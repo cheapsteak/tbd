@@ -64,7 +64,8 @@ struct ModelProfilesSettingsView: View {
                 .labelsHidden()
                 Spacer()
             }
-            // Account load balancing toggles (design 2026-09-05 §8.1)
+            // Account load balancing toggle (design 2026-09-05 §8.1). The limit
+            // offer has no toggle: it acts only on a click.
             let capabilities = appState.daemonCapabilities
             Toggle("Balance new Claude sessions across accounts", isOn: Binding(
                 get: { capabilities?.profileBalancingEnabled ?? false },
@@ -72,12 +73,6 @@ struct ModelProfilesSettingsView: View {
             ))
             .font(.caption)
             .help("When a new session would use the global default, pick the signed-in profile with the most room instead. Repo overrides and explicit picks still win. Off by default (soaking).")
-            Toggle("Switch account when a session hits its limit", isOn: Binding(
-                get: { capabilities?.limitRotationEnabled ?? false },
-                set: { newValue in Task { await appState.setLimitRotationEnabled(newValue) } }
-            ))
-            .font(.caption)
-            .help("When a session hits a hard usage limit, resume it in the same tab on another profile with room and continue the turn. Off by default (soaking).")
         }
     }
 

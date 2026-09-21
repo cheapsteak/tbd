@@ -87,11 +87,9 @@ Top level of `tbd profile list --json`:
   will be spawned under; it does not tell you what any *existing* session is
   running on, and it is never a substitute for a missing `profileID` (see
   "The terminal join").
-- **`balancing`** – object with two boolean fields: `enabled` (whether new
-  sessions spread across the available pool; design 2026-09-05 §6) and
-  `rotationEnabled` (the stored `limit_rotation_enabled` column; no behavior
-  reads it — a session hitting its limit is only ever offered a switch, never
-  moved automatically). Both default to `false`.
+- **`balancing`** – object with one boolean field, `enabled`: whether new
+  sessions spread across the available pool (design 2026-09-05 §6). Defaults
+  to `false`.
 
 The envelope also carries app-oriented configuration mirrors —
 `primaryAgentPreference`, `globalEnvOverrides`, merge-automation defaults, and

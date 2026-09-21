@@ -16,7 +16,6 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileSetDefault.self,
             ProfileLogin.self,
             ProfileBalancing.self,
-            ProfileRotation.self,
             ProfilePool.self,
         ]
     )
@@ -551,33 +550,6 @@ struct ProfileBalancing: AsyncParsableCommand {
             method: RPCMethod.configSetProfileBalancingEnabled,
             params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
         print("Profile balancing \(enabled ? "enabled" : "disabled").")
-    }
-}
-
-// MARK: - profile rotation
-
-struct ProfileRotation: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "rotation",
-        abstract: "Enable or disable automatic handover when a session hits its limit (default off)",
-        discussion: """
-            When on, a session that hits a hard usage limit is automatically \
-            resumed on another account with room, in the same tab, without \
-            losing the conversation.
-            """
-    )
-    @Argument(help: "on | off") var state: String
-    mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
-        }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetLimitRotationEnabled,
-            params: ConfigSetLimitRotationEnabledParams(enabled: enabled))
-        print("Limit rotation \(enabled ? "enabled" : "disabled").")
     }
 }
 

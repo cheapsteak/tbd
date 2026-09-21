@@ -213,7 +213,7 @@ struct ProfileCommandsTests {
     @Test func subcommandsRegistered() {
         let names = ProfileCommand.configuration.subcommands.map { String(describing: $0) }
         #expect(names == ["ProfileList", "ProfileSetDefault", "ProfileLogin",
-                          "ProfileBalancing", "ProfileRotation", "ProfilePool"])
+                          "ProfileBalancing", "ProfilePool"])
     }
 
     @Test func setDefaultParsesClearFlag() throws {

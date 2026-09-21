@@ -552,17 +552,4 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
-
-    /// Persist the limit rotation gate (`limit_rotation_enabled`). The column
-    /// is written on every call, because writing either value is the explicit
-    /// gesture that lifts it out of NULL forever after. No daemon behavior
-    /// reads it: a hard limit only ever suggests a profile to switch to.
-    func handleConfigSetLimitRotationEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetLimitRotationEnabledParams.self, from: paramsData)
-        try await db.config.setLimitRotationEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
 }

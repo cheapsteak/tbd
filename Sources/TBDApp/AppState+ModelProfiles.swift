@@ -884,18 +884,6 @@ extension AppState {
         }
     }
 
-    /// Persist the limit-rotation soak flag and refresh daemon capabilities.
-    /// Applies to the next limit-hit detection.
-    func setLimitRotationEnabled(_ enabled: Bool) async {
-        do {
-            try await limitRotationFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set limit rotation: \(error, privacy: .public)")
-            showAlert("Failed to set limit rotation: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Set or clear a profile's pool opt-out, then reload profiles.
     func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
         do {

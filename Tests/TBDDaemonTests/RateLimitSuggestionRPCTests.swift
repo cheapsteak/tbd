@@ -226,11 +226,11 @@ import TestSupport
 
     // MARK: - Nothing switches automatically
 
-    /// Even with the `limit_rotation_enabled` column set, a hard limit only
-    /// suggests: the session keeps its profile, nothing is scheduled, and the
-    /// notification says the limit resets rather than that anything switched.
-    @Test func aHardLimitNeverSwitchesTheSessionEvenWithTheRotationFlagSet() async throws {
-        try await db.config.setLimitRotationEnabled(true)
+    /// Even with balancing on, a hard limit only suggests: the session keeps
+    /// its profile, nothing is scheduled, and the notification says the limit
+    /// resets rather than that anything switched.
+    @Test func aHardLimitNeverSwitchesTheSessionEvenWithBalancingOn() async throws {
+        try await db.config.setProfileBalancingEnabled(true)
         try await db.config.setAutoResumeOnLimitReset(false)
         let (limited, eligible) = try await seedLimitedAndEligible()
         let recorder = LimitHitRecorder(router: router)

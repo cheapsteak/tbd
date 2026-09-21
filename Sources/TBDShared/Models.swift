@@ -1736,17 +1736,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var profileBalancingEnabled: Bool
-    /// Gate for automatic account rotation when a session hits a hard usage
-    /// limit (design 2026-09-05 §7.2). When enabled, the session is resumed on
-    /// another account with room, in the same tab.
-    ///
-    /// **Resolved, not stored**, like `gcRetainedTranscriptsEnabled`: the
-    /// backing column carries no SQL default and stays NULL until somebody
-    /// touches the toggle, so this property is
-    /// `limit_rotation_enabled ?? Config.limitRotationEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var limitRotationEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1869,12 +1858,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant, with no forcing `UPDATE` migration and every
     /// explicit opt-out left alone.
     public static let profileBalancingEnabledDefault = false
-    /// The shipped default for `limitRotationEnabled`, and the single place it
-    /// lives. Account rotation on hard limit ships off; graduation — after a
-    /// soak in which the rotated sessions worked correctly — is a change to this
-    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
-    /// left alone.
-    public static let limitRotationEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1919,7 +1902,6 @@ public struct Config: Codable, Sendable, Equatable {
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 modelProxyPort: Int? = nil,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
-                limitRotationEnabled: Bool = Config.limitRotationEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1964,7 +1946,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.modelProxyPort = modelProxyPort
         self.profileBalancingEnabled = profileBalancingEnabled
-        self.limitRotationEnabled = limitRotationEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2102,11 +2083,6 @@ public struct Config: Codable, Sendable, Equatable {
         // the shipped default rather than hardcoding `false`.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
-        // And once more, for the limit rotation flag — absent means the sender
-        // knew nothing about the flag, which is the NULL column's situation —
-        // follow the shipped default rather than hardcoding `false`.
-        limitRotationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .limitRotationEnabled) ?? Config.limitRotationEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

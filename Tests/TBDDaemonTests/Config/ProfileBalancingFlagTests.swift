@@ -156,16 +156,6 @@ struct ProfileBalancingFlagTests {
         #expect(try await db.config.get().profileBalancingEnabled == false)
     }
 
-    /// The gate is its own opt-in: turning on the limit-rotation flag
-    /// must not enable balancing, and vice versa.
-    @Test func theLimitRotationFlagDoesNotEnableThisLeg() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setLimitRotationEnabled(true)
-        let config = try await db.config.get()
-        #expect(config.limitRotationEnabled == true)
-        #expect(config.profileBalancingEnabled == false)
-    }
-
     /// JSON from a daemon that predates the flag still decodes, and the absent
     /// key means the sender knew nothing about it — the NULL column's situation,
     /// so it follows the shipped default rather than a hardcoded `false`.

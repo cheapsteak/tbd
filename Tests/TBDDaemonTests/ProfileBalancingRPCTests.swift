@@ -7,7 +7,6 @@ import TestSupport
 
 /// The RPC surface and data model for account load balancing (design 2026-09-05):
 /// - Profile balancing flag (spread new sessions across available accounts)
-/// - Limit rotation flag (resume on another account when hitting a limit)
 /// - Pool opt-out per profile (exclude from automatic balancing)
 /// - Live session counts per profile (the load signal for the policy)
 @Suite("Profile balancing RPC")
@@ -38,14 +37,6 @@ struct ProfileBalancingRPCTests {
         #expect(response.success, "\(String(describing: response.error))")
     }
 
-    private func setLimitRotation(_ router: RPCRouter, enabled: Bool) async throws {
-        let request = try RPCRequest(
-            method: RPCMethod.configSetLimitRotationEnabled,
-            params: ConfigSetLimitRotationEnabledParams(enabled: enabled))
-        let response = await router.handle(request)
-        #expect(response.success, "\(String(describing: response.error))")
-    }
-
     private func setPoolOptOut(_ router: RPCRouter, profileID: UUID, optOut: Bool) async throws {
         let request = try RPCRequest(
             method: RPCMethod.modelProfileSetPoolOptOut,
@@ -61,11 +52,6 @@ struct ProfileBalancingRPCTests {
         #expect(RPCMethod.configSetProfileBalancingEnabled == "config.setProfileBalancingEnabled")
     }
 
-    @Test("config.setLimitRotationEnabled method name")
-    func limitRotationMethodName() {
-        #expect(RPCMethod.configSetLimitRotationEnabled == "config.setLimitRotationEnabled")
-    }
-
     @Test("modelProfile.setPoolOptOut method name")
     func poolOptOutMethodName() {
         #expect(RPCMethod.modelProfileSetPoolOptOut == "modelProfile.setPoolOptOut")
@@ -79,12 +65,6 @@ struct ProfileBalancingRPCTests {
         #expect(try await db.config.get().profileBalancingEnabled == false)
     }
 
-    @Test("limit rotation is off before any call")
-    func limitRotationOffBeforeAnyCall() async throws {
-        let (_, db) = try makeRouterAndDB()
-        #expect(try await db.config.get().limitRotationEnabled == false)
-    }
-
     // MARK: - Round trip: flags
 
     @Test("profile balancing round-trips")
@@ -96,15 +76,6 @@ struct ProfileBalancingRPCTests {
         #expect(try await db.config.get().profileBalancingEnabled == false)
     }
 
-    @Test("limit rotation round-trips")
-    func limitRotationRoundTrip() async throws {
-        let (router, db) = try makeRouterAndDB()
-        try await setLimitRotation(router, enabled: true)
-        #expect(try await db.config.get().limitRotationEnabled == true)
-        try await setLimitRotation(router, enabled: false)
-        #expect(try await db.config.get().limitRotationEnabled == false)
-    }
-
     // MARK: - Explicit 0 vs NULL
 
     @Test("profile balancing stores explicit false, not NULL")
@@ -114,17 +85,6 @@ struct ProfileBalancingRPCTests {
         let stored = try await db.writerForTests.read { conn in
             try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)?
                 .profile_balancing_enabled
-        }
-        #expect(stored == false)
-    }
-
-    @Test("limit rotation stores explicit false, not NULL")
-    func limitRotationExplicitFalse() async throws {
-        let (router, db) = try makeRouterAndDB()
-        try await setLimitRotation(router, enabled: false)
-        let stored = try await db.writerForTests.read { conn in
-            try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)?
-                .limit_rotation_enabled
         }
         #expect(stored == false)
     }
@@ -241,7 +201,6 @@ struct ProfileBalancingRPCTests {
         )
 
         try await setProfileBalancing(router, enabled: true)
-        try await setLimitRotation(router, enabled: true)
 
         let request = try RPCRequest(method: RPCMethod.modelProfileList)
         let response = await router.handle(request)
@@ -251,12 +210,11 @@ struct ProfileBalancingRPCTests {
         )
 
         #expect(result.profileBalancingEnabled == true)
-        #expect(result.limitRotationEnabled == true)
         let profile = try #require(result.profiles.first)
         #expect(profile.liveSessions == 1)
     }
 
-    @Test("daemon.capabilities includes balancing and rotation flags")
+    @Test("daemon.capabilities includes the balancing flag")
     func daemonCapabilitiesIncludesFlags() async throws {
         let (router, db) = try makeRouterAndDB()
         try await setProfileBalancing(router, enabled: true)
@@ -269,6 +227,5 @@ struct ProfileBalancingRPCTests {
         )
 
         #expect(capabilities.profileBalancingEnabled == true)
-        #expect(capabilities.limitRotationEnabled == false)
     }
 }

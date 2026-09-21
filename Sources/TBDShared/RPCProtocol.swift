@@ -313,11 +313,6 @@ public enum RPCMethod {
     /// its own: `config.get` already carries the resolved value, as does
     /// `daemon.capabilities`.
     public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
-    /// The limit rotation gate (`limit_rotation_enabled`), the account rotation
-    /// on hard limit's soak switch (design 2026-09-05 §7.2). Reading needs no
-    /// method of its own: `config.get` already carries the resolved value, as
-    /// does `daemon.capabilities`.
-    public static let configSetLimitRotationEnabled = "config.setLimitRotationEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -891,9 +886,6 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// Whether profile balancing is enabled. Absent on older daemons (fall
     /// through to the shipped default on the app side).
     public let profileBalancingEnabled: Bool?
-    /// Whether account rotation on hard limit is enabled. Absent on older
-    /// daemons (fall through to the shipped default on the app side).
-    public let limitRotationEnabled: Bool?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -907,8 +899,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
         globalRemoteCreateDefaults: [String: String] = [:],
-        profileBalancingEnabled: Bool? = nil,
-        limitRotationEnabled: Bool? = nil
+        profileBalancingEnabled: Bool? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -923,7 +914,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
         self.profileBalancingEnabled = profileBalancingEnabled
-        self.limitRotationEnabled = limitRotationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -962,8 +952,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         // the app falls through to the shipped defaults on the Config side.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled)
-        limitRotationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .limitRotationEnabled)
     }
 }
 
@@ -3501,14 +3489,6 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setLimitRotationEnabled` — the gate for automatic account
-/// rotation when a session hits a hard usage limit (default OFF during soak).
-/// Design: `docs/specs/2026-09-05-account-load-balancing-design.md` §7.2.
-public struct ConfigSetLimitRotationEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
@@ -3888,13 +3868,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// budget, so callers construct with the older arguments and assign this
     /// after.
     public var profileBalancingEnabled: Bool
-    /// Whether the limit rotation gate is currently set (design 2026-09-05
-    /// §7.2). Default OFF while it soaks. Resolved through
-    /// `Config.limitRotationEnabledDefault`, so an install that never touched
-    /// the toggle reports whatever the shipped default currently is.
-    ///
-    /// `var` for the same reason as `profileBalancingEnabled`.
-    public var limitRotationEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3919,8 +3892,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 modelProxyPort: Int? = nil,
                 modelProxyVersion: String? = nil,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
-                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
-                limitRotationEnabled: Bool = Config.limitRotationEnabledDefault) {
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3945,7 +3917,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.modelProxyVersion = modelProxyVersion
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.profileBalancingEnabled = profileBalancingEnabled
-        self.limitRotationEnabled = limitRotationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -4030,11 +4001,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // default rather than assuming it is off.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
-        // New field for the limit rotation gate. A daemon that does not send it
-        // knows nothing about the feature, so fall through to the shipped default
-        // rather than assuming it is off.
-        limitRotationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .limitRotationEnabled) ?? Config.limitRotationEnabledDefault
     }
 }
 
