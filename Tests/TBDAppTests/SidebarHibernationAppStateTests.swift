@@ -99,6 +99,28 @@ struct SidebarHibernationAppStateTests {
         }
     }
 
+    @Test func scratchMembershipChangePreservesCollapsedSectionUntilNavigation() {
+        withState { state, _ in
+            let scratch = Worktree(repoID: nil, name: "scratch", displayName: "Scratch task",
+                                   branch: "", path: "/tmp/acme-scratch", tmuxServer: "acme")
+            state.scratchWorktrees = [scratch]
+            state.selectedWorktreeIDs = [scratch.id]
+            let initial = state.sidebarSelectionReveal
+            state.userDefaults.set(false, forKey: AppState.scratchSectionExpandedKey)
+
+            park(scratch, in: state)
+            let parked = state.sidebarSelectionReveal
+            #expect(parked.groups == [.init(owner: .scratch, kind: .hibernated)])
+            state.revealSidebarGroups(parked, previous: initial)
+            #expect(!state.userDefaults.bool(forKey: AppState.scratchSectionExpandedKey))
+            #expect(state.expandedSidebarGroups.contains(.init(owner: .scratch, kind: .hibernated)))
+
+            state.selectedWorktreeIDs = [scratch.id]
+            state.revealSidebarGroups(state.sidebarSelectionReveal, previous: parked)
+            #expect(state.userDefaults.bool(forKey: AppState.scratchSectionExpandedKey))
+        }
+    }
+
     @Test func shelfToggleDoesNotSelectWakeOrClearUnread() {
         withState { state, repoID in
             let row = SidebarGroupFixtures.row("parked", repoID: repoID)

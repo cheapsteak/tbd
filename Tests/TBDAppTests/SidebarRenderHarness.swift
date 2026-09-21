@@ -83,4 +83,69 @@ struct SidebarRenderHarness {
         try capture.writePNG(to: directory.appendingPathComponent(name))
         #expect(state.recentlyAttachedRemoteSessions.isEmpty)
     }
+
+    @Test func renderNestedRemoteGroups() async throws {
+        guard let path = ProcessInfo.processInfo.environment["TBD_SIDEBAR_SHOTS_DIR"], !path.isEmpty else { return }
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for width in [320, 240] {
+            for dark in [false, true] {
+                for expansion in 0...2 {
+                    try await renderNested(width: width, dark: dark, expansion: expansion, into: directory)
+                }
+            }
+        }
+    }
+
+    private func renderNested(width: Int, dark: Bool, expansion: Int, into directory: URL) async throws {
+        let suite = "SidebarRenderHarness.Nested.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(false, forKey: AppState.showScratchSectionKey)
+        defaults.set(false, forKey: AppState.nightwatchExperimentalKey)
+        let state = AppState(userDefaults: defaults)
+        let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")
+        let web = Repo(path: "/tmp/acme-web", displayName: "acme/web")
+        state.repos = [api, web]
+        state.remoteProviders = [SidebarGroupFixtures.provider()]
+        var director = SidebarGroupFixtures.row("API director", repoID: api.id)
+        director.pinnedAt = Date(timeIntervalSince1970: 1)
+        let local = SidebarGroupFixtures.row("Local review", repoID: api.id, parent: director.id)
+        let names = ["Index worker", "API tests worker", "Pagination worker", "Schema review", "Request trace"]
+        let workers = names.enumerated().map {
+            SidebarGroupFixtures.row($0.element, repoID: api.id, remote: "nested-\($0.offset)",
+                                     parent: director.id, order: $0.offset + 1)
+        }
+        let activeChild = SidebarGroupFixtures.row("Running follow-up", repoID: api.id,
+            remote: "follow-up", parent: workers[0].id)
+        let crossRepoChild = SidebarGroupFixtures.row("Local web review", repoID: web.id, parent: workers[1].id)
+        state.worktrees = [api.id: [director, local, activeChild] + workers, web.id: [crossRepoChild]]
+        state.remoteSessions = names.indices.map {
+            SidebarGroupFixtures.session("nested-\($0)", state: $0 == 0 || $0 >= 3 ? .exited : .running,
+                                         repoID: api.id, agent: $0 == 1 ? .waitingInput : .idle)
+        } + [SidebarGroupFixtures.session("follow-up", repoID: api.id)]
+        if expansion > 0 {
+            state.expandedSidebarGroups = [
+                .init(owner: .parent(director.id), kind: .remote),
+                .init(owner: .parent(workers[0].id), kind: .remote)
+            ]
+        }
+        if expansion > 1 {
+            state.expandedSidebarGroups.insert(.init(owner: .parent(director.id), kind: .exited))
+        }
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        let view = SidebarView().environment(state).defaultAppStorage(defaults)
+            .environment(\.colorScheme, dark ? .dark : .light)
+        let host = OffscreenHost(root: view, size: NSSize(width: width, height: 1000), appearance: appearance)
+        defer { host.tearDown() }
+        await host.pump(times: 40)
+        let capture = try host.capture(scale: 2)
+        try #require(capture.luminanceVariance() >= OffscreenHostDefaults.minLuminanceVariance,
+                     "Nested sidebar capture was blank")
+        let label = ["collapsed", "remote-expanded", "exited-expanded"][expansion]
+        let name = "sidebar-nested-\(width)-\(dark ? "dark" : "light")-\(label).png"
+        try capture.writePNG(to: directory.appendingPathComponent(name))
+        #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+    }
+
 }
