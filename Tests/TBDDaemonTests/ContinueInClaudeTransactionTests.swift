@@ -687,14 +687,27 @@ struct ContinueInClaudeTransactionTests {
         _ count: Int,
         in recorder: CommandRecorder
     ) async throws {
-        for _ in 0..<5_000 {
-            if recorder.commands.filter({ $0.contains("respawn-window") }).count >= count {
-                return
-            }
-            await Task.yield()
+        let deadline = TestDeadlines.saturatedPass
+        let outcome = await pollUntilTrue(
+            timeout: deadline,
+            pollInterval: .milliseconds(10)
+        ) {
+            recorder.commands.filter { $0.contains("respawn-window") }.count >= count
         }
-        Issue.record("replacement never reached respawn count \(count)")
-        throw CancellationError()
+        switch outcome {
+        case .satisfied:
+            return
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            let observed = recorder.commands.filter {
+                $0.contains("respawn-window")
+            }.count
+            throw BoundedWaitTimeout(
+                what: "replacement to reach respawn count \(count)",
+                observed: "\(observed) respawns",
+                deadline: deadline)
+        }
     }
 
     private func waitForFreshClaudeSessionID(
