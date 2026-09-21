@@ -224,10 +224,16 @@ headroom and account load, and each rejected candidate's reason. The spawn
 result is unchanged; the terminal row's `profileID` stamp is the record of
 what was chosen, as it is for every other resolution.
 
-Every spawn path that calls `resolve` inherits the policy: terminal create,
-worktree create, and revive-fresh. Hibernation wake does not call `resolve` —
-it pins to the row's stamp — and must not: a woken session belongs to the
-account whose transcript it carries.
+Only a fresh session is balanced: terminal create and worktree create when
+they start a new conversation. A spawn that resumes an existing conversation
+— terminal create with a resume id, worktree create restoring archived
+sessions, reviving a closed terminal, and revive-fresh — resolves with
+balancing off and gets the stable pre-balancing answer. A conversation
+belongs to the account whose config dir holds its transcript, and the
+history row does not record which one that is; a load-sensitive pick could
+send `claude --resume` to an account that has never seen the session.
+Hibernation wake does not call `resolve` at all — it pins to the row's
+stamp — for the same reason.
 
 ### 6.1 Pick reservations
 
@@ -239,17 +245,20 @@ on the same account: exactly the burst the policy exists to spread.
 
 The daemon keeps one in-memory `ProfilePickReservations` actor, shared by
 every resolver. A balanced resolve does all of its reads first — profiles,
-snapshots, live counts, and the live Claude rows created since the oldest
-outstanding reservation — and then makes one non-suspending call into the
-actor. That call adds to each profile's live count the reservations its rows
-have not yet caught up with, runs the picker, and records a reservation for
-the winner. Because the call never suspends, no second pick can interleave
-with it, which actor isolation alone would not guarantee across an `await`.
+snapshots, live counts — and then makes one non-suspending call into the
+actor. That call adds each profile's outstanding reservations to its live
+count, runs the picker, and records a reservation for the winner. Because
+the call never suspends, no second pick can interleave with it, which actor
+isolation alone would not guarantee across an `await`.
 
-A reservation stops counting when a row for its profile lands at or after the
-reservation's instant, so a placed session is never counted twice, or when it
-is two minutes old, so a spawn that fails after picking cannot hold a phantom
-session forever. Reservations live only in memory: a daemon restart drops
+The resolved profile carries its reservation's id, and the spawn path
+settles that reservation by id as soon as it has written the terminal row.
+Settling by id rather than by matching rows means an unrelated session
+landing on the same profile — an explicit pick, a repo override — never
+cancels a reservation it did not make. Between the row insert and the settle
+the session counts twice, which errs toward spreading. A reservation also
+stops counting when it is two minutes old, so a spawn that fails after
+picking cannot hold a phantom session forever. Reservations live only in memory: a daemon restart drops
 them, and by then every placed session is either a row or never started.
 Only the spawn-time pick reserves; the limit suggestion (§7) names an account
 without placing anything on it.
@@ -400,8 +409,10 @@ Both branches of every flag, per the repo rule.
 - **Pick reservations** – two balanced resolves with no terminal row written
   between them, against two otherwise identical profiles, choose different
   profiles (the interleaving of two concurrent spawns; this fails without
-  reservations); a reservation stops counting once a matching row lands, so
-  nothing is counted twice; an expired reservation stops counting.
+  reservations); settling a reservation stops it counting; unrelated rows
+  landing on a reserved profile do not erase its reservations; an expired
+  reservation stops counting. A resolve with balancing off — the resume
+  paths — returns the default and reserves nothing.
 - **Rate-limit handler** – the notification names the suggestion when one
   exists and omits it when none does; the limited account is excluded for a
   stamped session and nothing is excluded for an ambient one; the delta is
