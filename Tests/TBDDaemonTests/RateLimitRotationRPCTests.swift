@@ -703,6 +703,42 @@ import TestSupport
         #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
     }
 
+    /// A pending transient-error auto-continue belongs to a different feature
+    /// and must not latch a hard-limit report: the notification, the audit row
+    /// and the suggestion all still happen.
+    @Test func aPendingApiErrorRowDoesNotSwallowAHardLimitReport() async throws {
+        try await db.config.setLimitRotationEnabled(false)
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await seedLimitedAndEligible()
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID,
+            resetsAt: clock.now(), fireAt: clock.now().addingTimeInterval(60),
+            limitType: ScheduledResume.apiErrorLimitType, rawMessage: "api error"))
+
+        let response = await detect()
+        #expect(response.success)
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1, "the hard limit must still be reported")
+        #expect(notifs[0].message?.contains("Eligible has room") == true, "got: \(notifs[0].message ?? "nil")")
+        // The api_error row is untouched; the audit row for the limit was written.
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID)?.limitType == ScheduledResume.apiErrorLimitType)
+    }
+
+    /// The same report against a pending reset-time resume IS latched — that is
+    /// the existing double-send guard, unchanged.
+    @Test func aPendingResetTimeRowStillLatchesARepeatReport() async throws {
+        try await db.config.setLimitRotationEnabled(false)
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await seedLimitedAndEligible()
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID,
+            resetsAt: clock.now().addingTimeInterval(3600), fireAt: clock.now().addingTimeInterval(3660),
+            limitType: "session", rawMessage: "m"))
+        let response = await detect()
+        #expect(response.success)
+        #expect(try await db.notifications.unread(worktreeID: worktreeID).isEmpty)
+    }
+
     // MARK: - Wiring regression
 
     /// The daemon once built the router without a candidate source, which left
