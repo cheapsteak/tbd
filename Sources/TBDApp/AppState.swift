@@ -1342,6 +1342,37 @@ final class AppState {
         return true
     }
 
+    /// `reconnectRemoteSession` for an automatic, network-triggered restart:
+    /// identical, except the selection's pending-reconnect entry — if it has
+    /// one — is carried across the restart with its deadline set to `date`
+    /// rather than dropped. The manual Reconnect drops it because the user
+    /// asked to connect now; a network change says nothing about whether the
+    /// provider has stopped failing, so the attempt count — the only bound on
+    /// a respawn loop, see `RemoteReconnectPolicy.nextPending` — must survive.
+    ///
+    /// A carried entry does not hold the restarted pane back: its deadline is
+    /// `date` itself, and `RemoteReconnectPolicy.isBlocked` is false once
+    /// `now >= nextEligibleAt` on an `.ok` provider. What it preserves is the
+    /// escalation a subsequent failure builds on.
+    ///
+    /// Lives here rather than beside `handleNetworkChange` in
+    /// `AppState+RemoteAttach.swift` for the same reason
+    /// `expireRemoteReconnectBackoff(at:)` does: `pendingReconnectRemoteSessions`
+    /// is `private(set)` and Swift's `private` is file-scoped.
+    @discardableResult
+    func restartRemoteAttachAfterNetworkChange(_ selection: RemoteSessionSelection, at date: Date) -> Bool {
+        let carried = pendingReconnectRemoteSessions[selection]
+        guard reconnectRemoteSession(selection) else { return false }
+        if let carried {
+            pendingReconnectRemoteSessions[selection] = RemotePendingReconnect(
+                exitCode: carried.exitCode,
+                attempts: carried.attempts,
+                nextEligibleAt: date
+            )
+        }
+        return true
+    }
+
     /// Clears a stale explicit-detach flag for `selection`, if present —
     /// the narrow write `activateRemoteSession` (in
     /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab

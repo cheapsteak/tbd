@@ -26,10 +26,12 @@ struct RemoteAttachNetworkFingerprintTests {
     // MARK: - The fingerprint itself
 
     /// Reddens if the fingerprint stops being structurally `Equatable` — which
-    /// is the whole of what the detector below compares. It is also where the
-    /// deliberate EXCLUSION of the cost flags is pinned: two fingerprints
-    /// built from the same three fields are equal, and there is no fourth
-    /// field a hotspot toggle could move.
+    /// is the whole of what the detector below compares. What it checks is
+    /// exactly that: two fingerprints built from the same status, interface
+    /// list and gateway list are equal. The deliberate exclusion of the cost
+    /// and constrained flags is structural rather than asserted — the type has
+    /// no such field, so nothing about them can be exercised through this seam
+    /// without fabricating an `NWPath`.
     @Test func identicalFingerprintsAreEqual() {
         #expect(
             Self.fingerprint(.satisfied, interfaces: ["en0", "utun4"], gateways: ["192.0.2.1"])

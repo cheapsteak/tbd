@@ -199,7 +199,10 @@ extension AppState {
     ///    is already on it. Both are skipped, so a burst costs no spawn it
     ///    does not need. A restart is lossless — session state lives on the
     ///    provider, and `attach` is required to be targeted and idempotent —
-    ///    so the worst case of an unnecessary one is a repaint.
+    ///    so the worst case of an unnecessary one is a repaint. The restart
+    ///    goes through `restartRemoteAttachAfterNetworkChange`, not the
+    ///    manual `reconnectRemoteSession`, so a selection that also has a
+    ///    pending-reconnect entry keeps its `attempts` across the restart.
     /// 2. **Expire stale backoff.** Every pending-reconnect entry still
     ///    waiting has its deadline pulled back to `change.at`: a network
     ///    change is exactly what makes an earlier transport failure stale,
@@ -214,9 +217,16 @@ extension AppState {
     ///    republish.
     func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
         var restarted = 0
-        for selection in attachedRemoteSelections {
+        // Least-recent first: every restart ends in `touchAttachedRemoteSession`,
+        // which moves its selection to the front of
+        // `recentlyAttachedRemoteSessions`. Walking the most-recent-first list
+        // front-to-back would therefore leave the recency log reversed, which
+        // changes both which pane the host slot falls back to when nothing is
+        // selected and which pane cap pressure evicts next. Walking it
+        // backwards re-touches in ascending recency, so the order survives.
+        for selection in attachedRemoteSelections.reversed() {
             guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < change.at else { continue }
-            if reconnectRemoteSession(selection) { restarted += 1 }
+            if restartRemoteAttachAfterNetworkChange(selection, at: change.at) { restarted += 1 }
         }
         let cleared = expireRemoteReconnectBackoff(at: change.at)
 

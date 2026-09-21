@@ -113,6 +113,36 @@ struct RemoteAttachNetworkRecoveryTests {
         }
     }
 
+    /// `attachedRemoteSelections` is most-recent-first and every restart ends
+    /// in `touchAttachedRemoteSession`, which moves its selection to the
+    /// front of the recency log. Reddens if `handleNetworkChange` drops its
+    /// `.reversed()` and walks the list front-to-back: the log comes out
+    /// reversed, which changes both which pane the host slot falls back to
+    /// when nothing is selected and which pane cap pressure evicts next.
+    @Test("restarting every pane leaves the attach recency order unchanged")
+    func restartingPreservesTheRecencyOrder() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            seedSession(state, provider: "acme", id: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+            let s1 = sel("acme", "s1")
+            let s2 = sel("acme", "s2")
+            #expect(state.recentlyAttachedRemoteSessions == [s2, s1])
+
+            let t = Date()
+            state.markRemoteAttachStarted(s1, generation: 0, at: t.addingTimeInterval(-1))
+            state.markRemoteAttachStarted(s2, generation: 0, at: t.addingTimeInterval(-1))
+
+            state.handleNetworkChange(change(at: t))
+
+            #expect(state.remoteAttachGeneration(for: s1) == 1)
+            #expect(state.remoteAttachGeneration(for: s2) == 1)
+            #expect(state.recentlyAttachedRemoteSessions == [s2, s1])
+        }
+    }
+
     // MARK: - Recording the spawn
 
     /// Reddens if `markRemoteAttachStarted` stops checking the generation: the
@@ -240,6 +270,34 @@ struct RemoteAttachNetworkRecoveryTests {
             state.handleNetworkChange(change(at: t))
 
             #expect(state.pendingReconnectRemoteSessions[s1] == before)
+        }
+    }
+
+    // MARK: - Carrying attempts across a restart
+
+    /// A mounted pane and a pending entry routinely coexist: nothing clears
+    /// the entry when a re-attach succeeds. Reddens if the restart goes
+    /// through `reconnectRemoteSession` — which drops the entry outright,
+    /// right for the manual Reconnect and wrong here — because `attempts`
+    /// would fall back to 0 and a flapping network could reset the only
+    /// bound there is on a respawn loop.
+    @Test("a network-triggered restart carries the pending attempt count")
+    func aRestartCarriesThePendingAttemptCount() {
+        withState { state in
+            let s1 = attached(state)
+            let t = Date()
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(-60))
+            #expect(state.pendingReconnectRemoteSessions[s1]?.attempts == 1)
+            #expect(state.attachedRemoteSelections.contains(s1), "its window closed well before the change")
+            state.markRemoteAttachStarted(s1, generation: 0, at: t.addingTimeInterval(-30))
+
+            state.handleNetworkChange(change(at: t))
+
+            #expect(state.remoteAttachGeneration(for: s1) == 1)
+            let after = state.pendingReconnectRemoteSessions[s1]
+            #expect(after?.attempts == 1)
+            #expect(after?.nextEligibleAt == t)
+            #expect(state.attachedRemoteSelections.contains(s1), "a carried entry eligible at `t` blocks nothing")
         }
     }
 }
