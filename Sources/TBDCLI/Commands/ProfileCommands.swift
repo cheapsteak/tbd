@@ -144,8 +144,35 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
 func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
     jsonString(VersionedJSONEnvelope(
         schemaVersion: profileListSchemaVersion,
-        payload: result
+        payload: ProfileListJSONPayload(result: result)
     ))
+}
+
+/// The `tbd profile list --json` payload: the RPC result's own fields, plus the
+/// top-level `balancing` object the capacity contract documents
+/// (`docs/capacity-facts.md`, design 2026-09-05 §8.4). Added by the same
+/// shared-container technique `VersionedJSONEnvelope` uses, so every field the
+/// RPC result grows still flows through untouched.
+struct ProfileListJSONPayload: JSONObjectPayload {
+    let result: ModelProfileListResult
+
+    private struct Balancing: Encodable {
+        let enabled: Bool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case balancing
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try result.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        // A daemon that sends no flag predates balancing, so nothing on it
+        // balances: `false`, not the shipped default a newer daemon resolves.
+        try container.encode(
+            Balancing(enabled: result.profileBalancingEnabled ?? false),
+            forKey: .balancing)
+    }
 }
 
 /// Whether a failed usage-refresh may be tolerated, and if so the one-line
