@@ -631,7 +631,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // — set and removed on main, but `deinit` is nonisolated and must be
         // able to remove a monitor the main-actor teardown missed.
         nonisolated(unsafe) private var scrollMonitor: Any?
-        nonisolated(unsafe) private var clickMonitor: Any?
+        /// Internal rather than private so a panel test can ask whether a
+        /// transport installed one at all. The click monitor is the half of
+        /// `claimKeyboardFocusAndClickRouting` that an offscreen window cannot
+        /// exercise — nothing dispatches an `NSEvent` to a window that is never
+        /// key — so its presence is what a test can honestly assert.
+        nonisolated(unsafe) var clickMonitor: Any?
         private var fedPreparationMessages: Set<String> = []
         /// Set while this panel renders through the control-mode path (Phase 2
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
@@ -1069,6 +1074,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // to write to, so the reports go out through `holderWriteFD` like
             // any keystroke.
             installScrollMonitor(on: terminalView)
+            // And the keyboard, for the same reason and at the same moment.
+            // A panel that skipped this was reachable only through the key
+            // view loop: the session was live and painting, but the first
+            // keystroke went nowhere until the user pressed Tab.
+            claimKeyboardFocusAndClickRouting(on: terminalView)
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
         }
 
@@ -1574,6 +1584,104 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
+        /// Take keyboard focus for this panel and start routing clicks to it.
+        ///
+        /// Called once per panel, from whichever transport just went live:
+        /// the tmux viewer after its `LocalProcess` starts, and the holder
+        /// path after its attach is acked. A panel that never runs this is
+        /// reachable only through the key view loop — the user has to press
+        /// Tab before the session takes a keystroke — and its clicks never
+        /// claim first responder, which is what the holder transport shipped
+        /// with until this was hoisted out of the tmux path.
+        ///
+        /// The click monitor is removed by `cleanup()` and by `deinit`, both
+        /// of which every transport reaches.
+        @MainActor
+        private func claimKeyboardFocusAndClickRouting(on terminalView: TerminalView) {
+            // Focus on next run loop iteration (needs main actor for window access)
+            DispatchQueue.main.async {
+                terminalView.window?.makeFirstResponder(terminalView)
+                self.appState?.focusedTabCloseContext = self.tabCloseContext
+            }
+
+            let ref = WeakTerminalRef(terminalView)
+            // Intercept clicks: claim first responder on any click (so Cmd+Arrow
+            // routes to the focused terminal), and handle Cmd+Click for file paths.
+            //
+            // Visibility filter: each `assumeIsolated` block guards on
+            // `tv.window != nil` for the same reason as scrollMonitor above —
+            // the worktree keep-alive system retains terminal NSViews for
+            // inactive worktrees in a detached state, and we must skip event
+            // processing for those (otherwise clicks would claim first responder
+            // for a hidden terminal, or fire Cmd+Click handlers against
+            // invisible bounds).
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                let location = event.locationInWindow
+
+                // Claim first responder so key equivalents route to this terminal
+                MainActor.assumeIsolated { [weak self] in
+                    guard let self else { return }
+                    guard let tv = ref.view else { return }
+                    guard tv.window != nil else { return }
+                    // Short-circuit when a SwiftUI overlay is open on top of this
+                    // terminal — leave first-responder where it is so the overlay
+                    // receives key and click events.
+                    if self.shouldSuppressEvents() { return }
+                    let point = tv.convert(location, from: nil)
+                    if !tv.bounds.contains(point) {
+                        if self.appState?.focusedTabCloseContext == self.tabCloseContext,
+                           tv.window?.firstResponder === tv {
+                            self.appState?.focusedTabCloseContext = nil
+                        }
+                        return
+                    }
+                    self.appState?.focusedTabCloseContext = self.tabCloseContext
+                    tv.window?.makeFirstResponder(tv)
+                }
+
+                guard event.modifierFlags.contains(.command) else { return event }
+
+                let consumed = MainActor.assumeIsolated { [weak self] () -> Bool in
+                    guard let self else { return false }
+                    guard let tv = ref.view as? TBDTerminalView else { return false }
+                    guard tv.window != nil else { return false }
+                    if self.shouldSuppressEvents() { return false }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return false }
+
+                    // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
+                    // (requestOpenLink). If we also fired here on mouseDown,
+                    // a single cmd+click would route through both paths and
+                    // open two viewer panes.
+                    if tv.hasOSC8Payload(atWindowLocation: location) {
+                        logger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
+                        return false
+                    }
+
+                    if let filePath = tv.extractFilePath(atWindowLocation: location) {
+                        logger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
+                        tv.onFilePathClicked?(filePath)
+                        return true
+                    }
+                    // Fall back to hyperlink detection (PR pattern; OSC 8 was
+                    // already short-circuited above).
+                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location) {
+                        if let resolved = tv.resolveAsFilePath(urlString) {
+                            logger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
+                            tv.onFilePathClicked?(resolved)
+                            return true
+                        }
+                        if urlString.contains("://"), let url = URL(string: urlString) {
+                            NSWorkspace.shared.open(url)
+                            return true
+                        }
+                    }
+                    return false
+                }
+                return consumed ? nil : event
+            }
+        }
+
         @MainActor
         func startTmuxClient(
             terminalView: TerminalView,
@@ -1700,90 +1808,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
             }
 
-            // Focus on next run loop iteration (needs main actor for window access)
-            DispatchQueue.main.async {
-                terminalView.window?.makeFirstResponder(terminalView)
-                self.appState?.focusedTabCloseContext = self.tabCloseContext
-            }
-
             installScrollMonitor(on: terminalView)
-
-            let ref = WeakTerminalRef(terminalView)
-            // Intercept clicks: claim first responder on any click (so Cmd+Arrow
-            // routes to the focused terminal), and handle Cmd+Click for file paths.
-            //
-            // Visibility filter: each `assumeIsolated` block guards on
-            // `tv.window != nil` for the same reason as scrollMonitor above —
-            // the worktree keep-alive system retains terminal NSViews for
-            // inactive worktrees in a detached state, and we must skip event
-            // processing for those (otherwise clicks would claim first responder
-            // for a hidden terminal, or fire Cmd+Click handlers against
-            // invisible bounds).
-            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-                let location = event.locationInWindow
-
-                // Claim first responder so key equivalents route to this terminal
-                MainActor.assumeIsolated { [weak self] in
-                    guard let self else { return }
-                    guard let tv = ref.view else { return }
-                    guard tv.window != nil else { return }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — leave first-responder where it is so the overlay
-                    // receives key and click events.
-                    if self.shouldSuppressEvents() { return }
-                    let point = tv.convert(location, from: nil)
-                    if !tv.bounds.contains(point) {
-                        if self.appState?.focusedTabCloseContext == self.tabCloseContext,
-                           tv.window?.firstResponder === tv {
-                            self.appState?.focusedTabCloseContext = nil
-                        }
-                        return
-                    }
-                    self.appState?.focusedTabCloseContext = self.tabCloseContext
-                    tv.window?.makeFirstResponder(tv)
-                }
-
-                guard event.modifierFlags.contains(.command) else { return event }
-
-                let consumed = MainActor.assumeIsolated { [weak self] () -> Bool in
-                    guard let self else { return false }
-                    guard let tv = ref.view as? TBDTerminalView else { return false }
-                    guard tv.window != nil else { return false }
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
-
-                    // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
-                    // (requestOpenLink). If we also fired here on mouseDown,
-                    // a single cmd+click would route through both paths and
-                    // open two viewer panes.
-                    if tv.hasOSC8Payload(atWindowLocation: location) {
-                        logger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
-                        return false
-                    }
-
-                    if let filePath = tv.extractFilePath(atWindowLocation: location) {
-                        logger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
-                        tv.onFilePathClicked?(filePath)
-                        return true
-                    }
-                    // Fall back to hyperlink detection (PR pattern; OSC 8 was
-                    // already short-circuited above).
-                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location) {
-                        if let resolved = tv.resolveAsFilePath(urlString) {
-                            logger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
-                            tv.onFilePathClicked?(resolved)
-                            return true
-                        }
-                        if urlString.contains("://"), let url = URL(string: urlString) {
-                            NSWorkspace.shared.open(url)
-                            return true
-                        }
-                    }
-                    return false
-                }
-                return consumed ? nil : event
-            }
+            claimKeyboardFocusAndClickRouting(on: terminalView)
         }
 
         @MainActor
