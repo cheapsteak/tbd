@@ -53,12 +53,20 @@
 #     describes them too.
 #
 # The workflow keeps its half of that bargain by REMOVING the marker as soon as
-# it has read it, and recording a new one only at the end of the job. A run that
-# dies in between leaves no marker, so the next run wipes. A run that died
-# before ever reading it leaves the restored marker in place, and `--record`
-# refuses to overwrite a marker that is still there for exactly that reason: it
-# was never consumed, so this run took no responsibility for `.build/` and the
-# marker still describes the artifacts sitting in it.
+# it has read it, and recording a new one from an unconditional step placed
+# after every compile in the job — so reaching the recording is itself the
+# evidence that the build finished. A source fingerprint cannot supply that
+# evidence on its own: it says what the artifacts were built FROM, not that
+# they were finished, and a marker written over a compile that was killed part
+# way through would let a rerun of the same commit skip the wipe that used to
+# heal it.
+#
+# A run that dies anywhere in between therefore leaves no marker, and the next
+# run wipes. A run that died before ever reading the marker leaves the restored
+# one in place, and `--record` refuses to overwrite a marker that is still
+# there for exactly that reason: it was never consumed, so this run took no
+# responsibility for `.build/` and the marker still describes the artifacts
+# sitting in it.
 #
 # ---------------------------------------------------------------------------
 # WHY OBJECT IDS, NOT A COMMIT

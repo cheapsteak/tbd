@@ -894,16 +894,22 @@ jobs:
       # a commit they survive the ephemeral merge commit a `pull_request` run is
       # checked out at.
       #
-      # `if: always()` so that what `.build/` says about itself never depends on
-      # how the job ended, and the design never depends on knowing when the
-      # cache is saved. The wipe step removed the previous marker when it read
-      # it, so a run that reached a compile and then failed still records what
-      # it built, and a run that never got that far leaves the restored marker
-      # in place — the recording refuses to overwrite one that was never
-      # consumed, because that marker belongs to the restored artifacts rather
-      # than to this run.
+      # It carries NO condition, so it runs only when every step before it
+      # succeeded. A fingerprint of the sources says what `.build/` was built
+      # FROM, never that the build finished: a run whose compile was OOM-killed
+      # or wedged part way through — shapes this job's comments record as real —
+      # would otherwise record a marker over half-written artifacts, and a rerun
+      # of the same commit restores that cache by an exact key hit and skips the
+      # wipe that used to heal it. Reaching this step is the completion signal,
+      # and the step's own position, after every compile in the job, is what
+      # makes it one.
+      #
+      # A run that ends before here therefore records nothing, and that is the
+      # safe outcome in every case: the wipe step already removed the marker it
+      # read, so the next run to restore this cache finds none and wipes. A run
+      # that ended before the wipe step leaves the restored marker untouched,
+      # still describing the artifacts it was restored with.
       - name: Record the sources these build artifacts came from
-        if: always()
         run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint
 
       # Saved LAST, after the final writer into `.build`, so the stored entry

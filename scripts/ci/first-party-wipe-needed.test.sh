@@ -132,6 +132,24 @@ test_empty_marker_wipes() {
   assert_contains "the reason says the marker is empty" "$RUN_ERR" "empty or unreadable"
 }
 
+# The other half of "empty or unreadable": a marker that is there but cannot be
+# opened. Root can read a mode-000 file, so where the harness runs as root the
+# case says so rather than asserting something it did not arrange.
+test_unreadable_marker_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  chmod 000 "$repo/marker"
+  if [ -r "$repo/marker" ]; then
+    echo "ok   - (skipped: this user can read a mode-000 file, so unreadability cannot be staged)"
+    chmod 644 "$repo/marker"
+    return
+  fi
+  run_decider "$repo"
+  chmod 644 "$repo/marker"
+  assert_eq "a marker that cannot be read wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason says the marker is unreadable" "$RUN_ERR" "empty or unreadable"
+}
+
 # A marker holding only its human-readable header decides nothing.
 test_header_only_marker_wipes() {
   local repo; repo="$(mkrepo)"
