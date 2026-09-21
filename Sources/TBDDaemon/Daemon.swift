@@ -1571,8 +1571,7 @@ public final class Daemon: Sendable {
             // `orphanGC` is always non-nil here.
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
-                self.gcTask = Task {
-                    [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
                     // Sweep once immediately (cold recovery), then every hour.
                     await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
