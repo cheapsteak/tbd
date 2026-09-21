@@ -420,13 +420,22 @@ Run focused packet, router, store, CLI, and app tests, then
 
 ## Feature flag
 
-This change adds no flag or config column. Continue is an explicit user gesture, and its
-process replacement uses the existing same-window replacement actuator already exercised
-by profile swap, wake, and recreation. It adds no background timer, background policy, or
-autonomous kill path. Its safety boundary is stricter than the existing actuator:
-idle-only entry, complete preflight, snapshot and pane fencing, machine readiness, and
-mandatory rollback.
-A default-off switch would duplicate those gates, add a migration, and leave the risky
+This change adds no flag or config column. Every kill or respawn it performs is one of
+two things:
+
+- **A user gesture.** Continue itself is an explicit request, and its process replacement
+  uses the existing same-window replacement actuator already exercised by profile swap,
+  wake, and recreation.
+- **Recovery that restores Codex.** The startup and hourly reconcile pass acts only on a
+  row that a user's own earlier Continue already staged as pending. It never starts a
+  Claude replacement, only respawns the source Codex thread under a rotated token, and it
+  refuses to touch a live pane it cannot attribute to that terminal. It adds no new timer:
+  it rides the existing hourly maintenance loop, and the startup pass is bounded so it
+  cannot delay the daemon becoming answerable.
+
+Its safety boundary is stricter than the existing actuator: idle-only entry, complete
+preflight, snapshot and pane fencing, machine readiness, and mandatory rollback. A
+default-off switch would duplicate those gates, add a migration, and leave the risky
 operation unchanged once enabled.
 
 ## Durable resources and reconciliation
