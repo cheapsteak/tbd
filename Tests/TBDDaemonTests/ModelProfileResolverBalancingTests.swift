@@ -63,6 +63,8 @@ struct ModelProfileResolverBalancingTests {
         let snapshot = ProfileUsageSnapshot(
             buckets: [],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: "org-123"
         )
@@ -255,20 +257,16 @@ struct ModelProfileResolverBalancingTests {
         let defaultProfileID = defaultProfile.id
         let repoOverrideProfileID = repoOverrideProfile.id
 
-        let repo = RepoRecord(
-            id: UUID(),
-            name: "Test Repo",
-            owner: "test",
-            host: "github.com",
-            workingDirectory: "/tmp",
-            gitDirectory: "/tmp/.git",
-            profileOverrideID: repoOverrideProfileID,
-            localBranch: "main",
+        let repo = try await db.repos.create(
+            path: "/tmp",
+            displayName: "Test Repo",
+            defaultBranch: "main",
             remoteURL: "https://github.com/test/test.git"
         )
         let repoID = repo.id
 
-        try await db.repos.save(repo)
+        // Set the profile override on the created repo
+        try await db.repos.setProfileOverride(id: repoID, profileID: repoOverrideProfileID)
 
         try await db.config.setDefaultProfileID(defaultProfileID)
         try await db.config.setProfileBalancingEnabled(true)
@@ -306,7 +304,7 @@ struct ModelProfileResolverBalancingTests {
         let scratchOverrideProfileID = scratchOverrideProfile.id
 
         try await db.config.setDefaultProfileID(defaultProfileID)
-        try await db.config.setScratchProfileOverrideID(scratchOverrideProfileID)
+        try await db.config.setScratchProfileOverride(scratchOverrideProfileID)
         try await db.config.setProfileBalancingEnabled(true)
 
         let source = ProfilePoolCandidateSource(
@@ -417,6 +415,8 @@ struct ModelProfileResolverBalancingTests {
                 .init(kind: "weekly_all", percent: 80, resetsAt: Date().addingTimeInterval(86400 * 7), isActive: true),
             ],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: nil
         )
@@ -426,6 +426,8 @@ struct ModelProfileResolverBalancingTests {
                 .init(kind: "weekly_all", percent: 20, resetsAt: Date().addingTimeInterval(86400 * 7), isActive: true),
             ],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: nil
         )
@@ -491,6 +493,8 @@ struct ModelProfileResolverBalancingTests {
                 .init(kind: "session", percent: 80, resetsAt: Date().addingTimeInterval(3600), isActive: true),
             ],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: nil
         )
@@ -499,6 +503,8 @@ struct ModelProfileResolverBalancingTests {
                 .init(kind: "session", percent: 20, resetsAt: Date().addingTimeInterval(3600), isActive: true),
             ],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: nil
         )
