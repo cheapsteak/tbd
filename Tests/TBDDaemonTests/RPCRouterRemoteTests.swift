@@ -82,7 +82,7 @@ struct RPCRouterRemoteTests: ~Copyable {
         let r = router(invoker: FakeProviderInvoker(script: []))
         for method in ["remote.providers", "remote.sessions", "remote.create",
                        "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss",
-                       "remote.setPin"] {
+                       "remote.setPin", "remote.reconnect"] {
             let response = await call(r, method,
                 #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
@@ -100,7 +100,7 @@ struct RPCRouterRemoteTests: ~Copyable {
         let r = router(manager: nil)
         for method in ["remote.providers", "remote.sessions", "remote.create",
                        "remote.stop", "remote.send", "remote.log", "remote.rename", "remote.dismiss",
-                       "remote.setPin"] {
+                       "remote.setPin", "remote.reconnect"] {
             let response = await call(r, method,
                 #"{"provider": "fake", "sessionID": "x", "text": "t", "title": "t", "paramsJSON": "{}"}"#)
             #expect(response.success == false, "expected \(method) to be gated")
@@ -580,6 +580,40 @@ struct RPCRouterRemoteTests: ~Copyable {
             return false
         }
         #expect(changeBroadcasts.isEmpty)
+    }
+
+    /// The daemon never owns an `attach` child, so reconnect is a pure relay:
+    /// one `.remoteSessionReconnectRequested` naming the session, and a result
+    /// carrying how many subscribers it reached — the count taken before the
+    /// broadcast, so it includes the one listening here.
+    @Test func reconnectBroadcastsTheRequestAndReportsSubscribers() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.reconnect", #"{"provider": "fake", "sessionID": "a"}"#)
+        #expect(response.success)
+        #expect(try response.decodeResult(RemoteReconnectResult.self).subscribers == 1)
+        let requests = deltas.snapshot().compactMap { delta -> RemoteSessionReconnectDelta? in
+            if case .remoteSessionReconnectRequested(let d) = delta { return d }
+            return nil
+        }
+        #expect(requests == [RemoteSessionReconnectDelta(provider: "fake", sessionID: "a")])
+    }
+
+    /// With nobody subscribed the daemon says so — the CLI's one honest
+    /// failure signal — rather than reporting a request nobody will act on.
+    @Test func reconnectReportsZeroSubscribersWhenNoAppIsConnected() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let r = router(invoker: FakeProviderInvoker(script: []))
+        let response = await call(r, "remote.reconnect", #"{"provider": "fake", "sessionID": "a"}"#)
+        #expect(response.success)
+        #expect(try response.decodeResult(RemoteReconnectResult.self).subscribers == 0)
     }
 
     @Test func setPinStampsPinnedAtAndBroadcastsChange() async throws {

@@ -18,6 +18,10 @@ enum RemoteSessionActionMenu {
     enum Kind: Equatable {
         case rename
         case attach
+        /// Kill this session's local `attach` child and re-exec it
+        /// (`AppState.reconnectRemoteSession`). Offered only while a pane is
+        /// attached — there is nothing to restart otherwise.
+        case reconnect
         case viewLog
         case sendText
         case copySessionID
@@ -68,6 +72,7 @@ enum RemoteSessionActionMenu {
 
     static let renameLabel = "Rename…"
     static let attachLabel = "Attach"
+    static let reconnectLabel = "Reconnect"
     static let viewLogLabel = "View Log"
     static let sendTextLabel = "Send Text…"
     static let copySessionIDLabel = "Copy Session ID"
@@ -108,7 +113,9 @@ enum RemoteSessionActionMenu {
     /// tombstone isn't meaningful.
     ///
     /// For a live row: Rename…, then Attach/View Log/Send Text… gated on
-    /// their respective capabilities, then Copy Session ID (always
+    /// their respective capabilities — with Reconnect right after Attach
+    /// when `isAttached` (this app currently holds a live attach pane for the
+    /// session), then Copy Session ID (always
     /// available — the id is known locally, no provider call needed), then
     /// the pin toggle, then a divider, then Stop as the last, destructive
     /// item.
@@ -146,7 +153,8 @@ enum RemoteSessionActionMenu {
     /// remains the last, destructive item.
     static func items(
         capabilities: [String], gone: Bool, snapshotFresh: Bool = true,
-        isPinned: Bool, exited: Bool = false, deleteEnabled: Bool = false
+        isPinned: Bool, exited: Bool = false, deleteEnabled: Bool = false,
+        isAttached: Bool = false
     ) -> [Item] {
         let pinAction = isPinned
             ? Action(kind: .unpin, title: unpinLabel)
@@ -166,6 +174,12 @@ enum RemoteSessionActionMenu {
         }
         if capabilities.contains(attachCapability) {
             actions.append(Action(kind: .attach, title: attachLabel))
+            // Local like Attach — it restarts this machine's viewer process
+            // and mutates nothing on the provider — so a stale snapshot does
+            // not withhold it.
+            if isAttached {
+                actions.append(Action(kind: .reconnect, title: reconnectLabel))
+            }
         }
         if capabilities.contains(logCapability) {
             actions.append(Action(kind: .viewLog, title: viewLogLabel))

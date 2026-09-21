@@ -1077,6 +1077,16 @@ final class AppState {
     /// cap at once even with many pending entries at once.
     private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
 
+    /// Per-selection restart generation for the attach terminal, bumped by
+    /// `reconnectRemoteSession`. `RemoteAttachPager` keys each tab item on
+    /// `RemoteAttachMountKey` (selection + generation), so a bump makes the
+    /// old key fall out of the mount set — tearing down its `attach` child
+    /// through the normal dismantle path — and a fresh key mount a new one.
+    /// Absent means generation 0. The generation is also how a late exit
+    /// from a superseded child is told apart from the live one's exit; see
+    /// `markRemoteSessionDetached(_:exitCode:generation:)`.
+    private(set) var remoteAttachGenerations: [RemoteSessionSelection: Int] = [:]
+
     /// Cap on how many WARM BACKGROUND remote sessions may keep a live
     /// attach terminal around at once. The current selection is separately
     /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
@@ -1161,7 +1171,16 @@ final class AppState {
     /// Either way `selection` is excluded from `attachedRemoteSelections`
     /// until its respective clearing condition is met — the rule that
     /// prevents a respawn loop while the row stays selected.
-    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?) {
+    ///
+    /// `generation` is the restart generation the exiting child was mounted
+    /// under (`RemoteAttachMountKey.generation`). An exit from a generation
+    /// `reconnectRemoteSession` has since superseded is dropped: that child
+    /// was killed on purpose, and recording its exit would detach — or put
+    /// into backoff — the fresh child that replaced it. `nil` skips the check.
+    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?, generation: Int? = nil) {
+        if let generation, generation != remoteAttachGeneration(for: selection) {
+            return
+        }
         switch RemoteAttachExitClass.classify(exitCode: exitCode) {
         case .unexpected:
             pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
@@ -1194,6 +1213,46 @@ final class AppState {
         touchAttachedRemoteSession(selection)
     }
 
+    /// The restart generation `selection`'s attach terminal is currently
+    /// mounted under — 0 until the first `reconnectRemoteSession`.
+    func remoteAttachGeneration(for selection: RemoteSessionSelection) -> Int {
+        remoteAttachGenerations[selection] ?? 0
+    }
+
+    /// Kills `selection`'s `attach` child and re-execs it immediately — the
+    /// recourse for a pane whose transport died without the child exiting,
+    /// which no exit-driven path (auto-reconnect, Reattach) can see.
+    ///
+    /// Bumps the restart generation, so `RemoteAttachPager` drops the old tab
+    /// item (its dismantle terminates and reaps the child, and suppresses
+    /// that child's own exit callback) and mounts a fresh one on the next
+    /// update. The killed child's exit is never routed through
+    /// `markRemoteSessionDetached` as an unexpected exit, so it neither
+    /// detaches the session nor starts a backoff window.
+    ///
+    /// A session that has already detached behaves like Reattach: both
+    /// detach flags clear, and so does any pending-reconnect backoff — this
+    /// is an explicit request to connect now. Clearing is also right for a
+    /// live session, whose pending entry (if any) is a leftover from an
+    /// earlier flap and would otherwise escalate the backoff of a pane that
+    /// was deliberately restarted.
+    ///
+    /// Returns false, changing nothing, when there is no pane to reconnect:
+    /// the session is neither mounted nor detached (never viewed, evicted
+    /// past the keep-alive cap, or unknown). A reconnect must not quietly
+    /// open a new provider connection for a session nobody is looking at.
+    @discardableResult
+    func reconnectRemoteSession(_ selection: RemoteSessionSelection) -> Bool {
+        let wasDetached = explicitlyDetachedRemoteSessions[selection] != nil
+            || pendingReconnectRemoteSessions[selection] != nil
+        guard wasDetached || attachedRemoteSelections.contains(selection) else { return false }
+        explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
+        pendingReconnectRemoteSessions.removeValue(forKey: selection)
+        remoteAttachGenerations[selection] = remoteAttachGeneration(for: selection) + 1
+        touchAttachedRemoteSession(selection)
+        return true
+    }
+
     /// Clears a stale explicit-detach flag for `selection`, if present —
     /// the narrow write `activateRemoteSession` (in
     /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
@@ -1215,6 +1274,7 @@ final class AppState {
         explicitlyDetachedRemoteSessions = explicitlyDetachedRemoteSessions.filter { selections.contains($0.key) }
         pendingReconnectRemoteSessions = pendingReconnectRemoteSessions.filter { selections.contains($0.key) }
         recentlyAttachedRemoteSessions = recentlyAttachedRemoteSessions.filter { selections.contains($0) }
+        remoteAttachGenerations = remoteAttachGenerations.filter { selections.contains($0.key) }
     }
 
     /// Move `id` to the front of `recentlyVisitedWorktreeIDs`, then trim the LRU
@@ -2434,6 +2494,8 @@ final class AppState {
             Task { [weak self] in await self?.refreshRemote() }
         case .remoteSessionAttention(let d):
             handleRemoteSessionAttentionDelta(d)
+        case .remoteSessionReconnectRequested(let d):
+            reconnectRemoteSession(RemoteSessionSelection(provider: d.provider, sessionID: d.sessionID))
         default:
             break
         }

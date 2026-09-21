@@ -25,6 +25,7 @@ struct RemoteCommand: ParsableCommand {
             RemoteTranscript.self,
             RemoteRetain.self, RemoteImport.self, RemoteRecall.self, RemoteRetained.self,
             RemoteDelete.self, RemoteDismiss.self, RemoteAllowDelete.self,
+            RemoteReconnect.self,
         ]
     )
 }
@@ -654,6 +655,70 @@ struct RemoteDismiss: AsyncParsableCommand {
             params: RemoteDismissParams(provider: target.provider, sessionID: target.sessionID))
         print("Dismissed \(target.provider)/\(target.sessionID) from TBD's lists.")
     }
+}
+
+// MARK: - remote reconnect
+
+struct RemoteReconnect: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reconnect",
+        abstract: "Restart the app's attach connection to a session",
+        discussion: """
+            Kills the TBD app's local `attach` process for the session and \
+            starts a fresh one. Use it when an attached pane has gone blank \
+            or stopped responding: a connection whose transport died without \
+            the process exiting gives the app nothing to react to on its own. \
+            The session on the provider is untouched.
+
+            The app owns the attach process, so this only asks it to \
+            reconnect. A session the app is not attached to — and not showing \
+            as detached — is left alone.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let fleet = try readRemoteFleet(client: client)
+        guard let target = RemoteSessionRef.resolve(
+            session, sessions: fleet.sessions, worktrees: fleet.worktrees) else {
+            remoteNote("Error: could not resolve '\(session)' to a remote session")
+            throw ExitCode.failure
+        }
+        // Reconnect re-runs the provider's `attach` verb, so a provider that
+        // never declared it has no attach connection to restart.
+        guard fleet.capabilities(of: target.provider).contains("attach") else {
+            remoteNote(remoteMissingCapability("attach", provider: target.provider))
+            throw ExitCode.failure
+        }
+        let result = try client.call(
+            method: RPCMethod.remoteReconnect,
+            params: RemoteReconnectParams(provider: target.provider, sessionID: target.sessionID),
+            resultType: RemoteReconnectResult.self)
+        let report = remoteReconnectReport(
+            address: "\(target.provider)/\(target.sessionID)", subscribers: result.subscribers)
+        guard result.subscribers > 0 else {
+            remoteNote(report)
+            throw ExitCode.failure
+        }
+        print(report)
+    }
+}
+
+/// What `tbd remote reconnect` says. The daemon relays the request to the app
+/// and cannot see whether a pane exists to reconnect, so success is worded as
+/// a request, never as a reconnection. Zero subscribers is the one outcome the
+/// daemon does know: no app was connected to receive it.
+func remoteReconnectReport(address: String, subscribers: Int) -> String {
+    if subscribers == 0 {
+        return "Error: no TBD app is connected to the daemon, so nothing will reconnect \(address)"
+    }
+    return "Reconnect requested for \(address). An attached pane restarts its connection; "
+        + "a session the app is not attached to is left alone."
 }
 
 // MARK: - the delete gate

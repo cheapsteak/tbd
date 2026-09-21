@@ -347,6 +347,11 @@ public enum RPCMethod {
     public static let remoteDelete = "remote.delete"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
+    /// Asks the app to kill a session's local `attach` child and re-exec it.
+    /// The daemon never owns that child — the app spawns it on its own pty —
+    /// so this only broadcasts `.remoteSessionReconnectRequested`; whether a
+    /// pane exists to reconnect is known only to the app.
+    public static let remoteReconnect = "remote.reconnect"
 
     /// Every `remote.*` verb addressed by a `provider` field in its params (or,
     /// for the two worktree-addressed retirement routes, by the worktree's
@@ -368,7 +373,7 @@ public enum RPCMethod {
         remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
-        remoteSetPin, remoteReportAttachExit,
+        remoteSetPin, remoteReportAttachExit, remoteReconnect,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
@@ -1666,6 +1671,24 @@ public struct RemoteDismissParams: Codable, Sendable {
     public init(provider: String, sessionID: String) {
         self.provider = provider; self.sessionID = sessionID
     }
+}
+
+/// Params for `remote.reconnect`.
+public struct RemoteReconnectParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.reconnect`. The daemon cannot see whether any app holds
+/// a pane for the session, so all it can report is how many state
+/// subscribers the request was broadcast to — zero means no app was
+/// connected and nothing will reconnect.
+public struct RemoteReconnectResult: Codable, Sendable {
+    public let subscribers: Int
+    public init(subscribers: Int) { self.subscribers = subscribers }
 }
 
 // MARK: - The transcript exchange

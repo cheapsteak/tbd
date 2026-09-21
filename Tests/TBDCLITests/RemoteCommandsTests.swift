@@ -345,4 +345,20 @@ struct RemoteCommandsTests {
         #expect(discussion.contains("remote_delete_enabled"))
         #expect(discussion.contains("tbd remote allow-delete on"))
     }
+
+    // MARK: - reconnect wording
+
+    /// Success is a request, never a reconnection: the daemon cannot see
+    /// whether the app holds a pane for the session.
+    @Test func reconnectReportIsWordedAsARequest() {
+        let text = remoteReconnectReport(address: "acme/s1", subscribers: 1)
+        #expect(text.hasPrefix("Reconnect requested for acme/s1."))
+        #expect(!text.contains("Reconnected"))
+    }
+
+    @Test func reconnectReportNamesAMissingAppAsAnError() {
+        let text = remoteReconnectReport(address: "acme/s1", subscribers: 0)
+        #expect(text.hasPrefix("Error: no TBD app is connected"))
+        #expect(text.contains("acme/s1"))
+    }
 }

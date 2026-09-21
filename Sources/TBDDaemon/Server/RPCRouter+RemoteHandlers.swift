@@ -1157,6 +1157,24 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Relay a reconnect request to the app, which owns every `attach` child
+    /// (it spawns them on its own ptys; the daemon never learns their pids).
+    /// Local-only like dismiss: no provider verb is invoked, so the session
+    /// need not be in the mirror and the provider need not be healthy. The
+    /// result reports the subscriber count rather than success, because
+    /// whether a pane exists to reconnect is known only to the app.
+    func handleRemoteReconnect(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteReconnectParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        let subscribers = subscriptions.subscriberCount
+        subscriptions.broadcast(delta: .remoteSessionReconnectRequested(
+            RemoteSessionReconnectDelta(provider: params.provider, sessionID: params.sessionID)))
+        return try RPCResponse(result: RemoteReconnectResult(subscribers: subscribers))
+    }
+
     /// Pin or unpin a remote session for the sidebar dock. Local-only — it
     /// touches the mirror row and never invokes a provider verb, so unlike
     /// every handler above it needs no `RemoteProviderManager` (a session
