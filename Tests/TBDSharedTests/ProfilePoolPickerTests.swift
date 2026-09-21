@@ -164,7 +164,7 @@ struct ProfilePoolPickerTests {
         let fetchedAt = now.addingTimeInterval(-299)
         let candidate = makeCandidate(
             kind: .oauth,
-            snapshot: makeSnapshot(fetchedAt: fetchedAt, buckets: [makeBucket(kind: "session", percent: 30)])
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 30)], fetchedAt: fetchedAt)
         )
         let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
 
@@ -195,7 +195,7 @@ struct ProfilePoolPickerTests {
         let fetchedAt = now.addingTimeInterval(-899)
         let candidate = makeCandidate(
             kind: .oauthToken,
-            snapshot: makeSnapshot(fetchedAt: fetchedAt, buckets: [makeBucket(kind: "session", percent: 30)])
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 30)], fetchedAt: fetchedAt)
         )
         let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
 
@@ -416,10 +416,10 @@ struct ProfilePoolPickerTests {
         )
         let optedOut = makeCandidate(
             profileID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            poolOptOut: true,
             accountKey: "account1",
             snapshot: snapshot,
-            liveSessions: 5,
-            poolOptOut: true
+            liveSessions: 5
         )
 
         let decision = ProfilePoolPicker.pick(candidates: [eligible, optedOut], now: now)
@@ -659,10 +659,10 @@ struct ProfilePoolPickerTests {
         )
         let accountA2 = makeCandidate(
             profileID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            poolOptOut: true,
             accountKey: "account-a",
             snapshot: snapshot30,
-            liveSessions: 1,
-            poolOptOut: true
+            liveSessions: 1
         )
         let accountB = makeCandidate(
             profileID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
