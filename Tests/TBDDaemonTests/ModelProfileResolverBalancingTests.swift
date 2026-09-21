@@ -753,6 +753,66 @@ struct ModelProfileResolverBalancingTests {
         #expect(first?.profileID == second?.profileID)
     }
 
+    // MARK: - Resumed conversations are not balanced
+
+    /// `balance: false` keeps the pre-balancing chain with the flag on: the
+    /// global default, even when a balanced pick would choose another
+    /// profile, and no reservation.
+    @Test("resume: balance false returns the global default and reserves nothing")
+    func balanceFalseReturnsTheDefault() async throws {
+        let dates = TestDateSource(Date())
+        let fixture = try await makeReservedFixture(dates: dates)
+        let profiles = try await fixture.db.modelProfiles.list()
+        let defaultProfile = try #require(profiles.first)
+        try await fixture.db.config.setDefaultProfileID(defaultProfile.id)
+        // Load the default so a balanced pick would steer away from it.
+        for index in 1...3 {
+            _ = try await fixture.db.terminals.create(
+                worktreeID: fixture.worktreeID, tmuxWindowID: "@\(index)", tmuxPaneID: "%\(index)",
+                profileID: defaultProfile.id, kind: .claude)
+        }
+
+        let resumed = try #require(try await fixture.resolver.resolve(repoID: nil, balance: false))
+        #expect(resumed.profileID == defaultProfile.id)
+        #expect(resumed.reservationID == nil)
+        #expect(await fixture.reservations.heldCount == 0)
+
+        // Control: the same state with balancing allowed picks elsewhere.
+        let fresh = try #require(try await fixture.resolver.resolve(repoID: nil))
+        #expect(fresh.profileID != defaultProfile.id)
+        #expect(fresh.reservationID != nil)
+    }
+
+    /// With no global default, `balance: false` resolves to nothing (ambient
+    /// credentials) rather than to a pick.
+    @Test("resume: balance false with no default resolves to nil")
+    func balanceFalseWithNoDefaultIsNil() async throws {
+        let dates = TestDateSource(Date())
+        let fixture = try await makeReservedFixture(dates: dates)
+
+        let resumed = try await fixture.resolver.resolve(repoID: nil, balance: false)
+        #expect(resumed == nil)
+        #expect(await fixture.reservations.heldCount == 0)
+    }
+
+    @Test("resume: a terminal spawn balances only when it resumes nothing")
+    func terminalSpawnBalancesOnlyWhenFresh() {
+        #expect(ModelProfileResolver.balances(resumeSessionID: nil))
+        #expect(!ModelProfileResolver.balances(resumeSessionID: "session-1"))
+    }
+
+    @Test("resume: a worktree spawn balances only when it restores and carries over nothing")
+    func worktreeSpawnBalancesOnlyWhenFresh() {
+        #expect(ModelProfileResolver.balancesWorktreeSpawn(
+            restoringArchivedSessions: false, carryingOver: false))
+        #expect(!ModelProfileResolver.balancesWorktreeSpawn(
+            restoringArchivedSessions: true, carryingOver: false))
+        #expect(!ModelProfileResolver.balancesWorktreeSpawn(
+            restoringArchivedSessions: false, carryingOver: true))
+        #expect(!ModelProfileResolver.balancesWorktreeSpawn(
+            restoringArchivedSessions: true, carryingOver: true))
+    }
+
     /// Balancing off never touches the ledger.
     @Test("reservations: balancing off reserves nothing")
     func balancingOffReservesNothing() async throws {
