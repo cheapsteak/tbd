@@ -1,14 +1,14 @@
 # Account load balancing
 
-When you run multiple Claude accounts through different TBD profiles, TBD can now spread new sessions across your accounts and automatically resume sessions that hit their rate limit on another account with available capacity.
+When you run multiple Claude accounts through different TBD profiles, TBD can spread new sessions across your accounts, and when a session hits its usage limit it offers a one-click switch to an account with room.
 
 ## What it does
 
-Three behaviors work together, each independently optional:
+Three behaviors work together:
 
 - **Balanced new sessions** – when you spawn a Claude session without specifying an account, TBD picks the profile with the most available capacity instead of always using the global default. Explicit picks, repo overrides, and scratch-session overrides all still win.
 - **Live-session counts** – the profile list in Settings, the account picker, and the tab swap menu now show how many active sessions each account is carrying, so you can see the load being balanced.
-- **Automatic hand-over on limit** – when a session hits its hard usage limit, TBD can swap it to another account with room and resume the turn automatically, with a one-click banner as a fallback.
+- **One-click switch on limit** – when a session hits its hard usage limit, the notification names an account with room and a banner over the pane offers "Switch to …". Clicking it resumes the conversation on that account in the same tab; TBD never makes the switch for you.
 
 Everything else stays the same: explicit per-spawn picks, per-repo profile locks, per-worktree scratch overrides, and hibernation wake all work exactly as before.
 
