@@ -177,6 +177,59 @@ extension AppState {
     var remoteSessionHostSelection: RemoteSessionSelection? {
         selectedRemoteSession ?? recentlyAttachedRemoteSessions.first
     }
+
+    /// Re-attaches after a network path change or a wake from sleep — the
+    /// events that most often kill a transport whose `attach` child never
+    /// exits (#884). Design:
+    /// `docs/specs/2026-09-21-remote-attach-network-recovery-design.md`.
+    ///
+    /// The bug this exists for is invisible by construction: the contract
+    /// makes the child's exit the only viewer-side signal and forbids parsing
+    /// its bytes, so a child still running on a dead socket looks exactly
+    /// like an idle session, forever. Nothing here infers anything from
+    /// output; it acts on the external event instead.
+    ///
+    /// Three effects, in order:
+    ///
+    /// 1. **Restart the children that predate the change.** Every attached
+    ///    selection whose child has a recorded start time BEFORE `change.at`
+    ///    gets a fresh generation, which the pager turns into a kill and
+    ///    re-exec. A child with no recorded start has not spawned yet and
+    ///    will spawn on the new path; a child started at or after `change.at`
+    ///    is already on it. Both are skipped, so a burst costs no spawn it
+    ///    does not need. A restart is lossless — session state lives on the
+    ///    provider, and `attach` is required to be targeted and idempotent —
+    ///    so the worst case of an unnecessary one is a repaint.
+    /// 2. **Expire stale backoff.** Every pending-reconnect entry still
+    ///    waiting has its deadline pulled back to `change.at`: a network
+    ///    change is exactly what makes an earlier transport failure stale,
+    ///    and a session that failed while the network was down would
+    ///    otherwise sit out up to 300 seconds after it came back. `attempts`
+    ///    and the provider-health gate both survive untouched — see
+    ///    `expireRemoteReconnectBackoff(at:)`.
+    /// 3. **Re-evaluate now, with no timer and no RPC.**
+    ///    `attachedRemoteSelections` is computed on every read, and both
+    ///    mutations above notify observers, so `RemoteAttachPager` re-mounts
+    ///    on the next render rather than on the next ~60 s provider
+    ///    republish.
+    func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
+        var restarted = 0
+        for selection in attachedRemoteSelections {
+            guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < change.at else { continue }
+            if reconnectRemoteSession(selection) { restarted += 1 }
+        }
+        let cleared = expireRemoteReconnectBackoff(at: change.at)
+
+        let triggers = change.triggers.map(\.rawValue).joined(separator: "+")
+        let previous = change.previous?.description ?? "none"
+        let current = change.current?.description ?? "none"
+        remoteAttachLogger.info(
+            """
+            network change (\(triggers, privacy: .public)): \(previous, privacy: .public) -> \
+            \(current, privacy: .public); restarted \(restarted, privacy: .public) attach(es), \
+            cleared backoff on \(cleared, privacy: .public)
+            """)
+    }
 }
 
 /// The identity of one mounted attach terminal in `RemoteAttachPager`: the

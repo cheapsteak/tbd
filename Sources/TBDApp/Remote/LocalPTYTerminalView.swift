@@ -35,6 +35,12 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// provider `attach` this never implies the remote session died — only
     /// that this local viewer process stopped.
     let onExit: (Int32?) -> Void
+    /// Called once, on the main actor, the moment the child has been spawned,
+    /// with the spawn instant — the attach pane uses it to date its child
+    /// against a later network change (`AppState.markRemoteAttachStarted`).
+    /// Optional, so the synthesized memberwise initializer defaults it to nil
+    /// and the remediation terminal — which has no use for it — is untouched.
+    var onStarted: ((Date) -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -60,6 +66,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         tv.terminalDelegate = context.coordinator
         context.coordinator.terminalView = tv
         context.coordinator.onExit = onExit
+        context.coordinator.onStarted = onStarted
 
         // TBDTerminalView fires `onReady` exactly once, the first time it's
         // laid out with non-zero bounds — the same hook TerminalPanelView
@@ -84,6 +91,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
         weak var terminalView: TerminalView?
         var onExit: ((Int32?) -> Void)?
+        /// Mirrors `onExit`'s storage for the spawn side — see the
+        /// representable's `onStarted`.
+        var onStarted: ((Date) -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,
@@ -129,6 +139,11 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // `dataReceived`. Cleared by `cleanup()` before `terminate()`.
             viewHolder.set(terminalView)
             process.startProcess(executable: executable, args: args, environment: envPairs, execName: nil)
+            // The child now exists, so this is the instant it was running on
+            // whatever network path was in force. Reported from here (already
+            // `@MainActor`) rather than from the exit side, because the whole
+            // point is to date a child that may never exit.
+            onStarted?(Date())
 
             let dims = terminalView.terminalDimensions
             let cols = dims.cols

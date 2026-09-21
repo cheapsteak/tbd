@@ -28,6 +28,11 @@ struct RemoteAttachTerminalView: View {
     /// (clean exit, crash, unreachable host). Never implies the remote
     /// session died — only that this local viewer process stopped.
     let onDetached: (Int32?) -> Void
+    /// Called once with the instant the `attach` child was spawned. The pager
+    /// records it against this pane's restart generation, so a later network
+    /// change can tell a child that predates it — and is therefore running on
+    /// a path that no longer exists — from one spawned since.
+    let onStarted: (Date) -> Void
     @EnvironmentObject var appearance: AppearanceSettings
 
     /// Whether the local `attach` process ended in the UNEXPECTED class —
@@ -55,7 +60,8 @@ struct RemoteAttachTerminalView: View {
             argv: provider.argv + ["attach", sessionID],
             environment: Self.attachEnvironment(),
             appearance: appearance,
-            onExit: onDetached
+            onExit: onDetached,
+            onStarted: onStarted
         )
     }
 
