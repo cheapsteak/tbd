@@ -1154,16 +1154,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the limit rotation gate (default OFF, soaking) — automatic
-    /// account rotation when a session hits a hard usage limit (design
-    /// 2026-09-05 §7.2).
-    func setLimitRotation(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetLimitRotationEnabled,
-            params: ConfigSetLimitRotationEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.

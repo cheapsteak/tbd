@@ -1897,10 +1897,6 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var profileBalancingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setProfileBalancing(enabled: enabled) }
-    /// How `setLimitRotationEnabled` persists the limit-rotation soak flag —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var limitRotationFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setLimitRotation(enabled: enabled) }
     /// How `setProfilePoolOptOut` persists a profile's pool opt-out —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =

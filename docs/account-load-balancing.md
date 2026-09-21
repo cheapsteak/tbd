@@ -64,7 +64,7 @@ tbd profile balancing on
 
 or **Balance new Claude sessions across accounts** in Settings → Model Profiles. The help text reminds you that repo overrides and explicit picks still win.
 
-A second column, `limit_rotation_enabled` (`tbd profile rotation on|off`), is still stored and reported, but no behavior reads it: a limit hit only ever offers the switch button.
+The switch offer at a hard limit has no flag: it acts only on a click, so there is nothing for a switch to make safer.
 
 The flag is tri-state: `NULL` (never chosen), `0` (explicit off), or `1` (explicit on). The shipped default is `NULL` on every install. Flipping the source default graduates the flag to everyone who hasn't explicitly chosen, while preserving every intentional opt-out. The per-profile pool opt-out is a setting, not a flag, with no graduation.
 

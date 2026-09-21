@@ -269,19 +269,6 @@ struct LoadBalancingTests {
     }
 
     @Test @MainActor
-    func limitRotationSetterCallsClosureAndRefreshesCapabilities() async throws {
-        try await withAppState("rotation-setter") { appState in
-            let received = ValueBox<Bool>()
-            let refreshed = ValueBox<Bool>()
-            appState.limitRotationFlagSetter = { enabled in received.value = enabled }
-            appState.daemonCapabilitiesFetcher = { refreshed.value = true; return nil }
-            await appState.setLimitRotationEnabled(false)
-            #expect(received.value == false)
-            #expect(refreshed.value == true)
-        }
-    }
-
-    @Test @MainActor
     func poolOptOutSetterCallsClosure() async throws {
         try await withAppState("opt-out-setter") { appState in
             let received = ValueBox<(UUID, Bool)>()
