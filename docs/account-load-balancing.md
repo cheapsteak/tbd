@@ -10,7 +10,7 @@ Three behaviors work together:
 - **Live-session counts** – the profile list in Settings, the account picker, and the tab swap menu now show how many active sessions each account is carrying, so you can see the load being balanced.
 - **One-click switch on limit** – when a session hits its hard usage limit, the notification names an account with room and a banner over the pane offers "Switch to …". Clicking it resumes the conversation on that account in the same tab; TBD never makes the switch for you.
 
-Everything else stays the same: explicit per-spawn picks, per-repo profile locks, per-worktree scratch overrides, and hibernation wake all work exactly as before.
+Everything else stays the same: explicit per-spawn picks, per-repo profile locks, per-worktree scratch overrides, and hibernation wake all work exactly as before. Only brand-new sessions are balanced — resuming or reviving an existing conversation keeps the account TBD would have used before balancing, because the conversation's transcript lives with that account.
 
 ## The pool
 
