@@ -135,7 +135,20 @@ MAX_REPORTED_COMMAND_CHARACTERS = 120
 # lock file open, for when the recorded identity cannot explain the wait.  The
 # probe runs inside the wait loop, so it may cost a little and must never cost
 # the wait: it is abandoned after this long and reports at most this many.
+#
+# The budget covers the WHOLE probe — finding the openers with `lsof` and
+# naming them with `ps`, both legs — and not one leg each.  A per-leg timeout
+# is not a bound anybody can act on: two legs bounded separately are their
+# sum, so a per-heartbeat cost stated as five seconds would really have been
+# fifteen, and a number written down here is trusted precisely because nobody
+# re-derives it.
 LOCK_OPENER_PROBE_TIMEOUT_SECONDS = 5.0
+# ...of which the naming leg is guaranteed this much however slow the first
+# leg was, so a slow `lsof` cannot starve it into always timing out and
+# leaving every opener it found called "unknown" — a probe that names pids
+# without commands answers half the question.  `lsof` is capped at the
+# remainder, which is what keeps the guarantee inside the total.
+LOCK_OPENER_NAME_MINIMUM_SECONDS = 1.0
 MAX_REPORTED_LOCK_OPENERS = 4
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 # Where the shared precompiled-module cache lives, under the user's real home.
@@ -602,13 +615,22 @@ def _ancestor_pids(
     return tuple(chain)
 
 
-def _process_command_names(pids: tuple[int, ...]) -> dict[int, str]:
+def _process_command_names(
+    pids: tuple[int, ...],
+    *,
+    timeout: float = LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+) -> dict[int, str]:
     """pid -> executable basename, from one `ps`; unknown pids are omitted.
 
     Best effort, like every other probe here: a `ps` that is missing, slow or
     refused leaves the caller naming pids alone, which is still the actionable
     half.  macOS prints the full path under `comm=` and Linux the basename, so
     the result is reduced to a basename either way.
+
+    `timeout` is a slice of a budget the caller owns, not a bound of this
+    function's own: `_lock_file_openers` hands over what is left of
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` after its own leg.  The default is the
+    whole of that, for a caller that is not sharing.
     """
     if not pids:
         return {}
@@ -617,7 +639,7 @@ def _process_command_names(pids: tuple[int, ...]) -> dict[int, str]:
             ["ps", "-o", "pid=,comm=", "-p", ",".join(str(pid) for pid in pids)],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -660,13 +682,22 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
     unparsable output all return `()` and the caller falls back to saying the
     holder is unidentified, because this runs inside a wait loop and may never
     fail one.
+
+    Both legs share one budget, `LOCK_OPENER_PROBE_TIMEOUT_SECONDS`, and that
+    is the whole cost of the probe per heartbeat.  `lsof` is capped at the
+    budget less the naming leg's guaranteed floor, so the leg that turns pids
+    into command names always gets a usable slice no matter how slow `lsof`
+    was — and the two together can never exceed the stated bound.
     """
+    deadline = time.monotonic() + LOCK_OPENER_PROBE_TIMEOUT_SECONDS
     try:
         completed = subprocess.run(
             ["lsof", "-t", "-w", "--", str(lock_path)],
             capture_output=True,
             text=True,
-            timeout=LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+            timeout=(
+                LOCK_OPENER_PROBE_TIMEOUT_SECONDS - LOCK_OPENER_NAME_MINIMUM_SECONDS
+            ),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -682,7 +713,13 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
             continue
         if pid > 0 and pid != own and pid not in pids:
             pids.append(pid)
-    names = _process_command_names(tuple(pids))
+    names = _process_command_names(
+        tuple(pids),
+        # Whatever is left of the budget, floored so the leg is never handed
+        # a slice too small to answer in.  `lsof`'s own cap is the budget
+        # less this floor, so the floor can only be reached — never exceeded.
+        timeout=max(LOCK_OPENER_NAME_MINIMUM_SECONDS, deadline - time.monotonic()),
+    )
     return tuple((pid, names.get(pid, "unknown")) for pid in pids)
 
 

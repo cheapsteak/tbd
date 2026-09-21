@@ -1115,6 +1115,106 @@ class WaitReportingTests(unittest.TestCase):
         self.assertIn("pid 37731 (tbd-manifest)", first)
 
 
+class LockOpenerProbeBudgetTests(unittest.TestCase):
+    """The stated bound covers the WHOLE probe, both legs, and really bounds it.
+
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` is the per-heartbeat cost a reader is
+    told this fallback can add to a wait.  It used to bound only the `lsof`
+    leg while the naming leg carried an independent timeout of its own, so the
+    true worst case was their sum and the number written down was not the
+    number.  A bound nobody can act on is worse than no bound at all, because
+    it is believed.
+
+    The clock is faked rather than slept through: the point is the arithmetic
+    that splits the budget, and no test may spend five real seconds proving
+    it.
+    """
+
+    # Far enough from this process's pid to be nobody, and still parse.
+    OPENER_PID = 987654
+
+    def _timeouts(self, *, lsof_cost: float) -> dict[str, float]:
+        """The `timeout=` each leg is given, when `lsof` takes `lsof_cost`."""
+        seen: dict[str, float] = {}
+        clock = {"now": 1000.0}
+
+        def fake_run(argv, **kwargs):
+            seen[argv[0]] = kwargs.get("timeout")
+            if argv[0] == "lsof":
+                clock["now"] += lsof_cost
+                return subprocess.CompletedProcess(argv, 0, f"{self.OPENER_PID}\n", "")
+            return subprocess.CompletedProcess(
+                argv, 0, f"{self.OPENER_PID} /usr/bin/sleep\n", ""
+            )
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            with mock.patch.object(
+                swift_safe.time, "monotonic", lambda: clock["now"]
+            ):
+                found = swift_safe._lock_file_openers(Path("/nowhere/swift-build.lock"))
+        # Both legs really ran; a probe that short-circuited would make every
+        # assertion below vacuous.
+        self.assertEqual(found, ((self.OPENER_PID, "sleep"),))
+        self.assertEqual(sorted(seen), ["lsof", "ps"])
+        return seen
+
+    def test_the_two_legs_together_stay_inside_the_stated_bound(self):
+        """The finding itself: the sum, not each half, is what was promised.
+
+        The worst case is what the first leg actually spent (never more than
+        its own cap) plus what the second is still allowed, whatever the first
+        leg's cost turned out to be.
+        """
+        for lsof_cost in (0.0, 1.0, 4.0, 60.0):
+            with self.subTest(lsof_cost=lsof_cost):
+                seen = self._timeouts(lsof_cost=lsof_cost)
+                spent = min(lsof_cost, seen["lsof"])
+                self.assertLessEqual(
+                    spent + seen["ps"],
+                    swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+                )
+
+    def test_the_first_leg_is_capped_at_the_budget_less_the_floor(self):
+        seen = self._timeouts(lsof_cost=0.0)
+        self.assertEqual(
+            seen["lsof"],
+            swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+            - swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS,
+        )
+
+    def test_a_fast_first_leg_leaves_the_rest_of_the_budget_to_the_second(self):
+        seen = self._timeouts(lsof_cost=0.0)
+        self.assertEqual(
+            seen["ps"], swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+        )
+
+    def test_a_slow_first_leg_cannot_starve_the_second(self):
+        """The naming leg keeps its floor even when `lsof` spent its whole cap.
+
+        Starved, it would time out every time and report openers it could not
+        name — pids with no commands beside them, which is the half of the
+        answer a reader cannot act on.
+        """
+        seen = self._timeouts(
+            lsof_cost=swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+            - swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS
+        )
+        self.assertEqual(seen["ps"], swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS)
+
+    def test_an_overrunning_first_leg_still_leaves_the_floor(self):
+        """`lsof` cannot overrun its cap, but a clock jump must not go negative."""
+        seen = self._timeouts(lsof_cost=60.0)
+        self.assertEqual(seen["ps"], swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS)
+
+    def test_the_floor_leaves_the_first_leg_a_usable_cap(self):
+        """The split is only sane while the floor is a fraction of the budget."""
+        self.assertGreater(swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS, 0)
+        self.assertLess(
+            swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS,
+            swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+        )
+
+
 @unittest.skipIf(shutil.which("lsof") is None, "lsof is not installed here")
 class LockOpenerProbeTests(unittest.TestCase):
     """`_lock_file_openers` against a real lock file and real processes."""
