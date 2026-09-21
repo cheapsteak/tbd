@@ -1365,10 +1365,12 @@ public final class Daemon: Sendable {
         // Pending provider replacements recover only after the socket is live:
         // Codex readiness arrives through the SessionStart hook RPC, so a
         // pre-bind recovery would always time out despite a healthy process.
-        // The durable row remains Codex throughout this pass.
-        if mockMode == nil {
-            await rpcRouter.reconcilePendingContinueInClaude()
-        }
+        // The durable row remains Codex throughout the pass. It is NOT run
+        // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
+        // for that hook, serially, so awaiting it would hold every later boot
+        // step (the sidecar, the HTTP server) behind N × 15 s. The maintenance
+        // task in step 11a-gc runs the same pass immediately after boot, off the
+        // critical path, and then hourly.
 
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
@@ -1573,6 +1575,10 @@ public final class Daemon: Sendable {
                 let maintenanceLifecycle = lifecycle
                 self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
                     // Sweep once immediately (cold recovery), then every hour.
+                    // The immediate pass is also the post-socket recovery of any
+                    // Continue in Claude transaction a crash left pending: it
+                    // waits on hook-delivered readiness, so it runs here, off
+                    // the boot path, rather than serially before the listeners.
                     await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,

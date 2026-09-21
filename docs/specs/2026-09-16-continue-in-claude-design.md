@@ -430,8 +430,9 @@ two things:
   row that a user's own earlier Continue already staged as pending. It never starts a
   Claude replacement, only respawns the source Codex thread under a rotated token, and it
   refuses to touch a live pane it cannot attribute to that terminal. It adds no new timer:
-  it rides the existing hourly maintenance loop, and the startup pass is bounded so it
-  cannot delay the daemon becoming answerable.
+  it is the first iteration of the existing hourly maintenance task, which runs after
+  the socket is bound and off the boot path, so a slow readiness wait never delays the
+  daemon becoming answerable.
 
 Its safety boundary is stricter than the existing actuator: idle-only entry, complete
 preflight, snapshot and pane fencing, machine readiness, and mandatory rollback. A
