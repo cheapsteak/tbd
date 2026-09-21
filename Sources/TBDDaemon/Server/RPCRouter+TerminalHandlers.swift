@@ -364,13 +364,12 @@ extension RPCRouter {
             }
         }
 
-        // A login session stays on tmux whatever the flag says. Its whole point
-        // is the auto-`/login` pump `armLoginSession` starts, which reads the
-        // pane's text and types into it through tmux; the holder transport has
-        // no such pump, and a login tab that opened on a holder would sit at
-        // the composer with nothing typing `/login` into it. Every other
-        // terminal takes the decided transport.
-        let transport: TerminalSpawnTransport = isLoginSession ? .tmux : decidedTransport
+        // A login session takes the decided transport like every other spawn.
+        // Its auto-`/login` pump is transport-agnostic: `armLoginSession`
+        // hands it a closure pair per transport — a captured tmux pane and
+        // `send-keys`, or the daemon's retained emulator and the holder's
+        // injection courier.
+        let transport = decidedTransport
 
         // Build the spawn command via the pure helper.
         let appendSystemPrompt: String?
@@ -571,12 +570,7 @@ extension RPCRouter {
         )))
 
         if isLoginSession, let profile = resolvedProfile {
-            await armLoginSession(
-                terminalID: terminal.id,
-                paneID: terminal.tmuxPaneID,
-                server: currentServer,
-                profile: profile
-            )
+            await armLoginSession(terminal: terminal, server: currentServer, profile: profile)
         }
 
         await finishActuation(actuationID, .dispatched)
@@ -612,34 +606,29 @@ extension RPCRouter {
     }
 
     /// Post-spawn wiring for a profile login session:
-    /// 1. starts the verified auto-`/login` pump — poll the pane until
-    ///    Claude's TUI is interactive, type `/login` + Enter, then verify the
-    ///    login dialog actually appeared (retrying, capped) so a send that
+    /// 1. starts the verified auto-`/login` pump — poll the session's screen
+    ///    until Claude's TUI is interactive, type `/login` + Enter, then verify
+    ///    the login dialog actually appeared (retrying, capped) so a send that
     ///    lands before the input loop is ready doesn't silently vanish;
     /// 2. starts the login-identity watcher so the Settings badge flips to
     ///    "Logged in as …" the moment the profile's isolated `.claude.json`
     ///    gains an `oauthAccount`.
+    ///
+    /// Transport-agnostic: the pump is one loop and one classifier, and what
+    /// differs per transport is the pair of closures `loginPumpClosures(for:)`
+    /// builds for it.
     private func armLoginSession(
-        terminalID: UUID,
-        paneID: String,
+        terminal: Terminal,
         server: String,
         profile: ResolvedModelProfile
     ) async {
-        let tmux = self.tmux
+        let terminalID = terminal.id
+        let closures = loginPumpClosures(for: terminal, server: server)
         await loginSessions.registerPendingAutoLogin(terminalID: terminalID)
         await loginSessions.startAutoLoginPump(
             terminalID: terminalID,
-            paneText: {
-                (try? await tmux.capturePaneOutput(server: server, paneID: paneID)) ?? ""
-            },
-            typeLogin: {
-                do {
-                    try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
-                    try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
-                } catch {
-                    logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
-                }
-            }
+            paneText: closures.paneText,
+            typeLogin: closures.typeLogin
         )
 
         let configDirManager = self.configDirManager
@@ -652,6 +641,128 @@ extension RPCRouter {
             identity: { configDirManager.loginIdentity(forProfileID: profileID) },
             onLogin: { subscriptions.broadcast(delta: .modelProfilesChanged) }
         )
+    }
+
+    /// How the auto-`/login` pump reads and types for one login tab, chosen by
+    /// the transport its row records.
+    ///
+    /// A factory rather than two branches inside `armLoginSession` so a test
+    /// can take the pair and drive it: arming also starts the identity watcher
+    /// against a profile's config dir, which a test of the typing has no
+    /// business running.
+    ///
+    /// - **tmux** — a captured pane, which the daemon can always judge because
+    ///   the tmux server renders it for everybody, and `send-keys` twice: the
+    ///   text, then `Enter`.
+    /// - **holder** — the daemon's own retained emulator through the typed
+    ///   screen, judged only when it is live and fully observed
+    ///   (`LoginSessionCoordinator.paneReading(from:)`), and two courier writes
+    ///   for the same two acts.
+    ///
+    /// `server` is the tmux server the spawn ran in, and is consulted on the
+    /// tmux arm alone — a holder row has no server behind it.
+    func loginPumpClosures(
+        for terminal: Terminal,
+        server: String
+    ) -> (
+        paneText: @Sendable () async -> LoginSessionCoordinator.PaneReading,
+        typeLogin: @Sendable () async -> Void
+    ) {
+        let terminalID = terminal.id
+        switch terminal.transport {
+        case .tmux:
+            let tmux = self.tmux
+            let paneID = terminal.tmuxPaneID
+            return (
+                paneText: {
+                    // A capture that failed is an empty pane, which classifies
+                    // as `notReady` — the same wait it has always taken.
+                    let captured = try? await tmux.capturePaneOutput(
+                        server: server, paneID: paneID)
+                    return .text(captured ?? "")
+                },
+                typeLogin: {
+                    do {
+                        try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
+                        try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+                    } catch {
+                        logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
+                    }
+                }
+            )
+        case .holder:
+            return (
+                paneText: {
+                    let screen: TerminalScreen?
+                    do {
+                        screen = try await self.holderLoginScreen(terminalID: terminalID)
+                    } catch {
+                        // A refused projection is a producer bug rather than a
+                        // session state, so it is said out loud on every read
+                        // that hits it — the pump then waits, exactly as it
+                        // does for a screen it may not judge.
+                        logger.warning("auto-login: could not project terminal \(terminalID, privacy: .public)'s screen: \(error.localizedDescription, privacy: .public)")
+                        screen = nil
+                    }
+                    return LoginSessionCoordinator.paneReading(from: screen)
+                },
+                typeLogin: {
+                    guard let courier = self.holderInjectionCourier else {
+                        logger.warning("auto-login: terminal \(terminalID, privacy: .public) runs on the pty-holder transport and this daemon has no injection path; nothing was typed")
+                        return
+                    }
+                    // Two writes, as the tmux arm sends two commands. One write
+                    // carrying both would hand the TUI a body and a submitting
+                    // `\r` in the same burst, which its paste heuristic can
+                    // absorb into the text.
+                    let bodyLanded = await self.deliverLoginBytes(
+                        Data("/login".utf8), terminalID: terminalID, courier: courier)
+                    guard bodyLanded else { return }
+                    // Enter through the named-key table, against whatever modes
+                    // the session's store reports, so the login tab resolves a
+                    // key the one way every other holder send does.
+                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
+                    guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
+                        logger.warning("auto-login: no holder byte mapping for Enter; terminal \(terminalID, privacy: .public) was typed /login without a submit")
+                        return
+                    }
+                    _ = await self.deliverLoginBytes(
+                        enter, terminalID: terminalID, courier: courier)
+                }
+            )
+        }
+    }
+
+    /// One courier write for the login pump. `false` when nothing was written,
+    /// which stops the pair rather than submitting a `/login` that never landed.
+    private func deliverLoginBytes(
+        _ bytes: Data, terminalID: UUID, courier: HolderInjectionCourier
+    ) async -> Bool {
+        switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
+        case .viewerWrote, .daemonWrote:
+            return true
+        case .notDelivered(let reason):
+            logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(reason, privacy: .public)")
+            return false
+        }
+    }
+
+    /// The holder-backed login tab's screen, for the pump to read.
+    ///
+    /// The seam first so a test can pin all four of the pump's readings without
+    /// a real holder; otherwise the registry's own reader, which is retained
+    /// across an attach and so answers for an open session as well as a
+    /// detached one. `nil` from either means the same thing: nothing answered.
+    ///
+    /// The depth is `terminal.output`'s own default. The pump reads a tail of
+    /// the session rather than a pane, and the classifier's markers are what
+    /// Claude paints in the last handful of rows.
+    private func holderLoginScreen(terminalID: UUID) async throws -> TerminalScreen? {
+        if let holderScreenOracle {
+            return try await holderScreenOracle(terminalID)
+        }
+        guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
+        return try await reader.screen(maxLines: 50)
     }
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {

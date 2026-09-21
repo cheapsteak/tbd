@@ -285,6 +285,23 @@ public final class RPCRouter: Sendable {
     /// `nil` from the seam means the same thing as no reader: nothing answered.
     nonisolated(unsafe) var holderModeOracle: (@Sendable (UUID) async -> TerminalModeReading?)?
 
+    /// Answers a holder-backed login tab's screen, for the auto-`/login` pump
+    /// to read. A **test seam only** — production leaves it nil and
+    /// `holderLoginScreen` falls through to the registry's own reader, which is
+    /// the single source the design names.
+    ///
+    /// It exists for the same reason `holderModeOracle` does, and reaches the
+    /// same four answers the pump branches on: a live fully observed screen, a
+    /// screen frozen behind a viewer's attach, one built over a child that was
+    /// already running, and no screen at all. Arranging those through a real
+    /// registry means a real holder, a real pty and a real attach for what is a
+    /// pure question about whether the pump may type. The registry-backed path
+    /// is exercised live; this is how the pump's own branches are pinned.
+    ///
+    /// `nil` from the seam means the same thing as no reader: nothing answered.
+    /// A throw means the same thing as a refused projection.
+    nonisolated(unsafe) var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 

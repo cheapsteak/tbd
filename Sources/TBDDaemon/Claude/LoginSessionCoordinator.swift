@@ -12,12 +12,24 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "loginSession
 /// `loginSession` branch:
 ///
 /// 1. **Auto-typing `/login`** via a *verified pump* (`startAutoLoginPump`):
-///    poll the pane text until Claude's TUI is interactive, type `/login` +
-///    Enter, then VERIFY the login dialog actually appeared before declaring
-///    success — re-sending (capped) if the input was swallowed. Fixed-delay
-///    sends were tried first and failed in practice: the SessionStart hook
-///    fires before the TUI's input loop reliably consumes pty input, and a
-///    send that lands in that window vanishes without a trace.
+///    poll the session's screen until Claude's TUI is interactive, type
+///    `/login` + Enter, then VERIFY the login dialog actually appeared before
+///    declaring success — re-sending (capped) if the input was swallowed.
+///    Fixed-delay sends were tried first and failed in practice: the
+///    SessionStart hook fires before the TUI's input loop reliably consumes
+///    pty input, and a send that lands in that window vanishes without a
+///    trace.
+///
+///    **Both transports feed the same pump.** A tmux-backed login tab reads a
+///    captured pane; a holder-backed one reads the daemon's own retained
+///    emulator through the typed screen. The holder half is evidence only when
+///    the daemon rendered it live AND its emulator watched the child from the
+///    start, so with a viewer attached — or over a child the daemon
+///    re-adopted — the pump has nothing it may judge and simply waits, bounded
+///    by `pumpTimeout`, rather than typing blind at a screen that may be
+///    showing a caret the session does not have. `paneReading(from:)` states
+///    that policy; `classifyPane` remains the one classifier either transport's
+///    text goes through.
 ///
 /// 2. **Login-completion watching** — `watchLoginIdentity` polls the
 ///    profile's isolated `.claude.json` for an `oauthAccount` and invokes
@@ -72,9 +84,15 @@ public actor LoginSessionCoordinator {
     private var pendingAutoLogin: Set<UUID> = []
     private var activePumps: Set<UUID> = []
     private var watchedProfiles: Set<UUID> = []
+    /// Every wait this actor takes — the pump's initial settle, its poll
+    /// cadence, its post-send verify pause, and the identity watcher's poll —
+    /// goes through here, so a test drives the whole coordinator on virtual
+    /// time instead of on the wall.
+    private let clock: any Clock<Duration>
 
-    public init(delays: Delays = Delays()) {
+    public init(delays: Delays = Delays(), clock: any Clock<Duration> = ContinuousClock()) {
         self.delays = delays
+        self.clock = clock
     }
 
     // MARK: - Pane classification
@@ -100,6 +118,47 @@ public actor LoginSessionCoordinator {
         return .notReady
     }
 
+    /// What one read of the login pane produced.
+    public enum PaneReading: Sendable, Equatable {
+        /// Screen text rendered by a store that has watched this child paint —
+        /// evidence `classifyPane` may judge.
+        case text(String)
+        /// A screen that is not evidence, with the reason for the log: nobody
+        /// is reading the pty for the daemon, the daemon's emulator is frozen
+        /// behind a viewer's attach, or it was built over an already-running
+        /// child.
+        case notEvidence(String)
+    }
+
+    /// The login pump's reading of a holder session's typed screen. Evidence
+    /// only when the daemon rendered it live AND its emulator watched the child
+    /// from the start — the same two facts the hibernation pending-input rail
+    /// refuses on (`HibernationCoordinator.holderRefusal`), for the same
+    /// reason: a frozen or half-painted grid can show a caret the session does
+    /// not have.
+    ///
+    /// Restated here rather than borrowed. The rail's refusals name hibernation
+    /// actions a person can take, and a pump that never blocks anything has
+    /// nothing to offer them; what it needs is a line for the log saying why it
+    /// is still waiting.
+    public static func paneReading(from screen: TerminalScreen?) -> PaneReading {
+        guard let screen else { return .notEvidence("no live holder reader") }
+        switch screen.source {
+        case .staleDaemon, .viewer:
+            return .notEvidence(
+                "a viewer holds the pty; the daemon's screen is frozen at its attach")
+        case .daemon:
+            guard screen.contentObserved else {
+                return .notEvidence(
+                    "the daemon's emulator was built over a running child and has not seen "
+                        + "the whole screen")
+            }
+            // `output` is the screen's own joined lines — the type carries no
+            // second copy of the text, and joining here would make one.
+            return .text(screen.output)
+        }
+    }
+
     // MARK: - Auto-login pump
 
     /// Mark a freshly spawned login-session terminal as awaiting its
@@ -122,18 +181,24 @@ public actor LoginSessionCoordinator {
     /// Run the verified auto-`/login` pump for a registered terminal.
     ///
     /// Loop (bounded by `delays.pumpTimeout`):
+    ///  - reading `notEvidence` → wait `pumpPollInterval`, re-read;
     ///  - pane `notReady` → wait `pumpPollInterval`, re-read;
     ///  - pane `promptReady` → `typeLogin()` (at most `maxSends` times, so a
     ///    pathological pane can't get its input stuffed), wait
     ///    `pumpPostSendDelay`, re-read to VERIFY;
     ///  - pane `loginDialogVisible` → success, stop.
     ///
+    /// `paneText` answers with a `PaneReading` rather than a bare string so the
+    /// pump can tell "the screen says nothing yet" from "this screen is not
+    /// something anyone may judge" — the holder transport's frozen and
+    /// half-painted grids, which read as perfectly ordinary text.
+    ///
     /// Single-flighted per terminal; exits early when the registration is
     /// cancelled (terminal deleted).
     public func startAutoLoginPump(
         terminalID: UUID,
         maxSends: Int = 3,
-        paneText: @escaping @Sendable () async -> String,
+        paneText: @escaping @Sendable () async -> PaneReading,
         typeLogin: @escaping @Sendable () async -> Void
     ) {
         guard pendingAutoLogin.contains(terminalID) else { return }
@@ -144,13 +209,20 @@ public actor LoginSessionCoordinator {
                 activePumps.remove(terminalID)
                 pendingAutoLogin.remove(terminalID)
             }
-            // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: delays.pumpInitialDelay)
+            try? await clock.sleep(for: delays.pumpInitialDelay)
             var elapsed: Duration = .zero
             var sends = 0
             while elapsed < delays.pumpTimeout {
                 guard pendingAutoLogin.contains(terminalID) else { return }
-                switch Self.classifyPane(await paneText()) {
+                let state: PaneLoginState
+                switch await paneText() {
+                case .notEvidence(let reason):
+                    logger.debug("auto-login: terminal \(terminalID, privacy: .public) screen is not evidence (\(reason, privacy: .public)); waiting")
+                    state = .notReady
+                case .text(let text):
+                    state = Self.classifyPane(text)
+                }
+                switch state {
                 case .loginDialogVisible:
                     logger.info("auto-login: login dialog visible in terminal \(terminalID, privacy: .public) after \(sends, privacy: .public) send(s)")
                     return
@@ -158,12 +230,10 @@ public actor LoginSessionCoordinator {
                     sends += 1
                     logger.info("auto-login: typing /login into terminal \(terminalID, privacy: .public) (attempt \(sends, privacy: .public))")
                     await typeLogin()
-                    // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
-                    try? await Task.sleep(for: delays.pumpPostSendDelay)
+                    try? await clock.sleep(for: delays.pumpPostSendDelay)
                     elapsed += delays.pumpPostSendDelay
                 case .promptReady, .notReady:
-                    // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration comes from the injected `Delays` struct, exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift (`fastDelays()`) and Tests/TBDDaemonTests/ModelProfileSpawnTests.swift; see docs/specs/2026-07-24-test-hardening-design.md
-                    try? await Task.sleep(for: delays.pumpPollInterval)
+                    try? await clock.sleep(for: delays.pumpPollInterval)
                     elapsed += delays.pumpPollInterval
                 }
             }
@@ -196,8 +266,7 @@ public actor LoginSessionCoordinator {
                     onLogin()
                     return
                 }
-                // swiftlint:disable:next no_raw_task_sleep - already seamed: the duration is `watchLoginIdentity`'s own `interval:` parameter (NOT the `Delays` struct — this loop predates it), exercised by Tests/TBDDaemonTests/LoginSessionCoordinatorTests.swift which passes .milliseconds(10); see docs/specs/2026-07-24-test-hardening-design.md
-                try? await Task.sleep(for: interval)
+                try? await clock.sleep(for: interval)
                 elapsed += interval
             }
             logger.debug("login watcher for profile \(profileID, privacy: .public) timed out without a login")

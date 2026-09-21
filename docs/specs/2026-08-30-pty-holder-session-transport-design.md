@@ -926,14 +926,21 @@ flag with a soak and a stated graduation plan.
   (`TerminalSpawnTransport.decide`) and spawn through one function
   (`WorktreeLifecycle.spawnTerminal`): the primary terminal at worktree
   creation, the setup and pre-session hook tabs, restored archived sessions,
-  revive-from-history tabs, fork-session tabs, and the extra terminals
-  `terminal.create` and `terminal.continueInCodex` open — Claude, Codex and
-  shell alike, since the holder runs any command. A wake respawns onto the
-  transport its row recorded. The one spawn kind pinned to tmux whatever the
-  flag says is the profile login tab, because its auto-`/login` pump reads and
-  types through a tmux pane. It spawns through the same function with the
-  transport pinned, so the flag reaching it later is a one-line change at that
-  site rather than a second spawn implementation.
+  revive-from-history tabs, fork-session tabs, the profile login tab, and the
+  extra terminals `terminal.create` and `terminal.continueInCodex` open —
+  Claude, Codex and shell alike, since the holder runs any command. A wake
+  respawns onto the transport its row recorded. Every spawn kind takes the
+  decided transport; none is pinned.
+
+  The login tab is the one whose *servicing* differs, because it carries the
+  auto-`/login` pump. On a holder the pump reads the daemon's retained
+  emulator through the typed screen and types through the injection courier,
+  where on tmux it captures a pane and sends keys. It treats only a live,
+  fully observed screen as evidence — the same two facts the hibernation
+  pending-input rail refuses on — so a login tab a viewer has open waits,
+  bounded by the pump's own timeout, rather than typing at a grid that can
+  show a caret the session does not have. The loop, the classifier and the
+  send cap are one implementation either transport feeds.
 
   The flag therefore gates **spawning, not servicing**: the flag is consulted
   only when a session is created, and both transports' machinery (attach
