@@ -90,6 +90,11 @@ public final class RPCRouter: Sendable {
     /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
     /// don't need it; set post-construction like `claudeUsagePoller`.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    /// Seam for testing profile rotation on limit hit. When nil (production),
+    /// uses the real `handleTerminalSwapProfile`. Tests substitute a mock.
+    public nonisolated(unsafe) var rotationSwapPerformer: (
+        @Sendable (Data, ActuationActor?) async throws -> RPCResponse
+    )?
     /// Periodic comparison of this build against the remote's `main`. `nil`
     /// when nothing wired one (mock mode, unit tests), in which case
     /// `daemon.status` carries no `update` field and `daemon.checkForUpdate`
