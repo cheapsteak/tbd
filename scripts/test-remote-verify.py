@@ -740,10 +740,11 @@ class ResultsVerdictTests(unittest.TestCase):
         )
 
     def test_no_results_at_all_is_no_verdict_rather_than_a_failing_suite(self):
-        # 78, NOT 1. The test job runs eight fallible setup steps before the first
-        # `scripts/test.sh` — checkout, mtime restore, `brew install tmux`,
-        # `xcode-select`, toolchain capture, cache restore, workspace repair,
-        # force rebuild — so a `brew` flake means zero tests ran, no xUnit file
+        # 78, NOT 1. The test job runs nine fallible setup steps before the first
+        # `scripts/test.sh` — checkout, the cache-save decision, mtime restore,
+        # `brew install tmux`, `xcode-select`, toolchain capture, cache restore,
+        # workspace repair, force rebuild — so a `brew` flake means zero tests
+        # ran, no xUnit file
         # exists and no artifact was uploaded. Adopting 1 there tells a caller its
         # suite is red when nothing ever compiled, and `scripts/test.sh` has no
         # local fallback for a 1. Every case that reaches here is answered by 78:

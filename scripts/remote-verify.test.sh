@@ -523,9 +523,10 @@ test_a_truncated_result_file_is_named_rather_than_read_as_green() {
 
 test_a_failing_run_with_no_results_artifact_falls_back_to_a_local_run() {
   # A RED RUN THAT PUBLISHED NOTHING IS NOT A RED SUITE. `test.yml`'s test job
-  # runs eight fallible setup steps — checkout, mtime restore, `brew install
-  # tmux`, `xcode-select`, toolchain capture, cache restore, workspace repair,
-  # force rebuild — before it reaches the first `scripts/test.sh`, so a `brew`
+  # runs nine fallible setup steps — checkout, the cache-save decision, mtime
+  # restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
+  # restore, workspace repair, force rebuild — before it reaches the first
+  # `scripts/test.sh`, so a `brew`
   # flake or a swept ref failing `actions/checkout` means zero tests ran and no
   # artifact exists. 78 sends this lane back to the local queue, where it gets a
   # real answer; 1 would tell it its suite is red with nothing to show and no
