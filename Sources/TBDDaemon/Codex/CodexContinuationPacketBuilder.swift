@@ -131,8 +131,10 @@ struct CodexContinuationPacketBuilder: Sendable {
         gitStatus: String,
         counts: OmissionCounts
     ) -> String {
-        let safePath = SecretRedactor.redact(
-            bounded(sourcePath, byteLimit: 4 * 1024))
+        // Redact first, then bound: the redaction marker is longer than a short
+        // secret-shaped value, so bounding first lets a field outgrow its limit.
+        let safePath = bounded(
+            SecretRedactor.redact(sourcePath), byteLimit: 4 * 1024)
         let fields: [(String, String?)] = [
             ("Source thread ID", metadata.threadID),
             ("Rollout timestamp", metadata.timestamp),
@@ -144,7 +146,7 @@ struct CodexContinuationPacketBuilder: Sendable {
         ]
         let metadataLines = fields.compactMap { label, value -> String? in
             guard let value, !value.isEmpty else { return nil }
-            let safeValue = SecretRedactor.redact(bounded(value, byteLimit: 512))
+            let safeValue = bounded(SecretRedactor.redact(value), byteLimit: 512)
             return "- \(label): \(safeValue)"
         }
 
@@ -209,8 +211,10 @@ struct CodexContinuationPacketBuilder: Sendable {
         }
         let omitted = statusLines.count - included.count
         let envelope = compose(includedStatus: included, omittedStatusLineCount: omitted)
-        precondition(envelope.utf8.count <= envelopeByteLimit)
-        return envelope
+        // Every field is bounded above, so this holds by construction. Clip
+        // rather than assert: the inputs come from a rollout file and a
+        // process-terminating check would take the whole daemon down with it.
+        return bounded(envelope, byteLimit: envelopeByteLimit)
     }
 
     private static func bounded(_ value: String, byteLimit: Int) -> String {

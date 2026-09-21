@@ -195,6 +195,36 @@ struct CodexContinuationPacketBuilderTests {
         #expect(packet.contains("Keep the envelope."))
     }
 
+    @Test("redaction growth in metadata fields stays within the envelope on a clean tree")
+    func redactionGrowthStaysBounded() async throws {
+        let fixture = try Fixture()
+        // Short secret-shaped tokens: each is replaced by the longer redaction
+        // marker, so a field bounded before redaction would outgrow its limit.
+        let shortSecrets = String(repeating: "token=x ", count: 200)
+        try fixture.write([
+            envelope("session_meta", [
+                "id": shortSecrets, "timestamp": shortSecrets, "cwd": shortSecrets,
+                "originator": shortSecrets, "cli_version": shortSecrets,
+                "model": shortSecrets, "model_provider": shortSecrets,
+            ]),
+            responseMessage(role: "user", text: "Keep the envelope."),
+        ])
+        let builder = CodexContinuationPacketBuilder(
+            gitStatusProvider: StubGitStatusProvider(status: ""))
+
+        let packet = try await builder.build(
+            rolloutPath: fixture.rollout.path, worktreePath: fixture.directory.path)
+        let historyStart = try #require(packet.range(of: "## Selected history"))
+        let envelope = String(packet[..<historyStart.lowerBound])
+
+        #expect(envelope.utf8.count <= CodexContinuationPacketBuilder.envelopeByteLimit)
+        #expect(packet.utf8.count <= CodexContinuationPacketBuilder.promptByteLimit)
+        #expect(envelope.contains("(clean working tree)"))
+        #expect(!envelope.contains("token=x"))
+        #expect(envelope.contains("[REDACTED]"))
+        #expect(packet.contains("Keep the envelope."))
+    }
+
     @Test("oversized and unterminated JSONL records are discarded without losing valid content")
     func boundedJSONLRecords() async throws {
         let fixture = try Fixture()
