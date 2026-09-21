@@ -25,8 +25,8 @@ Events are debounced by 2 seconds on an injected clock, per the repo rule for ti
 
 **`AppState.handleNetworkChange(at: t)`** does three things:
 
-- **Restart live children.** It calls `reconnectRemoteSession` for every attached remote selection whose attach child started before `t`. Children started after `t` already run on the new path and are skipped. The restart generation records each child's start time for this comparison.
-- **Clear backoff.** It clears the backoff on every session in `pendingReconnectRemoteSessions`. A network change is exactly what makes an earlier failure stale. The provider-health gate (`RemoteReconnectPolicy.isBlocked`) still applies unchanged: an auth-needed session stays blocked, and a session on an unhealthy provider waits for `.ok`.
+- **Restart live children.** Every attached remote selection whose attach child started before `t` gets a fresh restart generation, which the pager turns into a kill and a re-exec. Children started after `t` already run on the new path and are skipped, as are children that have not spawned yet. The restart generation records each child's start time for this comparison. The panes are walked least-recently-attached first, because each restart moves its selection to the front of the attach recency log and walking the most-recent-first list forwards would leave that log reversed.
+- **Expire backoff.** The deadline of every entry in `pendingReconnectRemoteSessions` that is still waiting moves to `t`, since a network change is exactly what makes an earlier failure stale. The attempt count is kept: escalation is the only bound on a respawn loop, and a flapping network must not reset it. A child the event restarts carries its entry across the restart for the same reason, with the same deadline. The provider-health gate (`RemoteReconnectPolicy.isBlocked`) still applies unchanged: an auth-needed session stays blocked, and a session on an unhealthy provider waits for `.ok`.
 - **Re-evaluate now.** It re-evaluates the reconnect policy immediately, rather than on the next `remoteProviders` republish (roughly every 60 seconds).
 
 Each handled event logs one `os.Logger` info line (`com.tbd.app`, category `remote-attach`): the trigger (`path` or `wake`), the old and new fingerprints, and the number of sessions restarted and un-backed-off. An unnecessary restart can then be diagnosed after the fact.
@@ -47,9 +47,9 @@ No flag. This is a bug fix. It restores the promise the contract already makes â
 
 ## Testing
 
-- **Fingerprint.** Pure function: identical paths compare equal; an added `utun*` interface, a reordered primary interface, or a changed gateway compare unequal; a cost-flag change compares equal; an unsatisfied path emits nothing; the seed update emits nothing.
+- **Fingerprint.** Pure function: identical paths compare equal; an added `utun*` interface, a reordered primary interface, or a changed gateway compare unequal; cost and constrained flags are not fields of the fingerprint, so they cannot make two fingerprints differ; an unsatisfied path emits nothing; the seed update emits nothing.
 - **Debounce.** Driven by a test clock: a burst of events yields one handled event carrying the latest time.
-- **Handler.** Children started before `t` get a new restart generation, and those started after keep theirs. Backoff is cleared for pending sessions. An auth-needed session is still blocked after the event.
+- **Handler.** Children started before `t` get a new restart generation, and those started after keep theirs. A pending session's deadline moves to `t` while its attempt count survives, including for a session whose pane is restarted. The attach recency order is unchanged by a restart of every pane. An auth-needed session is still blocked after the event.
 - Each test must fail with the behavior removed.
 
 ## Rejected alternatives
