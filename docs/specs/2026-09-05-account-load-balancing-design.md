@@ -285,7 +285,17 @@ now and `limitType` `rotation`, so the actuator's existing eligibility checks
 — pane not in copy mode, Claude foreground, transcript not already advanced —
 gate the keystroke exactly as they do for a reset-time resume. The person's
 dead turn resumes on the new account roughly a minute after the limit, with
-no gesture. The notification reads "Session limit hit on Acme — switched to
+no gesture.
+
+That `continue` belongs to the rotation feature, not to the reset-time one.
+The scheduler re-checks a row's governing toggle at fire time and every toggle
+cancels only its own rows when switched off, so a `rotation` row is governed by
+`limit_rotation_enabled` — `Config.autoResumeEnabled(forLimitType:)` maps it
+there, and turning rotation off cancels pending `rotation` rows and no others.
+Without that mapping a person who enabled rotation but never touched the older
+`autoResumeOnLimitReset` toggle would see the swap succeed and the `continue`
+silently cancelled at fire time, which is the manual-gesture dependency this
+feature exists to remove. The notification reads "Session limit hit on Acme — switched to
 Personal (5h 12%)".
 
 If the swap fails for any reason, the handler logs it and falls through to
