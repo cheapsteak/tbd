@@ -112,6 +112,8 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "assistant/image", points: 2, percent: 1.0, achieved: "0.0"),
         Budget(id: "assistant/soft-breaks", points: 2, percent: 0.9, achieved: "0.0"),
         Budget(id: "assistant/crlf", points: 2, percent: 0.8, achieved: "0.0"),
+        Budget(id: "assistant/quoted-paste-tags", points: 2, percent: 1.3,
+               achieved: "0.0 expected by construction"),
         Budget(id: "assistant/badge-control", points: 2, percent: 3.1, achieved: "0.0"),
         Budget(id: "assistant/badge", points: 2, percent: 2.2, achieved: "0.0"),
         Budget(id: "assistant/badge-after-bullets", points: 2, percent: 1.7, achieved: "0.0"),
@@ -119,6 +121,7 @@ struct TranscriptEstimatorAccuracyTests {
         Budget(id: "user/short", points: 2, percent: 4.2, achieved: "0.0"),
         Budget(id: "user/long", points: 2, percent: 2.1, achieved: "0.0"),
         Budget(id: "user/wrap-boundary", points: 2, percent: 1.4, achieved: "0.0"),
+        Budget(id: "user/pasted", points: 2, percent: 1.6, achieved: "0.0 expected by construction"),
         Budget(id: "activity/systemReminder", points: 0.5, percent: 2.3, achieved: "0.0"),
         Budget(id: "activity/bash", points: 0.5, percent: 2.3, achieved: "0.0"),
         Budget(id: "activity/task", points: 0.5, percent: 2.3, achieved: "0.0"),
@@ -759,6 +762,28 @@ struct TranscriptEstimatorAccuracyTests {
         repeating: "check the wrapped line count here please ", count: 15)
         .trimmingCharacters(in: .whitespaces)
 
+    /// A terminal paste in a user prompt renders as its own block — a "pasted"
+    /// caption line, the caption's spacing, then the pasted lines in the code
+    /// face — rather than as prose carrying the `<pasted_content>` tags. The
+    /// pasted lines are short enough not to wrap at either user body width.
+    private static let pastedUserText = "why is this path here?\n\n"
+        + "<pasted_content id=\"62f5\">\n"
+        + "/Users/acme/tbd/worktrees/acme-app/20260921-stiff-seahorse\n"
+        + "second line of the paste\n"
+        + "</pasted_content id=\"62f5\">\n\n"
+        + " and where does it come from?"
+
+    /// The same span in an ASSISTANT message is prose, not a paste: the
+    /// estimator's paste split is user-only, so the tags and the path are charged
+    /// as ordinary soft-broken paragraph lines, exactly as the renderer draws
+    /// them. (`pasted_content` is not a valid HTML tag name — the underscore —
+    /// so neither side treats the tag line as raw HTML.)
+    private static let quotedPasteTagsAssistantText = "Claude Code wraps a terminal paste like this:\n\n"
+        + "<pasted_content id=\"62f5\">\n"
+        + "/Users/acme/tbd/worktrees/acme-app/20260921-stiff-seahorse\n"
+        + "</pasted_content id=\"62f5\">\n\n"
+        + "and the closing tag repeats the id."
+
     private static let longUserText = "Walk me through the row-sizing path and the trade-offs, with "
         + "enough detail that this user bubble wraps across several lines in the column, and please "
         + "include what happens when the estimate and the measurement disagree by more than a line, "
@@ -1084,11 +1109,14 @@ struct TranscriptEstimatorAccuracyTests {
                                     timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/soft-breaks", text: softBreakText,
                                     timestamp: nil, usage: nil))
+        items.append(.assistantText(id: "assistant/quoted-paste-tags", text: quotedPasteTagsAssistantText,
+                                    timestamp: nil, usage: nil))
         items.append(.assistantText(id: "assistant/crlf", text: crlfText,
                                     timestamp: nil, usage: nil))
         items.append(.userPrompt(id: "user/short", text: shortUserText, timestamp: nil))
         items.append(.userPrompt(id: "user/long", text: longUserText, timestamp: nil))
         items.append(.userPrompt(id: "user/wrap-boundary", text: wrapBoundaryUserText, timestamp: nil))
+        items.append(.userPrompt(id: "user/pasted", text: pastedUserText, timestamp: nil))
         items.append(.assistantText(id: "assistant/badge-control", text: badgeText,
                                     timestamp: nil, usage: nil))
         items.append(.systemReminder(id: "activity/systemReminder", kind: .other,

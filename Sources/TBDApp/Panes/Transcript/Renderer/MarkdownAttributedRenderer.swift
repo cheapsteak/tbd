@@ -64,10 +64,17 @@ enum MarkdownAttributedRenderer {
     /// prose out on TextKit 1 (fast, exact `usedRect`) and host the table as its
     /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
     /// stay inside prose with unchanged inline rendering. (#129)
+    ///
+    /// `recognizePastes` is for USER prompts only: it pulls Claude Code's
+    /// `<pasted_content id="…">` spans out first (`TranscriptPastedContent`) and
+    /// renders each as its own `.prose` block via `TranscriptPastedBlock`, never
+    /// as markdown. Off by default, because an assistant message that quotes the
+    /// tags is prose and must render verbatim.
     static func renderBlocks(
         _ markdown: String,
         theme: TranscriptTextTheme = .chatBubble,
-        linkResolver: TranscriptPathResolver?
+        linkResolver: TranscriptPathResolver?,
+        recognizePastes: Bool = false
     ) -> [MessageBlock] {
         var visitor = AttributedStringVisitor(theme: theme)
         var blocks: [MessageBlock] = []
@@ -83,22 +90,43 @@ enum MarkdownAttributedRenderer {
         // marker is not markdown, and an image is its own laid-out block rather
         // than a run of text. Everything between markers still goes through the
         // same document walk, so prose, code and tables are unaffected.
-        for segment in TranscriptImageMarker.split(markdown) {
-            switch segment {
-            case .image(let attachment):
-                flushProse()
-                blocks.append(.image(attachment))
-            case .text(let run):
-                let document = Document(parsing: run, options: [])
-                for child in document.children {
-                    if let table = child as? Markdown.Table {
-                        flushProse()
-                        let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
-                        if data.columnCount > 0 { blocks.append(.table(data)) }
-                    } else {
-                        proseRun.append(visitor.visit(child))
+        func appendTyped(_ typed: String) {
+            for segment in TranscriptImageMarker.split(typed) {
+                switch segment {
+                case .image(let attachment):
+                    flushProse()
+                    blocks.append(.image(attachment))
+                case .text(let run):
+                    let document = Document(parsing: run, options: [])
+                    for child in document.children {
+                        if let table = child as? Markdown.Table {
+                            flushProse()
+                            let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
+                            if data.columnCount > 0 { blocks.append(.table(data)) }
+                        } else {
+                            proseRun.append(visitor.visit(child))
+                        }
                     }
                 }
+            }
+        }
+
+        // Pastes are split out before either of those: pasted text is neither
+        // markdown nor a place an image marker could mean anything.
+        guard recognizePastes else {
+            appendTyped(markdown)
+            flushProse()
+            return blocks
+        }
+        for segment in TranscriptPastedContent.split(markdown) {
+            switch segment {
+            case .typed(let typed):
+                appendTyped(typed)
+            case .pasted(_, let text):
+                flushProse()
+                blocks.append(.prose(finalizedProse(
+                    TranscriptPastedBlock.attributed(text, theme: theme),
+                    theme: theme, linkResolver: linkResolver)))
             }
         }
         flushProse()

@@ -877,6 +877,16 @@ struct TableTranscriptView: NSViewRepresentable {
         /// property of the theme, not a law.
         private static let codeLineHeight: CGFloat =
             lineHeight(of: TranscriptTextTheme.chatBubble.codeFont)
+        /// Height of a terminal paste's "pasted" caption line.
+        private static let pastedCaptionLineHeight: CGFloat =
+            lineHeight(of: TranscriptPastedBlock.captionFont)
+        /// Advance of one character of the monospaced code face, for wrapping a
+        /// paste's lines. Monospaced, so any single glyph gives the exact figure.
+        private static let codeCharAdvance: CGFloat = {
+            NSAttributedString(
+                string: "0", attributes: [.font: TranscriptTextTheme.chatBubble.codeFont]
+            ).size().width
+        }()
         /// Height of the trailing token-usage badge's own line. The badge is set in
         /// `NSFont.systemFont(ofSize: 9)` by `TranscriptBubbleGeometry.composedBlocks`.
         private static let badgeLineHeight: CGFloat = lineHeight(of: NSFont.systemFont(ofSize: 9))
@@ -1143,18 +1153,30 @@ struct TableTranscriptView: NSViewRepresentable {
             let charsPerLine = max(Int(bodyWidth / bubbleCharAdvance), 12)
             let text = TranscriptBubbleGeometry.text(for: item)
 
-            // Split on image markers exactly as `renderBlocks` does, so the marker
-            // text is not counted as prose and each image contributes its own block
-            // height. Marker-free text (the overwhelmingly common case) costs one
-            // substring search and yields a single text segment.
+            // Split on terminal pastes (user prompts only) and then on image
+            // markers exactly as `renderBlocks` does, so neither wrapper is counted
+            // as prose: each paste and each image contributes its own block height.
+            // Text with neither (the overwhelmingly common case) costs a substring
+            // search per splitter and yields a single text segment.
             var blocks = BlockAccumulator(charsPerLine: charsPerLine)
-            for segment in TranscriptImageMarker.split(text) {
-                switch segment {
-                case .text(let run):
-                    blocks.appendTextRun(run)
-                case .image(let attachment):
-                    blocks.appendBlock(
-                        MessageBlockMeasurer.imageSize(attachment, bodyWidth: bodyWidth).height)
+            let pasteSegments: [TranscriptPastedContent.Segment] =
+                TranscriptBubbleGeometry.role(for: item) == .user
+                    ? TranscriptPastedContent.split(text)
+                    : [.typed(text)]
+            for pasteSegment in pasteSegments {
+                switch pasteSegment {
+                case .pasted(_, let pasted):
+                    blocks.appendPastedBlock(pasted, bodyWidth: bodyWidth)
+                case .typed(let typed):
+                    for segment in TranscriptImageMarker.split(typed) {
+                        switch segment {
+                        case .text(let run):
+                            blocks.appendTextRun(run)
+                        case .image(let attachment):
+                            blocks.appendBlock(
+                                MessageBlockMeasurer.imageSize(attachment, bodyWidth: bodyWidth).height)
+                        }
+                    }
                 }
             }
             blocks.flushProse()
@@ -1221,6 +1243,46 @@ struct TableTranscriptView: NSViewRepresentable {
                 flushProse()
                 closedBlocksHeight += height
                 closedBlockCount += 1
+            }
+
+            /// Adds a terminal-paste block (`TranscriptPastedBlock`): the caption
+            /// line, then — unless the paste is empty once trailing whitespace is
+            /// trimmed, as the renderer trims it — the caption's spacing and the
+            /// pasted lines in the code face, each wrapped at the code block's
+            /// inset width. Every approximation in that arithmetic errs the same
+            /// way — toward fewer lines, the safe (low) side: code wraps on word
+            /// boundaries rather than at the exact character capacity, a tab
+            /// advances to the next tab stop but is counted as one character, and
+            /// a wide character (CJK, emoji) takes more than the one monospaced
+            /// cell it is counted as. Each can only ADD drawn lines.
+            ///
+            /// It is a prose block to the renderer, so a trailing usage badge
+            /// merges into it: after pasted text the badge pays the code style's
+            /// zero spacing, after a bare caption the caption's spacing.
+            mutating func appendPastedBlock(_ text: String, bodyWidth: CGFloat) {
+                flushProse()
+                var body = Substring(text)
+                while let last = body.last,
+                      last.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) {
+                    body = body.dropLast()
+                }
+                var height = pastedCaptionLineHeight
+                var finalStyleSpacing = TranscriptPastedBlock.captionSpacing
+                if !body.isEmpty {
+                    let wrapWidth = bodyWidth - 2 * TranscriptPastedBlock.inset
+                    let capacity = max(Int(wrapWidth / codeCharAdvance), 1)
+                    var lineCount = 0
+                    for line in body.split(omittingEmptySubsequences: false,
+                                           whereSeparator: Self.isLineTerminator) {
+                        lineCount += max(1, (line.count + capacity - 1) / capacity)
+                    }
+                    height += TranscriptPastedBlock.captionSpacing + CGFloat(lineCount) * codeLineHeight
+                    finalStyleSpacing = 0
+                }
+                closedBlocksHeight += height
+                closedBlockCount += 1
+                hasProseBlock = true
+                lastProseUnitStyleSpacing = finalStyleSpacing
             }
 
             /// Closes the prose block under construction, if any.
