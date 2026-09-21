@@ -1285,15 +1285,20 @@ final class AppState {
     /// enough for that to happen. `RemotePendingReconnect` records no creation
     /// time, but it is derivable: an entry is written with
     /// `nextEligibleAt = failedAt + backoffInterval(attempts:)`, so
-    /// subtracting that interval recovers `failedAt`. The equality edge — a
-    /// failure landing exactly at `date` — is not load-bearing; it counts as
-    /// predating the change, and at that instant either answer is defensible.
+    /// subtracting that interval recovers `failedAt`. That recovery is a
+    /// `Double` round trip through `TimeInterval`, not an exact one, so a
+    /// failure landing precisely at `date` can come out either side of the
+    /// `<=` and be read as predating the change or as following it. The edge
+    /// is not load-bearing: at an instant that coincides exactly with the
+    /// change, both answers are defensible, and no caller can tell them apart.
     ///
-    /// **`attempts` is deliberately preserved.** Escalation is the only bound
-    /// on a respawn loop (see `RemoteReconnectPolicy.nextPending`), so a
-    /// flapping VPN must not reset it — what a network change makes stale is
-    /// the *wait*, not the count. The health gate
-    /// (`RemoteReconnectPolicy.isBlocked`) is untouched too, so a selection
+    /// **`attempts` is deliberately preserved.** Escalation is what bounds
+    /// retries *between* network changes (see
+    /// `RemoteReconnectPolicy.nextPending`), so a flapping VPN must not reset
+    /// it — what a network change makes stale is the *wait*, not the count.
+    /// Across repeated changes the retry cadence is the change cadence itself,
+    /// bounded by the watcher's debounce rather than by escalation. The health
+    /// gate (`RemoteReconnectPolicy.isBlocked`) is untouched too, so a selection
     /// under a `.needsAuth`/`.error`/`.stale` provider stays blocked.
     @discardableResult
     func expireRemoteReconnectBackoff(at date: Date) -> Int {
@@ -1375,7 +1380,8 @@ final class AppState {
     /// would otherwise reorder the recency list — reversing it when every pane
     /// restarts, and demoting a skipped (already-on-the-new-path) pane to the
     /// tail when only some do. A network change says nothing about what the
-    /// user looked at last.
+    /// user looked at last. That restore carries a second job — the spec's
+    /// "re-evaluate now" effect — described at the write itself.
     ///
     /// Lives here rather than beside `handleNetworkChange` in
     /// `AppState+RemoteAttach.swift` for the same reason
@@ -1389,7 +1395,26 @@ final class AppState {
             guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < date else { continue }
             if reconnectRemoteSession(selection) { restarted += 1 }
         }
-        recentlyAttachedRemoteSessions = order
+        // Unconditional, and load-bearing beyond the order restore: this is
+        // the spec's third effect, "re-evaluate now"
+        // (`docs/specs/2026-09-21-remote-attach-network-recovery-design.md`).
+        // `attachedRemoteSelections` is computed on read, so a pending entry
+        // whose deadline elapsed while the machine slept — restarted by
+        // nothing (its child never spawned) and moved by nothing (its deadline
+        // is already past, so the expiry pass skips it) — is re-admitted only
+        // when some property that computation reads notifies its observers.
+        // This write is that notification, and it has to fire even when the
+        // order is identical, so it must NOT be guarded by an equality check.
+        //
+        // It goes through `_modify` rather than a whole-property assignment
+        // for exactly that reason: the toolchain drops the notification for an
+        // assignment of an equal `Equatable` value, and
+        // `[RemoteSessionSelection]` is `Equatable`. That exemption is pinned
+        // by `AppStateObservationContractTests`, and a plain
+        // `recentlyAttachedRemoteSessions = order` here would land inside it
+        // and silently cost the handler its third effect.
+        let replaced = recentlyAttachedRemoteSessions.startIndex..<recentlyAttachedRemoteSessions.endIndex
+        recentlyAttachedRemoteSessions.replaceSubrange(replaced, with: order)
         return restarted
     }
 

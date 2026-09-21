@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 import TestSupport
 @testable import TBDApp
@@ -333,6 +334,52 @@ struct RemoteAttachNetworkRecoveryTests {
 
             seedProvider(state, name: "acme", health: .stale)
             #expect(state.attachedRemoteSelections.contains(s1), "no entry left for the health gate to block")
+        }
+    }
+
+    // MARK: - Re-evaluating now
+
+    /// The handler's third effect (the spec's "Re-evaluate now"), pinned on
+    /// the one case where it is the *only* thing that happens.
+    ///
+    /// A session whose backoff deadline elapsed while the machine slept is
+    /// already admitted by `attachedRemoteSelections` — which is computed on
+    /// read — but nothing re-reads it until an observed property notifies.
+    /// Neither of the first two effects touches this session: its child never
+    /// spawned, so step 1 restarts nothing, and its deadline is already past,
+    /// so step 2 moves nothing. The recency-order restore at the end of
+    /// `restartRemoteAttachChildren` is the notification that gets the pane
+    /// re-admitted now rather than at the next ~60 s provider republish.
+    ///
+    /// Reddens if that restore is guarded by
+    /// `if order != recentlyAttachedRemoteSessions`, and equally if it is
+    /// written as a whole-property assignment: the toolchain exempts an
+    /// assignment of an equal `Equatable` value from notifying at all, which
+    /// `AppStateObservationContractTests` pins independently.
+    @Test("a change notifies observers even when nothing is restarted or expired")
+    func aChangeNotifiesObserversEvenWhenNothingIsRestartedOrExpired() {
+        withState { state in
+            let s1 = attached(state)
+            let t = Date()
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(-60))
+            #expect(state.pendingReconnectRemoteSessions[s1] != nil)
+            #expect(state.remoteAttachStartedAt(for: s1) == nil, "no child spawned, so step 1 restarts nothing")
+            #expect(state.attachedRemoteSelections.contains(s1), "its window closed well before the change")
+
+            // `onChange` is `@Sendable`, so the flag lives in a reference box
+            // — the same instrument `AppStateObservationTests` uses.
+            let fired = BodyEvaluationCounter()
+            withObservationTracking {
+                _ = state.attachedRemoteMountKeys
+            } onChange: {
+                MainActor.assumeIsolated { _ = fired.bump() }
+            }
+
+            state.handleNetworkChange(change(at: t))
+
+            #expect(fired.count > 0, "nothing notified, so the pane waits for the next provider republish")
+            #expect(state.remoteAttachGeneration(for: s1) == 0, "step 1 restarted nothing")
+            #expect(state.expireRemoteReconnectBackoff(at: t) == 0, "step 2 had nothing eligible to move")
         }
     }
 }

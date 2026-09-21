@@ -199,8 +199,21 @@ extension AppState {
     ///    is already on it. Both are skipped, so a burst costs no spawn it
     ///    does not need. The session survives a restart untouched — its state
     ///    lives on the provider, and `attach` is required to be targeted and
-    ///    idempotent — so an unnecessary one costs the viewer a repaint and
-    ///    the pane's local scrollback, and nothing more. Each restart is a
+    ///    idempotent — so the whole cost of an unnecessary one falls on the
+    ///    viewer, and it differs by whether the pane is on screen. A displayed
+    ///    pane repaints and loses its local scrollback. A pane that is NOT
+    ///    displayed — a warm background attach, or every remote pane while a
+    ///    local worktree is showing — drops its connection now and reconnects
+    ///    only when it is next shown: the replacement child spawns from
+    ///    `TBDTerminalView.onReady`, which fires from `layout()` the first
+    ///    time the view has non-zero bounds, and an `NSTabViewController`
+    ///    genuinely detaches an unselected tab's content view (`window ==
+    ///    nil`) — both in `RemoteAttachPager`, between remote panes, and in
+    ///    `DetailSectionHostPager`, across an excursion to a worktree. That is
+    ///    the mechanism the automatic re-admission path already runs on: a
+    ///    background selection readmitted when its backoff elapses also gets a
+    ///    fresh tab item that waits for layout before it spawns anything. The
+    ///    restart changes nothing about it. Each restart is a
     ///    plain `reconnectRemoteSession`; see
     ///    `restartRemoteAttachChildren(startedBefore:)` for why this automatic
     ///    path drops a live child's leftover pending entry exactly as the
