@@ -20,6 +20,15 @@ extension RPCRouter {
             return .ok()
         }
 
+        // Latch, before any side effect: a repeat StopFailure for a limit that
+        // already has a pending resume — reset-time or the `continue` a
+        // rotation armed — must not swap the session a second time or notify
+        // twice. `schedule` enforces the same latch for the reset-time path;
+        // this covers the rotation path, which acts before it schedules.
+        if (try? await db.scheduledResumes.pending(terminalID: terminal.id)) != nil {
+            logger.info("rateLimitDetected: terminal \(terminal.id.uuidString, privacy: .public) already has a pending resume — latched")
+            return .ok()
+        }
         let config = try? await db.config.get()
         let autoResumeEnabled = config?.autoResumeOnLimitReset ?? false
         let rotationEnabled = config?.limitRotationEnabled ?? false
@@ -124,12 +133,11 @@ extension RPCRouter {
             else {
                 return .ok()   // latch: already pending — no duplicate notification
             }
-            message = "Session limit hit — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
-            // §7.1: Always append suggestion suffix to auto-resume branch too
-            if let limited = limitedProfileName, let suggested = suggestedProfileName, let suffix = usageSuffix {
-                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: scheduled.fireAt)). \(suggested) has room (\(suffix))"
-            } else if let limited = limitedProfileName {
-                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            let onAccount = limitedProfileName.map { " on \($0)" } ?? ""
+            message = "Session limit hit\(onAccount) — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            // §7.1 is "always": the suggestion rides along with the schedule.
+            if let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message.append(". \(suggested) has room (\(suffix))")
             }
         } else {
             // Gate off: record the detection for audit, notify with the reset time
