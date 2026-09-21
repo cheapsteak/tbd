@@ -259,7 +259,10 @@ enum TranscriptBubbleGeometry {
     ) -> [MessageBlock] {
         var blocks = MarkdownAttributedRenderer.renderBlocks(
             text(for: item) + (isProvisional ? provisionalCursor : ""),
-            theme: .chatBubble, linkResolver: linkResolver)
+            theme: .chatBubble, linkResolver: linkResolver,
+            // Terminal pastes are unwrapped for the user's own prompts only; an
+            // assistant or peer message quoting the tags renders them verbatim.
+            recognizePastes: role(for: item) == .user)
         guard let usage = badgeUsage else { return blocks }
 
         let badge = NSAttributedString(

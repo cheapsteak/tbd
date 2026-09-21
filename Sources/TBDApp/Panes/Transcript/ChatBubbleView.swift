@@ -223,7 +223,9 @@ struct ChatBubbleView: View {
             "len=\(text.count, privacy: .public) role=\(signpostRoleName, privacy: .public)"
         )
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.build", state) }
-        let segments = MarkdownSegments.split(text)
+        // Terminal pastes are unwrapped for the user's own prompts only, as in
+        // `TranscriptBubbleGeometry.composedBlocks`.
+        let segments = MarkdownSegments.split(text, recognizePastes: bubbleRole == .user)
         // The 6pt stack spacing is `TranscriptBubbleGeometry.interBlockSpacing`:
         // the header→body gap is the same gap the native cell's block stack puts
         // there, which is the other half of `headerHeight(for: .peer)`.
@@ -239,6 +241,8 @@ struct ChatBubbleView: View {
                     codeBlock(language: lang, content: body)
                 case .image(let attachment):
                     TranscriptImageAttachmentView(attachment: attachment)
+                case .pasted(_, let pasted):
+                    pastedBlock(pasted)
                 }
             }
         }
@@ -250,6 +254,27 @@ struct ChatBubbleView: View {
         ))
         .background(bubbleTint)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// A terminal paste: a small "pasted" caption over the pasted text, set like
+    /// a language-less code block. Shown in full — row cards never collapse.
+    /// Trailing whitespace is trimmed and the caption is set at the small system
+    /// size, as the native `TranscriptPastedBlock` does.
+    private func pastedBlock(_ content: String) -> some View {
+        var trimmed = Substring(content)
+        while let last = trimmed.last, last.isWhitespace { trimmed = trimmed.dropLast() }
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(TranscriptPastedBlock.caption)
+                .font(.system(size: NSFont.smallSystemFontSize))
+                .foregroundStyle(.secondary)
+            Text(String(trimmed))
+                .font(.system(.body, design: .monospaced))
+                .transcriptSelectableText()
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
     }
 
     @ViewBuilder
