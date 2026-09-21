@@ -6,13 +6,14 @@ runs under. What it does not do is act on either fact: a new session lands on
 whichever profile the precedence chain names, and a session that hits its
 limit sits dead until its window resets or a person swaps it by hand. This
 design adds three behaviors on top of the facts TBD already gathers: a launch
-policy that spreads new sessions across the profiles with the most room, an
-automatic hand-over to another account when a running session hits a hard
-limit, and a live-session count beside the usage bars so the person can see
-the load the policy is balancing. All three run entirely on machinery that
-exists today — the usage snapshots, the `terminal.profile_id` stamp, and the
-in-place profile swap — and the two that act on their own ship behind
-default-off flags.
+policy that spreads new sessions across the profiles with the most room, a
+one-click "Switch to …" offer naming an account with room when a running
+session hits a hard limit, and a live-session count beside the usage bars so
+the person can see the load the policy is balancing. All three run entirely
+on machinery that exists today — the usage snapshots, the `terminal.profile_id`
+stamp, and the in-place profile swap. The launch policy, the only one that
+acts without a gesture, ships behind a default-off flag; the limit offer never
+acts on its own.
 
 ## 1. What is wrong today
 
@@ -59,9 +60,9 @@ Goals:
 - A new Claude session, when the person has not pinned it to a profile, lands
   on the eligible profile with the most room, adjusted for how many sessions
   that account already carries.
-- A session that hits a hard usage limit is offered — and, when the person
-  has opted in, automatically given — a resume on another account with room,
-  in the same tab, without losing the conversation.
+- A session that hits a hard usage limit is offered, one click away, a
+  resume on another account with room, in the same tab, without losing the
+  conversation. The person makes that move; TBD never makes it for them.
 - The person can see, per profile, the 5-hour and 7-day utilization and the
   number of live sessions, in the places they already look: the profile list
   in Settings, the spawn-time account picker, and the tab's swap menu.
@@ -74,12 +75,11 @@ Non-goals:
 - Learning which profiles are the same account from anything TBD does not
   already record. Two profiles are treated as one account only when their
   snapshots carry the same `organizationID` or their login identities match.
-- Rotating an ambient session (`profileID == nil`) automatically. TBD cannot
-  name the account such a session runs on, so it cannot rule out swapping it
-  onto the account it just exhausted. It is offered the suggestion; it is
-  never moved unasked.
-- Rebalancing sessions that have not hit a limit. A working session stays
-  where it is; the policy acts at two moments only — spawn and a hard limit.
+- Moving a running session on its own. A session that has hit a limit is
+  offered a switch; a session that has not is left alone. The policy acts
+  without a gesture at one moment only — spawn.
+- Resuming an interrupted turn on the person's behalf. After a switch the
+  session waits at its prompt for the person, as it does after a manual swap.
 - Reading utilization out of the statusline stdin payload. Setup-token
   profiles already have a per-turn signal, and signed-in profiles have a
   90-second one; widening the desk-only statusline tee to the fleet would
@@ -92,15 +92,13 @@ Non-goals:
 ## 3. Placement
 
 Following "Compile only what user-land cannot do well": the picker is a pure
-function over facts the daemon already exposes, and the two acting behaviors
-are compiled because both need the daemon's own moment-of-action — a spawn
-resolves its profile inside the daemon, and a hard limit is reported to the
-daemon by a hook with a sub-second window before the person would want the
-hand-over to have already happened. A user-land script could read
-`tbd profile list --json` and swap terminals, but it could not intercept a
-spawn, and a hook that swaps a session from inside that session's own
-`StopFailure` would be racing the daemon's recapture of the very session it is
-replacing.
+function over facts the daemon already exposes, and the launch policy is
+compiled because it needs the daemon's own moment-of-action — a spawn
+resolves its profile inside the daemon, and a user-land script reading
+`tbd profile list --json` could not intercept it. The limit offer is compiled
+only as far as naming the suggestion in the existing limit notification and
+delta; the action behind it is the existing swap RPC, which a script can
+drive just as well.
 
 The picker itself lives in `TBDShared` so the app can run the same function
 over the same facts to *show* what the daemon would choose — the account
@@ -109,7 +107,7 @@ implementation, not two heuristics that drift apart.
 
 ## 4. The pool
 
-The pool is the set of profiles the launch policy and the rotation may choose
+The pool is the set of profiles the launch policy and the limit offer may choose
 from. Membership is derived, with one explicit opt-out:
 
 - **Kind** – `.oauth` and `.oauthToken` only. API-key and Bedrock profiles
@@ -135,7 +133,7 @@ setup-token profile minted from the same login share one set of windows. The
 picker treats them as one account for load purposes. Its **account key** is
 the snapshot's `organizationID` when present, else the profile's
 `loginIdentity`, else the profile id. Live-session counts are summed per
-account key before scoring, and a rotation away from a limited profile
+account key before scoring, and a suggestion away from a limited profile
 excludes every profile sharing its account key, because moving a session
 between two doors into the same exhausted room does nothing.
 
@@ -155,7 +153,8 @@ why a profile was passed over:
 1. Kind is `.oauth` or `.oauthToken`; otherwise `wrongKind`.
 2. `hasCredential`; otherwise `noCredential`.
 3. Not opted out; otherwise `optedOut`.
-4. Not in the excluded account set (rotation only); otherwise `sameAccount`.
+4. Not in the excluded account set (limit suggestion only); otherwise
+   `sameAccount`.
 5. The snapshot exists and its `fetchedAt` is within the staleness window —
    five minutes for `.oauth`, fifteen for `.oauthToken`, the same
    cadence-relative thresholds `ProfileUsagePresentation.staleAge` uses;
@@ -182,10 +181,10 @@ already minutes behind the sessions that will move it.
 shape this borrows from (a fleet credential pool on a remote host) uses
 power-of-two-choices because its readings can be ten minutes old and a
 restart wave would otherwise stampede one account. Here the live-session count
-in the numerator is exact and updates on the very spawn being decided — each
-placed session is stamped before the next resolves — so a burst of spawns
-spreads on its own, and a deterministic pick is both explainable and
-testable.
+in the numerator is exact at decision time — pick reservations (§6.1) count
+every placement the daemon has made whose terminal row has not landed yet —
+so a burst of spawns spreads on its own, and a deterministic pick is both
+explainable and testable.
 
 The result names the profile and a `PickReason`
 (`leastLoaded`, or nil when nothing was eligible) plus the per-candidate
@@ -230,14 +229,35 @@ worktree create, and revive-fresh. Hibernation wake does not call `resolve` —
 it pins to the row's stamp — and must not: a woken session belongs to the
 account whose transcript it carries.
 
-## 7. Rotation on a hard limit
+### 6.1 Pick reservations
 
-`handleRateLimitDetected` gains two behaviors, one ungated and one gated.
+A spawn resolves its profile well before its terminal row is written — the
+tmux window and the Claude process come first — and the only lock on the
+spawn path is per worktree. Two spawns into different worktrees can therefore
+both resolve against the same live counts, and without a correction both land
+on the same account: exactly the burst the policy exists to spread.
 
-### 7.1 Always: name the way out
+The daemon keeps one in-memory `ProfilePickReservations` actor, shared by
+every resolver. A balanced resolve does all of its reads first — profiles,
+snapshots, live counts, and the live Claude rows created since the oldest
+outstanding reservation — and then makes one non-suspending call into the
+actor. That call adds to each profile's live count the reservations its rows
+have not yet caught up with, runs the picker, and records a reservation for
+the winner. Because the call never suspends, no second pick can interleave
+with it, which actor isolation alone would not guarantee across an `await`.
 
-Whenever a hard limit is reported for a terminal with a stamped profile, the
-handler runs the picker with that profile's account key excluded. If a
+A reservation stops counting when a row for its profile lands at or after the
+reservation's instant, so a placed session is never counted twice, or when it
+is two minutes old, so a spawn that fails after picking cannot hold a phantom
+session forever. Reservations live only in memory: a daemon restart drops
+them, and by then every placed session is either a row or never started.
+Only the spawn-time pick reserves; the limit suggestion (§7) names an account
+without placing anything on it.
+
+## 7. The switch offer on a hard limit
+
+Whenever a hard limit is reported for a terminal, `handleRateLimitDetected`
+runs the picker with the limited profile's account key excluded. If a
 candidate exists, the `.limitReached` notification names it — "Session limit
 hit on Acme — resets 1:01pm. Personal has room (5h 12%)" — and the handler
 broadcasts a new `terminalLimitHit` delta carrying the terminal id, the reset
@@ -254,72 +274,25 @@ changes profile, or goes away) and renders a banner over the pane:
 
 "Switch to" calls `swapTerminalProfile(terminalID:newProfileID:mode:
 .inPlace)` — the existing action behind the tab menu's "Swap profile", now
-one click away at the moment it is wanted. The banner is app-side state
-derived from a daemon delta, not a persisted column: a hard limit is a
-transient condition of a live process, and a restart of the app while one is
-open loses only a convenience — the notification row and the tab menu's
-swap submenu are still there.
+one click away at the moment it is wanted. The swap resumes the conversation
+on the new account and leaves it at its prompt; the person sends the next
+message, exactly as after a manual swap. The banner is app-side state derived
+from a daemon delta, not a persisted column: a hard limit is a transient
+condition of a live process, and a restart of the app while one is open loses
+only a convenience — the notification row and the tab menu's swap submenu are
+still there.
 
 An ambient session (no stamp) gets the same banner and the same suggestion
 with no account excluded. The person can judge whether the suggestion is the
-same account; the daemon cannot, which is why §7.2 never acts on one.
+same account; the daemon cannot.
 
-### 7.2 Gated: hand the session over
-
-A second tri-state flag, `limit_rotation_enabled` (shipped default `false`,
-constant `Config.limitRotationEnabledDefault`), turns the suggestion into an
-action. When it is on and all of the following hold, the handler performs the
-swap itself before notifying:
-
-- the terminal has a stamped `profileID` (see the ambient non-goal);
-- it is a live, unparked Claude session on the `.tmux` transport with a
-  `claudeSessionID` — the in-place swap refuses holder rows and parked rows
-  already, and a blank session has nothing to hand over;
-- the picker, with the limited account excluded, returned a candidate.
-
-The swap is the existing `handleTerminalSwapProfile` in `.inPlace` mode,
-invoked with an `ActuationActor` of kind `daemon` and rail `limit-rotation`
-so the actuation log attributes it. The handler then arms the session: it
-schedules a `continue` through `LimitResumeScheduler` with `resetsAt` set to
-now and `limitType` `rotation`, so the actuator's existing eligibility checks
-— pane not in copy mode, Claude foreground, transcript not already advanced —
-gate the keystroke exactly as they do for a reset-time resume. The person's
-dead turn resumes on the new account roughly a minute after the limit, with
-no gesture.
-
-That `continue` belongs to the rotation feature, not to the reset-time one.
-The scheduler re-checks a row's governing toggle at fire time and every toggle
-cancels only its own rows when switched off, so a `rotation` row is governed by
-`limit_rotation_enabled` — `Config.autoResumeEnabled(forLimitType:)` maps it
-there, and turning rotation off cancels pending `rotation` rows and no others.
-Without that mapping a person who enabled rotation but never touched the older
-`autoResumeOnLimitReset` toggle would see the swap succeed and the `continue`
-silently cancelled at fire time, which is the manual-gesture dependency this
-feature exists to remove. The notification reads "Session limit hit on Acme — switched to
-Personal (5h 12%)".
-
-If the swap fails for any reason, the handler logs it and falls through to
-§7.1 and to today's reset-time behavior, so a failed hand-over degrades to
-the current experience rather than to silence. A successful rotation does
-**not** also schedule the reset-time resume: the session is no longer on the
-limited account, and typing `continue` into it at that account's reset would
-be a stray keystroke into a working session.
-
-Rotation runs once per limit report. The pending-resume latch already
-prevents a repeat `StopFailure` on the same limit from scheduling twice; a
-rotated session that hits a limit on its *new* account produces a fresh
-report against that account and is handled afresh, which is correct — it is
-a different account's limit.
-
-### 7.3 Why not rotate everything
-
-The two constraints above — stamped profile, tmux transport — are the
-boundary of what TBD can hand over *safely*, which is what the request asked
-for. A holder-backed session has no in-place respawn yet (the swap handler
-refuses it for the reasons in its own comment), and an ambient session's
-account is unknowable. Both still get the banner. Widening either is a
-separate change with its own evidence; this design does not pretend to a
-guarantee it cannot keep.
+The offer is the whole of the limit behavior. The handler never swaps a
+session and never types into one on its own: moving a session to another
+account and resuming its interrupted turn are the person's moves. The existing
+reset-time resume (`autoResumeOnLimitReset`) is untouched and independent —
+when it is on, its schedule and the switch offer ride in the same
+notification, and that feature's own checks — the transcript-growth cancel,
+Claude in the foreground — still govern whether its `continue` fires.
 
 ## 8. Surfaces
 
@@ -359,7 +332,7 @@ in either state — the sheet exists for the person to choose.
 
 The tab label already reads `<profile name> <n>` and the hover card already
 names the pinned identity and usage; both are the "this session's profile"
-indicator and are unchanged. The limit banner (§7.1) is new.
+indicator and are unchanged. The limit banner (§7) is new.
 
 ### 8.4 CLI
 
@@ -424,23 +397,25 @@ Both branches of every flag, per the repo rule.
   default; at step 3 it replaces ambient; with nothing eligible, step 2
   returns the default and step 3 returns nil; the live-count query excludes
   parked rows and non-Claude rows.
-- **Rate-limit handler** – with rotation off: the notification names the
-  suggestion when one exists and omits it when none does, the delta is
-  broadcast, and the reset-time path is unchanged. With rotation on: a
-  stamped tmux session with a candidate is swapped, a `continue` is
-  scheduled at now with `limitType` `rotation`, and no reset-time resume is
-  scheduled; an ambient session is not swapped; a parked or holder session
-  is not swapped; a swap failure falls through to the off-path notification
-  and the reset-time schedule; no candidate falls through likewise.
+- **Pick reservations** – two balanced resolves with no terminal row written
+  between them, against two otherwise identical profiles, choose different
+  profiles (the interleaving of two concurrent spawns; this fails without
+  reservations); a reservation stops counting once a matching row lands, so
+  nothing is counted twice; an expired reservation stops counting.
+- **Rate-limit handler** – the notification names the suggestion when one
+  exists and omits it when none does; the limited account is excluded for a
+  stamped session and nothing is excluded for an ambient one; the delta is
+  broadcast with the suggestion; the reset-time path is unchanged; and no
+  swap and no `continue` ever originate from the handler.
 - **Limit parsing** – `RateLimitDetectionTests` already covers the
   structured path, the weekly and session text wordings, zone conversion and
-  the transient exclusions. This adds the cases the rotation newly depends
-  on: a structured `rejected` record carries its `rateLimitType` through as
+  the transient exclusions. This adds the cases the limit offer newly
+  depends on: a structured `rejected` record carries its `rateLimitType` through as
   the `limitType` the handler reports; a structured record whose `resetsAt`
   is not a number keeps that structured type when the reset instant comes
   from the text rules; and a rejected record with no usable reset and no parseable text detects
-  nothing, so no rotation can fire on a message the detector could not
-  place in time.
+  nothing, so no offer is made on a message the detector could not place in
+  time.
 - **App** – the live count counts unparked Claude terminals for the profile
   only; the banner appears on `terminalLimitHit`, disappears when the
   terminal reports `.working`, and its action calls the swap with
@@ -467,9 +442,9 @@ alone. The per-profile opt-out is not a flag and has no graduation.
 
 - **Power-of-two-choices with randomization.** Right for a fleet reading
   ten-minute-old quota snapshots where a restart wave would pile onto one
-  account. Here the live count is exact at decision time and each spawn
-  stamps its row before the next resolves, so a deterministic argmin
-  spreads a burst on its own and is explainable from the screen.
+  account. Here the live count is exact at decision time — rows plus pick
+  reservations (§6.1) — so a deterministic argmin spreads a burst on its own
+  and is explainable from the screen.
 - **Failing closed when no profile is eligible.** Correct for an unattended
   fleet where a wrong account is worse than no session. Wrong for a person at
   a keyboard, who would rather have a session on the default and a
@@ -479,9 +454,18 @@ alone. The per-profile opt-out is not a flag and has no graduation.
   a repo override is the person telling TBD which account a repo's work
   belongs on. Overriding it silently is the kind of surprise a load
   balancer must not produce.
-- **Rotating ambient sessions.** TBD cannot name the account, so it cannot
-  exclude it, so it could move a session onto the account it just exhausted.
-  A suggestion the person can judge is the honest ceiling.
+- **Handing a limited session over automatically.** The daemon has every
+  fact it would need to swap a limited session to an account with room and
+  type `continue`, and that would remove the last gesture. It would also
+  make TBD move a person's work between accounts and send input to a session
+  nobody was watching, on the strength of a usage reading that can be
+  minutes old. A switch the person clicks keeps both of those decisions with
+  the person, at the cost of one click, and the banner puts that click where
+  they are already looking.
+- **Serializing whole spawns across worktrees.** A daemon-wide spawn lock
+  would close the concurrent-pick window too, but it would hold every spawn
+  behind every other's tmux and process start, which take seconds. A
+  reservation closes the same window around the only step that needs it.
 - **A persisted limit-hit column on `terminal`.** A hard limit is a
   transient state of a live process, and every consumer of it is the running
   app. A column would need clearing on every state transition that ends the
