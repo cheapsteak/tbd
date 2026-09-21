@@ -1062,8 +1062,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     /// 0 so existing JSON/rows without this field still decode.
     public var sortOrder: Int
     /// Per-profile opt-out from the balancing pool (design 2026-09-05 §4).
-    /// When true, this profile is never chosen by the launch policy or the
-    /// rotation policy. Defaults to false so existing JSON/rows without this
+    /// When true, this profile is never chosen by the launch policy or
+    /// suggested by the limit offer. Defaults to false so existing JSON/rows without this
     /// field still decode as "in the pool" (the default state).
     public var poolOptOut: Bool
 
