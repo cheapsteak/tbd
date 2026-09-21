@@ -430,7 +430,7 @@ the public API. The spawn's process environment gains
 `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/r/<token>` and a `NO_PROXY`
 extended with `127.0.0.1,localhost`. `NO_PROXY` travels in `sensitiveEnv`
 alone. So do `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` and
-`ENABLE_TOOL_SEARCH=true`, because Claude Code treats any host other than
+`ENABLE_TOOL_SEARCH=true` when the upstream is the public API, because Claude Code treats any host other than
 `api.anthropic.com` as a third-party gateway and would otherwise turn off tool
 search, the model catalog, and the other first-party behaviors
 (`docs/specs/2026-09-21-model-proxy-tool-search-design.md`). The route URL travels **both** in `sensitiveEnv` and as an inline export

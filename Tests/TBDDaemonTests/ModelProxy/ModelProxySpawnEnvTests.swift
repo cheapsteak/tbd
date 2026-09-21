@@ -366,22 +366,22 @@ struct ModelProxySpawnEnvTests {
     }
 
     /// **The invariant the spec's first-request blowup turns on.** A route URL
-    /// without the override is a loopback host Claude Code treats as a
-    /// third-party gateway, so every routed shape this suite can build is
-    /// checked, not just the default one.
-    @Test("no routed outcome sets ANTHROPIC_BASE_URL without both first-party variables")
-    func everyRoutedBaseURLCarriesTheFirstPartyVariables() async throws {
+    /// to the public API without the override is a loopback host Claude Code
+    /// treats as a third-party gateway, so every such routed shape this suite
+    /// can build is checked, not just the default one.
+    @Test("no routed outcome to the public API lacks either first-party variable")
+    func everyFirstPartyRouteCarriesTheFirstPartyVariables() async throws {
         let home = fencedScratchRoot(prefix: "tbdmpse")
         var outcomes = [
             await attach(config: proxyOnConfig(), supervisor: FakeModelProxySupervisor()),
             await attach(
                 config: proxyOnConfig(streaming: false), supervisor: FakeModelProxySupervisor()),
             await attach(
-                config: proxyOnConfig(), profileBaseURL: Self.profileBaseURL,
+                config: proxyOnConfig(), profileBaseURL: "https://api.anthropic.com",
                 supervisor: FakeModelProxySupervisor()),
             await attach(
-                config: proxyOnConfig(), envOverrideBaseURL: "https://override.acme.example",
-                sensitiveEnv: ["ANTHROPIC_BASE_URL": "https://override.acme.example"],
+                config: proxyOnConfig(), envOverrideBaseURL: "https://api.anthropic.com/",
+                sensitiveEnv: ["ANTHROPIC_BASE_URL": "https://api.anthropic.com/"],
                 supervisor: FakeModelProxySupervisor()),
             await attach(
                 config: proxyOnConfig(), sensitiveEnv: ["NO_PROXY": "corp.example"],
@@ -395,13 +395,51 @@ struct ModelProxySpawnEnvTests {
 
         for outcome in outcomes {
             #expect(outcome.routed, "every fixture here must route, or this proves nothing")
-            guard outcome.sensitiveEnv["ANTHROPIC_BASE_URL"] != nil else { continue }
+            #expect(outcome.sensitiveEnv["ANTHROPIC_BASE_URL"] != nil)
             for key in Self.firstPartyKeys {
                 #expect(
                     outcome.sensitiveEnv[key] != nil,
                     "a routed outcome set ANTHROPIC_BASE_URL without \(key)")
             }
         }
+    }
+
+    /// A gateway upstream ran third-party unproxied, so the proxy must not
+    /// promote it: the gateway never promised to accept tool-search fields or
+    /// first-party fetches.
+    @Test("a routed spawn to a gateway upstream carries neither first-party variable")
+    func gatewayRoutesCarryNeither() async throws {
+        let outcomes = [
+            await attach(
+                config: proxyOnConfig(), profileBaseURL: Self.profileBaseURL,
+                supervisor: FakeModelProxySupervisor()),
+            await attach(
+                config: proxyOnConfig(), envOverrideBaseURL: "https://override.acme.example",
+                sensitiveEnv: ["ANTHROPIC_BASE_URL": "https://override.acme.example"],
+                supervisor: FakeModelProxySupervisor()),
+        ]
+        for outcome in outcomes {
+            #expect(outcome.routed, "every fixture here must route, or this proves nothing")
+            for key in Self.firstPartyKeys {
+                #expect(outcome.sensitiveEnv[key] == nil, "a gateway route carries \(key)")
+            }
+        }
+    }
+
+    @Test(
+        "only the public API on its default port counts as a first-party upstream",
+        arguments: [
+            ("https://api.anthropic.com", true),
+            ("https://API.anthropic.com", true),
+            ("https://api.anthropic.com:443", true),
+            ("http://api.anthropic.com", false),
+            ("https://api.anthropic.com:8443", false),
+            ("https://api.anthropic.com.acme.example", false),
+            ("https://gateway.acme.example", false),
+            ("not a url", false),
+        ])
+    func firstPartyUpstreamPredicate(upstream: String, expected: Bool) {
+        #expect(ModelProxyRoute.isFirstPartyUpstream(upstream) == expected)
     }
 
     /// Every unrouted outcome, one per refusal: none of them talks to a
@@ -526,11 +564,12 @@ struct ModelProxySpawnEnvTests {
     /// in one input (whether the proxy is on) and must not be able to drift
     /// apart anywhere else.
     private func composeSpawn(
-        config: Config, supervisor: (any ModelProxyRouting)?
+        config: Config, profileBaseURL: String = ModelProxySpawnEnvTests.profileBaseURL,
+        supervisor: (any ModelProxyRouting)?
     ) async -> (launch: HolderLaunchRequest, attachment: ModelProxyRouteAttachment.Outcome) {
         let attachment = await attach(
             config: config,
-            profileBaseURL: Self.profileBaseURL,
+            profileBaseURL: profileBaseURL,
             sensitiveEnv: Self.carriedEnv,
             supervisor: supervisor)
         let spawn = ClaudeSpawnCommandBuilder.build(
@@ -542,7 +581,7 @@ struct ModelProxySpawnEnvTests {
             profileKind: .oauth,
             // The production seam, not a paraphrase of it: both spawn sites
             // call exactly this.
-            profileBaseURL: attachment.builderBaseURL(profile: Self.profileBaseURL),
+            profileBaseURL: attachment.builderBaseURL(profile: profileBaseURL),
             profileConfigDir: "/tmp/a-profile-dir",
             cmd: nil,
             shellFallback: "/bin/zsh",
@@ -693,7 +732,8 @@ struct ModelProxySpawnEnvTests {
     @Test("a routed spawn carries the first-party variables in its environment, not its command line")
     func firstPartyVariablesStayOutOfTheCommandLine() async throws {
         let (launch, attachment) = await composeSpawn(
-            config: proxyOnConfig(), supervisor: FakeModelProxySupervisor(port: 51_842))
+            config: proxyOnConfig(), profileBaseURL: "https://api.anthropic.com",
+            supervisor: FakeModelProxySupervisor(port: 51_842))
 
         #expect(attachment.routed, "the fixture must route, or this proves nothing")
         #expect(launch.environment["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] == "1")

@@ -17,7 +17,7 @@ enum ModelProxyEnv {
     static let loopbackEntries = ["127.0.0.1", "localhost"]
 
     /// The variables that keep a proxied session first-party, set beside the
-    /// route URL on every routed spawn
+    /// route URL on every routed spawn whose upstream is the public API
     /// (`docs/specs/2026-09-21-model-proxy-tool-search-design.md`).
     ///
     /// Claude Code treats any base URL whose host is not `api.anthropic.com`
@@ -372,10 +372,16 @@ enum ModelProxyRouteAttachment {
         env["ANTHROPIC_BASE_URL"] = baseURL
         env["NO_PROXY"] = ModelProxyEnv.noProxy(
             extending: sensitiveEnv["NO_PROXY"] ?? baseEnvironment["NO_PROXY"])
-        // A repo that sets either deliberately keeps its value: the override
-        // is the user's, and only its absence is ours to fill.
-        for (key, value) in ModelProxyEnv.firstPartyEnv where sensitiveEnv[key] == nil {
-            env[key] = value
+        // Only an upstream that would have been first-party unproxied: a
+        // gateway ran third-party without the proxy, and telling Claude Code
+        // otherwise would send it tool-search fields and first-party fetches
+        // the gateway never promised to accept. A repo that sets either
+        // variable deliberately keeps its value: the override is the user's,
+        // and only its absence is ours to fill.
+        if ModelProxyRoute.isFirstPartyUpstream(upstream) {
+            for (key, value) in ModelProxyEnv.firstPartyEnv where sensitiveEnv[key] == nil {
+                env[key] = value
+            }
         }
         return Outcome(
             sensitiveEnv: env,

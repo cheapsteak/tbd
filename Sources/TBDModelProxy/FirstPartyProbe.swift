@@ -5,8 +5,9 @@ import os
 /// mode (spec `docs/specs/2026-09-21-model-proxy-tool-search-design.md`,
 /// "The probe").
 ///
-/// The daemon spawns a routed session with the override that keeps Claude Code
-/// treating the proxy's base URL as the Anthropic API. Claude Code sends
+/// The daemon spawns a session routed to the public API with the override that
+/// keeps Claude Code treating the proxy's base URL as the Anthropic API; the
+/// server consults the probe only for such routes. Claude Code sends
 /// `x-client-request-id` on a `/v1/messages` request only under the predicate
 /// that override controls, so the header's absence on the route's first
 /// messages request means the session is running degraded — tool search off,

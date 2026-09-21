@@ -12,7 +12,8 @@ schema in its first request and sized its window at 200k: a real session's
 first turn created 222,901 tokens of cache before doing any work and compacted
 at once.
 
-The fix is two variables set beside the route URL on every routed spawn:
+The fix is two variables set beside the route URL on every routed spawn whose
+upstream is the public API:
 
 - `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` tells Claude Code to treat the
   base URL as first-party, which restores everything the host check gates
@@ -80,7 +81,9 @@ JavaScript and confirmed with real turns.
 ### Spawn environment
 
 `ModelProxyRouteAttachment.attach` is the single place a route URL enters a
-spawn's environment. Beside `ANTHROPIC_BASE_URL` it sets:
+spawn's environment. When the route's resolved upstream is
+`https://api.anthropic.com` on its default port
+(`ModelProxyRoute.isFirstPartyUpstream`), beside `ANTHROPIC_BASE_URL` it sets:
 
 - `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`
 - `ENABLE_TOOL_SEARCH=true`
@@ -89,7 +92,13 @@ Each is set only when the caller's resolved environment overrides do not
 already name it, so a repo that sets either deliberately keeps its value. The
 two are process environment only, not inline exports: they are not routing
 keys, and the inline export exists to defend endpoint variables against rc
-files that set them. Every unrouted outcome — tmux transport, Bedrock, flag
+files that set them.
+
+A route whose upstream is anything else — a profile's gateway, an env-override
+base URL — carries neither. That session ran third-party unproxied, and the
+proxy's promise is parity with the unproxied session: promoting it would send
+the gateway tool-search fields and first-party fetches it never promised to
+accept. Every unrouted outcome — tmux transport, Bedrock, flag
 off, an overlay that sets its own base URL, no live proxy — carries neither.
 
 With the override honored, the model catalog is back, so `ANTHROPIC_MODEL=opus`
@@ -103,7 +112,8 @@ and the other first-party behaviors degrade, and the probe below says so.
 
 ### The probe
 
-On the first `POST` under a route whose path, query stripped, ends in
+On the first `POST` under a route to the public API whose path, query
+stripped, ends in
 `/v1/messages`, the proxy records whether the request carries
 `x-client-request-id`. When it does not, the proxy logs once for that route, at
 `.error`, subsystem `com.tbd.modelproxy`, category `first-party`: the terminal
@@ -129,9 +139,9 @@ needs either in a session runs it unproxied.
 
 ## Testing
 
-- **Attachment.** Every routed outcome carries both variables, and a test fails
-  if a routed outcome sets `ANTHROPIC_BASE_URL` without them. No unrouted
-  outcome carries either. A value already present in the env overrides wins.
+- **Attachment.** Every routed outcome to the public API carries both
+  variables, and a test fails if one sets `ANTHROPIC_BASE_URL` without them. No
+  gateway route and no unrouted outcome carries either. A value already present in the env overrides wins.
   Neither variable appears in the builder's inline exports.
 - **Probe.** The verdict: a `/v1/messages` POST, with and without the query
   string, with and without the header, and non-matching methods and paths. The

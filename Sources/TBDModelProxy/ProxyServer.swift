@@ -508,10 +508,15 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
                     body: ProxyServer.unknownRouteBody, keepAlive: keepAlive)
                 return
             }
-            if firstParty != .notApplicable {
-                // One hop onto the probe and back, which logs rather than
-                // waits on anything; forwarding is neither delayed further nor
-                // altered by what it finds.
+            if firstParty != .notApplicable,
+                ModelProxyRoute.isFirstPartyUpstream(route.upstream)
+            {
+                // Only a route to the public API: a gateway route is spawned
+                // without the override, so the header's absence there is the
+                // expected state, not a degraded one. One hop onto the probe
+                // and back, which logs rather than waits on anything;
+                // forwarding is neither delayed further nor altered by what
+                // it finds.
                 await routes.firstPartyProbe.examine(
                     token: target.token, terminalID: route.terminalID, verdict: firstParty)
             }

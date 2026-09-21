@@ -64,6 +64,22 @@ public struct ModelProxyRoute: Codable, Sendable, Equatable {
         guard s.count == 32 else { return false }
         return s.allSatisfy { $0.isLowercaseHexDigit }
     }
+
+    /// Whether `upstream` is the host Claude Code itself treats as
+    /// first-party: `https://api.anthropic.com`, on the default port.
+    ///
+    /// A session routed to it would have run first-party unproxied, so the
+    /// proxy may ask Claude Code to keep treating it that way
+    /// (`docs/specs/2026-09-21-model-proxy-tool-search-design.md`). Any other
+    /// upstream — a profile's gateway, an override base URL — ran third-party
+    /// unproxied and must stay so behind the proxy.
+    public static func isFirstPartyUpstream(_ upstream: String) -> Bool {
+        guard let url = URL(string: upstream),
+            url.scheme?.lowercased() == "https",
+            url.host?.lowercased() == "api.anthropic.com"
+        else { return false }
+        return url.port == nil || url.port == 443
+    }
 }
 
 private extension Character {
