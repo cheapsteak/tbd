@@ -19,6 +19,46 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     /// Free-form env overrides carried by this profile (profile scope). Merged
     /// into the spawned session's env under `global < repo < profile` precedence.
     public let envOverrides: [String: String]
+    /// The balanced pick's reservation on the shared ledger, when this profile
+    /// came from one. The spawn hands it back through
+    /// `ModelProfileResolver.settleReservation` once its terminal row is
+    /// inserted. Nil for every other step of the chain.
+    public let reservationID: UUID?
+
+    public init(
+        profileID: UUID,
+        name: String,
+        kind: CredentialKind,
+        baseURL: String?,
+        model: String?,
+        secret: String?,
+        awsRegion: String?,
+        awsProfile: String?,
+        fallbackModels: [String]?,
+        envOverrides: [String: String],
+        reservationID: UUID? = nil
+    ) {
+        self.profileID = profileID
+        self.name = name
+        self.kind = kind
+        self.baseURL = baseURL
+        self.model = model
+        self.secret = secret
+        self.awsRegion = awsRegion
+        self.awsProfile = awsProfile
+        self.fallbackModels = fallbackModels
+        self.envOverrides = envOverrides
+        self.reservationID = reservationID
+    }
+
+    /// The same profile carrying `reservationID`.
+    func withReservation(_ id: UUID?) -> ResolvedModelProfile {
+        ResolvedModelProfile(
+            profileID: profileID, name: name, kind: kind, baseURL: baseURL,
+            model: model, secret: secret, awsRegion: awsRegion,
+            awsProfile: awsProfile, fallbackModels: fallbackModels,
+            envOverrides: envOverrides, reservationID: id)
+    }
 }
 
 public struct ModelProfileResolver: Sendable {
@@ -106,6 +146,15 @@ public struct ModelProfileResolver: Sendable {
         )
     }
 
+    /// Settle a balanced pick's reservation: the spawn's terminal row has
+    /// been inserted and now carries the load in the live counts. Call it
+    /// with `resolved?.reservationID` right after the row lands; nil (any
+    /// non-balanced resolution) and a resolver without a ledger are no-ops.
+    public func settleReservation(_ id: UUID?) async {
+        guard let id, let reservations else { return }
+        await reservations.release(id)
+    }
+
     /// Resolve the model profile for a spawn.
     ///
     /// `override` is an explicit per-creation profile id (e.g. chosen in the
@@ -153,16 +202,13 @@ public struct ModelProfileResolver: Sendable {
                 let candidates: [ProfilePoolCandidate]
                 let decision: ProfilePoolDecision
                 if let reservations {
-                    // Every read happens first — the recent rows BEFORE the
-                    // live counts inside `candidates` — and then one
-                    // non-suspending call picks and reserves, so a concurrent
-                    // spawn into another worktree sees this pick even before
-                    // its terminal row exists.
-                    let recentRows = try await source.recentLiveSessionSpawns(
-                        since: reservations.rowCutoff())
+                    // Every read happens first, and then one non-suspending
+                    // call picks and reserves, so a concurrent spawn into
+                    // another worktree sees this pick even before its
+                    // terminal row exists.
                     let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
                     let outcome = await reservations.pickAndReserve(
-                        candidates: stored, recentRows: recentRows, pickTime: now())
+                        candidates: stored, pickTime: now())
                     candidates = outcome.candidates
                     decision = outcome.decision
                     reservationID = outcome.reservationID
@@ -219,7 +265,7 @@ public struct ModelProfileResolver: Sendable {
                             }
                         }
 
-                        return resolved
+                        return resolved.withReservation(reservationID)
                     }
                     logger.warning("balanced pick \(chosenID, privacy: .public) did not load; falling back to default")
                 } else {

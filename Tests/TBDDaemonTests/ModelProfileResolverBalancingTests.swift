@@ -640,28 +640,73 @@ struct ModelProfileResolverBalancingTests {
         #expect(firstID != secondID, "the second concurrent spawn piled onto the first's profile")
     }
 
-    /// Once the first spawn's row lands, its live count carries the load and
-    /// the reservation stops counting — a profile is never counted twice.
-    @Test("reservations: a landed row settles its reservation")
-    func aLandedRowSettlesItsReservation() async throws {
+    /// Once the first spawn's row lands, the spawn settles its reservation
+    /// and the live count alone carries the load — a profile is never counted
+    /// twice.
+    @Test("reservations: settling a reservation stops it counting")
+    func settlingAReservationStopsItCounting() async throws {
         let dates = TestDateSource(Date())
         let fixture = try await makeReservedFixture(dates: dates)
 
-        let firstID = try #require(try await fixture.resolver.resolve(repoID: nil)?.profileID)
+        let first = try #require(try await fixture.resolver.resolve(repoID: nil))
+        let firstID = first.profileID
+        let reservationID = try #require(first.reservationID, "a balanced pick carries its reservation")
         _ = try await fixture.db.terminals.create(
             worktreeID: fixture.worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
             profileID: firstID, kind: .claude)
+        await fixture.resolver.settleReservation(reservationID)
+        #expect(await fixture.reservations.heldCount == 0)
 
-        // First profile: 1 live, reservation settled. Second: 0 live.
+        // First profile: 1 live row, nothing reserved. Second: 0 live.
         let secondID = try #require(try await fixture.resolver.resolve(repoID: nil)?.profileID)
         #expect(secondID != firstID)
 
-        // Now each carries one session — the first as a row, the second as an
-        // unlanded reservation — so they tie and the tie-break repeats the
-        // first pick. Counting the first profile's reservation on top of its
-        // row would push this onto the second profile instead.
+        // Now each carries one session — the first as a row, the second as a
+        // held reservation — so they tie and the tie-break repeats the first
+        // pick. Counting the first profile's reservation on top of its row
+        // would push this onto the second profile instead.
         let thirdID = try #require(try await fixture.resolver.resolve(repoID: nil)?.profileID)
-        #expect(thirdID == firstID, "the first profile's reservation was counted on top of its landed row")
+        #expect(thirdID == firstID, "a settled reservation was counted on top of its landed row")
+    }
+
+    /// Rows from spawns that did not take a balanced pick — explicit picks,
+    /// repo overrides — landing on a reserved profile must not erase that
+    /// profile's reservations: only the spawn holding a reservation settles it.
+    @Test("reservations: unrelated rows landing on a reserved profile do not erase its reservations")
+    func unrelatedRowsDoNotEraseReservations() async throws {
+        let dates = TestDateSource(Date())
+        let fixture = try await makeReservedFixture(dates: dates)
+        var window = 0
+        func insertRow(on profileID: UUID) async throws {
+            window += 1
+            _ = try await fixture.db.terminals.create(
+                worktreeID: fixture.worktreeID, tmuxWindowID: "@\(window)", tmuxPaneID: "%\(window)",
+                profileID: profileID, kind: .claude)
+        }
+
+        // Three unlanded picks: X, Y, X — X holds two reservations, Y one.
+        let x = try #require(try await fixture.resolver.resolve(repoID: nil))
+        let y = try #require(try await fixture.resolver.resolve(repoID: nil))
+        let x2 = try #require(try await fixture.resolver.resolve(repoID: nil))
+        #expect(y.profileID != x.profileID)
+        #expect(x2.profileID == x.profileID)
+
+        // Y's spawn lands and settles, and two unrelated spawns add rows to
+        // it: Y carries 3 rows and nothing reserved.
+        try await insertRow(on: y.profileID)
+        await fixture.resolver.settleReservation(y.reservationID)
+        try await insertRow(on: y.profileID)
+        try await insertRow(on: y.profileID)
+
+        // Two unrelated spawns land on X. X now carries 2 rows plus its 2
+        // held reservations = 4 against Y's 3. Had those rows erased X's
+        // reservations, X would read 2 and win.
+        try await insertRow(on: x.profileID)
+        try await insertRow(on: x.profileID)
+        #expect(await fixture.reservations.heldCount == 2)
+
+        let next = try #require(try await fixture.resolver.resolve(repoID: nil)?.profileID)
+        #expect(next == y.profileID, "unrelated rows on a reserved profile erased its reservations")
     }
 
     /// A spawn that failed after picking never lands a row; its reservation
@@ -717,25 +762,5 @@ struct ModelProfileResolverBalancingTests {
 
         _ = try await fixture.resolver.resolve(repoID: nil)
         #expect(await fixture.reservations.heldCount == 0)
-    }
-
-    @Test("terminal store: recent live spawns match the live-count population")
-    func recentLiveSessionSpawnsFiltersLikeTheLiveCount() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let profile = try await db.modelProfiles.create(name: "P", kind: .oauth)
-        let worktree = try await db.worktrees.createScratch(
-            name: "wt", displayName: "wt", path: "/tmp/wt-recent-\(UUID().uuidString)", tmuxServer: "@wt")
-        let cutoff = Date().addingTimeInterval(-60)
-        _ = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", profileID: profile.id, kind: .claude)
-        let parked = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2", profileID: profile.id, kind: .claude)
-        try await db.terminals.setHibernated(id: parked.id, sessionID: "s", reason: .auto)
-        _ = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%3", kind: .claude)
-
-        let recent = try await db.terminals.recentLiveSessionSpawns(since: cutoff)
-        #expect(recent.map(\.profileID) == [profile.id])
-        #expect(try await db.terminals.recentLiveSessionSpawns(since: Date().addingTimeInterval(60)).isEmpty)
     }
 }

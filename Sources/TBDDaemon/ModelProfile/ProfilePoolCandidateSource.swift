@@ -109,12 +109,6 @@ public struct ProfilePoolCandidateSource: Sendable {
         }
     }
 
-    /// Live Claude rows created at or after `cutoff` — what a reserved
-    /// balanced pick reads, before `candidates`, to settle its reservations.
-    public func recentLiveSessionSpawns(since cutoff: Date) async throws -> [RecentProfileSpawn] {
-        try await terminals.recentLiveSessionSpawns(since: cutoff)
-    }
-
     /// Return the account key for a single profile.
     ///
     /// Looks up the profile's account grouping key (snapshot.organizationID ??
