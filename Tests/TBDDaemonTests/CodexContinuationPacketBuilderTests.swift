@@ -93,12 +93,18 @@ struct CodexContinuationPacketBuilderTests {
         #expect(!first.contains("must-not-appear"))
     }
 
-    @Test("history keeps the initial task and newest whole units within 64 KiB")
+    @Test("history keeps the initial task and newest whole turns within 64 KiB")
     func boundedHistorySelection() async throws {
         let fixture = try Fixture()
-        var records = [responseMessage(
-            role: "user", text: "INITIAL TASK — keep this even when history is long 🧭")]
+        var records = [
+            responseMessage(
+                role: "user", text: "INITIAL TASK — keep this even when history is long 🧭"),
+            turnContext("initial"),
+        ]
         for index in 0..<80 {
+            records.append(responseMessage(
+                role: "user", text: "follow-up-\(index)"))
+            records.append(turnContext("turn-\(index)"))
             records.append(responseMessage(
                 role: "assistant",
                 text: "conclusion-\(index)-" + String(repeating: "é", count: 900)))
@@ -119,6 +125,41 @@ struct CodexContinuationPacketBuilderTests {
         let seventyEight = try #require(packet.range(of: "conclusion-78-"))
         let seventyNine = try #require(packet.range(of: "conclusion-79-"))
         #expect(seventyEight.lowerBound < seventyNine.lowerBound)
+    }
+
+    @Test("history cap never emits a partial turn bundle")
+    func completeTurnSelectionAtCap() async throws {
+        let fixture = try Fixture()
+        try fixture.write([
+            responseMessage(role: "user", text: "INITIAL-TASK"),
+            turnContext("initial"),
+            responseMessage(
+                role: "user",
+                text: "MIDDLE-USER-" + String(repeating: "u", count: 19_000)),
+            turnContext("middle"),
+            responseMessage(
+                role: "assistant",
+                text: "MIDDLE-ASSISTANT-" + String(repeating: "a", count: 19_000)),
+            responseMessage(
+                role: "user",
+                text: "NEWEST-USER-" + String(repeating: "n", count: 6_000)),
+            turnContext("newest"),
+            responseMessage(
+                role: "assistant",
+                text: "NEWEST-ASSISTANT-" + String(repeating: "z", count: 6_000)),
+        ])
+        let builder = CodexContinuationPacketBuilder(
+            gitStatusProvider: StubGitStatusProvider(status: "## topic\n"))
+
+        let packet = try await builder.build(
+            rolloutPath: fixture.rollout.path, worktreePath: fixture.directory.path)
+
+        #expect(packet.contains("INITIAL-TASK"))
+        #expect(packet.contains("NEWEST-USER-"))
+        #expect(packet.contains("NEWEST-ASSISTANT-"))
+        #expect(!packet.contains("MIDDLE-USER-"))
+        #expect(!packet.contains("MIDDLE-ASSISTANT-"))
+        #expect(integer(after: "- Middle history units: ", in: packet) > 0)
     }
 
     @Test("mandatory envelope survives maximal metadata and git status")
@@ -228,6 +269,10 @@ struct CodexContinuationPacketBuilderTests {
                 role: "user",
                 text: """
                 token=abcd1234 Authorization: Bearer bearer-secret
+                GITHUB_TOKEN=github-ordinary-value
+                ANTHROPIC_API_KEY=anthropic-ordinary-value
+                AWS_SECRET_ACCESS_KEY=aws-ordinary-value
+                CLAUDE_CODE_OAUTH_TOKEN=claude-ordinary-value
                 URL https://person:pass@example.test/path key \(privateKey)
                 service ghp_abcdefghijk
                 """),
@@ -267,6 +312,14 @@ struct CodexContinuationPacketBuilderTests {
         #expect(packet.contains("[REDACTED]"))
         #expect(!packet.contains("abcd1234"))
         #expect(!packet.contains("bearer-secret"))
+        #expect(!packet.contains("github-ordinary-value"))
+        #expect(!packet.contains("anthropic-ordinary-value"))
+        #expect(!packet.contains("aws-ordinary-value"))
+        #expect(!packet.contains("claude-ordinary-value"))
+        #expect(packet.contains("GITHUB_TOKEN=[REDACTED]"))
+        #expect(packet.contains("ANTHROPIC_API_KEY=[REDACTED]"))
+        #expect(packet.contains("AWS_SECRET_ACCESS_KEY=[REDACTED]"))
+        #expect(packet.contains("CLAUDE_CODE_OAUTH_TOKEN=[REDACTED]"))
         #expect(!packet.contains("person:pass"))
         #expect(!packet.contains("very-secret-material"))
         #expect(!packet.contains("ghp_abcdefghijk"))
@@ -321,6 +374,10 @@ struct CodexContinuationPacketBuilderTests {
                 "text": text,
             ]],
         ])
+    }
+
+    private func turnContext(_ id: String) -> [String: Any] {
+        envelope("turn_context", ["turn_id": id])
     }
 
     private func jsonString(_ value: Any) -> String {
