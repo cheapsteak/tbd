@@ -56,11 +56,11 @@ EOF
 
 # Build a throwaway "worktree" whose scripts/swift-safe stub BLOCKS until the
 # test releases it, so anything asserted while it blocks is provably asserted
-# mid-build. It writes, in order: $2 lines of compiler noise, one `swift-safe:`
+# mid-build. It writes, in order: $1 lines of compiler noise, one `swift-safe:`
 # progress line, then nothing until $d/release exists, then a final noise line
-# and the wrapper's own exit-status line. Echoes $d.
+# and the wrapper's own exit-status line, before exiting with $2. Echoes $d.
 mkblockingworktree() {
-    local noise_lines="${1:-1}"
+    local noise_lines="${1:-1}" status="${2:-0}"
     local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-block.XXXXXX")"
     mkdir -p "$d/scripts"
     cat > "$d/scripts/swift-safe" <<EOF
@@ -69,11 +69,81 @@ for i in \$(seq 1 $noise_lines); do echo "compiler output line \$i"; done
 echo "swift-safe: still waiting for the shared build slot after 60s of 1800s (held by pid 1)" >&2
 while [ ! -e "$d/release" ]; do sleep 0.05; done
 echo "compiler output line after release"
-echo "swift-safe: exit status 0" >&2
-exit 0
+echo "swift-safe: exit status $status" >&2
+exit $status
 EOF
     chmod +x "$d/scripts/swift-safe"
     echo "$d"
+}
+
+# A directory holding a `ps` that never answers, to be put ahead of the real
+# one on PATH. This is the hazard the process probe has to survive: the
+# watcher must reach `wait` on the build for the build's status to be
+# collected at all, so a `ps` that wedges rather than failing would strand a
+# build that may already have succeeded.
+#
+# It sleeps rather than blocking forever, and `exec`s so the sleep IS the
+# process the probe kills: a fixture that outlived a failing case would be
+# exactly the unreclaimed process this repo keeps finding. Twenty seconds is
+# long enough that no bounded probe can outlast it and short enough that a
+# leaked one reaps itself.
+mkhangingps() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-hangps.XXXXXX")"
+    cat > "$d/ps" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 20
+EOF
+    chmod +x "$d/ps"
+    echo "$d"
+}
+
+# Run "$@" in the background and say whether it finished within $1 tenths of a
+# second. Echoes "finished" or "hung". A hung command is killed, so a case
+# that fails against an unbounded probe fails rather than wedging the harness.
+await_completion() {
+    local limit="$1"; shift
+    local pid waited=0
+    "$@" >/dev/null 2>&1 &
+    pid=$!
+    while [ "$waited" -lt "$limit" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null
+            echo finished
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    echo hung
+}
+
+# Wait up to $2 tenths of a second for background job $1 to finish, leaving
+# "finished"/"hung" in AWAITED_RESULT and, when it finished, the job's status
+# in AWAITED_STATUS — the half that matters here, since a watcher that
+# returned but lost the build's status is no better than one that hung.
+#
+# Results come back through globals rather than stdout because `wait` only
+# knows the jobs of the shell that started them: run inside a command
+# substitution this could neither collect the status nor report it.
+AWAITED_RESULT=""
+AWAITED_STATUS=""
+await_exit() {
+    local pid="$1" limit="$2" waited=0
+    AWAITED_RESULT=hung
+    AWAITED_STATUS=""
+    while [ "$waited" -lt "$limit" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            AWAITED_STATUS=0
+            wait "$pid" 2>/dev/null || AWAITED_STATUS=$?
+            AWAITED_RESULT=finished
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    return 1
 }
 
 # Wait up to ~10s for $2 to appear in file $1. Echoes "found" or "missing".
@@ -429,6 +499,90 @@ test_silence_with_no_live_processes_says_so() {
     # A pid that has exited: the walk finds nothing below it.
     local msg; msg="$(describe_silent_build "$dead" 900)"
     assert_contains "an empty process tree is reported as empty" "$msg" "no live child processes"
+}
+
+# --- the probe must not become the hang ---------------------------------------
+#
+# This is a watchdog, and the one failure it may never have is its own. The
+# walk runs from inside `follow_build_progress`, which must RETURN before
+# `run_governed_build` reaches the `wait` that collects the build's exit
+# status — so a `ps` that wedges instead of failing strands a build whose own
+# status may already be a clean zero. The bound is what these cases pin.
+
+test_a_hanging_process_probe_is_abandoned_rather_than_waited_on() {
+    local fake; fake="$(mkhangingps)"
+    local finished
+    finished="$(
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        # Three seconds is comfortably past the one-second bound and
+        # comfortably short of the fixture's own twenty.
+        await_completion 30 build_descendant_processes 1
+    )"
+    assert_eq "a hanging ps is abandoned, not waited on" "finished" "$finished"
+    rm -rf "$fake"
+}
+
+test_an_abandoned_probe_is_distinguishable_from_an_empty_process_tree() {
+    local fake; fake="$(mkhangingps)"
+    local status=0
+    (
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        build_descendant_processes 1 >/dev/null 2>&1
+    ) || status=$?
+    # Empty output alone cannot carry the difference: "nothing is running" and
+    # "I could not look" are opposite conclusions that both print nothing.
+    assert_fail "an abandoned probe reports failure, not an empty tree" test "$status" -eq 0
+    rm -rf "$fake"
+}
+
+test_a_hanging_probe_degrades_to_saying_it_could_not_look() {
+    local fake; fake="$(mkhangingps)"
+    local msg
+    msg="$(
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        describe_silent_build 1 480
+    )"
+    assert_contains "the silence itself is still named" "$msg" "no build output for 480s"
+    assert_contains "an unreadable process table says so" "$msg" "could not be enumerated within 1s"
+    assert_contains "the degraded report names its own limits" "$msg" "Could not enumerate descendants"
+    # The honesty assertion. Falling through to the no-compiler branch would
+    # tell a human that nothing is compiling when the truth is that nobody
+    # looked — and that reads as licence to kill a working build.
+    assert_missing "it never claims no compiler is running" "$msg" "NO swift-frontend process is running"
+    assert_missing "it never claims an empty process tree" "$msg" "no live child processes"
+    rm -rf "$fake"
+}
+
+# The assertion the whole finding is about: the watcher returns, and the
+# build's REAL status still reaches restart.sh. 75 rather than 0, so a status
+# that was invented rather than collected is visible as such.
+test_a_hanging_ps_cannot_strand_the_builds_exit_status() {
+    local d; d="$(mkblockingworktree 1 75)"
+    local fake; fake="$(mkhangingps)"
+    local out="$d/stdout.txt" err="$d/stderr.txt"
+    (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        run_under_restart_shell "$d" > "$out" 2> "$err"
+    ) &
+    local runner=$!
+
+    local seen; seen="$(await_text "$err" "no build output for")"
+    assert_eq "silence is still reported when ps hangs" "found" "$seen"
+    assert_fail "the build had not been released yet" test -e "$d/release"
+
+    : > "$d/release"
+    await_exit "$runner" 50 || true
+    assert_eq "the watcher returns rather than waiting on the probe" "finished" "$AWAITED_RESULT"
+    assert_eq "the build's own status is still collected" "75" "$AWAITED_STATUS"
+    # Not left running: a case that failed above must not leak the build. The
+    # stub exits on its own, so this is a collection, not a kill.
+    [ "$AWAITED_RESULT" = finished ] || wait "$runner" 2>/dev/null
+    rm -rf "$d" "$fake"
 }
 
 test_the_lock_path_follows_the_wrappers_own_resolution() {

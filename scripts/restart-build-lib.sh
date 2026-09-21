@@ -57,6 +57,23 @@ COMPILER_LEAF_PROCESS=swift-frontend
 # is a human-readable line, not a process listing.
 MAX_REPORTED_BUILD_PROCESSES=6
 
+# How long the process-table snapshot may take before it is abandoned.
+#
+# This is the bound that keeps the watchdog from becoming the hang. The
+# snapshot is taken from inside the loop that watches the build, and that loop
+# must return for `run_governed_build` to reach the `wait` that collects the
+# build's exit status at all. An unbounded `ps` that wedges rather than
+# failing would therefore strand a build whose own status may already be a
+# clean zero — a watchdog taking down the thing it was watching. The sibling
+# probes in scripts/swift-safe are bounded for exactly this reason; so is
+# this one.
+#
+# Five seconds because the snapshot is a diagnostic and the thing it describes
+# has by then been silent for minutes: a probe worth waiting on is one that
+# answers immediately, and one that has not answered in five seconds is not
+# going to.
+DEFAULT_PROCESS_PROBE_SECONDS=5
+
 # May restart.sh ship what is in .build/<config>, given the status of the build
 # it just ran? Only a clean zero says yes. Deliberately not "is it one of the
 # statuses I recognize" — an unrecognized non-zero is still a build that did
@@ -131,6 +148,10 @@ build_silence_seconds() {
     positive_integer_setting "${TBD_RESTART_BUILD_SILENCE_SECONDS-}" "$DEFAULT_BUILD_SILENCE_SECONDS"
 }
 
+process_probe_seconds() {
+    positive_integer_setting "${TBD_RESTART_PROCESS_PROBE_SECONDS-}" "$DEFAULT_PROCESS_PROBE_SECONDS"
+}
+
 # Where scripts/swift-safe's machine-global lock lives, for a message that
 # tells a human what to inspect. Mirrors the wrapper's own resolution order.
 swift_build_lock_path() {
@@ -141,12 +162,66 @@ swift_build_lock_path() {
     fi
 }
 
+# A `ps` snapshot of the whole process table on stdout, or NOTHING and a
+# non-zero status when it could not be taken within `process_probe_seconds`.
+# The two outcomes are deliberately distinguishable: "the table says no
+# process is running" and "the table could not be read" are opposite
+# conclusions, and a diagnostic that confuses them points the wrong way.
+#
+# The bound is a background job and a poll, not `timeout(1)`: that binary is
+# not present on every machine this runs on (a stock macOS has none), so
+# reaching for it would leave the bound silently absent exactly where it is
+# needed. Nothing here is more than bash plus `ps` itself.
+#
+# Every teardown step is unconditional-safe (`|| true`, `2>/dev/null`)
+# because callers run under restart.sh's `set -e`: a failing `kill` on a
+# process that just exited must not take the build down with it.
+build_process_table() {
+    local limit snapshot probe waited status=0
+    limit="$(process_probe_seconds)"
+    snapshot="$(mktemp "${TMPDIR:-/tmp}/tbd-ps-probe.XXXXXX")" || return 1
+
+    ps -Ao pid=,ppid=,comm= > "$snapshot" 2>/dev/null &
+    probe=$!
+    # Tenths, so a probe that answers promptly — which is every healthy one —
+    # is not billed a whole second by the polling itself.
+    waited=0
+    while kill -0 "$probe" 2>/dev/null && [ "$waited" -lt "$((limit * 10))" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    if kill -0 "$probe" 2>/dev/null; then
+        # Abandoned. SIGTERM first, then SIGKILL, because a `ps` wedged in
+        # the kernel may not take the first — and a probe that leaked a
+        # process would be its own unreclaimed resource.
+        kill "$probe" 2>/dev/null || true
+        sleep 0.1
+        kill -9 "$probe" 2>/dev/null || true
+        wait "$probe" 2>/dev/null || true
+        rm -f "$snapshot"
+        return 1
+    fi
+
+    wait "$probe" || status=$?
+    if [ "$status" = 0 ]; then
+        cat "$snapshot"
+    fi
+    rm -f "$snapshot"
+    return "$status"
+}
+
 # "<pid> <command>" for every live process below pid $1, itself excluded.
-# One `ps` answers the whole walk; macOS has no /proc. Best effort — a `ps`
-# that fails prints nothing, and the caller says only what it can see.
+# One `ps` answers the whole walk; macOS has no /proc.
+#
+# Returns non-zero, having printed nothing, when the snapshot could not be
+# taken — which a caller must report as "could not enumerate" rather than as
+# an empty process tree. Empty output with a ZERO status is the other thing,
+# and means the build really has no live children.
 build_descendant_processes() {
-    local root="$1"
-    ps -Ao pid=,ppid=,comm= 2>/dev/null | awk -v root="$root" '
+    local root="$1" table
+    table="$(build_process_table)" || return 1
+    printf '%s\n' "$table" | awk -v root="$root" '
         {
             pid = $1; parent[pid] = $2
             $1 = ""; $2 = ""; sub(/^ +/, "")
@@ -190,8 +265,22 @@ build_descendant_processes() {
 # days, holding the machine-global lock. Nothing in TBD's tooling said so.
 describe_silent_build() {
     local builder="$1" silent_for="$2"
-    local processes compilers listed
-    processes="$(build_descendant_processes "$builder")"
+    local processes compilers listed enumerated=1
+    processes="$(build_descendant_processes "$builder")" || enumerated=0
+
+    # The probe gave up. Say only that, and in particular do NOT fall through
+    # to the no-compiler branch: "no swift-frontend is running" and "I could
+    # not look" are opposite conclusions, and a silent build is the one
+    # moment where reporting the first for the second would send a human off
+    # to kill a build that was compiling.
+    if [ "$enumerated" = 0 ]; then
+        printf 'restart.sh: no build output for %ss, and the process table could not be enumerated within %ss.\n' \
+            "$silent_for" "$(process_probe_seconds)"
+        printf '  Could not enumerate descendants, so nothing is known about what the build is doing.\n'
+        printf '  Inspect the holder by hand: lsof %s\n' "$(swift_build_lock_path)"
+        return 0
+    fi
+
     compilers="$(printf '%s\n' "$processes" | grep -c -- "$COMPILER_LEAF_PROCESS")" \
         || compilers=0
 
