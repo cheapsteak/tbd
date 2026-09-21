@@ -49,8 +49,11 @@ struct ControlModePaneKey: Hashable {
 /// mounted under it was spawned.
 ///
 /// `startedAt` is nil until the pager's terminal reports the spawn
-/// (`AppState.markRemoteAttachStarted`), and goes back to nil on every
-/// generation bump because the replacement child re-reports for itself.
+/// (`AppState.markRemoteAttachStarted`), goes back to nil on every generation
+/// bump because the replacement child re-reports for itself, and goes back to
+/// nil again when that child's exit is recorded
+/// (`AppState.markRemoteSessionDetached`) — a spawn time must never outlive
+/// the child it dates.
 /// `AppState.handleNetworkChange` compares it against the change time to skip
 /// children that are already running on the new path.
 struct RemoteAttachGeneration: Equatable {
@@ -1209,6 +1212,17 @@ final class AppState {
         if let generation, generation != remoteAttachGeneration(for: selection) {
             return
         }
+        // The child that reported this exit is gone, so its spawn time must
+        // not outlive it. `handleNetworkChange` reads a recorded start as "a
+        // live child has been running since then" and restarts the pane; an
+        // unexpected exit re-enters `attachedRemoteSelections` the moment its
+        // backoff elapses, so a start left behind here would make the very
+        // next network change bump the generation of a selection whose
+        // replacement child has not spawned yet — a restart of nothing, and
+        // one that skips the pane again on the change after it. The
+        // generation itself is kept: it still names the mount key a
+        // replacement spawns under, and no child was superseded here.
+        remoteAttachGenerations[selection]?.startedAt = nil
         switch RemoteAttachExitClass.classify(exitCode: exitCode) {
         case .unexpected:
             pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
@@ -1247,11 +1261,20 @@ final class AppState {
         remoteAttachGenerations[selection]?.generation ?? 0
     }
 
-    /// When the attach child currently mounted for `selection` was spawned,
-    /// or nil when no child has reported a spawn under the current
-    /// generation — it has not started yet, or a reconnect just superseded
-    /// the one that had. `handleNetworkChange` reads nil as "will spawn on
-    /// the new path anyway" and leaves such a selection alone.
+    /// When the attach child that is currently running for `selection` was
+    /// spawned, or nil when no such child exists: none has reported a spawn
+    /// under the current generation (it has not started yet, or a reconnect
+    /// just superseded the one that had), or the one that did has since
+    /// exited and been recorded by `markRemoteSessionDetached`. Non-nil
+    /// therefore means a live child, which is what `handleNetworkChange`
+    /// relies on — it reads nil as "nothing to restart; whatever spawns next
+    /// spawns on the new path" and leaves such a selection alone.
+    ///
+    /// The one unmount that is not an exit — cap eviction, whose terminate
+    /// deliberately suppresses the child's own exit callback — leaves a
+    /// recorded start behind, but an evicted selection is by definition
+    /// absent from `attachedRemoteSelections`, so the only caller never reads
+    /// it; a re-admitted pane re-reports its own spawn before it could.
     func remoteAttachStartedAt(for selection: RemoteSessionSelection) -> Date? {
         remoteAttachGenerations[selection]?.startedAt
     }

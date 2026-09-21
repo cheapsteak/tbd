@@ -200,6 +200,46 @@ struct RemoteAttachNetworkRecoveryTests {
         }
     }
 
+    /// The other way a child stops being live: it exited. A recorded start
+    /// that outlives its child claims a live pane to `handleNetworkChange`,
+    /// which would then bump the generation of a selection whose replacement
+    /// has not spawned — and skip the pane on the next change. Reddens if the
+    /// `startedAt = nil` clear in `markRemoteSessionDetached` is dropped. The
+    /// generation is deliberately NOT bumped: nothing was superseded here.
+    @Test("a detach clears the recorded start time")
+    func aDetachClearsTheRecordedStart() {
+        withState { state in
+            let s1 = attached(state)
+            state.markRemoteAttachStarted(s1, generation: 0, at: Date().addingTimeInterval(-60))
+            #expect(state.remoteAttachStartedAt(for: s1) != nil)
+
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0)
+
+            #expect(state.remoteAttachStartedAt(for: s1) == nil)
+            #expect(state.remoteAttachGeneration(for: s1) == 0, "an exit supersedes nothing")
+        }
+    }
+
+    /// The converse discriminator for that clear: a late exit from a child a
+    /// reconnect already killed must not reach the clear at all, or the
+    /// corpse would erase the live replacement's start and leave the pane
+    /// looking unspawned to the next network change. Reddens if the clear is
+    /// hoisted above the generation check in `markRemoteSessionDetached`.
+    @Test("a superseded exit does not clear the current generation's start")
+    func aSupersededExitDoesNotClearTheCurrentStart() {
+        withState { state in
+            let s1 = attached(state)
+            state.reconnectRemoteSession(s1)
+            let spawnedAt = Date()
+            state.markRemoteAttachStarted(s1, generation: 1, at: spawnedAt)
+
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0)
+
+            #expect(state.remoteAttachStartedAt(for: s1) == spawnedAt)
+            #expect(state.pendingReconnectRemoteSessions[s1] == nil, "the corpse's exit is dropped whole")
+        }
+    }
+
     // MARK: - Expiring stale backoff
 
     /// A session that failed because the network was down would otherwise wait
@@ -362,7 +402,8 @@ struct RemoteAttachNetworkRecoveryTests {
             let s1 = attached(state)
             let t = Date()
             state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(-60))
-            #expect(state.pendingReconnectRemoteSessions[s1] != nil)
+            let before = state.pendingReconnectRemoteSessions[s1]
+            #expect(before != nil)
             #expect(state.remoteAttachStartedAt(for: s1) == nil, "no child spawned, so step 1 restarts nothing")
             #expect(state.attachedRemoteSelections.contains(s1), "its window closed well before the change")
 
@@ -379,6 +420,10 @@ struct RemoteAttachNetworkRecoveryTests {
 
             #expect(fired.count > 0, "nothing notified, so the pane waits for the next provider republish")
             #expect(state.remoteAttachGeneration(for: s1) == 0, "step 1 restarted nothing")
+            // A return of 0 alone cannot tell "skipped" from "already moved
+            // to `t`", so the entry itself is checked first — the sibling
+            // idiom in `aFailureAfterTheChangeKeepsItsCoolOff`.
+            #expect(state.pendingReconnectRemoteSessions[s1] == before, "step 2 left the entry untouched")
             #expect(state.expireRemoteReconnectBackoff(at: t) == 0, "step 2 had nothing eligible to move")
         }
     }

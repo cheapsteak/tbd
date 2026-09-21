@@ -227,10 +227,18 @@ extension AppState {
     ///    it already met the new path. `attempts` and the provider-health gate
     ///    both survive untouched — see `expireRemoteReconnectBackoff(at:)`.
     /// 3. **Re-evaluate now, with no timer and no RPC.**
-    ///    `attachedRemoteSelections` is computed on every read, and both
-    ///    mutations above notify observers, so `RemoteAttachPager` re-mounts
-    ///    on the next render rather than on the next ~60 s provider
-    ///    republish.
+    ///    `attachedRemoteSelections` is computed on every read, so it re-runs
+    ///    only when some property that computation reads notifies its
+    ///    observers — and neither effect above is guaranteed to be one: a
+    ///    change that restarts nothing and expires nothing writes nothing.
+    ///    What guarantees the notification is the restore of
+    ///    `recentlyAttachedRemoteSessions` at the end of
+    ///    `restartRemoteAttachChildren(startedBefore:)`, which is
+    ///    unconditional and fires even when the order it writes back is
+    ///    identical — see the comment at that write for why it is neither
+    ///    guarded by an equality check nor written as a whole-property
+    ///    assignment. So `RemoteAttachPager` re-mounts on the next render
+    ///    rather than on the next ~60 s provider republish.
     func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
         let restarted = restartRemoteAttachChildren(startedBefore: change.at)
         let cleared = expireRemoteReconnectBackoff(at: change.at)
