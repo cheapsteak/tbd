@@ -197,7 +197,11 @@ public enum ProfilePoolPicker {
         guard !bindingBuckets.isEmpty else { return 1.0 }
 
         let maxPercent = bindingBuckets.map { min($0.percent, 100.0) }.max() ?? 0.0
-        return max(0.0, 1.0 - (maxPercent / 100.0))
+        // Round to a millionth so a reading of exactly 95% lands on the 0.05
+        // floor rather than a hair above it (1 - 0.95 is 0.050000000000000044
+        // in binary floating point), and equal readings compare equal.
+        let raw = max(0.0, 1.0 - (maxPercent / 100.0))
+        return (raw * 1_000_000).rounded() / 1_000_000
     }
 
     /// Staleness threshold for a credential kind.
@@ -337,6 +341,11 @@ public enum ProfilePoolPicker {
         guard case let .eligible(lhsScore, _, _) = lhsVerdict,
               case let .eligible(rhsScore, _, _) = rhsVerdict else {
             return 0  // Neither should be called if not eligible
+        }
+
+        // Score first: lower is better. Only equal scores reach the tie-breaks.
+        if lhsScore != rhsScore {
+            return lhsScore < rhsScore ? -1 : 1
         }
 
         // Tie-break 1: Configured default first

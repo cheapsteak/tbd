@@ -9,7 +9,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceHashCredentialForOAuth() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Test OAuth",
             kind: .oauth
@@ -32,7 +32,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceNoCredentialForOAuthWithoutIdentity() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Test OAuth No Cred",
             kind: .oauth
@@ -53,7 +53,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceAccountKeyPrecedence() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Test Account Key",
             kind: .oauth
@@ -86,7 +86,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceAccountKeyFallsBackToLoginIdentity() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Test Account Key",
             kind: .oauth
@@ -109,7 +109,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceAccountKeyFallsBackToProfileID() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Test Account Key",
             kind: .oauth
@@ -132,7 +132,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceIsConfiguredDefault() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profile = try await db.modelProfiles.create(
             name: "Default Profile",
             kind: .oauth
@@ -156,7 +156,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func balancingOffFallsBackToDefault() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -186,7 +186,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func explicitOverrideStillWins() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -221,7 +221,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func balancingOnWithoutSourceFallsBackToDefault() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -245,7 +245,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func repoOverrideStillWins() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -291,7 +291,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func scratchOverrideStillWins() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -327,7 +327,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func candidateSourceThrowingFallsBackToDefault() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .oauth
@@ -351,7 +351,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test
     func nothingEligibleFallsBackToDefault() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let defaultProfile = try await db.modelProfiles.create(
             name: "Default",
             kind: .apiKey
@@ -381,7 +381,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test("balancing: on selects lower usage, off uses default")
     func balancingOnSelectsLowerUsageProfile() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profileA = try await db.modelProfiles.create(
             name: "Profile A",
             kind: .oauth
@@ -395,18 +395,8 @@ struct ModelProfileResolverBalancingTests {
         try await db.config.setDefaultProfileID(profileA.id)
 
         // Create repo with no override
-        let repo = RepoRecord(
-            id: UUID(),
-            name: "Test Repo",
-            owner: "test",
-            host: "github.com",
-            workingDirectory: "/tmp",
-            gitDirectory: "/tmp/.git",
-            profileOverrideID: nil,
-            localBranch: "main",
-            remoteURL: "https://github.com/test/test.git"
-        )
-        try await db.repos.save(repo)
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo", displayName: "Test Repo", defaultBranch: "main")
 
         // Seed snapshots: A at 80% with 2 live sessions, B at 20% with 0 live sessions
         let snapshotA = ProfileUsageSnapshot(
@@ -434,12 +424,14 @@ struct ModelProfileResolverBalancingTests {
         try await db.oauthUsageSnapshots.upsert(profileID: profileA.id, snapshot: snapshotA)
         try await db.oauthUsageSnapshots.upsert(profileID: profileB.id, snapshot: snapshotB)
 
+        let worktree = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt", path: "/tmp/wt-balancing", tmuxServer: "@wt")
         // Create 2 live Claude terminals on A
         _ = try await db.terminals.create(
-            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1", profileID: profileA.id
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", profileID: profileA.id, kind: .claude
         )
         _ = try await db.terminals.create(
-            worktreeID: UUID(), tmuxWindowID: "@2", tmuxPaneID: "%2", profileID: profileA.id
+            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2", profileID: profileA.id, kind: .claude
         )
 
         let source = ProfilePoolCandidateSource(
@@ -474,7 +466,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test("balancing: on without default selects lowest usage")
     func balancingOnWithoutDefaultSelectsLowestUsage() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profileA = try await db.modelProfiles.create(
             name: "Profile A",
             kind: .oauth
@@ -543,7 +535,7 @@ struct ModelProfileResolverBalancingTests {
 
     @Test("candidate source: live sessions reflect terminal state")
     func candidateSourceReflectsLiveSessionCounts() async throws {
-        let db = TBDDatabase(inMemory: true)
+        let db = try TBDDatabase(inMemory: true)
         let profileA = try await db.modelProfiles.create(
             name: "Profile A",
             kind: .oauth
@@ -553,18 +545,18 @@ struct ModelProfileResolverBalancingTests {
             kind: .oauth
         )
 
+        let worktree = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt", path: "/tmp/wt-balancing", tmuxServer: "@wt")
         // Create 1 live Claude terminal on A
         _ = try await db.terminals.create(
-            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1", profileID: profileA.id
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", profileID: profileA.id, kind: .claude
         )
 
         // Create 1 hibernated terminal on A (should not count)
         let hibernated = try await db.terminals.create(
-            worktreeID: UUID(), tmuxWindowID: "@2", tmuxPaneID: "%2", profileID: profileA.id
+            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2", profileID: profileA.id, kind: .claude
         )
-        var hibernatedUpdated = hibernated
-        hibernatedUpdated.hibernatedAt = Date()
-        try await db.terminals.update(hibernatedUpdated)
+        try await db.terminals.setHibernated(id: hibernated.id, sessionID: "session-2", reason: .auto)
 
         // No terminals on B
 

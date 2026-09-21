@@ -144,6 +144,7 @@ final class AppStateEmissionTracker {
         _ = state.prBindings
         _ = state.prDetachedCounts
         _ = state.modelProfiles
+        _ = state.limitHits
         _ = state.defaultProfileID
         _ = state.codexUsage
         _ = state.isLoadingCodexUsage
@@ -260,6 +261,7 @@ final class AppStateEmissionTracker {
         "prBindings",
         "prDetachedCounts",
         "modelProfiles",
+        "limitHits",
         "defaultProfileID",
         "codexUsage",
         "isLoadingCodexUsage",

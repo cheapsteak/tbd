@@ -173,7 +173,7 @@ extension RPCRouter {
     }
 
     /// Eligibility verdict for attempting a profile rotation on limit hit.
-    enum RotationVerdict: Sendable, CustomStringConvertible {
+    enum RotationVerdict: Sendable, Equatable, CustomStringConvertible {
         case rotate(UUID)
         case flagOff
         case ambient
