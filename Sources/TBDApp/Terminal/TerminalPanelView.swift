@@ -229,21 +229,11 @@ struct TerminalPanelView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Text("⚠ Session limit hit on \(model.limitedProfileName) · \(model.resetsText)")
-                                .font(.caption)
-                            Spacer()
-                        }
-                        if model.isRotated, let rotatedName = model.suggestedProfileName {
-                            Text("— switched to \(rotatedName)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    Text("⚠ Session limit hit on \(model.limitedProfileName) · \(model.resetsText)")
+                        .font(.caption)
                     Spacer()
-                    if !model.isRotated, let suggestedName = model.suggestedProfileName, let suggestedSummary = model.suggestedUsageSummary {
-                        Button("Switch to \(suggestedName) — \(suggestedSummary)") {
+                    if let switchTitle = model.switchButtonTitle {
+                        Button(switchTitle) {
                             Task {
                                 if let suggestedID = limitHit.suggestedProfileID {
                                     await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: suggestedID, mode: .inPlace)

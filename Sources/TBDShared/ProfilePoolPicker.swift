@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Represents a single profile with its current usage, credential, and load information.
 /// Used by `ProfilePoolPicker.pick(_:excludingAccountKeys:now:)` to score and rank profiles
-/// for spawn-time and limit-rotation decisions.
+/// for spawn-time placement and the hard-limit switch suggestion.
 public struct ProfilePoolCandidate: Sendable, Equatable {
     /// The profile's unique identifier.
     public var profileID: UUID
@@ -77,8 +77,8 @@ public enum ProfilePoolVerdict: Sendable, Equatable {
     /// Profile is opted out of the pool (poolOptOut == true).
     case optedOut
 
-    /// Profile's accountKey is in the excludingAccountKeys set (used in rotation to
-    /// avoid swapping a session to the same account).
+    /// Profile's accountKey is in the excludingAccountKeys set (used by the
+    /// hard-limit suggestion so it never names the exhausted account).
     case sameAccount
 
     /// Snapshot is absent or stale. The threshold is `stalenessWindow(for: kind)`:
@@ -95,7 +95,7 @@ public enum ProfilePoolVerdict: Sendable, Equatable {
 ///
 /// Names the chosen profile (if any) and includes per-candidate verdicts for logging.
 public struct ProfilePoolDecision: Sendable, Equatable {
-    /// The profile id chosen for spawn/rotation, or nil if no eligible profile exists.
+    /// The profile id chosen for spawn or suggestion, or nil if no eligible profile exists.
     public var chosen: UUID?
     /// Verdict for every candidate in the input set, keyed by profileID.
     /// Even ineligible profiles appear so the resolver can log the reasoning.
@@ -110,7 +110,7 @@ public struct ProfilePoolDecision: Sendable, Equatable {
 /// Pure account load-balancing picker for Claude profiles.
 ///
 /// A stateless function that ranks profiles by available headroom and current load,
-/// choosing the profile with the most room for a new session or rotation target.
+/// choosing the profile with the most room for a new session or a switch suggestion.
 /// All scores and verdicts are deterministic and explainable from the input facts.
 /// The picker holds no state and touches no I/O — it works entirely over the
 /// candidate set passed in.
@@ -131,7 +131,7 @@ public enum ProfilePoolPicker {
     /// - Parameters:
     ///   - candidates: Profiles to consider.
     ///   - excludingAccountKeys: Account keys to exclude from eligibility (e.g.,
-    ///     the exhausted account in a rotation). Profiles whose accountKey is in
+    ///     the exhausted account in a hard-limit suggestion). Profiles whose accountKey is in
     ///     this set are marked `.sameAccount` even if otherwise eligible.
     ///   - now: The current time for staleness assessment.
     ///

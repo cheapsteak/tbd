@@ -1112,9 +1112,8 @@ public final class Daemon: Sendable {
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
             // The same candidate source the resolver balances on; the
-            // rate-limit handler reads it to suggest (and, gated, rotate to)
-            // a profile with room. Without it both rotation behaviors are
-            // silently unreachable.
+            // rate-limit handler reads it to suggest a profile with room.
+            // Without it the suggestion is silently unreachable.
             profilePoolCandidateSource: profilePoolCandidateSource,
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,

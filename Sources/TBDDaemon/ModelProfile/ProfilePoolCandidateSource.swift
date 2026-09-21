@@ -113,8 +113,8 @@ public struct ProfilePoolCandidateSource: Sendable {
     ///
     /// Looks up the profile's account grouping key (snapshot.organizationID ??
     /// loginIdentity ?? profileID.uuidString) without assembling the full candidate list.
-    /// Used by the rotation worker to determine the excluded account key when suggesting
-    /// a rotation target.
+    /// Used by the rate-limit handler to exclude the limited account when suggesting
+    /// a profile to switch to.
     ///
     /// - Parameter profileID: The profile to look up.
     /// - Returns: The account key string, or nil if the profile does not exist.

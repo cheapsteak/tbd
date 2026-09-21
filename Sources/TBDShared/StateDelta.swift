@@ -63,9 +63,9 @@ public enum StateDelta: Codable, Sendable {
     /// then simply not acted on.
     case remoteSessionReconnectRequested(RemoteSessionReconnectDelta)
     /// A terminal hit a hard usage limit — session limit reached or similar
-    /// (design 2026-09-05 §7). Carries the terminal, suggested rotation target,
+    /// (design 2026-09-05 §7). Carries the terminal, the suggested profile,
     /// and reset time so the app can show the limit banner and offer the
-    /// one-click switch or await automatic rotation (if enabled).
+    /// one-click switch.
     case terminalLimitHit(TerminalLimitHitDelta)
 }
 
@@ -532,40 +532,32 @@ public struct RemoteSessionAttentionDelta: Codable, Sendable {
 
 /// A terminal hit a hard usage limit (session limit, weekly limit, etc.).
 /// Carries the terminal and worktree IDs, the session's pinned profile, the
-/// limit reset time, and the suggested rotation target so the app can show
-/// a banner and offer one-click switching or wait for automatic rotation
-/// (design 2026-09-05 §7.1, §7.2).
+/// limit reset time, and the suggested profile so the app can show a banner
+/// and offer a one-click switch (design 2026-09-05 §7.1). The daemon never
+/// switches the session itself.
 public struct TerminalLimitHitDelta: Codable, Sendable {
     public let terminalID: UUID
     public let worktreeID: UUID
     /// The profile the session is running on, when it is pinned. Nil for
-    /// ambient sessions, which the rotation policy does not move.
+    /// ambient sessions.
     public let profileID: UUID?
-    /// When the limit resets (or when it was cleared by a rotation).
+    /// When the limit resets.
     public let resetsAt: Date
     /// The limit type: "session" or "weekly_all" or another label the
     /// daemon's rate-limit detector names (used for the banner).
     public let limitType: String
     /// The profile the daemon would suggest switching to, or nil when no
-    /// profile is eligible. Present whether rotation is enabled or not —
-    /// the app shows it in the banner regardless.
+    /// profile is eligible. The app offers it as the banner's switch button.
     public let suggestedProfileID: UUID?
-    /// The profile the session was actually switched to by automatic rotation,
-    /// or nil when rotation was off, not enabled, or the swap failed. Set
-    /// after the swap, so a banner sees it populate when the terminal's
-    /// activity transitions to `.working`.
-    public let rotatedToProfileID: UUID?
 
     public init(terminalID: UUID, worktreeID: UUID, profileID: UUID?,
                 resetsAt: Date, limitType: String,
-                suggestedProfileID: UUID? = nil,
-                rotatedToProfileID: UUID? = nil) {
+                suggestedProfileID: UUID? = nil) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.profileID = profileID
         self.resetsAt = resetsAt
         self.limitType = limitType
         self.suggestedProfileID = suggestedProfileID
-        self.rotatedToProfileID = rotatedToProfileID
     }
 }
