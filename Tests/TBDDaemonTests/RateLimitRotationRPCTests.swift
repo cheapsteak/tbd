@@ -370,6 +370,69 @@ import TestSupport
         #expect(notifs[0].message?.contains("Eligible") == true)
     }
 
+    /// The swap succeeds but no `continue` can be armed. The reachable shape
+    /// of that today is "no scheduler" (the daemon constructs one, mock mode
+    /// does not); the other shape — `schedule()` returning nil because a
+    /// duplicate report raced in between the handler's latch check and the
+    /// swap — cannot be forced deterministically, because the latch at the top
+    /// of the handler turns a pre-seeded pending row into an early return
+    /// before the swap. Either way the person must not be told the turn will
+    /// resume on its own when nothing was armed.
+    @Test func rotationSeamSuccessWithoutAnArmedContinueSaysSo() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauth)
+        let eligibleProfileID = try await makeProfile(name: "Eligible", kind: .oauth)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-123")
+        try await makeSnapshot(for: eligibleProfileID, percent: 30, organizationID: "org-456")
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
+        )
+        let testRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            profilePoolCandidateSource: source,
+            actuationLog: makeTestActuationLog())
+        // Deliberately no scheduler: the swap can succeed, the continue cannot be armed.
+        testRouter.limitResumeScheduler = nil
+        let receivedParams = SwapParamsBox()
+        testRouter.rotationSwapPerformer = { paramsData, _ in
+            receivedParams.value = try JSONDecoder().decode(TerminalSwapProfileParams.self, from: paramsData)
+            return .ok()
+        }
+
+        let request = try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID,
+                resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session",
+                rawMessage: "You've hit your session limit · resets 3pm (UTC)"))
+        let response = await testRouter.handle(request)
+        #expect(response.success)
+
+        // The swap happened …
+        #expect(receivedParams.value?.newProfileID == eligibleProfileID)
+        // … nothing was armed …
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
+        // … and the notification says both things rather than implying a resume.
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs[0].message?.contains("switched to Eligible") == true, "got: \(notifs[0].message ?? "nil")")
+        #expect(notifs[0].message?.contains("not resumed automatically") == true, "got: \(notifs[0].message ?? "nil")")
+    }
+
     @Test func rotationSeamFailureReturnsAuditRowAndSuggestion() async throws {
         try await db.config.setLimitRotationEnabled(true)
         try await db.config.setAutoResumeOnLimitReset(false)
