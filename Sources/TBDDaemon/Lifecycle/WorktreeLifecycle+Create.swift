@@ -1392,7 +1392,15 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile? = nil
         if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo?.id, override: overrideProfileID)
+                // Restored or carried-over conversations belong to the account
+                // holding their transcripts, which nothing here records, so
+                // they keep the stable pre-balancing resolution. Fresh spawns
+                // balance.
+                resolvedProfile = try await resolver.resolve(
+                    repoID: repo?.id, override: overrideProfileID,
+                    balance: ModelProfileResolver.balancesWorktreeSpawn(
+                        restoringArchivedSessions: !archivedSessions.isEmpty,
+                        carryingOver: carryover != nil))
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil

@@ -146,6 +146,26 @@ public struct ModelProfileResolver: Sendable {
         )
     }
 
+    /// Whether a terminal spawn may take a balanced pick. A resumed
+    /// conversation belongs to the account holding its transcript, which the
+    /// history row does not record, so a resume keeps the stable
+    /// pre-balancing resolution; a load-sensitive pick could land it on an
+    /// account without the transcript.
+    public static func balances(resumeSessionID: String?) -> Bool {
+        resumeSessionID == nil
+    }
+
+    /// Whether a worktree-create spawn may take a balanced pick: never when
+    /// it restores archived conversations or carries one over, for the same
+    /// reason as `balances(resumeSessionID:)` — those resume transcripts that
+    /// live under whichever account wrote them.
+    public static func balancesWorktreeSpawn(
+        restoringArchivedSessions: Bool,
+        carryingOver: Bool
+    ) -> Bool {
+        !restoringArchivedSessions && !carryingOver
+    }
+
     /// Settle a balanced pick's reservation: the spawn's terminal row has
     /// been inserted and now carries the load in the live counts. Call it
     /// with `resolved?.reservationID` right after the row lands; nil (any
@@ -162,7 +182,16 @@ public struct ModelProfileResolver: Sendable {
     /// EVERY tier of the precedence chain below. A nil `override` (the default)
     /// preserves the exact pre-existing precedence: repo override → scratch
     /// override → global default → none.
-    public func resolve(repoID: UUID?, override overrideID: UUID? = nil) async throws -> ResolvedModelProfile? {
+    ///
+    /// `balance: false` keeps that pre-balancing chain even when
+    /// `profileBalancingEnabled` is on: the global-default step returns the
+    /// default (or nil), with no pick and no reservation. Spawns that resume
+    /// an existing conversation pass it — see `balances(resumeSessionID:)`.
+    public func resolve(
+        repoID: UUID?,
+        override overrideID: UUID? = nil,
+        balance: Bool = true
+    ) async throws -> ResolvedModelProfile? {
         // Step 0: explicit per-creation override — highest priority. If the
         // row/keychain is missing we log and fall through to the normal chain
         // rather than fail the spawn.
@@ -195,7 +224,7 @@ public struct ModelProfileResolver: Sendable {
         }
 
         // Step 2: global default, or balanced pick if enabled.
-        if cfg.profileBalancingEnabled, let source = candidateSource {
+        if balance, cfg.profileBalancingEnabled, let source = candidateSource {
             // Balancing is enabled and we have a source: build candidates and ask the picker.
             var reservationID: UUID?
             do {

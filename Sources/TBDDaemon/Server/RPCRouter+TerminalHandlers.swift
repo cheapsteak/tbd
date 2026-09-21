@@ -334,7 +334,12 @@ extension RPCRouter {
                 if let overrideID = params.overrideProfileID {
                     resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
                 } else {
-                    resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                    // A resumed conversation belongs to the account holding its
+                    // transcript, which the history row does not record, so a
+                    // resume keeps the stable pre-balancing resolution.
+                    resolvedProfile = try await modelProfileResolver.resolve(
+                        repoID: worktree.repoID,
+                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID))
                 }
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
@@ -1270,7 +1275,11 @@ extension RPCRouter {
             }
             var resolvedProfile: ResolvedModelProfile? = nil
             do {
-                resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so a
+                // revive keeps the stable pre-balancing resolution.
+                resolvedProfile = try await modelProfileResolver.resolve(
+                    repoID: worktree.repoID, balance: false)
             } catch {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
