@@ -690,3 +690,50 @@ struct ProfilePoolPickerTests {
         #expect(decision.chosen == accountB.profileID)
     }
 }
+
+// MARK: - Credential presence rule
+
+/// The one credential-presence rule shared by the app's and the daemon's candidate
+/// builders. Every branch is pinned so the two cannot drift apart.
+struct ProfilePoolCandidateHasCredentialTests {
+    @Test
+    func oauthWithLoginIdentityHasCredential() {
+        #expect(ProfilePoolCandidate.hasCredential(kind: .oauth, hasLoginIdentity: true, snapshotStatus: .ok))
+        #expect(ProfilePoolCandidate.hasCredential(kind: .oauth, hasLoginIdentity: true, snapshotStatus: nil))
+    }
+
+    @Test
+    func oauthWithoutLoginIdentityHasNoCredential() {
+        #expect(!ProfilePoolCandidate.hasCredential(kind: .oauth, hasLoginIdentity: false, snapshotStatus: .ok))
+        #expect(!ProfilePoolCandidate.hasCredential(kind: .oauth, hasLoginIdentity: false, snapshotStatus: nil))
+    }
+
+    @Test
+    func oauthTokenWithoutSnapshotHasCredential() {
+        // No snapshot only means the poller has not probed yet; the stored token counts.
+        #expect(ProfilePoolCandidate.hasCredential(kind: .oauthToken, hasLoginIdentity: false, snapshotStatus: nil))
+    }
+
+    @Test
+    func oauthTokenNeedingLoginHasNoCredential() {
+        #expect(!ProfilePoolCandidate.hasCredential(kind: .oauthToken, hasLoginIdentity: false, snapshotStatus: .needsLogin))
+    }
+
+    @Test
+    func oauthTokenWithNoCredentialsStatusHasNoCredential() {
+        #expect(!ProfilePoolCandidate.hasCredential(kind: .oauthToken, hasLoginIdentity: false, snapshotStatus: .noCredentials))
+    }
+
+    @Test(arguments: [
+        ProfileUsageStatusKind.ok, .rateLimited, .networkError, .decodeError, .unknown,
+    ])
+    func oauthTokenWithOtherStatusHasCredential(status: ProfileUsageStatusKind) {
+        #expect(ProfilePoolCandidate.hasCredential(kind: .oauthToken, hasLoginIdentity: false, snapshotStatus: status))
+    }
+
+    @Test(arguments: [CredentialKind.apiKey, .bedrock])
+    func nonPoolKindsNeverHaveCredential(kind: CredentialKind) {
+        #expect(!ProfilePoolCandidate.hasCredential(kind: kind, hasLoginIdentity: true, snapshotStatus: .ok))
+        #expect(!ProfilePoolCandidate.hasCredential(kind: kind, hasLoginIdentity: false, snapshotStatus: nil))
+    }
+}

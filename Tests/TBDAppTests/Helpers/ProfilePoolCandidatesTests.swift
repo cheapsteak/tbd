@@ -116,5 +116,22 @@ struct ProfilePoolCandidatesTests {
         ).first
 
         #expect(candidateNeedsLogin?.hasCredential == false)
+
+        // With no snapshot yet: the stored token counts, matching the daemon's
+        // candidate source (the picker still rejects it as .noFreshReading).
+        let entryUnprobed = ModelProfileWithUsage(profile: profile, usageSnapshot: nil)
+
+        let candidateUnprobed = ProfilePoolCandidates.fromApp(
+            entries: [entryUnprobed],
+            liveCounts: { _ in 0 },
+            defaultProfileID: nil
+        ).first
+
+        #expect(candidateUnprobed?.hasCredential == true)
+        if let candidateUnprobed {
+            let decision = ProfilePoolPicker.pick(candidates: [candidateUnprobed], now: Date())
+            #expect(decision.chosen == nil)
+            #expect(decision.verdicts[profile.id] == .noFreshReading)
+        }
     }
 }

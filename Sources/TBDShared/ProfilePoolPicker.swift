@@ -11,8 +11,8 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
     /// The credential kind: `.oauth` or `.oauthToken` profiles are pool-eligible;
     /// `.apiKey` and `.bedrock` are excluded (billed differently, no usage snapshot).
     public var kind: CredentialKind
-    /// Whether the profile has a stored credential (hasCredential = oauth: loginIdentity != nil;
-    /// oauthToken: snapshot statusKind not .needsLogin/.noCredentials).
+    /// Whether the profile has a stored credential. Builders compute it with
+    /// `ProfilePoolCandidate.hasCredential(kind:hasLoginIdentity:snapshotStatus:)`.
     public var hasCredential: Bool
     /// Whether the user has opted this profile out of the balancing pool.
     public var poolOptOut: Bool
@@ -51,6 +51,34 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
         self.liveSessions = liveSessions
         self.sortOrder = sortOrder
         self.isConfiguredDefault = isConfiguredDefault
+    }
+
+    /// Whether a profile holds a credential it could start a session with.
+    ///
+    /// The single rule both candidate builders use — the daemon's
+    /// `ProfilePoolCandidateSource` and the app's picker ordering — so the app's
+    /// "balanced pick" display cannot drift from the daemon's spawn-time choice.
+    ///
+    /// - `.oauth`: a login identity is known.
+    /// - `.oauthToken`: the profile carries a stored token, so presence is assumed
+    ///   unless the last usage probe reported `.needsLogin` or `.noCredentials`.
+    ///   An absent snapshot only means the poller has not probed yet; the picker
+    ///   still rejects such a profile, as `.noFreshReading`.
+    /// - `.apiKey`, `.bedrock`: never — they are not pool-eligible.
+    public static func hasCredential(
+        kind: CredentialKind,
+        hasLoginIdentity: Bool,
+        snapshotStatus: ProfileUsageStatusKind?
+    ) -> Bool {
+        switch kind {
+        case .oauth:
+            return hasLoginIdentity
+        case .oauthToken:
+            guard let snapshotStatus else { return true }
+            return snapshotStatus != .needsLogin && snapshotStatus != .noCredentials
+        case .apiKey, .bedrock:
+            return false
+        }
     }
 }
 
