@@ -64,8 +64,32 @@ struct RemoteSessionDetailGatesTests {
         #expect(RemoteSessionDetailGates.initialTab(available: [.log], requested: .attach) == .log)
     }
 
-    @Test func initialTabFallsBackToFirstAvailableWhenRequestedIsNil() {
-        #expect(RemoteSessionDetailGates.initialTab(available: [.attach, .log], requested: nil) == .attach)
+    @Test func unattachedSessionDefaultsToLog() {
+        #expect(RemoteSessionDetailGates.initialTab(available: [.attach, .log], requested: nil) == .log)
+    }
+
+    @Test func attachedSessionDefaultsToAttach() {
+        #expect(RemoteSessionDetailGates.initialTab(
+            available: [.attach, .log], requested: nil, isAttached: true) == .attach)
+    }
+
+    @Test func explicitAttachOverridesTheUnattachedLogDefault() {
+        #expect(RemoteSessionDetailGates.initialTab(
+            available: [.attach, .log], requested: .attach, isAttached: false) == .attach)
+    }
+
+    @Test func explicitLogOverridesTheAttachedDefault() {
+        #expect(RemoteSessionDetailGates.initialTab(
+            available: [.attach, .log], requested: .log, isAttached: true) == .log)
+    }
+
+    @Test func unattachedAttachOnlySessionShowsTheAttachPromptTab() {
+        #expect(RemoteSessionDetailGates.initialTab(available: [.attach], requested: nil) == .attach)
+    }
+
+    @Test func goneSessionDefaultsToItsAvailableLog() {
+        let available = RemoteSessionDetailGates.available(capabilities: ["attach", "log"], gone: true)
+        #expect(RemoteSessionDetailGates.initialTab(available: available, requested: nil) == .log)
     }
 
     @Test func initialTabIsNilWhenNothingIsAvailable() {

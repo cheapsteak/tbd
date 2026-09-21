@@ -329,24 +329,9 @@ extension AppState {
     /// call sites stay symmetric with how `.worktrees`/`.repo` apply state
     /// directly rather than through their own "select" functions).
     ///
-    /// Clears the other three mutually-exclusive selections, sets the tab
-    /// hint, clears this session's unread entry, and feeds the
-    /// attach-lifecycle recency log (`touchAttachedRemoteSession`) — a click
-    /// AND a back/forward landing both count as "viewed" for keep-alive
-    /// purposes, matching how a worktree click OR a back/forward landing on
-    /// it both count for `touchVisitedWorktree`.
-    ///
-    /// Explicit-detach state rule: an already-detached session's flag
-    /// (`explicitlyDetachedRemoteSessions`) is cleared — allowing it to
-    /// auto-attach again — only when this call is a genuine NEW transition
-    /// (the previously selected session, if any, differs from `selection`)
-    /// or an explicit re-attach request (`tab == .attach`, the context
-    /// menu's "Attach" item). A REDUNDANT reselection of the session that's
-    /// ALREADY current, with no `.attach` tab request, changes nothing —
-    /// this is the rule that keeps a detach from looping: the pty exiting
-    /// while its row stays the current selection must never by itself cause
-    /// a respawn, since nothing re-invokes this function merely because the
-    /// selection didn't change.
+    /// Clears the other mutually-exclusive selections, sets the tab hint,
+    /// and clears unread state. Browsing and history replay never request a
+    /// new connection; only an explicit Attach action changes attach intent.
     private func activateRemoteSession(_ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
@@ -367,19 +352,17 @@ extension AppState {
     /// the user clicked; that path keeps `selectedWorktreeIDs` and calls this
     /// half directly (`syncRemoteSurfaceToWorktreeSelection`).
     ///
-    /// Everything below the selections is identical for both, and that is the
-    /// point: the tab hint, the unread clear, the keep-alive recency touch and
-    /// the detach-flag rule are what make the surface work, so a lane row that
-    /// skipped them would reach the same view in a different state.
+    /// Both row kinds share the tab hint and unread clear. A plain selection
+    /// only browses the surface; an explicit Attach action also records
+    /// connection intent and clears a clean-detach flag.
     func showRemoteSessionSurface(
         _ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?
     ) {
-        let isTransition = selectedRemoteSession != selection
         selectedRemoteSession = selection
         remoteSessionRequestedTab = tab
         unreadByRemoteSession[selection] = nil
-        touchAttachedRemoteSession(selection)
-        if isTransition || tab == .attach {
+        if tab == .attach {
+            touchAttachedRemoteSession(selection)
             clearRemoteSessionDetachedFlag(selection)
         }
     }

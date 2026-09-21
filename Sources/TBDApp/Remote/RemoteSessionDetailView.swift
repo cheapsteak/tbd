@@ -109,7 +109,7 @@ struct RemoteSessionDetailView: View {
     /// changes.
     var clock: any Clock<Duration> = ContinuousClock()
 
-    @State private var selectedTab: RemoteSessionDetailTab = .attach
+    @State private var selectedTab: RemoteSessionDetailTab?
     @State private var showStopConfirm = false
     @State private var logRefreshToken = 0
     /// Non-nil while the provider's remediation command is running in its
@@ -148,16 +148,26 @@ struct RemoteSessionDetailView: View {
         RemoteSessionDetailGates.available(capabilities: capabilities, gone: isGone)
     }
 
-    /// The tab actually rendered — derived from `availableTabs` and
-    /// `selectedTab` on every `body` evaluation (see
-    /// `RemoteSessionDetailGates.initialTab`), rather than trusting
-    /// `selectedTab`'s `@State` default to already be correct. This is what
-    /// makes a single-tab provider (e.g. `log`-only) render unconditionally:
-    /// `selectedTab`'s placeholder default is `.attach`, which is simply not
-    /// in `availableTabs` for that provider, so `effectiveTab` falls back to
-    /// `.log` — no dependence on `onAppear`/`onChange` timing.
+    /// Derive the first render from capabilities and current attachment
+    /// intent. Unattached browsing prefers Log; attach-only providers show
+    /// an explicit Attach prompt without opening a connection.
     private var effectiveTab: RemoteSessionDetailTab? {
-        RemoteSessionDetailGates.initialTab(available: availableTabs, requested: selectedTab)
+        RemoteSessionDetailGates.initialTab(
+            available: availableTabs, requested: selectedTab, isAttached: isAttached)
+    }
+
+    /// Only a picker gesture requests an attachment. Programmatic tab
+    /// correction and adopting a navigation hint must never acquire one.
+    private var tabSelection: Binding<RemoteSessionDetailTab> {
+        Binding(
+            get: { effectiveTab ?? .attach },
+            set: { tab in
+                selectedTab = tab
+                if tab == .attach {
+                    appState.showRemoteSessionSurface(selection, tab: .attach)
+                }
+            }
+        )
     }
 
     private var displayName: String {
@@ -171,7 +181,7 @@ struct RemoteSessionDetailView: View {
             Divider()
 
             if RemoteSessionDetailGates.showsPicker(available: availableTabs) {
-                Picker("", selection: $selectedTab) {
+                Picker("", selection: tabSelection) {
                     ForEach(availableTabs, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
@@ -210,7 +220,7 @@ struct RemoteSessionDetailView: View {
             // binding never retains a selection that's dropped out of
             // `availableTabs` — e.g. a provider's capabilities shrinking
             // while this view is mounted.
-            if let corrected = RemoteSessionDetailGates.initialTab(available: tabs, requested: selectedTab),
+            if let corrected = RemoteSessionDetailGates.initialTab(available: tabs, requested: selectedTab, isAttached: isAttached),
                corrected != selectedTab {
                 selectedTab = corrected
             }
@@ -227,7 +237,7 @@ struct RemoteSessionDetailView: View {
         showStopConfirm = false
         sendText = ""
         isSending = false
-        selectedTab = .attach
+        selectedTab = nil
         // Must be reset like the rest: a non-nil `runningRemediation`
         // surviving a selection change re-presents itself with no user
         // gesture — and, on a session belonging to a DIFFERENT provider,
@@ -251,12 +261,8 @@ struct RemoteSessionDetailView: View {
         appState.remoteSessionRequestedTab = nil
     }
 
-    /// Whether `selection`'s attach terminal currently has a live PTY
-    /// mounted in `RemoteAttachPager` — the only state that distinguishes
-    /// "render the pager slot" from "render the detached/reattach prompt"
-    /// for the Attach tab of the CURRENTLY viewed session (a session that's
-    /// eligible and selected but not in this set is, by construction,
-    /// explicitly detached — see `RemoteAttachLifecycle`).
+    /// Whether this selection has an admitted connection in the pager.
+    /// A browsed session can be eligible without having requested one.
     private var isAttached: Bool {
         appState.attachedRemoteSelections.contains(selection)
     }
@@ -525,11 +531,9 @@ struct RemoteSessionDetailView: View {
         .padding()
     }
 
-    /// Shown in place of the pager slot once `selection` has detached
-    /// (`AppState.explicitlyDetachedRemoteSessions`) — auto-attach means
-    /// there is no longer a "not yet attached, click to start" state for an
-    /// eligible session (selecting it already started that), only "live" vs
-    /// "detached, here's why, click to try again."
+    /// First-time browsing offers Attach; a connection that ended offers
+    /// Reattach and its existing exit information. Neither prompt makes a
+    /// claim about the remote process's current liveness.
     private var detachedPrompt: some View {
         VStack(spacing: 12) {
             Image(systemName: isUnexpectedDetach
@@ -537,12 +541,11 @@ struct RemoteSessionDetailView: View {
                   : "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-            Text(isUnexpectedDetach ? "Attach ended unexpectedly" : "Detached")
+            Text(isUnexpectedDetach ? "Attach ended unexpectedly" : detachInfo == nil ? "Not attached" : "Detached")
                 .font(.headline)
-            // Contract-correct framing kept regardless of exit code: only
-            // `list`/`events` are authoritative about the remote session's
-            // fate, never this local viewer process exiting.
-            Text("The session keeps running remotely.")
+            Text(detachInfo == nil
+                 ? "Attach to open an interactive terminal for this session."
+                 : "The local viewer is disconnected.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if let exitCode = detachInfo?.exitCode {
@@ -550,7 +553,7 @@ struct RemoteSessionDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Button("Reattach") { appState.reattachRemoteSession(selection) }
+            Button(detachInfo == nil ? "Attach" : "Reattach") { appState.reattachRemoteSession(selection) }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
         }
