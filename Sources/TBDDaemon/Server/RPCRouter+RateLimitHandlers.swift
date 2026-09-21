@@ -51,10 +51,12 @@ extension RPCRouter {
                     excludingAccountKeys: limitedAccountKey.map { [$0] } ?? [],
                     now: Date()
                 )
-                if let chosen = decision.chosen,
-                   let chosenSnapshot = try await db.oauthUsageSnapshots.get(profileID: chosen) {
-                    suggestedProfileID = chosen
-                    usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
+                if let chosen = decision.chosen {
+                    let allSnapshots = (try? await db.oauthUsageSnapshots.loadAll()) ?? [:]
+                    if let chosenSnapshot = allSnapshots[chosen] {
+                        suggestedProfileID = chosen
+                        usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
+                    }
                 }
             } catch {
                 logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
@@ -100,7 +102,10 @@ extension RPCRouter {
         }
 
         // Build notification message and broadcast delta
-        let suggestedProfileName = suggestedProfileID.flatMap { try? await db.modelProfiles.get(id: $0) }?.name
+        var suggestedProfileName: String? = nil
+        if let suggestedID = suggestedProfileID {
+            suggestedProfileName = (try? await db.modelProfiles.get(id: suggestedID))?.name
+        }
         var message: String
         if rotationSucceeded {
             if let limited = limitedProfileName, let suggested = suggestedProfileName, let suffix = usageSuffix {
