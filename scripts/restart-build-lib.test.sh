@@ -433,6 +433,34 @@ test_a_silent_build_is_described_while_it_runs() {
     rm -rf "$d"
 }
 
+# `date +%s` truncates, so two readings a hair apart can straddle a second
+# boundary and differ by a whole second. Arming the silence deadline at exactly
+# `now + silence` therefore let a report fire after as little as no time at
+# all: a build that ran for 80ms was announced as silent for "1s". It reddened
+# this suite about one run in eight — the shape of flake that gets a guard
+# disabled rather than fixed.
+#
+# The case is deterministic because it STARTS at the adverse phase instead of
+# waiting to land on it by luck.
+test_a_fast_build_at_a_second_boundary_is_never_called_silent() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        pass "second-boundary case needs python3 to align — not run here"
+        return 0
+    fi
+    local d; d="$(mkfakeworktree 0)"
+    # Land a few tens of milliseconds before the next whole second, which is
+    # the window where a truncated clock turns a one-second bound into none.
+    python3 -c 'import time; time.sleep((1.0 - time.time() % 1.0) * 0.96)'
+    local err
+    err="$( (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" 2>&1 >/dev/null
+    ) )"
+    assert_missing "a fast build started at a second boundary is not called silent" \
+        "$err" "no build output for"
+    rm -rf "$d"
+}
+
 test_a_finishing_build_is_never_called_silent() {
     local d; d="$(mkfakeworktree 0)"
     local err

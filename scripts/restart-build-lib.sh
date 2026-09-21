@@ -318,6 +318,14 @@ describe_silent_build() {
 #  - output of ANY kind resets a silence timer, and silence past the bound is
 #    reported by `describe_silent_build`.
 #
+# The silence deadline is armed a second beyond the bound because `date +%s`
+# truncates: two readings a hair apart can straddle a second boundary and
+# differ by one, so arming at exactly `now + silence` lets a report fire after
+# as little as no time at all. The deadline is therefore [silence, silence+1),
+# rounded the safe way — a build is never called silent before it has been.
+# (The elapsed figure the report prints comes from the same truncated clock
+# and may understate by under a second, which no reader acts on.)
+#
 # Everything that is not a `swift-safe:` line stays in the file for the trim —
 # streaming raw compiler output would flood the agent context `run_governed_build`
 # exists to protect. Always returns 0: under restart.sh's `set -e` a watcher
@@ -329,7 +337,7 @@ follow_build_progress() {
     silence="$(build_silence_seconds)"
     now="$(date +%s)"
     last_output_at="$now"
-    next_report=$((now + silence))
+    next_report=$((now + silence + 1))
 
     exec 3< "$build_log"
     while :; do
@@ -357,10 +365,10 @@ follow_build_progress() {
         now="$(date +%s)"
         if [ "$read_any" = 1 ]; then
             last_output_at="$now"
-            next_report=$((now + silence))
+            next_report=$((now + silence + 1))
         elif [ "$now" -ge "$next_report" ]; then
             describe_silent_build "$builder" "$((now - last_output_at))" >&2
-            next_report=$((now + silence))
+            next_report=$((now + silence + 1))
         fi
         sleep "$poll"
     done
