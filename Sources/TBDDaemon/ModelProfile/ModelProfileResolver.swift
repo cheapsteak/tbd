@@ -27,6 +27,10 @@ public struct ModelProfileResolver: Sendable {
     let config: ConfigStore
     let keychain: @Sendable (String) throws -> String?
     let candidateSource: ProfilePoolCandidateSource?
+    /// Makes the balanced pick atomic across concurrent spawns. Nil picks
+    /// straight from the stores, as tests that exercise one spawn at a time
+    /// do; the daemon always passes its single shared instance.
+    let reservations: ProfilePickReservations?
     let now: @Sendable () -> Date
 
     public init(
@@ -35,6 +39,7 @@ public struct ModelProfileResolver: Sendable {
         config: ConfigStore,
         keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) },
         candidateSource: ProfilePoolCandidateSource? = nil,
+        reservations: ProfilePickReservations? = nil,
         now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.profiles = profiles
@@ -42,6 +47,7 @@ public struct ModelProfileResolver: Sendable {
         self.config = config
         self.keychain = keychain
         self.candidateSource = candidateSource
+        self.reservations = reservations
         self.now = now
     }
 
@@ -142,13 +148,32 @@ public struct ModelProfileResolver: Sendable {
         // Step 2: global default, or balanced pick if enabled.
         if cfg.profileBalancingEnabled, let source = candidateSource {
             // Balancing is enabled and we have a source: build candidates and ask the picker.
+            var reservationID: UUID?
             do {
-                let candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
-                let decision = ProfilePoolPicker.pick(
-                    candidates: candidates,
-                    excludingAccountKeys: [],
-                    now: now()
-                )
+                let candidates: [ProfilePoolCandidate]
+                let decision: ProfilePoolDecision
+                if let reservations {
+                    // Every read happens first — the recent rows BEFORE the
+                    // live counts inside `candidates` — and then one
+                    // non-suspending call picks and reserves, so a concurrent
+                    // spawn into another worktree sees this pick even before
+                    // its terminal row exists.
+                    let recentRows = try await source.recentLiveSessionSpawns(
+                        since: reservations.rowCutoff())
+                    let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    let outcome = await reservations.pickAndReserve(
+                        candidates: stored, recentRows: recentRows, pickTime: now())
+                    candidates = outcome.candidates
+                    decision = outcome.decision
+                    reservationID = outcome.reservationID
+                } else {
+                    candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    decision = ProfilePoolPicker.pick(
+                        candidates: candidates,
+                        excludingAccountKeys: [],
+                        now: now()
+                    )
+                }
 
                 if let chosenID = decision.chosen {
                     if let resolved = try await loadResolved(id: chosenID) {
@@ -196,11 +221,17 @@ public struct ModelProfileResolver: Sendable {
 
                         return resolved
                     }
+                    logger.warning("balanced pick \(chosenID, privacy: .public) did not load; falling back to default")
                 } else {
                     logger.info("balancing found no eligible candidate; falling back to default")
                 }
             } catch {
                 logger.error("candidate source threw; falling back to default: \(error, privacy: .public)")
+            }
+            // Reaching here means the pick placed nothing; its reservation
+            // must not count against the profile.
+            if let reservationID, let reservations {
+                await reservations.release(reservationID)
             }
         }
 
