@@ -39,6 +39,14 @@ struct TerminalCreateTransportGateTests {
             lock.lock(); defer { lock.unlock() }
             return argvs.filter { $0.contains("new-window") }.count
         }
+        /// Whether a tmux *server* was started. A holder spawn must not reach
+        /// `prepareTmuxServer` at all, and a window count alone cannot say so:
+        /// the server is ensured before the window, so a spawn that failed
+        /// after starting one still reports zero windows.
+        var newSessionCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return argvs.filter { $0.contains("new-session") }.count
+        }
     }
 
     private struct Fixture {
@@ -251,16 +259,43 @@ struct TerminalCreateTransportGateTests {
         #expect(fixture.recorder.newWindowCount == 0)
     }
 
-    // MARK: - The login tab stays on tmux
+    // MARK: - The login tab takes the decided transport
 
-    /// A profile login tab is the one extra terminal that stays on tmux with
-    /// the flag on: its auto-`/login` pump reads and types through a tmux
-    /// pane. With a spawner that would fail, success here is the proof that
-    /// the holder path was not taken.
-    @Test("a login session stays on tmux with the flag on")
-    func loginSessionStaysOnTmux() async throws {
+    /// The profile login tab is not pinned: with the flag on it takes the
+    /// holder path like every other spawn, and its auto-`/login` pump reads
+    /// the daemon's emulator and types through the injection courier instead
+    /// of capturing a pane.
+    ///
+    /// With a spawner that cannot start anything, the failure IS the proof:
+    /// a login tab that had stayed on tmux would have succeeded here.
+    @Test("a login session takes the holder path with the flag on")
+    func loginSessionTakesTheHolderPath() async throws {
         let fixture = try await Self.makeFixture(
             holderFlag: true, proxyFlag: false, spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
+
+        let response = try await fixture.create(
+            TerminalCreateParams(
+                worktreeID: fixture.worktree.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true))
+        #expect(!response.success)
+        #expect(
+            response.error?.contains("/nonexistent/TBDHolder") == true,
+            "a login session did not take the holder path: \(response.error ?? "success")")
+        #expect(fixture.recorder.newWindowCount == 0, "a failed holder login tab fell through to tmux")
+        #expect(
+            fixture.recorder.newSessionCount == 0,
+            "a tmux server was started for a holder-transport login tab")
+        #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
+    }
+
+    /// The other arm, unchanged: with the flag off a login tab is a tmux
+    /// window in a tmux server, labelled `login`.
+    @Test("flag off: a login session spawns onto tmux")
+    func loginSessionFlagOffSpawnsOntoTmux() async throws {
+        let fixture = try await Self.makeFixture(
+            holderFlag: false, proxyFlag: false, spawner: Self.unspawnableSpawner())
         defer { fixture.tearDown() }
         let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
 

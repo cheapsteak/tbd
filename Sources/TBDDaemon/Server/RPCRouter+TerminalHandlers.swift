@@ -677,8 +677,9 @@ extension RPCRouter {
                 paneText: {
                     // A capture that failed is an empty pane, which classifies
                     // as `notReady` — the same wait it has always taken.
-                    .text(
-                        (try? await tmux.capturePaneOutput(server: server, paneID: paneID)) ?? "")
+                    let captured = try? await tmux.capturePaneOutput(
+                        server: server, paneID: paneID)
+                    return .text(captured ?? "")
                 },
                 typeLogin: {
                     do {
@@ -714,13 +715,13 @@ extension RPCRouter {
                     // carrying both would hand the TUI a body and a submitting
                     // `\r` in the same burst, which its paste heuristic can
                     // absorb into the text.
-                    guard await self.deliverLoginBytes(
+                    let bodyLanded = await self.deliverLoginBytes(
                         Data("/login".utf8), terminalID: terminalID, courier: courier)
-                    else { return }
+                    guard bodyLanded else { return }
                     // Enter through the named-key table, against whatever modes
                     // the session's store reports, so the login tab resolves a
                     // key the one way every other holder send does.
-                    let modes = await self.holderModeReading(terminalID: terminalID)?.modes
+                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
                     guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
                         logger.warning("auto-login: no holder byte mapping for Enter; terminal \(terminalID, privacy: .public) was typed /login without a submit")
                         return

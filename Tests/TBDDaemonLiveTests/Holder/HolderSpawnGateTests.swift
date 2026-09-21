@@ -603,6 +603,76 @@ struct HolderSpawnGateTests {
             "a holder rendezvous was created for a tmux-transport revive")
     }
 
+    // MARK: - Profile login tab
+
+    /// The profile login tab with the flag on: born onto a real holder like
+    /// every other spawn, with no tmux server behind it.
+    ///
+    /// It was the one spawn kind pinned to tmux, so the row's transport is the
+    /// assertion that matters here; the rendezvous socket and the two live pids
+    /// are what say a holder actually started rather than a row being labelled
+    /// as though one had.
+    @Test func loginTabFlagOnSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(
+                worktreeID: fixture.worktree.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .holder)
+        #expect(row.label == TerminalLabel.login)
+        let holderPID = try #require(row.holderPID)
+        let childPID = try #require(row.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(row.tmuxWindowID.isEmpty)
+        #expect(row.tmuxPaneID.isEmpty)
+
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            FileManager.default.fileExists(atPath: socketPath),
+            "no holder rendezvous at \(socketPath) for a holder-transport login tab")
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the login tab created a tmux window: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the login tab started a tmux server: \(issued)")
+    }
+
+    /// The other arm, unchanged: with the flag off a login tab is a tmux
+    /// window in a tmux server, and the pump reads and types through its pane.
+    @Test func loginTabFlagOffStaysOnTmux() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: false)
+        defer { fixture.tearDown() }
+        let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(
+                worktreeID: fixture.worktree.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .tmux)
+        #expect(row.label == TerminalLabel.login)
+        #expect(!row.tmuxWindowID.isEmpty)
+        #expect(row.holderPID == nil)
+        #expect(row.childPID == nil)
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            !FileManager.default.fileExists(atPath: socketPath),
+            "a holder rendezvous was created for a tmux-transport login tab")
+    }
+
     // MARK: - Fork-session swap
 
     /// A `.fork` swap with the flag on lands on a real holder, and its session
@@ -1178,6 +1248,19 @@ private final class GateFixture {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
+            // The login-tab tests arm the auto-`/login` pump against a real
+            // holder whose job is the pinned gate shell — it never paints a
+            // Claude TUI, so the pump polls until it gives up. On the router's
+            // shipped delays that is 45 seconds of polling and half an hour of
+            // identity watching outliving the test; these bound both to the
+            // test's own lifetime.
+            loginSessions: LoginSessionCoordinator(delays: .init(
+                pumpInitialDelay: .zero,
+                pumpPollInterval: .milliseconds(50),
+                pumpPostSendDelay: .milliseconds(50),
+                pumpTimeout: .seconds(1),
+                identityPollInterval: .milliseconds(25),
+                identityPollTimeout: .milliseconds(50))),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         if let recapture {
