@@ -24,7 +24,7 @@ protocol CodexContinuationGitStatusProviding: Sendable {
     func status(worktreePath: String) async throws -> String
 }
 
-struct ProcessCodexContinuationGitStatusProvider: CodexContinuationGitStatusProviding {
+struct CodexProcessGitStatusProvider: CodexContinuationGitStatusProviding {
     let timeout: Duration
     let clock: any Clock<Duration>
 
@@ -75,7 +75,7 @@ struct CodexContinuationPacketBuilder: Sendable {
 
     init(
         gitStatusProvider: any CodexContinuationGitStatusProviding =
-            ProcessCodexContinuationGitStatusProvider()
+            CodexProcessGitStatusProvider()
     ) {
         self.gitStatusProvider = gitStatusProvider
     }
