@@ -254,11 +254,11 @@ jobs:
     env:
       TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
       # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
-      # `scripts/swift-safe`'s default — see the "Two parallel swift-frontend
+      # `scripts/swift-safe`'s default — see the "Three parallel swift-frontend
       # processes" block below. Job-level so every step gets it: the three
       # `scripts/test.sh` steps through the wrapper, and the bare build at the
       # end of the job by spelling `-j "$TBD_SWIFT_JOBS"`. One cap, one place.
-      TBD_SWIFT_JOBS: "2"
+      TBD_SWIFT_JOBS: "3"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -346,17 +346,19 @@ jobs:
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
           done
 
-      # Two parallel swift-frontend processes is the cap on the ~7 GB runner.
-      # Historically (Swift 6.2, all-per-file builds) default parallelism
-      # OOMed late in the build with a bare `error: fatalError`. Under
-      # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
-      # frontend RSS each, measured), so the cap is likely over-conservative
-      # now — kept as safety margin; candidate for re-validation.
+      # Three parallel swift-frontend processes is the cap on the 3-core,
+      # ~7 GB `macos-26` runner. Under Swift 6.3 the two big modules build
+      # WMO in debug at ~1.35 GB peak frontend RSS each (measured), so three
+      # concurrent frontends leave headroom under the memory ceiling, and the
+      # runner has only 3 cores — a fourth job would just contend for CPU
+      # without shortening the build. The ceiling is real: with Swift 6.2 and
+      # all-per-file builds, default parallelism OOMed late in the build with
+      # a bare `error: fatalError`, which is why a cap exists at all.
       #
       # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
       # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs` from
       # TBD_SWIFT_JOBS and refuses a command line above it. That variable is
-      # pinned to 2 in this job's `env:` block, so the cap above is stated
+      # pinned in this job's `env:` block, so the cap above is stated
       # explicitly here instead of riding on the wrapper's default — raising
       # that default would otherwise lift CI past the runner's memory ceiling
       # silently. A developer box, which sets its own TBD_SWIFT_JOBS, is no
