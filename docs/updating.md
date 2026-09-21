@@ -147,6 +147,22 @@ woken, and how many could not be.
   daemon, and do nothing else.
 - `--remote <url>` — fetch from this URL instead of the resolved default.
 
+## Running it from inside another project's dev shell
+
+A terminal inside a nix/direnv (or similar) dev shell exports variables that
+point the compiler at that shell's own SDK — `SDKROOT`, `DEVELOPER_DIR`,
+`CPATH`, `LIBRARY_PATH`, the `NIX_CFLAGS_*`/`NIX_LDFLAGS*` family, and
+`IN_NIX_SHELL`. Left in place, they make a dependency fail to build with an
+error such as `'sqlite3.h' file not found`. `tbd update` (and `scripts/restart.sh`,
+around its build) clears them and says so in the log, for example
+`note: ignoring inherited compiler-environment variables for the build
+(SDKROOT, IN_NIX_SHELL)`. Your own shell is not touched.
+
+Left alone on purpose: `TBD_SWIFT_BIN`, `TOOLCHAINS`, and an `SDKROOT` or
+`DEVELOPER_DIR` that points into an installed Xcode or the Command Line Tools.
+`TBD_KEEP_BUILD_ENV=1` turns the clearing off entirely. `PATH` is not edited,
+so a dev shell that puts a different compiler first on it still wins.
+
 ## Going back to the previous build
 
 There is no automated rollback, by design. Three routes back exist instead, in

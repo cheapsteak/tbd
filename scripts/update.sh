@@ -471,7 +471,7 @@ maybe_reexec() {
     # them — the product list in restart-bundle-lib.sh, say — would otherwise
     # run the old copy against the new sources with nothing to trigger the hop.
     local name
-    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh; do
+    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh restart-build-lib.sh; do
         if should_reexec "$UPDATE_SRC/scripts/$name" "$UPDATE_SCRIPT_DIR/$name"; then
             log "re-exec: the fetched $name differs from the running one"
             # Carry the lock across. `exec` replaces the image but keeps the
@@ -1088,6 +1088,20 @@ main() {
 
     # shellcheck source=/dev/null
     source "$UPDATE_SCRIPT_DIR/restart-bundle-lib.sh"
+    # shellcheck source=/dev/null
+    source "$UPDATE_SCRIPT_DIR/restart-build-lib.sh"
+
+    # Run from inside another project's dev shell (nix/direnv, say), this
+    # process inherits that shell's SDK and header overrides. They point the
+    # compiler at an SDK that lacks what TBD's dependencies need, and
+    # DEVELOPER_DIR also breaks the xcode-select git shim; see
+    # restart-build-lib.sh. Clear them for the whole run rather than only
+    # around the build, so the fetch, the build and the daemon this hands over
+    # to all see the system toolchain. Only this process is affected.
+    local sdk_note
+    sdk_note="$(describe_sdk_overrides)"
+    [ -z "$sdk_note" ] || log "note: $sdk_note"
+    clear_sdk_overrides
 
     if [ "$OPT_CHECK" = true ]; then
         run_check

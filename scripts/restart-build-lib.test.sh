@@ -219,6 +219,79 @@ test_temp_output_file_is_cleaned_up() {
     rm -rf "$scratch" "$d0" "$d75"
 }
 
+# --- inherited SDK overrides --------------------------------------------------
+
+# Run the shell snippet in $SNIPPET in a clean bash that has sourced the lib,
+# with "$@" as its whole environment (plus PATH/HOME). env -i keeps the
+# developer's real environment out of it.
+under_dev_shell() {
+    env -i PATH="$PATH" HOME="$HOME" "$@" bash -c '
+        source "$0/restart-build-lib.sh"
+        eval "$SNIPPET"
+    ' "$HERE"
+}
+
+test_sdk_override_names_lists_only_what_is_set() {
+    local out
+    out="$(under_dev_shell SNIPPET='sdk_override_names | sort -u | paste -sd, -' \
+        SDKROOT=/nix/store/acme-sdk IN_NIX_SHELL=impure NIX_LDFLAGS=-L/x NIX_CFLAGS_COMPILE=-I/x)"
+    assert_eq "set variables are listed, unset ones are not" \
+        "IN_NIX_SHELL,NIX_CFLAGS_COMPILE,NIX_LDFLAGS,SDKROOT" "$out"
+    out="$(under_dev_shell SNIPPET='sdk_override_names' TOOLCHAINS=org.acme TBD_SWIFT_BIN=/x/swift)"
+    assert_eq "a deliberate toolchain selection is never listed" "" "$out"
+}
+
+test_apple_toolchain_sdk_paths_are_not_overrides() {
+    local out
+    out="$(under_dev_shell SNIPPET='sdk_override_names' \
+        SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+        DEVELOPER_DIR=/Library/Developer/CommandLineTools)"
+    assert_eq "Xcode and Command Line Tools paths are kept" "" "$out"
+    out="$(under_dev_shell SNIPPET='sdk_override_names' DEVELOPER_DIR=/nix/store/acme-apple-sdk)"
+    assert_eq "a nix-store DEVELOPER_DIR is an override" "DEVELOPER_DIR" "$out"
+}
+
+test_clear_sdk_overrides_unsets_them_in_the_calling_shell_only() {
+    local out
+    out="$(under_dev_shell \
+        SNIPPET='( clear_sdk_overrides; echo "in=${SDKROOT-unset}/${CPATH-unset}/${TOOLCHAINS-unset}" ); echo "out=${SDKROOT-unset}"' \
+        SDKROOT=/nix/store/acme-sdk CPATH=/nix/store/inc TOOLCHAINS=org.acme)"
+    assert_contains "cleared inside the subshell, toolchain kept" "$out" "in=unset/unset/org.acme"
+    assert_contains "the caller's own environment is untouched" "$out" "out=/nix/store/acme-sdk"
+}
+
+test_keep_build_env_switch_disables_the_scrub() {
+    local out
+    out="$(under_dev_shell SNIPPET='sdk_override_names; describe_sdk_overrides' \
+        SDKROOT=/nix/store/acme-sdk TBD_KEEP_BUILD_ENV=1)"
+    assert_eq "TBD_KEEP_BUILD_ENV=1 lists nothing" "" "$out"
+}
+
+test_describe_sdk_overrides_names_the_variables() {
+    local out
+    out="$(under_dev_shell SNIPPET='describe_sdk_overrides' SDKROOT=/nix/store/acme-sdk IN_NIX_SHELL=impure)"
+    assert_contains "the note names the variables" "$out" "IN_NIX_SHELL, SDKROOT"
+    assert_contains "the note names the opt-out" "$out" "TBD_KEEP_BUILD_ENV=1"
+    out="$(under_dev_shell SNIPPET='describe_sdk_overrides')"
+    assert_eq "nothing set, nothing said" "" "$out"
+}
+
+# The fake swift-safe reports what it inherited; run_governed_build must have
+# scrubbed it, and must say so on stderr.
+test_run_governed_build_scrubs_the_compiler_environment() {
+    local d; d="$(mkfakeworktree 0)"
+    cat > "$d/scripts/swift-safe" <<SWEOF
+#!/usr/bin/env bash
+echo "SDKROOT=\${SDKROOT-unset} TOOLCHAINS=\${TOOLCHAINS-unset}" > "$d/env.txt"
+SWEOF
+    local err
+    err="$(SDKROOT=/nix/store/acme-sdk TOOLCHAINS=org.acme run_under_restart_shell "$d" 2>&1 >/dev/null)"
+    assert_eq "swift-safe inherits no SDKROOT but keeps TOOLCHAINS" \
+        "SDKROOT=unset TOOLCHAINS=org.acme" "$(cat "$d/env.txt")"
+    assert_contains "the scrub is announced on stderr" "$err" "ignoring inherited compiler-environment variables"
+    rm -rf "$d"
+}
+
 # --- restart.sh wiring --------------------------------------------------------
 #
 # Static checks: the guard is worth nothing if restart.sh stops calling it, and
