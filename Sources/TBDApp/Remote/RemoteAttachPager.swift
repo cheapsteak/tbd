@@ -61,6 +61,28 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         for (idx, key) in currentKeys.enumerated().reversed() {
             if !mountedKeys.contains(key) {
                 vc.removeTabViewItem(vc.tabViewItems[idx])
+                // That dismantle terminates the child with its own exit
+                // callback suppressed (`Coordinator.cleanup()`), so this
+                // report is the only thing that tells AppState the child is
+                // gone. Without it the recorded spawn time outlives the child
+                // it dates, and a cap-evicted selection that is later
+                // re-admitted while still backgrounded — no child, nothing to
+                // re-report — gets restarted by the next network change for a
+                // pane that has nothing to restart.
+                //
+                // Deferred one main-queue turn because this runs inside
+                // `updateNSViewController`, i.e. inside a SwiftUI update
+                // pass, where mutating observed AppState is not allowed. The
+                // generation rides along for the same reason `onDetached`
+                // carries it: when a reconnect supersedes a generation, this
+                // very loop removes the old key in the same update that mounts
+                // the replacement, and a report against the stale generation
+                // must not clear the replacement child's start.
+                let selection = key.selection
+                let generation = key.generation
+                DispatchQueue.main.async { [weak appState] in
+                    appState?.markRemoteAttachUnmounted(selection, generation: generation)
+                }
             }
         }
 

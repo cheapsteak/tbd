@@ -51,9 +51,11 @@ struct ControlModePaneKey: Hashable {
 /// `startedAt` is nil until the pager's terminal reports the spawn
 /// (`AppState.markRemoteAttachStarted`), goes back to nil on every generation
 /// bump because the replacement child re-reports for itself, and goes back to
-/// nil again when that child's exit is recorded
-/// (`AppState.markRemoteSessionDetached`) — a spawn time must never outlive
-/// the child it dates.
+/// nil again the moment that child stops being live — either its exit is
+/// recorded (`AppState.markRemoteSessionDetached`), or the pager reports its
+/// tab's unmount (`AppState.markRemoteAttachUnmounted`), the teardown that
+/// terminates the child with its exit callback suppressed. A spawn time must
+/// never outlive the child it dates.
 /// `AppState.handleNetworkChange` compares it against the change time to skip
 /// children that are already running on the new path.
 struct RemoteAttachGeneration: Equatable {
@@ -1270,11 +1272,13 @@ final class AppState {
     /// relies on — it reads nil as "nothing to restart; whatever spawns next
     /// spawns on the new path" and leaves such a selection alone.
     ///
-    /// The one unmount that is not an exit — cap eviction, whose terminate
-    /// deliberately suppresses the child's own exit callback — leaves a
-    /// recorded start behind, but an evicted selection is by definition
-    /// absent from `attachedRemoteSelections`, so the only caller never reads
-    /// it; a re-admitted pane re-reports its own spawn before it could.
+    /// An unmount that is not an exit — cap eviction, an explicit detach, the
+    /// session vanishing, a superseded generation — terminates the child with
+    /// its own exit callback suppressed, so the pager reports the teardown
+    /// separately through `markRemoteAttachUnmounted`, which clears the start
+    /// the same way. Without that report a cap-evicted selection would carry a
+    /// start with no child behind it, and the first network change after it
+    /// was re-admitted would restart a pane that has nothing to restart.
     func remoteAttachStartedAt(for selection: RemoteSessionSelection) -> Date? {
         remoteAttachGenerations[selection]?.startedAt
     }
@@ -1290,6 +1294,19 @@ final class AppState {
     func markRemoteAttachStarted(_ selection: RemoteSessionSelection, generation: Int, at date: Date = Date()) {
         guard generation == remoteAttachGeneration(for: selection) else { return }
         remoteAttachGenerations[selection] = RemoteAttachGeneration(generation: generation, startedAt: date)
+    }
+
+    /// Records that the pane mounted for `selection` under `generation` was
+    /// torn down without its child's exit being reported — cap eviction, an
+    /// explicit detach, the session vanishing, or a superseded generation. The
+    /// pager's dismantle terminates the child with its exit callback
+    /// suppressed, so this is the only way `startedAt` learns the child is
+    /// gone. A report for a generation that is no longer current is dropped,
+    /// so the old key's removal after a reconnect cannot clear the replacement
+    /// child's start. The generation itself is kept.
+    func markRemoteAttachUnmounted(_ selection: RemoteSessionSelection, generation: Int) {
+        guard generation == remoteAttachGeneration(for: selection) else { return }
+        remoteAttachGenerations[selection]?.startedAt = nil
     }
 
     /// Moves back to `date` every pending-reconnect deadline that still lies

@@ -240,6 +240,60 @@ struct RemoteAttachNetworkRecoveryTests {
         }
     }
 
+    /// The third way a child stops being live: its tab item was removed — cap
+    /// eviction, an explicit detach, the session vanishing from the mirror —
+    /// and the pager's dismantle terminates the child with its own exit
+    /// callback suppressed, so no exit is ever reported for it. A start left
+    /// behind here claims a live child to `handleNetworkChange`, so a
+    /// cap-evicted selection that is later re-admitted while still
+    /// backgrounded — nothing running, nothing to re-report — would be
+    /// "restarted", inflating the handler's count and churning a generation
+    /// for nothing. Reddens if the `startedAt` clear in
+    /// `markRemoteAttachUnmounted` is dropped. The generation is deliberately
+    /// NOT bumped: an unmount supersedes nothing, and the next mount for this
+    /// selection uses the same key.
+    @Test("an unmount clears the recorded start time")
+    func anUnmountClearsTheRecordedStart() {
+        withState { state in
+            let s1 = attached(state)
+            let t = Date()
+            state.markRemoteAttachStarted(s1, generation: 0, at: t.addingTimeInterval(-60))
+            #expect(state.remoteAttachStartedAt(for: s1) != nil)
+
+            state.markRemoteAttachUnmounted(s1, generation: 0)
+
+            #expect(state.remoteAttachStartedAt(for: s1) == nil)
+            #expect(state.remoteAttachGeneration(for: s1) == 0, "an unmount supersedes nothing")
+
+            state.handleNetworkChange(change(at: t))
+
+            #expect(state.remoteAttachGeneration(for: s1) == 0, "no live child, so nothing to restart")
+        }
+    }
+
+    /// The converse discriminator for that clear. A reconnect's swap removes
+    /// the superseded generation's tab item in the SAME pager update that
+    /// mounts the replacement, and the unmount report is deferred a main-queue
+    /// turn, so it can land after the replacement child has already reported
+    /// its own spawn. Reddens if the generation guard in
+    /// `markRemoteAttachUnmounted` is removed: the old key's teardown would
+    /// erase the live child's start, and the next network change would skip
+    /// the pane instead of restarting it.
+    @Test("an unmount reported for a superseded generation is dropped")
+    func anUnmountOfASupersededGenerationIsDropped() {
+        withState { state in
+            let s1 = attached(state)
+            state.reconnectRemoteSession(s1)
+            let spawnedAt = Date()
+            state.markRemoteAttachStarted(s1, generation: 1, at: spawnedAt)
+
+            state.markRemoteAttachUnmounted(s1, generation: 0)
+
+            #expect(state.remoteAttachStartedAt(for: s1) == spawnedAt)
+            #expect(state.remoteAttachGeneration(for: s1) == 1)
+        }
+    }
+
     // MARK: - Expiring stale backoff
 
     /// A session that failed because the network was down would otherwise wait
