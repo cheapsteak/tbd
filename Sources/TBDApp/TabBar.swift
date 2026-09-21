@@ -590,7 +590,12 @@ enum ContinueInClaudeMenu {
     /// Only a positively idle cached state enables an account choice. Unknown
     /// fails closed alongside active and waiting states.
     static func isEnabled(for terminal: Terminal?) -> Bool {
-        isVisible(for: terminal) && terminal?.activityState == .idle
+        guard isVisible(for: terminal),
+              let terminal,
+              terminal.presentationActivityState == .idle,
+              terminal.activityState != .waitingForUser,
+              terminal.activityState != .unknown else { return false }
+        return !WorktreeRowView.isForegroundWorking(terminal)
     }
 
     static func caption(for terminal: Terminal?) -> String? {
