@@ -53,6 +53,25 @@ struct ControlModeInputRouterTests {
         router.shutdown()
     }
 
+    @Test("a default-constructed router delivers keystrokes in order")
+    func defaultRouterDeliversInOrder() async throws {
+        // Tier 1: exercise the production configuration without an executor.
+        // Passing nil to Task(executorPreference:) crashes on macOS 15.
+        let (client, recorder) = makeFakeClient()
+        let router = ControlModeInputRouter(
+            commandProvider: { server in server == "srv" ? client : nil })
+        defer { router.shutdown() }
+        let worktreeID = UUID()
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
+        let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
+
+        router.enqueue(header: header, bytes: Data([0x41]))
+        router.enqueue(header: header, bytes: Data([0x42]))
+
+        try #require(await waitForWrites(recorder, count: 2))
+        #expect(recorder.writes == ["send-keys -H -t %0 41", "send-keys -H -t %0 42"])
+    }
+
     @Test("input for an unregistered pane is dropped, not sent")
     func unknownPaneDropped() async throws {
         let worktreeID = UUID()

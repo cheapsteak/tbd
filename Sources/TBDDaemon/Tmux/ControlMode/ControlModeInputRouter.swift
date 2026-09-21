@@ -110,12 +110,18 @@ final class ControlModeInputRouter: @unchecked Sendable {
         // One consumer, draining in order. `[weak self]` breaks the retain
         // cycle (self holds the task, the task references self); on `shutdown`
         // the stream finishes, the loop exits, and self is released.
-        // `executorPreference:` is nil in production, which is identical to a
-        // bare `Task {}`; see the `executor` parameter's note.
-        self.consumer = Task(executorPreference: executor) { [weak self] in
+        let consume: @Sendable () async -> Void = { [weak self] in
             for await item in stream {
                 await self?.deliver(item)
             }
+        }
+        // Swift 6.2's executor-preference initializer crashes with nil on the
+        // macOS 15 concurrency runtime. Use the ordinary initializer when no
+        // executor was supplied, preserving production's cooperative pool.
+        if let executor {
+            self.consumer = Task(executorPreference: executor, operation: consume)
+        } else {
+            self.consumer = Task(operation: consume)
         }
     }
 
