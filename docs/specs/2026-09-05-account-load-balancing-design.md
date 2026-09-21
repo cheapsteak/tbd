@@ -159,7 +159,9 @@ why a profile was passed over:
    five minutes for `.oauth`, fifteen for `.oauthToken`, the same
    cadence-relative thresholds `ProfileUsagePresentation.staleAge` uses;
    otherwise `noFreshReading`. A reading TBD would not present as current is
-   not a reading it should route on.
+   not a reading it should route on. A reading that stays stale usually
+   means a lapsed login or a failing poll, which only the person can fix, so
+   the skip is surfaced rather than silent (§6.1).
 6. Headroom is above the floor; otherwise `exhausted`.
 
 **Headroom** is `1 − max(percent)/100` over the snapshot's `session`,
@@ -181,7 +183,7 @@ already minutes behind the sessions that will move it.
 shape this borrows from (a fleet credential pool on a remote host) uses
 power-of-two-choices because its readings can be ten minutes old and a
 restart wave would otherwise stampede one account. Here the live-session count
-in the numerator is exact at decision time — pick reservations (§6.1) count
+in the numerator is exact at decision time — pick reservations (§6.2) count
 every placement the daemon has made whose terminal row has not landed yet —
 so a burst of spawns spreads on its own, and a deterministic pick is both
 explainable and testable.
@@ -235,7 +237,28 @@ send `claude --resume` to an account that has never seen the session.
 Hibernation wake does not call `resolve` at all — it pins to the row's
 stamp — for the same reason.
 
-### 6.1 Pick reservations
+### 6.1 Surfacing a stale account
+
+An account skipped as `noFreshReading` is otherwise pool-eligible — it has a
+credential and is not opted out — yet balancing cannot see it. Left silent,
+the pool quietly shrinks to the accounts whose polls happen to be healthy.
+
+When a balanced pick skips such an account, the daemon posts one
+`.attentionNeeded` notification on the spawning worktree: "Usage for
+Personal hasn't refreshed in 42 min — balancing is skipping it; check its
+login" ("has no usage reading yet" when there has never been one). A small
+in-memory latch keyed by profile holds it to once: the latch clears when a
+balanced pick next sees that account with a fresh reading, so a relapse
+notifies again. A daemon restart clears the latch too, which costs at most
+one repeat notification. Because the notification comes from the pick, it
+fires only while balancing is on and only for accounts in the pool.
+
+Settings carries the same fact without waiting for a spawn: while balancing
+is on, a profile row whose candidate verdict is `noFreshReading` shows a
+"stale — skipped by balancing" badge beside its usage line. The app computes
+it from the same shared candidate rule and picker the daemon uses (§3).
+
+### 6.2 Pick reservations
 
 A spawn resolves its profile well before its terminal row is written — the
 tmux window and the Claude process come first — and the only lock on the
@@ -307,8 +330,8 @@ Claude in the foreground — still govern whether its `continue` fires.
 
 ### 8.1 Settings → Model Profiles
 
-Two toggles under the global-default picker, reading from
-`DaemonCapabilitiesResult` and writing through two new config RPCs, following
+One toggle under the global-default picker, reading from
+`DaemonCapabilitiesResult` and writing through a new config RPC, following
 the `queuedPromptToggle` shape:
 
 - **Balance new Claude sessions across accounts** –
@@ -316,17 +339,16 @@ the `queuedPromptToggle` shape:
   use the global default, pick the signed-in profile with the most room
   instead. Repo overrides and explicit picks still win. Off by default
   (soaking)."
-- **Switch account when a session hits its limit** –
-  `config.setLimitRotationEnabled`. Help text: "When a session hits a hard
-  usage limit, resume it in the same tab on another profile with room and
-  continue the turn. Off by default (soaking)."
+
+The limit offer (§7) has no toggle: it acts only on a click, so there is
+nothing for a switch to make safer.
 
 Each profile row gains a checkbox in its `⋯` menu, **Include in balancing**,
 checked unless `poolOptOut` is set, writing `modelProfile.setPoolOptOut`.
 Rows show a `live` count beside the usage line — "5h 61% · 7d 38% · 2 live"
 — computed app-side from `appState.terminals` (Claude, unparked, matching
-`profileID`). No RPC carries the count: the app already holds every
-terminal.
+`profileID`), and, while balancing is on, the stale badge of §6.1. No RPC
+carries the count: the app already holds every terminal.
 
 ### 8.2 Account picker and swap menu
 
@@ -345,21 +367,20 @@ indicator and are unchanged. The limit banner (§7) is new.
 
 ### 8.4 CLI
 
-- `tbd profile balancing on|off` and `tbd profile rotation on|off` – the two
-  flags, under the profile noun per the soak-flag convention.
+- `tbd profile balancing on|off` – the flag, under the profile noun per the
+  soak-flag convention.
 - `tbd profile pool <name> include|exclude` – the per-profile opt-out.
 - `tbd profile list` gains a `live` column and, in `--json`, a
   `liveSessions` integer per profile plus a top-level `balancing` object
-  `{ enabled, rotationEnabled }`. This is an additive change to the
+  `{ enabled }`. This is an additive change to the
   capacity-facts contract and is recorded in `docs/capacity-facts.md` as
   such.
 
 ## 9. Data model
 
-Three migrations, each one `.sql` file with no `DEFAULT` clause:
+Two migrations, each one `.sql` file with no `DEFAULT` clause:
 
 - `config.profile_balancing_enabled INTEGER` – tri-state flag.
-- `config.limit_rotation_enabled INTEGER` – tri-state flag.
 - `model_profiles.pool_opt_out INTEGER` – per-profile opt-out, NULL ≡ 0.
 
 `ConfigRecord`, `Config`, `DaemonCapabilitiesResult`, `ModelProfileRecord`
@@ -370,7 +391,9 @@ gains `poolOptOut: Bool` defaulting to `false`.
 One new `StateDelta` case, `terminalLimitHit(TerminalLimitHitDelta)`,
 appended after the existing cases (case names are wire-visible).
 
-No new durable external resource is created. The swap path this reuses
+No new durable external resource is created. Pick reservations and the
+stale-notification latch live in daemon memory. The swap path the limit
+offer reuses
 respawns into an existing tmux window and row, both already reconciled by
 `WorktreeLifecycle+Reconcile` and `AgentReaper`; the transcript copy into the
 destination config dir is the same best-effort carry the manual swap performs
@@ -391,13 +414,15 @@ Both branches of every flag, per the repo rule.
   and excluding one excludes the other. Tie-break: default, then sort order,
   then id, and the same input always yields the same output. Empty and
   all-ineligible inputs return nil with the verdicts populated.
-- **Flags** (`Tests/TBDDaemonTests/Config/ProfileBalancingFlagTests.swift`,
-  `LimitRotationFlagTests.swift`) – the three-state roster the
-  retained-transcripts flag uses: NULL before any gesture, NULL survives a row
-  written before the migration, explicit `false` survives a default flip
-  while NULL follows it, shipped default off, setter round-trips, cross-flag
-  isolation (balancing on does not turn rotation on, and vice versa).
-- **RPC** – wire-name pins and round trips for the two config setters and
+- **Flag** (`Tests/TBDDaemonTests/Config/ProfileBalancingFlagTests.swift`) –
+  the three-state roster the retained-transcripts flag uses: NULL before any
+  gesture, NULL survives a row written before the migration, explicit
+  `false` survives a default flip while NULL follows it, shipped default
+  off, setter round-trips.
+- **Credential rule** – one shared function decides credential presence for
+  both the daemon's and the app's candidates, each branch tested, so the
+  app's "balanced pick" cannot disagree with the daemon's.
+- **RPC** – wire-name pins and round trips for the config setter and
   `modelProfile.setPoolOptOut`; the opt-out records an explicit `1`, and
   clearing it records `0`, not NULL.
 - **Resolver** – with balancing off, steps 2 and 3 behave exactly as today
@@ -411,8 +436,15 @@ Both branches of every flag, per the repo rule.
   profiles (the interleaving of two concurrent spawns; this fails without
   reservations); settling a reservation stops it counting; unrelated rows
   landing on a reserved profile do not erase its reservations; an expired
-  reservation stops counting. A resolve with balancing off — the resume
-  paths — returns the default and reserves nothing.
+  reservation stops counting; concurrent resolves split evenly. A resolve
+  with balancing off — the resume paths — returns the default and reserves
+  nothing.
+- **Stale surfacing** – a balanced pick that skips an otherwise-eligible
+  account for `noFreshReading` notifies once on the spawning worktree; a
+  second skip does not notify again; a fresh reading clears the latch so a
+  relapse notifies; an account skipped for any other reason, or any skip with
+  balancing off, never notifies. The Settings badge shows for a stale pool
+  account only while balancing is on.
 - **Rate-limit handler** – the notification names the suggestion when one
   exists and omits it when none does; the limited account is excluded for a
   stamped session and nothing is excluded for an ambient one; the delta is
@@ -435,26 +467,25 @@ Both branches of every flag, per the repo rule.
 
 ## 11. Rollout
 
-Both flags ship off. To soak:
+The flag ships off. To soak:
 
 ```text
 tbd profile balancing on
-tbd profile rotation on
 ```
 
-or the two toggles in Settings → Model Profiles. Graduation for each is a
-one-line change to its `Default` constant, which reaches everyone who never
+or the toggle in Settings → Model Profiles. Graduation is a one-line change
+to `Config.profileBalancingEnabledDefault`, which reaches everyone who never
 touched the toggle and preserves every explicit opt-out; the flag is deleted
 once the soak has shown the picker's choices match what the person would
-have chosen, and the rotation has not moved a session anyone wanted left
-alone. The per-profile opt-out is not a flag and has no graduation.
+have chosen. The limit offer ships on, since it acts only on a click. The
+per-profile opt-out is not a flag and has no graduation.
 
 ## 12. Rejected alternatives
 
 - **Power-of-two-choices with randomization.** Right for a fleet reading
   ten-minute-old quota snapshots where a restart wave would pile onto one
   account. Here the live count is exact at decision time — rows plus pick
-  reservations (§6.1) — so a deterministic argmin spreads a burst on its own
+  reservations (§6.2) — so a deterministic argmin spreads a burst on its own
   and is explainable from the screen.
 - **Failing closed when no profile is eligible.** Correct for an unattended
   fleet where a wrong account is worse than no session. Wrong for a person at
@@ -492,35 +523,35 @@ alone. The per-profile opt-out is not a flag and has no graduation.
   have no comparable window readings; ranking them alongside subscription
   profiles would be comparing a number to its absence.
 
-## 13. Decisions taken from the request, and what remains open
+## 13. Decisions
 
-The request named the shape: a pool with usage awareness, a least-used
-launch policy with a visible per-session profile, rotation on a limit hit
-with at minimum a one-click relaunch and automatic hand-over where safe, a
-per-profile usage view with live counts, and tests for the picker and the
-limit parsing. The design above follows that shape; where it had to choose,
-it chose as follows, and each is a point the person can overturn.
+The requester answered each of these; the design above states them as its
+own.
 
-- **Two flags, not one.** Balancing new spawns and moving a running session
-  are different risks — the second sends input to a session — so each soaks
-  on its own. A single "load balancing" switch would force the cautious
-  person to take both or neither.
-- **The pool is opt-out, not opt-in.** A person enabling balancing wants it
-  to balance; making every profile opt in would ship a flag that does nothing
-  until a second gesture per profile.
-- **Headroom on the binding window, not the 5-hour window alone.** A profile
-  with 5-hour room and no weekly room dies on its next long turn; the
-  weekly limit is the one that takes days to clear.
-- **The rotation types `continue` through the existing actuator.** A resumed
-  session sits idle at its prompt; without the keystroke the hand-over
-  leaves the person's dead turn dead on a healthier account. Routing it
-  through `LimitResumeScheduler` reuses every safety check that rail already
-  has.
-
-Open, for the person to confirm during the soak:
-
-- Whether the 5% headroom floor and the 90-second-relative staleness
-  thresholds are the right constants, or whether the floor should scale with
-  the number of live sessions an account already carries.
-- Whether balancing should also apply to the scratch override tier (step
-  1.5). This design leaves it as an explicit choice that wins.
+- **An eligible account is in the pool unless the person excludes it.**
+  Turning balancing on balances immediately; the opt-out is for accounts the
+  person wants kept out of unattended fleet work.
+- **An explicit account choice always wins.** A per-spawn pick, a repo
+  override and a scratch override are the person saying "this one", and
+  balancing fills in only where the global default would have applied.
+- **At a hard limit, TBD offers a switch and never makes one.** No automatic
+  hand-over and no automatic resume of the interrupted turn: the banner's
+  "Switch to …" is the person's move, and the next message is theirs. The
+  older reset-time auto-resume is a separate feature and is unchanged.
+- **One flag, and the switch button always shows.** With automatic hand-over
+  out, the only thing left at a limit is a button that does nothing without
+  a click, so it needs no soak switch of its own; balancing new sessions is
+  the one behavior that acts on its own, and it is the one that is flagged.
+- **Headroom is measured on the binding window.** The fuller of the 5-hour
+  and weekly windows decides: a profile with 5-hour room and no weekly room
+  dies on its next long turn, and the weekly limit takes days to clear.
+- **Full means 95% of any window.** The 5% headroom floor is fixed; a
+  profile past it is skipped rather than ranked last, because a session
+  placed there dies on its first long turn.
+- **A reading is current for five minutes (signed-in) or fifteen
+  (setup-token)** — the thresholds the UI already uses to mark a reading
+  stale. An account skipped for a stale reading is surfaced once as a
+  notification and continuously as a Settings badge (§6.1), because only the
+  person can fix what keeps it stale.
+- **If nothing is eligible, the session starts where it would have without
+  balancing** (§12, failing closed).
