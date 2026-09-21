@@ -176,6 +176,14 @@ jobs:
       # that socket — still no egress, and it self-skips on runners, which
       # have no `claude` installed.
       #
+      # `cache-save-policy.test.sh` is the odd one out in what it reads: it
+      # extracts two pieces of THIS file — the cache-save decision step's shell
+      # and the save step's `if:` — and drives the first against fixture repos.
+      # It is here rather than in the `test` job because a wrong answer there
+      # has no red symptom anywhere else: too few saves leaves every later run
+      # paying a cold build, too many churns main's entry out of a 10 GB store,
+      # and neither shows up in a suite.
+      #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -191,6 +199,7 @@ jobs:
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/restart-guard-lib.test.sh
           bash scripts/restart-build-lib.test.sh
@@ -349,11 +358,18 @@ jobs:
       # scope: a run reads caches created on its own branch, on its base branch,
       # or on the default branch, and among prefix matches it takes the most
       # recently created one. The store is capped at 10 GB and an entry for this
-      # package is ~1.5 GB, so it holds five to seven entries and evicts the
-      # least recently used. Three consequences follow, and together they are the
-      # whole of the save policy. Measured over 30 days, in which this workflow
-      # ran 144 times on `pull_request`, 44 times on `push` to main and 112 times
-      # on `workflow_dispatch`, against a store sitting at 10.1 GB:
+      # package is ~1.56 GB, so it holds six entries and evicts the least
+      # recently used.
+      #
+      # The measurement that shapes the policy, taken over the 30 days to
+      # 2026-09-21: this workflow ran 849 times — 516 on `pull_request`, 195 on
+      # `workflow_dispatch`, 138 on `push` to main — and 475 of those runs
+      # concluded successfully, which is the set that writes an entry, since
+      # `actions/cache` saves under `post-if: success()`. The store held six
+      # entries at that moment, 9.4 GB in all: two on `refs/heads/main` and four
+      # on `refs/pull/<n>/merge`, every one of them created or last read within
+      # the previous hour. The whole store turns over in under an hour. Three
+      # consequences follow, and together they are the save policy.
       #
       #  - An entry written by a `workflow_dispatch` run is created on the ref
       #    that run was dispatched against. The remote verification valve
@@ -361,13 +377,16 @@ jobs:
       #    this workflow against an inert `preflight/` ref, which is nobody's
       #    branch and nobody's base and which the preflight sweep then deletes,
       #    so no later run can ever read what that entry cost 1.5 GB to store.
-      #    Those dispatches were 112 of the 300 runs in the window above.
-      #  - A save into a full store evicts the least recently used entry, and the
-      #    entry least recently used is routinely main's — the one entry every
-      #    branch can read. When it goes, the next push to main and the next PR's
-      #    first run restore nothing and pay a cold build: about 12 minutes at
-      #    -j2, against 25-56 s to restore a warm one.
-      #  - Every save costs the run that makes it 34-50 s of upload.
+      #    That was 77 of the 475.
+      #  - A `pull_request` entry is created on that PR's merge ref, so only that
+      #    same PR can read it. Those were 317 of the 475, and four of the six
+      #    entries in the store — which is what pushes main's entry, the one
+      #    entry every branch can read, toward the bottom of the LRU. When it
+      #    goes, the next push to main and the next PR's first run restore
+      #    nothing and pay a cold build: about 12 minutes at -j2, against the
+      #    30-54 s a warm restore took across the eight most recent green runs.
+      #  - Every save costs the run that makes it 26-49 s of upload, measured
+      #    across those same eight runs.
       - name: Restore SwiftPM build artifacts and dependencies
         id: spm-cache
         uses: actions/cache/restore@v4
@@ -834,9 +853,10 @@ jobs:
       #    TBDDaemonLib is exactly that case — an interface change cascades into
       #    every downstream module, ~12 minutes of it, and this job wipes and
       #    re-emits both libraries on every run regardless. Touching
-      #    Package.swift or Package.resolved moves the dependency set that the
-      #    restore-keys fallback is scoped to, which leaves main's entry no
-      #    longer a base this PR can fall back to at all. A PR that touches
+      #    Package.resolved moves the dependency set the restore-keys prefix is
+      #    scoped to, which leaves main's entry no longer a fallback this PR can
+      #    use at all; touching Package.swift re-plans the build graph, which
+      #    cascades the way a library change does. A PR that touches
       #    neither rebuilds a small delta on top of main's entry for about what
       #    restoring its own would have cost, so it keeps main's entry alive for
       #    everyone instead of evicting it.
