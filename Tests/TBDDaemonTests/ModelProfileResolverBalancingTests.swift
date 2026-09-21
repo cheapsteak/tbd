@@ -640,6 +640,33 @@ struct ModelProfileResolverBalancingTests {
         #expect(firstID != secondID, "the second concurrent spawn piled onto the first's profile")
     }
 
+    /// The same race run truly concurrently: four spawns resolve at once
+    /// against two identical profiles, and no terminal row lands in between.
+    /// Picking and reserving happen as one step on the ledger, so no two
+    /// resolves can read the same counts — the picks split two and two.
+    @Test("reservations: concurrent balanced resolves split evenly")
+    func concurrentPicksSplitEvenly() async throws {
+        let dates = TestDateSource(Date())
+        let fixture = try await makeReservedFixture(dates: dates)
+        let resolver = fixture.resolver
+
+        let picks = try await withThrowingTaskGroup(of: UUID?.self) { group in
+            for _ in 0..<4 {
+                group.addTask { try await resolver.resolve(repoID: nil)?.profileID }
+            }
+            var picks: [UUID?] = []
+            for try await pick in group { picks.append(pick) }
+            return picks
+        }
+
+        let chosen = picks.compactMap { $0 }
+        #expect(chosen.count == 4, "every balanced resolve should choose a profile")
+        let counts = Dictionary(grouping: chosen, by: { $0 }).mapValues(\.count)
+        #expect(counts.count == 2, "concurrent resolves piled onto one profile: \(counts)")
+        #expect(counts.values.allSatisfy { $0 == 2 }, "concurrent resolves did not split evenly: \(counts)")
+        #expect(await fixture.reservations.heldCount == 4)
+    }
+
     /// Once the first spawn's row lands, the spawn settles its reservation
     /// and the live count alone carries the load — a profile is never counted
     /// twice.
