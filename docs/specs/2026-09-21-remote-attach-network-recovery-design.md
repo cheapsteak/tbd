@@ -45,6 +45,15 @@ The contract also states the caller behavior providers must tolerate: a caller M
 
 No flag. This is a bug fix. It restores the promise the contract already makes — that a pane recovers from a dropped channel — for providers that do not supervise their own transport. Session state lives on the provider and `attach` is required to be targeted and idempotent, so a restart lands on the same session. The session loses nothing; the whole cost of an unnecessary restart falls on the viewer. A displayed pane repaints and loses its local scrollback. A pane that is not displayed drops its connection now and reconnects when it is next shown, because an attach child only spawns once its terminal has been laid out — the same way an automatically re-admitted background pane already comes back.
 
+## Assumptions
+
+Four things the design takes to be true without enforcing. Each names what it costs when it does not hold.
+
+- **A child's start report lands before any change that should restart it** – the pty host reports the spawn synchronously on the main actor the moment the spawn returns, and events reach the handler only after a 2-second debounce, so the report has the wider margin. A selection with no recorded start is read as "not yet spawned" and skipped, which is the safe reading: whatever spawns next spawns on the new path. A child that somehow never reported therefore costs a skipped restart, and the manual Reconnect covers it.
+- **`NWPathMonitor` delivers a distinct update when a VPN's `utun` interface joins or the primary route changes** – those are the two path moves the field evidence turns on, and the ordered interface list is the fingerprint field that captures both. A move the monitor folds into the previous update is a move this design never sees.
+- **Every wake restarts every mounted pane, and the debounce is the only cooldown** – a network that flaps more slowly than 2 seconds therefore restarts its panes once per flap. A restart costs a repaint, the pane's local scrollback, and, for a pane that is not displayed, a reconnect when it is next shown. A grace period is not the remedy: it would leave the stranded pane this design exists for stranded for the length of the grace. A per-selection cooldown is the refinement to reach for if a metered provider shows a real cost in the field.
+- **Spawn times and change times are wall-clock dates** – the comparison that decides whether a child predates a change is one `Date` against another, so a backward clock step across sleep can make a pre-sleep child look newer than the wake and skip it. The manual Reconnect covers that case.
+
 ## Testing
 
 - **Fingerprint.** Pure function: identical paths compare equal; an added `utun*` interface, a reordered primary interface, or a changed gateway compare unequal; cost and constrained flags are not fields of the fingerprint, so they cannot make two fingerprints differ; an unsatisfied path emits nothing; the seed update emits nothing.
