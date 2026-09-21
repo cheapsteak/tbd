@@ -24,22 +24,24 @@ struct RemoteAttachReconnectTests {
         body(AppState(userDefaults: defaults))
     }
 
-    private func seedProvider(_ state: AppState, name: String) {
+    private func seedProvider(_ state: AppState, name: String, health: ProviderHealth = .ok) {
         state.remoteProviders = state.remoteProviders.filter { $0.config.name != name } + [
             RemoteProviderStatus(
                 config: RemoteProviderConfig(name: name, exec: "/usr/bin/true"),
                 describe: ProviderDescribe(name: name, capabilities: ["attach", "log"]),
-                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil
+                health: health, errorMessage: nil, remediationLabel: nil, remediationCommand: nil
             )
         ]
     }
 
-    private func seedSession(_ state: AppState, provider: String, id: String) {
-        state.remoteSessions.append(RemoteSessionInfo(
-            provider: provider,
-            payload: RemoteSessionPayload(id: id, state: .running),
-            gone: false, dismissed: false, lastSeen: Date()
-        ))
+    private func seedSession(_ state: AppState, provider: String, id: String, gone: Bool = false) {
+        state.remoteSessions = state.remoteSessions.filter { !($0.provider == provider && $0.payload.id == id) } + [
+            RemoteSessionInfo(
+                provider: provider,
+                payload: RemoteSessionPayload(id: id, state: .running),
+                gone: gone, dismissed: false, lastSeen: Date()
+            )
+        ]
     }
 
     private func sel(_ provider: String, _ id: String) -> RemoteSessionSelection {
@@ -169,6 +171,57 @@ struct RemoteAttachReconnectTests {
 
             #expect(state.attachedRemoteSelections.isEmpty)
             #expect(state.remoteAttachGeneration(for: sel("acme", "s1")) == 0)
+        }
+    }
+
+    // MARK: - Ineligible sessions are left untouched
+
+    /// Detaches `s1` with an unexpected exit (so it holds both a pending
+    /// backoff entry and a bumped generation from an earlier reconnect),
+    /// applies `makeIneligible`, then asserts a reconnect changes nothing.
+    private func assertReconnectLeavesIneligibleSessionUntouched(
+        _ makeIneligible: (AppState) -> Void
+    ) {
+        withState { state in
+            let s1 = attached(state)
+            state.reconnectRemoteSession(s1)
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 1)
+            makeIneligible(state)
+            #expect(!state.attachEligibleRemoteSelections.contains(s1))
+            let pending = state.pendingReconnectRemoteSessions[s1]
+            #expect(pending != nil)
+
+            #expect(!state.reconnectRemoteSession(s1))
+
+            #expect(state.pendingReconnectRemoteSessions[s1] == pending)
+            #expect(state.remoteAttachGeneration(for: s1) == 1)
+        }
+    }
+
+    @Test func reconnectOfAGoneSessionChangesNothing() {
+        assertReconnectLeavesIneligibleSessionUntouched { state in
+            seedSession(state, provider: "acme", id: "s1", gone: true)
+        }
+    }
+
+    @Test func reconnectUnderANeedsAuthProviderChangesNothing() {
+        assertReconnectLeavesIneligibleSessionUntouched { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+        }
+    }
+
+    /// The clean-exit flag must survive too, not just the backoff entry.
+    @Test func reconnectOfAGoneCleanlyDetachedSessionKeepsTheDetachFlag() {
+        withState { state in
+            let s1 = attached(state)
+            state.markRemoteSessionDetached(s1, exitCode: 0, generation: 0)
+            seedSession(state, provider: "acme", id: "s1", gone: true)
+            #expect(state.explicitlyDetachedRemoteSessions[s1] != nil)
+
+            #expect(!state.reconnectRemoteSession(s1))
+
+            #expect(state.explicitlyDetachedRemoteSessions[s1] != nil)
+            #expect(state.remoteAttachGeneration(for: s1) == 0)
         }
     }
 

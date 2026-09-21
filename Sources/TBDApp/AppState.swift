@@ -1241,8 +1241,15 @@ final class AppState {
     /// the session is neither mounted nor detached (never viewed, evicted
     /// past the keep-alive cap, or unknown). A reconnect must not quietly
     /// open a new provider connection for a session nobody is looking at.
+    ///
+    /// Also returns false, changing nothing, when the session is not
+    /// attach-eligible (`attachEligibleRemoteSelections`: gone, provider
+    /// unregistered or `.needsAuth`). No pane would mount for it, so
+    /// clearing its detach and backoff state would discard real bookkeeping
+    /// for zero effect.
     @discardableResult
     func reconnectRemoteSession(_ selection: RemoteSessionSelection) -> Bool {
+        guard attachEligibleRemoteSelections.contains(selection) else { return false }
         let wasDetached = explicitlyDetachedRemoteSessions[selection] != nil
             || pendingReconnectRemoteSessions[selection] != nil
         guard wasDetached || attachedRemoteSelections.contains(selection) else { return false }
