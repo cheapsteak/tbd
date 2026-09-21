@@ -77,11 +77,14 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
                     onDetached: { [weak appState] exitCode in
                         appState?.markRemoteSessionDetached(selection, exitCode: exitCode, generation: generation)
                     },
-                    // Runs from `TBDTerminalView.onReady` — layout, not a
-                    // SwiftUI update pass — so mutating AppState here is
-                    // fine. Same generation tagging as `onDetached`: a spawn
-                    // reported for a superseded generation is dropped rather
-                    // than dating the replacement child.
+                    // Runs from `TBDTerminalView.onReady`, which the terminal
+                    // view defers through `DispatchQueue.main.async` (see its
+                    // `layout()` override) — so this lands on a later
+                    // main-queue turn, outside the SwiftUI update pass, and
+                    // mutating AppState here is fine. Same generation tagging
+                    // as `onDetached`: a spawn reported for a superseded
+                    // generation is dropped rather than dating the
+                    // replacement child.
                     onStarted: { [weak appState] date in
                         appState?.markRemoteAttachStarted(selection, generation: generation, at: date)
                     }

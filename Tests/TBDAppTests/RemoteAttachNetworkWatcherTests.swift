@@ -182,4 +182,22 @@ struct RemoteAttachNetworkWatcherTests {
 
         #expect(h.fired.values.isEmpty)
     }
+
+    /// Reddens if `stop()` leaves the detector holding the fingerprint from
+    /// before the gap: the first update after a later `start()` would be
+    /// compared against it and emit a change for a path nobody watched move.
+    /// Driven through `observePath` alone — a real `start()` would install an
+    /// `NWPathMonitor`, which a test machine cannot control.
+    @Test("stop reseeds the detector, so the next update emits nothing")
+    func stopReseedsTheDetector() async {
+        let h = Harness()
+        h.watcher.observePath(Self.pathA)
+
+        h.watcher.stop()
+        h.setNow(plus: 1)
+        h.watcher.observePath(Self.pathB)
+
+        #expect(await watchForSleeper(on: h.clock) == false, "the first update after stop is a seed")
+        #expect(h.fired.values.isEmpty)
+    }
 }

@@ -197,37 +197,29 @@ extension AppState {
     ///    re-exec. A child with no recorded start has not spawned yet and
     ///    will spawn on the new path; a child started at or after `change.at`
     ///    is already on it. Both are skipped, so a burst costs no spawn it
-    ///    does not need. A restart is lossless — session state lives on the
-    ///    provider, and `attach` is required to be targeted and idempotent —
-    ///    so the worst case of an unnecessary one is a repaint. The restart
-    ///    goes through `restartRemoteAttachAfterNetworkChange`, not the
-    ///    manual `reconnectRemoteSession`, so a selection that also has a
-    ///    pending-reconnect entry keeps its `attempts` across the restart.
+    ///    does not need. The session survives a restart untouched — its state
+    ///    lives on the provider, and `attach` is required to be targeted and
+    ///    idempotent — so an unnecessary one costs the viewer a repaint and
+    ///    the pane's local scrollback, and nothing more. Each restart is a
+    ///    plain `reconnectRemoteSession`; see
+    ///    `restartRemoteAttachChildren(startedBefore:)` for why this automatic
+    ///    path drops a live child's leftover pending entry exactly as the
+    ///    manual Reconnect does, and why the recency order is restored after.
     /// 2. **Expire stale backoff.** Every pending-reconnect entry still
-    ///    waiting has its deadline pulled back to `change.at`: a network
-    ///    change is exactly what makes an earlier transport failure stale,
-    ///    and a session that failed while the network was down would
-    ///    otherwise sit out up to 300 seconds after it came back. `attempts`
-    ///    and the provider-health gate both survive untouched — see
-    ///    `expireRemoteReconnectBackoff(at:)`.
+    ///    waiting whose failure PREDATES `change.at` has its deadline pulled
+    ///    back to it: a network change is exactly what makes an earlier
+    ///    transport failure stale, and a session that failed while the network
+    ///    was down would otherwise sit out up to 300 seconds after it came
+    ///    back. A failure that landed after the change keeps its cool-off —
+    ///    it already met the new path. `attempts` and the provider-health gate
+    ///    both survive untouched — see `expireRemoteReconnectBackoff(at:)`.
     /// 3. **Re-evaluate now, with no timer and no RPC.**
     ///    `attachedRemoteSelections` is computed on every read, and both
     ///    mutations above notify observers, so `RemoteAttachPager` re-mounts
     ///    on the next render rather than on the next ~60 s provider
     ///    republish.
     func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
-        var restarted = 0
-        // Least-recent first: every restart ends in `touchAttachedRemoteSession`,
-        // which moves its selection to the front of
-        // `recentlyAttachedRemoteSessions`. Walking the most-recent-first list
-        // front-to-back would therefore leave the recency log reversed, which
-        // changes both which pane the host slot falls back to when nothing is
-        // selected and which pane cap pressure evicts next. Walking it
-        // backwards re-touches in ascending recency, so the order survives.
-        for selection in attachedRemoteSelections.reversed() {
-            guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < change.at else { continue }
-            if restartRemoteAttachAfterNetworkChange(selection, at: change.at) { restarted += 1 }
-        }
+        let restarted = restartRemoteAttachChildren(startedBefore: change.at)
         let cleared = expireRemoteReconnectBackoff(at: change.at)
 
         let triggers = change.triggers.map(\.rawValue).joined(separator: "+")

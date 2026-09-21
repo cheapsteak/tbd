@@ -1269,14 +1269,25 @@ final class AppState {
         remoteAttachGenerations[selection] = RemoteAttachGeneration(generation: generation, startedAt: date)
     }
 
-    /// Moves every pending-reconnect deadline that still lies in the future
-    /// back to `date`, keeping each entry's `exitCode` and `attempts`.
-    /// Returns how many entries moved.
+    /// Moves back to `date` every pending-reconnect deadline that still lies
+    /// in the future AND belongs to a failure that predates `date`, keeping
+    /// each entry's `exitCode` and `attempts`. Returns how many entries moved.
     ///
     /// Lives here rather than beside `handleNetworkChange` in
     /// `AppState+RemoteAttach.swift` because `pendingReconnectRemoteSessions`
     /// is `private(set)` and Swift's `private` is file-scoped: every direct
     /// mutator of that dictionary has to sit in this file.
+    ///
+    /// **Only an EARLIER failure is stale.** A child that died at or after
+    /// `date` died on the path the change installed, so pulling its cool-off
+    /// back would respawn it straight into whatever just killed it — and the
+    /// gap between the raw event and the debounced handling is exactly wide
+    /// enough for that to happen. `RemotePendingReconnect` records no creation
+    /// time, but it is derivable: an entry is written with
+    /// `nextEligibleAt = failedAt + backoffInterval(attempts:)`, so
+    /// subtracting that interval recovers `failedAt`. The equality edge — a
+    /// failure landing exactly at `date` — is not load-bearing; it counts as
+    /// predating the change, and at that instant either answer is defensible.
     ///
     /// **`attempts` is deliberately preserved.** Escalation is the only bound
     /// on a respawn loop (see `RemoteReconnectPolicy.nextPending`), so a
@@ -1287,7 +1298,10 @@ final class AppState {
     @discardableResult
     func expireRemoteReconnectBackoff(at date: Date) -> Int {
         var moved = 0
-        for (selection, pending) in pendingReconnectRemoteSessions where pending.nextEligibleAt > date {
+        for (selection, pending) in pendingReconnectRemoteSessions
+        where pending.nextEligibleAt > date
+            && pending.nextEligibleAt.addingTimeInterval(
+                -RemoteReconnectPolicy.backoffInterval(attempts: pending.attempts)) <= date {
             pendingReconnectRemoteSessions[selection] = RemotePendingReconnect(
                 exitCode: pending.exitCode,
                 attempts: pending.attempts,
@@ -1342,35 +1356,41 @@ final class AppState {
         return true
     }
 
-    /// `reconnectRemoteSession` for an automatic, network-triggered restart:
-    /// identical, except the selection's pending-reconnect entry — if it has
-    /// one — is carried across the restart with its deadline set to `date`
-    /// rather than dropped. The manual Reconnect drops it because the user
-    /// asked to connect now; a network change says nothing about whether the
-    /// provider has stopped failing, so the attempt count — the only bound on
-    /// a respawn loop, see `RemoteReconnectPolicy.nextPending` — must survive.
+    /// Restarts every attached selection whose child has a recorded spawn time
+    /// before `date` — the network-change path's step 1 — and returns how many.
     ///
-    /// A carried entry does not hold the restarted pane back: its deadline is
-    /// `date` itself, and `RemoteReconnectPolicy.isBlocked` is false once
-    /// `now >= nextEligibleAt` on an `.ok` provider. What it preserves is the
-    /// escalation a subsequent failure builds on.
+    /// Each restart is a plain `reconnectRemoteSession`, so a live child's
+    /// leftover pending-reconnect entry is dropped, exactly as for the manual
+    /// Reconnect: that entry predates the child that is running now, and
+    /// carrying it would re-arm the health gate
+    /// (`RemoteReconnectPolicy.isBlocked` blocks on any non-`.ok` health,
+    /// deadline or not) so that a provider going `.stale` during the very
+    /// network change would unmount the pane this just restarted. The bound on
+    /// a respawn loop is re-established by the first failure after the
+    /// restart; the restart cadence itself is bounded by the watcher's
+    /// debounce.
+    ///
+    /// `recentlyAttachedRemoteSessions` is restored to its prior order
+    /// afterwards: every restart ends in `touchAttachedRemoteSession`, which
+    /// would otherwise reorder the recency list — reversing it when every pane
+    /// restarts, and demoting a skipped (already-on-the-new-path) pane to the
+    /// tail when only some do. A network change says nothing about what the
+    /// user looked at last.
     ///
     /// Lives here rather than beside `handleNetworkChange` in
     /// `AppState+RemoteAttach.swift` for the same reason
-    /// `expireRemoteReconnectBackoff(at:)` does: `pendingReconnectRemoteSessions`
+    /// `expireRemoteReconnectBackoff(at:)` does: `recentlyAttachedRemoteSessions`
     /// is `private(set)` and Swift's `private` is file-scoped.
     @discardableResult
-    func restartRemoteAttachAfterNetworkChange(_ selection: RemoteSessionSelection, at date: Date) -> Bool {
-        let carried = pendingReconnectRemoteSessions[selection]
-        guard reconnectRemoteSession(selection) else { return false }
-        if let carried {
-            pendingReconnectRemoteSessions[selection] = RemotePendingReconnect(
-                exitCode: carried.exitCode,
-                attempts: carried.attempts,
-                nextEligibleAt: date
-            )
+    func restartRemoteAttachChildren(startedBefore date: Date) -> Int {
+        let order = recentlyAttachedRemoteSessions
+        var restarted = 0
+        for selection in attachedRemoteSelections {
+            guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < date else { continue }
+            if reconnectRemoteSession(selection) { restarted += 1 }
         }
-        return true
+        recentlyAttachedRemoteSessions = order
+        return restarted
     }
 
     /// Clears a stale explicit-detach flag for `selection`, if present —

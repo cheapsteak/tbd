@@ -186,8 +186,11 @@ final class RemoteAttachNetworkWatcher {
         }
     }
 
-    /// Tears both sources down and abandons any burst still accumulating.
-    /// Idempotent.
+    /// Tears both sources down, abandons any burst still accumulating, and
+    /// resets the detector so a later `start()` SEEDS on its new monitor's
+    /// first update rather than comparing it against a fingerprint from before
+    /// the gap — nothing was watched in between, so a difference there says
+    /// nothing about whether a transport died. Idempotent.
     func stop() {
         monitor?.cancel()
         monitor = nil
@@ -198,6 +201,7 @@ final class RemoteAttachNetworkWatcher {
         pending?.cancel()
         pending = nil
         burst = nil
+        detector = RemoteAttachNetworkChangeDetector()
     }
 
     /// Feeds one reduced path update through the detector, scheduling a fire

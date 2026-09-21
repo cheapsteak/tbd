@@ -52,7 +52,10 @@ struct RemoteAttachNetworkFingerprintTests {
     /// which would restart every pane once at every app launch.
     @Test func theSeedUpdateEmitsNothing() {
         var detector = RemoteAttachNetworkChangeDetector()
-        #expect(!detector.observe(Self.fingerprint()))
+        // Hoisted out of `#expect`: `observe` is `mutating`, and the macro
+        // captures its operands immutably. Same everywhere below.
+        let emitted = detector.observe(Self.fingerprint())
+        #expect(!emitted)
         #expect(detector.last == Self.fingerprint())
     }
 
@@ -61,14 +64,16 @@ struct RemoteAttachNetworkFingerprintTests {
     @Test func anUnchangedPathEmitsNothing() {
         var detector = RemoteAttachNetworkChangeDetector()
         _ = detector.observe(Self.fingerprint())
-        #expect(!detector.observe(Self.fingerprint()))
+        let emitted = detector.observe(Self.fingerprint())
+        #expect(!emitted)
     }
 
     /// A VPN coming up. Reddens if `interfaceNames` leaves the fingerprint.
     @Test func anAddedInterfaceEmits() {
         var detector = RemoteAttachNetworkChangeDetector()
         _ = detector.observe(Self.fingerprint(interfaces: ["en0"]))
-        #expect(detector.observe(Self.fingerprint(interfaces: ["en0", "utun4"])))
+        let emitted = detector.observe(Self.fingerprint(interfaces: ["en0", "utun4"]))
+        #expect(emitted)
     }
 
     /// A primary-route change: same interfaces, different order. Reddens if
@@ -77,7 +82,8 @@ struct RemoteAttachNetworkFingerprintTests {
     @Test func areorderedPrimaryInterfaceEmits() {
         var detector = RemoteAttachNetworkChangeDetector()
         _ = detector.observe(Self.fingerprint(interfaces: ["en0", "en1"]))
-        #expect(detector.observe(Self.fingerprint(interfaces: ["en1", "en0"])))
+        let emitted = detector.observe(Self.fingerprint(interfaces: ["en1", "en0"]))
+        #expect(emitted)
     }
 
     /// A new default router on the same interface — the field evidence's own
@@ -85,7 +91,8 @@ struct RemoteAttachNetworkFingerprintTests {
     @Test func aChangedGatewayEmits() {
         var detector = RemoteAttachNetworkChangeDetector()
         _ = detector.observe(Self.fingerprint(gateways: ["192.0.2.1"]))
-        #expect(detector.observe(Self.fingerprint(gateways: ["198.51.100.1"])))
+        let emitted = detector.observe(Self.fingerprint(gateways: ["198.51.100.1"]))
+        #expect(emitted)
     }
 
     /// Re-attaching onto no network only burns a spawn. Reddens if the
@@ -94,7 +101,8 @@ struct RemoteAttachNetworkFingerprintTests {
     @Test func anUnsatisfiedPathEmitsNothingEvenWhenDifferent() {
         var detector = RemoteAttachNetworkChangeDetector()
         _ = detector.observe(Self.fingerprint(.satisfied, interfaces: ["en0"], gateways: ["192.0.2.1"]))
-        #expect(!detector.observe(Self.fingerprint(.unsatisfied, interfaces: [], gateways: [])))
+        let emitted = detector.observe(Self.fingerprint(.unsatisfied, interfaces: [], gateways: []))
+        #expect(!emitted)
     }
 
     /// Wi-Fi dropping and coming back on the same network: the path is
@@ -105,9 +113,12 @@ struct RemoteAttachNetworkFingerprintTests {
     /// exists for.
     @Test func satisfiedThenUnsatisfiedThenTheSameSatisfiedEmits() {
         var detector = RemoteAttachNetworkChangeDetector()
-        #expect(!detector.observe(Self.fingerprint()))
-        #expect(!detector.observe(Self.fingerprint(.unsatisfied, interfaces: [], gateways: [])))
-        #expect(detector.observe(Self.fingerprint()))
+        let seeded = detector.observe(Self.fingerprint())
+        #expect(!seeded)
+        let wentDown = detector.observe(Self.fingerprint(.unsatisfied, interfaces: [], gateways: []))
+        #expect(!wentDown)
+        let cameBack = detector.observe(Self.fingerprint())
+        #expect(cameBack)
     }
 
     /// `last` is what the watcher reads to recover the fingerprint a change

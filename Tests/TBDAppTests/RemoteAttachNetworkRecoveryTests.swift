@@ -113,33 +113,40 @@ struct RemoteAttachNetworkRecoveryTests {
         }
     }
 
-    /// `attachedRemoteSelections` is most-recent-first and every restart ends
-    /// in `touchAttachedRemoteSession`, which moves its selection to the
-    /// front of the recency log. Reddens if `handleNetworkChange` drops its
-    /// `.reversed()` and walks the list front-to-back: the log comes out
-    /// reversed, which changes both which pane the host slot falls back to
-    /// when nothing is selected and which pane cap pressure evicts next.
-    @Test("restarting every pane leaves the attach recency order unchanged")
+    /// Every restart ends in `touchAttachedRemoteSession`, which moves its
+    /// selection to the front of the recency log, so `handleNetworkChange`
+    /// snapshots that log and restores it afterwards. The partial case is the
+    /// discriminating one: s2 is already on the new path and is skipped.
+    /// Reddens if the snapshot/restore is removed — s1 and s3 would jump ahead
+    /// of s2, demoting the one untouched pane to the tail, which changes both
+    /// which pane the host slot falls back to when nothing is selected and
+    /// which pane cap pressure evicts next.
+    @Test("restarting some panes leaves the attach recency order unchanged")
     func restartingPreservesTheRecencyOrder() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             seedSession(state, provider: "acme", id: "s2")
+            seedSession(state, provider: "acme", id: "s3")
             state.selectRemoteSession(provider: "acme", sessionID: "s1")
             state.selectRemoteSession(provider: "acme", sessionID: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s3")
             let s1 = sel("acme", "s1")
             let s2 = sel("acme", "s2")
-            #expect(state.recentlyAttachedRemoteSessions == [s2, s1])
+            let s3 = sel("acme", "s3")
+            #expect(state.recentlyAttachedRemoteSessions == [s3, s2, s1])
 
             let t = Date()
             state.markRemoteAttachStarted(s1, generation: 0, at: t.addingTimeInterval(-1))
-            state.markRemoteAttachStarted(s2, generation: 0, at: t.addingTimeInterval(-1))
+            state.markRemoteAttachStarted(s2, generation: 0, at: t.addingTimeInterval(1))
+            state.markRemoteAttachStarted(s3, generation: 0, at: t.addingTimeInterval(-1))
 
             state.handleNetworkChange(change(at: t))
 
             #expect(state.remoteAttachGeneration(for: s1) == 1)
-            #expect(state.remoteAttachGeneration(for: s2) == 1)
-            #expect(state.recentlyAttachedRemoteSessions == [s2, s1])
+            #expect(state.remoteAttachGeneration(for: s2) == 0, "already on the new path")
+            #expect(state.remoteAttachGeneration(for: s3) == 1)
+            #expect(state.recentlyAttachedRemoteSessions == [s3, s2, s1])
         }
     }
 
@@ -197,13 +204,15 @@ struct RemoteAttachNetworkRecoveryTests {
     /// A session that failed because the network was down would otherwise wait
     /// out its whole backoff after the network came back. Reddens if the
     /// backoff expiry is removed — the session stays excluded from
-    /// `attachedRemoteSelections`.
+    /// `attachedRemoteSelections`. The failure is placed a second before `t`,
+    /// which is the case the expiry is for: the network went down, this
+    /// session's transport died, and only then did the path come back.
     @Test("a pending session on a healthy provider becomes attachable at once")
     func pendingBackoffIsExpiredOnAHealthyProvider() {
         withState { state in
             let s1 = attached(state)
             let t = Date()
-            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0)
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(-1))
             let before = state.pendingReconnectRemoteSessions[s1]
             #expect(before != nil)
             #expect(!state.attachedRemoteSelections.contains(s1), "still inside its backoff window")
@@ -273,31 +282,57 @@ struct RemoteAttachNetworkRecoveryTests {
         }
     }
 
-    // MARK: - Carrying attempts across a restart
+    /// The rule is that an EARLIER failure is stale. A child that died after
+    /// the change died on the path the change installed, so pulling its
+    /// cool-off back would respawn it straight into whatever just killed it —
+    /// and the debounce window is exactly wide enough for such a failure to
+    /// land. Reddens if the `failedAt <= date` half of the predicate is
+    /// removed: this entry's deadline would be dragged back to `t`.
+    @Test("a failure after the change keeps its cool-off")
+    func aFailureAfterTheChangeKeepsItsCoolOff() {
+        withState { state in
+            let s1 = attached(state)
+            let t = Date()
+            state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(1))
+            let before = state.pendingReconnectRemoteSessions[s1]
+            #expect(before?.nextEligibleAt == t.addingTimeInterval(1 + RemoteReconnectPolicy.baseBackoff),
+                    "it failed one second after the change, and waits its whole window from there")
+
+            state.handleNetworkChange(change(at: t))
+
+            #expect(state.pendingReconnectRemoteSessions[s1] == before)
+            #expect(state.expireRemoteReconnectBackoff(at: t) == 0, "nothing was eligible to move")
+        }
+    }
+
+    // MARK: - The pending entry across a restart
 
     /// A mounted pane and a pending entry routinely coexist: nothing clears
-    /// the entry when a re-attach succeeds. Reddens if the restart goes
-    /// through `reconnectRemoteSession` — which drops the entry outright,
-    /// right for the manual Reconnect and wrong here — because `attempts`
-    /// would fall back to 0 and a flapping network could reset the only
-    /// bound there is on a respawn loop.
-    @Test("a network-triggered restart carries the pending attempt count")
-    func aRestartCarriesThePendingAttemptCount() {
+    /// the entry when a re-attach succeeds. The restart drops it, exactly as
+    /// the manual Reconnect does — that entry predates the child running now.
+    /// Reddens if the entry is instead carried across the restart:
+    /// `RemoteReconnectPolicy.isBlocked` blocks on ANY non-`.ok` health
+    /// regardless of deadline, so the `.stale` flip below — an in-flight
+    /// `list` failing during the very network change — would unmount the pane
+    /// the handler just restarted, with nothing to remount it until the next
+    /// provider republish.
+    @Test("a network-triggered restart drops the live child's stale pending entry")
+    func aRestartDropsTheLiveChildsStalePendingEntryAndSurvivesAHealthFlap() {
         withState { state in
             let s1 = attached(state)
             let t = Date()
             state.markRemoteSessionDetached(s1, exitCode: 255, generation: 0, now: t.addingTimeInterval(-60))
-            #expect(state.pendingReconnectRemoteSessions[s1]?.attempts == 1)
+            #expect(state.pendingReconnectRemoteSessions[s1] != nil)
             #expect(state.attachedRemoteSelections.contains(s1), "its window closed well before the change")
             state.markRemoteAttachStarted(s1, generation: 0, at: t.addingTimeInterval(-30))
 
             state.handleNetworkChange(change(at: t))
 
             #expect(state.remoteAttachGeneration(for: s1) == 1)
-            let after = state.pendingReconnectRemoteSessions[s1]
-            #expect(after?.attempts == 1)
-            #expect(after?.nextEligibleAt == t)
-            #expect(state.attachedRemoteSelections.contains(s1), "a carried entry eligible at `t` blocks nothing")
+            #expect(state.pendingReconnectRemoteSessions[s1] == nil)
+
+            seedProvider(state, name: "acme", health: .stale)
+            #expect(state.attachedRemoteSelections.contains(s1), "no entry left for the health gate to block")
         }
     }
 }
