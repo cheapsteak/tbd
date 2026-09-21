@@ -717,6 +717,18 @@ extension WorktreeLifecycle {
             // is expected, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
+                // A nonparked Codex row with a pending incarnation is the
+                // durable handoff for Continue-in-Claude rollback. Startup
+                // recovery cannot launch Codex until the hook socket is live,
+                // so this earlier ownership sweep must preserve the row even
+                // when its recorded window is missing or reassigned. The
+                // continuation reconciler rotates the token and establishes
+                // process ownership after bind.
+                if terminal.kind == .codex,
+                   terminal.pendingSessionIncarnationID != nil {
+                    logger.info("reconcile: preserving pending Codex recovery terminal \(terminal.id, privacy: .public) for post-bind continuation recovery")
+                    continue
+                }
                 // **Two transports, one fork.** Each arm establishes the
                 // same fact in its own vocabulary — nothing can reach this
                 // session any more — and then hands it to the shared

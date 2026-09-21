@@ -243,6 +243,23 @@ struct ContinueInClaudeTransactionTests {
         #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
     }
 
+    @Test("an unreadable ownership probe retracts the staged fence")
+    func rpcThrowingOwnershipProbeLeavesCodexUntouched() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true, paneProbeThrows: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let before = fixture.terminal
+
+        let response = await continueRequest(fixture)
+
+        #expect(!response.success)
+        let after = try #require(try await fixture.db.terminals.get(id: before.id))
+        #expect(after.kind == .codex)
+        #expect(after.sessionIncarnationID == before.sessionIncarnationID)
+        #expect(after.pendingSessionIncarnationID == nil)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+    }
+
     @Test("durable pending recovery always restores Codex")
     func startupRecoveryRestoresSourceIdentity() async throws {
         let fixture = try await makeRPCFixture(ownsPane: true)
@@ -281,6 +298,103 @@ struct ContinueInClaudeTransactionTests {
         #expect(restored.pendingSessionIncarnationID == nil)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.terminal.worktreeID).count == 1)
+    }
+
+    @Test("recovery adopts a live exact-stamped pane in its actual window")
+    func recoveryAdoptsExactStampedPaneWindow() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true, paneWindowID: "@actual")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        let recoveryTask = Task {
+            await fixture.router.reconcilePendingContinueInClaude()
+        }
+        let recoveryToken = try await waitForPending(
+            terminalID: fixture.terminal.id,
+            differentFrom: crashedDestinationToken,
+            in: fixture.db)
+        try await waitForRespawnCount(1, in: fixture.recorder)
+        #expect((await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: "codex-thread",
+                transcriptPath: fixture.rollout.path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: recoveryToken)))).success)
+        await recoveryTask.value
+
+        let restored = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(restored.tmuxWindowID == "@actual")
+        #expect(restored.tmuxPaneID == "%source")
+        #expect(restored.pendingSessionIncarnationID == nil)
+        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(fixture.recorder.commands.contains {
+            $0.contains("respawn-window") && $0.contains("@actual")
+        })
+    }
+
+    @Test("recovery refuses a live pane whose identity is unavailable")
+    func recoveryFailsClosedForUnstampedLivePane() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: false)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        await fixture.router.reconcilePendingContinueInClaude()
+
+        let pending = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(pending.kind == .codex)
+        #expect(pending.pendingSessionIncarnationID != nil)
+        #expect(pending.pendingSessionIncarnationID != crashedDestinationToken)
+        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+    }
+
+    @Test("authoritative rollout activity overrides a stale persisted idle fact")
+    func authoritativeWorkingRolloutRefusesContinue() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let started = """
+            {"type":"event_msg","payload":{"type":"task_started","turn_id":"live-turn","started_at":20}}
+            """
+        try append(started + "\n", to: fixture.rollout)
+
+        let response = await continueRequest(fixture)
+
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
+        let after = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.observedActivity?.value == .idle)
+        #expect(after.pendingSessionIncarnationID == nil)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+    }
+
+    @Test("authoritative rollout inspection fails closed while bounded scan is behind")
+    func authoritativeBehindRolloutRefusesContinue() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let bulkyRecord = "{\"type\":\"response_item\",\"padding\":\""
+            + String(repeating: "x", count: 1_100_000) + "\"}\n"
+        try append(bulkyRecord, to: fixture.rollout)
+
+        let response = await continueRequest(fixture)
+
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
+            .pendingSessionIncarnationID == nil)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
     }
 
     @Test("busy, wrong-provider, unreadable-rollout, and missing-profile preflight do not respawn")
@@ -447,7 +561,9 @@ struct ContinueInClaudeTransactionTests {
 
     private func makeRPCFixture(
         ownsPane: Bool,
-        respawnFailures: Int = 0
+        respawnFailures: Int = 0,
+        paneWindowID: String = "@source",
+        paneProbeThrows: Bool = false
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
@@ -461,7 +577,10 @@ struct ContinueInClaudeTransactionTests {
         let userMessage = """
             {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue the task."}]}}
             """
-        try (sessionMeta + "\n" + userMessage + "\n").write(
+        let lifecycleClose = """
+            {"type":"event_msg","payload":{"type":"task_complete","turn_id":"ready-turn","started_at":1,"last_agent_message":"Ready."}}
+            """
+        try (sessionMeta + "\n" + userMessage + "\n" + lifecycleClose + "\n").write(
             to: rollout, atomically: true, encoding: .utf8)
 
         let db = try TBDDatabase(inMemory: true)
@@ -483,9 +602,10 @@ struct ContinueInClaudeTransactionTests {
             dryRunRecorder: recorder.append,
             dryRunRespawnWindowError: { _ in failurePlan.next() },
             dryRunPaneSendTarget: { _, _ in
-                .live(terminalID: ownsPane ? terminalID.uuidString : nil)
+                if paneProbeThrows { throw FailurePlan.Failure.injected }
+                return .live(terminalID: ownsPane ? terminalID.uuidString : nil)
             },
-            dryRunPaneWindowID: { _, _ in "@source" })
+            dryRunPaneWindowID: { _, _ in paneWindowID })
         let subscriptions = StateSubscriptionManager()
         let deltas = DeltaRecorder()
         subscriptions.addSubscriber { data in
@@ -513,12 +633,13 @@ struct ContinueInClaudeTransactionTests {
             tmuxWindowID: "@source",
             tmuxPaneID: "%source",
             label: TerminalLabel.codex,
-            claudeSessionID: "codex-thread",
             kind: .codex)
-        try await db.terminals.updateSession(
+        _ = try #require(try await db.terminals.applySessionStart(
             id: created.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: created),
             sessionID: "codex-thread",
-            transcriptPath: rollout.path)
+            transcriptPath: rollout.path,
+            observedAt: Date(timeIntervalSinceReferenceDate: 5)))
         try await db.terminals.setActivityState(
             id: created.id,
             activityState: .idle,
@@ -601,6 +722,13 @@ struct ContinueInClaudeTransactionTests {
         guard process.terminationStatus == 0 else {
             throw CocoaError(.executableRuntimeMismatch)
         }
+    }
+
+    private func append(_ value: String, to url: URL) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(value.utf8))
     }
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {

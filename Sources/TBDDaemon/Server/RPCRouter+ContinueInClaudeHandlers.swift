@@ -162,6 +162,24 @@ extension RPCRouter {
         }
         let rolloutFingerprint = try CodexRolloutFingerprint.read(path: rolloutPath)
 
+        // The persisted activity row is presentation state and may lag an
+        // append that reached the immutable rollout moments ago. Continue is
+        // destructive, so re-read the authoritative lifecycle stream through
+        // the same bounded tracker terminal.list uses. Missing, unreadable,
+        // or still-behind observations publish no state and therefore refuse.
+        let authoritativeActivity = await codexActivityTracker.observe(
+            transcripts: [.init(
+                transcriptPath: rolloutFingerprint.path,
+                worktreeID: source.worktreeID,
+                terminalID: source.id,
+                sessionGeneration: source.sessionOrderObservedAt,
+                transcriptBoundaryOffset: source.codexTranscriptBoundaryOffset)])
+        guard authoritativeActivity[rolloutFingerprint.path] == .idle else {
+            throw ContinueInClaudeError(
+                "Wait for the current Codex turn to finish before continuing in Claude.",
+                code: .terminalBusy)
+        }
+
         guard let worktree = try await db.worktrees.getLocal(id: source.worktreeID) else {
             throw ContinueInClaudeError(
                 "Worktree not found for terminal \(source.id).")
@@ -331,9 +349,20 @@ extension RPCRouter {
         // first destructive act. Continue requires positive agreement for all
         // three facts: pane, window, and terminal stamp. An unstamped pane is
         // not enough authority to kill its process.
-        let probe = try await tmux.paneSendProbe(
-            server: currentWorktree.tmuxServer,
-            paneID: staged.tmuxPaneID)
+        let probe: (target: PaneSendTarget, windowID: String?)
+        do {
+            probe = try await tmux.paneSendProbe(
+                server: currentWorktree.tmuxServer,
+                paneID: staged.tmuxPaneID)
+        } catch {
+            await continueInClaudeReadiness.clear(destinationKey)
+            _ = try await db.terminals.abortContinueInClaudeBeforeLaunch(
+                id: staged.id,
+                pendingIncarnationID: destinationToken)
+            throw ContinueInClaudeError(
+                "The recorded Codex pane could not be verified; nothing was replaced.",
+                code: .terminalSessionGone)
+        }
         guard case .live(let claimedTerminalID) = probe.target,
               let claimedTerminalID,
               claimedTerminalID.caseInsensitiveCompare(staged.id.uuidString) == .orderedSame,
@@ -546,14 +575,42 @@ extension RPCRouter {
         let probe = try await tmux.paneSendProbe(
             server: worktree.tmuxServer,
             paneID: row.tmuxPaneID)
-        let ownsRecordedWindow: Bool = {
-            guard case .live(let claimedTerminalID) = probe.target,
-                  let claimedTerminalID else { return false }
-            return claimedTerminalID.caseInsensitiveCompare(row.id.uuidString) == .orderedSame
-                && probe.windowID == row.tmuxWindowID
-        }()
+        let claimedLiveWindow: String?
+        switch probe.target {
+        case .live(let claimedTerminalID):
+            guard let claimedTerminalID else {
+                throw ContinueInClaudeError(
+                    "Codex recovery found a live pane with no verifiable owner.")
+            }
+            guard claimedTerminalID.caseInsensitiveCompare(row.id.uuidString) == .orderedSame,
+                  let windowID = probe.windowID,
+                  !windowID.isEmpty else {
+                throw ContinueInClaudeError(
+                    "Codex recovery found a live pane owned by another terminal.")
+            }
+            claimedLiveWindow = windowID
+        case .missing, .dead:
+            claimedLiveWindow = nil
+        }
 
-        if !ownsRecordedWindow {
+        if let claimedLiveWindow {
+            // The pane itself is the stronger ownership fact. A restarted
+            // tmux server may have placed the exact stamped terminal in a
+            // window whose coordinate differs from the stale row. Adopt that
+            // coordinate, then respawn-window kills the one live process
+            // before starting Codex — never create a second agent window.
+            if claimedLiveWindow != row.tmuxWindowID {
+                guard let moved = try await db.terminals.movePendingCodexRecovery(
+                    id: row.id,
+                    expectedPendingIncarnationID: recoveryToken,
+                    windowID: claimedLiveWindow,
+                    paneID: row.tmuxPaneID) else {
+                    throw ContinueInClaudeError(
+                        "Codex recovery lost its database ownership fence.")
+                }
+                target = moved
+            }
+        } else {
             let staleWindowID = row.tmuxWindowID
             let mayKillStale: Bool = switch probe.target {
             case .missing, .dead: true
