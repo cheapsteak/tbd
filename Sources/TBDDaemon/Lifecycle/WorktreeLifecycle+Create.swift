@@ -1662,6 +1662,9 @@ extension WorktreeLifecycle {
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
+        // Track the window IDs of created terminals to avoid reusing the
+        // bootstrap window ID if tmux restarts and hands it to a new window.
+        var createdTerminalWindowIDs: Set<String> = [primaryTerminal.tmuxWindowID]
 
         // The pane a parked prompt was waiting for now exists. This is the
         // whole of the spawn path's involvement: it passes no prompt, reads no
@@ -1753,6 +1756,7 @@ extension WorktreeLifecycle {
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+            createdTerminalWindowIDs.insert(setupTerminal.tmuxWindowID)
             if let setupMarkerPath, let setupHookPath {
                 // `remain-on-exit` is a tmux property and only tmux needs it:
                 // the auto-close wrapper lets the pane EXIT on hook success and
@@ -1861,7 +1865,7 @@ extension WorktreeLifecycle {
                 if !transport.isHolder {
                     try await ensureTmuxServerOnce()
                 }
-                _ = try await spawnTerminal(
+                let archivedTerminal = try await spawnTerminal(
                     id: plannedID,
                     worktreeID: worktreeID,
                     tmuxServer: tmuxServer,
@@ -1880,6 +1884,7 @@ extension WorktreeLifecycle {
                     attachment: nil,
                     modelProxySupervisor: modelProxySupervisor)
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
+                createdTerminalWindowIDs.insert(archivedTerminal.tmuxWindowID)
             }
         }
 
@@ -1893,8 +1898,12 @@ extension WorktreeLifecycle {
         try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: tabOrder)
         try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: plannedTerminalID1)
 
-        // Kill the untracked initial window that new-session created
-        if let windowID = initialWindowID {
+        // Kill the untracked initial window that new-session created, but skip
+        // if a restarted tmux server reused the window ID for one we just created
+        // (ABA scenario: the fresh window and the old ID are textually identical,
+        // so killing it would destroy a session we just spawned). Within one live
+        // tmux incarnation, window IDs are unique, so this is defense in depth.
+        if let windowID = initialWindowID, !createdTerminalWindowIDs.contains(windowID) {
             try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         }
 
