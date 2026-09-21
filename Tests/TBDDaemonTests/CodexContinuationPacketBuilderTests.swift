@@ -256,6 +256,36 @@ struct CodexContinuationPacketBuilderTests {
         #expect(packet.contains("Canonical conclusion"))
     }
 
+    @Test("free-text redaction covers JSON-quoted keys and leaves ordinary prose alone")
+    func redactionCoversQuotedJSONKeys() async throws {
+        let fixture = try Fixture()
+        try fixture.write([
+            responseMessage(
+                role: "user",
+                text: """
+                pasted {"password": "hunter2"} and {"api_key":"quoted-key-value","user":"someone"}
+                also {'token': 'single-quoted-value'} and {"client_secret": 12345678}
+                The password reset flow uses a token bucket; see the secret santa list.
+                plain {"name": "widget", "count": 3}
+                """),
+            responseMessage(role: "assistant", text: "Finished safely."),
+        ])
+        let builder = CodexContinuationPacketBuilder(
+            gitStatusProvider: StubGitStatusProvider(status: ""))
+
+        let packet = try await builder.build(
+            rolloutPath: fixture.rollout.path, worktreePath: fixture.directory.path)
+
+        #expect(!packet.contains("hunter2"))
+        #expect(!packet.contains("quoted-key-value"))
+        #expect(!packet.contains("single-quoted-value"))
+        #expect(!packet.contains("12345678"))
+        #expect(packet.contains("[REDACTED]"))
+        #expect(packet.contains(#""user":"someone""#))
+        #expect(packet.contains("The password reset flow uses a token bucket; see the secret santa list."))
+        #expect(packet.contains(#"plain {"name": "widget", "count": 3}"#))
+    }
+
     @Test("tool summaries keep only path arguments and all retained strings are redacted")
     func redactionAndToolAllowlist() async throws {
         let fixture = try Fixture()
