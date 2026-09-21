@@ -81,6 +81,44 @@ struct RemoteSessionActionMenuTests {
         #expect(!kinds(items).contains(.sendText))
     }
 
+    // MARK: - Reconnect: offered only while this app holds an attach pane
+
+    @Test func reconnectFollowsAttachWhenAttached() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach"], gone: false, isPinned: false, isAttached: true)
+        #expect(kinds(items) == [.rename, .attach, .reconnect, .copySessionID, .pin, nil, .stop])
+    }
+
+    @Test func reconnectOmittedWhenNotAttached() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach"], gone: false, isPinned: false, isAttached: false)
+        #expect(!kinds(items).contains(.reconnect))
+        #expect(!kinds(RemoteSessionActionMenu.items(
+            capabilities: ["attach"], gone: false, isPinned: false)).contains(.reconnect))
+    }
+
+    /// Reconnect re-runs the provider's `attach` verb, so without the
+    /// capability there is nothing to restart even if the flag claims a pane.
+    @Test func reconnectOmittedWithoutAttachCapability() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["log"], gone: false, isPinned: false, isAttached: true)
+        #expect(!kinds(items).contains(.reconnect))
+    }
+
+    /// Local like Attach — a stale inventory does not withhold it.
+    @Test func reconnectSurvivesAStaleSnapshot() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach"], gone: false, snapshotFresh: false,
+            isPinned: false, isAttached: true)
+        #expect(kinds(items) == [.attach, .reconnect, .copySessionID, .pin])
+    }
+
+    @Test func reconnectNeverOfferedOnAGoneRow() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach"], gone: true, isPinned: false, isAttached: true)
+        #expect(!kinds(items).contains(.reconnect))
+    }
+
     // MARK: - full capability set: exact order
 
     @Test func allCapabilitiesProduceTheFullOrderedMenu() {

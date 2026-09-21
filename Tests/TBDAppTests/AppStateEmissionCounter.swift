@@ -182,6 +182,7 @@ final class AppStateEmissionTracker {
         _ = state.recentlyAttachedRemoteSessions
         _ = state.explicitlyDetachedRemoteSessions
         _ = state.pendingReconnectRemoteSessions
+        _ = state.remoteAttachGenerations
         _ = state.selectedArchivedWorktreeIDs
         _ = state.selectedReapRecordIDs
         _ = state.revivingArchived
@@ -297,6 +298,7 @@ final class AppStateEmissionTracker {
         "recentlyAttachedRemoteSessions",
         "explicitlyDetachedRemoteSessions",
         "pendingReconnectRemoteSessions",
+        "remoteAttachGenerations",
         "selectedArchivedWorktreeIDs",
         "selectedReapRecordIDs",
         "revivingArchived",

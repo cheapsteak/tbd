@@ -151,6 +151,17 @@ extension AppState {
         attachedRemoteSelections(now: Date())
     }
 
+    /// `attachedRemoteSelections` paired with each selection's restart
+    /// generation — the identities `RemoteAttachPager` mounts its tab items
+    /// under. A `reconnectRemoteSession` bump changes a selection's key, which
+    /// is what makes the pager tear the old `attach` child down and spawn a
+    /// fresh one.
+    var attachedRemoteMountKeys: [RemoteAttachMountKey] {
+        attachedRemoteSelections.map {
+            RemoteAttachMountKey(selection: $0, generation: remoteAttachGeneration(for: $0))
+        }
+    }
+
     /// Which selection the persistently-mounted remote-session detail host
     /// (`DetailSectionHostPager`'s `.remote` tab, via `RemoteSessionHostSlot`)
     /// should currently render its chrome for: the active selection when
@@ -166,4 +177,13 @@ extension AppState {
     var remoteSessionHostSelection: RemoteSessionSelection? {
         selectedRemoteSession ?? recentlyAttachedRemoteSessions.first
     }
+}
+
+/// The identity of one mounted attach terminal in `RemoteAttachPager`: the
+/// session plus the restart generation it was spawned under. Two keys for the
+/// same selection but different generations are different terminals, so a
+/// generation bump replaces the pane's `attach` child rather than reusing it.
+struct RemoteAttachMountKey: Hashable {
+    let selection: RemoteSessionSelection
+    let generation: Int
 }

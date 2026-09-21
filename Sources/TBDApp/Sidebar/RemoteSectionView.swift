@@ -705,7 +705,9 @@ struct RemoteSessionRowView: View {
                 isPinned: appState.remoteSessionIsPinned(
                     provider: session.provider, sessionID: session.payload.id),
                 exited: session.payload.state == .exited,
-                deleteEnabled: appState.remoteDeleteEnabled
+                deleteEnabled: appState.remoteDeleteEnabled,
+                isAttached: appState.attachedRemoteSelections.contains(
+                    RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
             )
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 switch item {
@@ -739,6 +741,9 @@ struct RemoteSessionRowView: View {
             isEditing = true
         case .attach:
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .attach)
+        case .reconnect:
+            appState.reconnectRemoteSession(
+                RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
         case .viewLog:
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .log)
         case .sendText:

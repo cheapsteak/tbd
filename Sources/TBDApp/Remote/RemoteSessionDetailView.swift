@@ -287,6 +287,13 @@ struct RemoteSessionDetailView: View {
                     .fontWeight(.semibold)
                     .lineLimit(1)
                 Spacer()
+                if isAttached {
+                    // Restarts the local `attach` child in place — the way
+                    // out of a pane whose transport died without the child
+                    // exiting, which nothing else can detect.
+                    Button("Reconnect") { appState.reconnectRemoteSession(selection) }
+                        .help("Restart this session's attach connection")
+                }
                 if let session, !session.gone, providerStatus?.hasStaleSnapshot != true {
                     Button("Stop", role: .destructive) { showStopConfirm = true }
                         .confirmationDialog(
@@ -436,7 +443,7 @@ struct RemoteSessionDetailView: View {
             // transparent and non-hit-testable behind the empty-state
             // message below without any special-casing here.
             RemoteAttachPager(
-                selections: appState.attachedRemoteSelections,
+                mounts: appState.attachedRemoteMountKeys,
                 activeSelection: selection
             )
             .opacity(showsAttachSlot ? 1 : 0)

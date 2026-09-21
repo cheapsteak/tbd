@@ -56,6 +56,21 @@ public enum StateDelta: Codable, Sendable {
     /// last on purpose — `StateDelta`'s Codable synthesis keys on case name,
     /// but the order is still the record of how the protocol grew.
     case terminalPendingQuestionsChanged(TerminalPendingQuestionsDelta)
+    /// `tbd remote reconnect` asked the app to kill and re-exec a remote
+    /// session's local `attach` child. The app owns that child, so the daemon
+    /// only relays the request. An app build that predates this case fails to
+    /// decode it and drops the line, like any unknown delta — the request is
+    /// then simply not acted on.
+    case remoteSessionReconnectRequested(RemoteSessionReconnectDelta)
+}
+
+/// Identifies the remote session a `.remoteSessionReconnectRequested` names.
+public struct RemoteSessionReconnectDelta: Codable, Sendable, Equatable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
 }
 
 /// The complete set of in-flight `AskUserQuestion` captures for one terminal.
