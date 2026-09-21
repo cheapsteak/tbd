@@ -63,7 +63,18 @@ extract_save_if() {
 
 SCRIPT="$(mktemp "${TMPDIR:-/tmp}/cache-save-policy.XXXXXX.sh")"
 extract_step_script > "$SCRIPT"
-trap 'rm -f "$SCRIPT"' EXIT
+
+# Everything this harness mints is reclaimed from one EXIT trap rather than from
+# the line after each case, so an interrupted run leaves nothing behind either.
+# On a runner the VM is discarded anyway; on a developer box a harness that
+# leaks a fixture repo per case per run is how a temp directory fills up.
+FIXTURE_ROOTS=()
+cleanup() {
+  rm -f "$SCRIPT"
+  local root
+  for root in ${FIXTURE_ROOTS+"${FIXTURE_ROOTS[@]}"}; do rm -rf "$root"; done
+}
+trap cleanup EXIT
 
 # --- fixture -----------------------------------------------------------------
 
@@ -112,12 +123,24 @@ decision() {
   sed -n 's/^output://p' <<<"$(run_step "$@")"
 }
 
+# plant_unrelated_base ROOT NAME -> refs/remotes/origin/<NAME> pointing at a
+# commit that shares no history with HEAD. `git rev-parse` resolves it, so the
+# step gets past its base-ref guard, and the three-dot `git diff` then exits 128
+# with "no merge base" — which is the only realistic way to reach the step's
+# error branch.
+plant_unrelated_base() {
+  local root="$1" name="$2" empty_tree sha
+  empty_tree="$(git -C "$root" hash-object -t tree /dev/null)"
+  sha="$("${GIT_FIXTURE[@]}" -C "$root" commit-tree "$empty_tree" -m unrelated)"
+  git -C "$root" update-ref "refs/remotes/origin/$name" "$sha"
+}
+
 with_repo() {
   local fn="$1"
   local root; root="$(mktemp -d "${TMPDIR:-/tmp}/cache-save-policy-repo.XXXXXX")"
+  FIXTURE_ROOTS+=("$root")
   mkrepo "$root"
   "$fn" "$root"
-  rm -rf "$root"
 }
 
 # --- cases -------------------------------------------------------------------
@@ -167,6 +190,15 @@ case_manifest() {
   assert_eq "Package.resolved -> true" "true" "$(decision "$1" pull_request main)"
 }
 
+# Both manifest files are gated, for different reasons — Package.resolved moves
+# the restore-keys scope, Package.swift re-plans the build graph — so both get
+# their own case rather than one standing in for the other.
+test_a_pr_touching_the_package_manifest_answers_true() { with_repo case_package_swift; }
+case_package_swift() {
+  change_file "$1" Package.swift
+  assert_eq "Package.swift -> true" "true" "$(decision "$1" pull_request main)"
+}
+
 # The discriminating half. A first-party source change that is NOT one of the
 # gated directories must still answer false, or the gate is just "any change".
 test_a_pr_touching_another_first_party_target_answers_false() { with_repo case_app; }
@@ -190,6 +222,20 @@ case_missing_base() {
   local out; out="$(run_step "$1" pull_request nonexistent-base)"
   assert_eq "missing base ref -> false" "false" "$(sed -n 's/^output://p' <<<"$out")"
   assert_contains "and warns" "$out" '::warning::origin/nonexistent-base is absent'
+}
+
+# The third arm of the step's `case`: a base ref that RESOLVES but that the
+# three-dot diff cannot reach, which git reports as "no merge base" with exit
+# 128. It must land on false with a warning rather than being read as either
+# verdict — a 128 silently taken for "nothing changed" is the same answer as a
+# real "nothing changed", and only the warning tells them apart.
+test_a_diff_that_errors_answers_false_and_warns() { with_repo case_diff_error; }
+case_diff_error() {
+  change_file "$1" Sources/TBDShared/Base.swift
+  plant_unrelated_base "$1" unrelated
+  local out; out="$(run_step "$1" pull_request unrelated)"
+  assert_eq "an erroring diff -> false" "false" "$(sed -n 's/^output://p' <<<"$out")"
+  assert_contains "and warns with the status" "$out" '::warning::git diff against origin/unrelated failed (128)'
 }
 
 # The step is only half the decision; the save step's `if:` is the other half,

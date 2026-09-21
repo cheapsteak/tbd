@@ -358,7 +358,7 @@ jobs:
       # scope: a run reads caches created on its own branch, on its base branch,
       # or on the default branch, and among prefix matches it takes the most
       # recently created one. The store is capped at 10 GB and an entry for this
-      # package is ~1.56 GB, so it holds six entries and evicts the least
+      # package is ~1.56 GB, so it holds about six of them and evicts the least
       # recently used.
       #
       # The measurement that shapes the policy, taken over the 30 days to
@@ -383,8 +383,10 @@ jobs:
       #    entries in the store — which is what pushes main's entry, the one
       #    entry every branch can read, toward the bottom of the LRU. When it
       #    goes, the next push to main and the next PR's first run restore
-      #    nothing and pay a cold build: about 12 minutes at -j2, against the
-      #    30-54 s a warm restore took across the eight most recent green runs.
+      #    nothing and rebuild from scratch — the step comment below puts the
+      #    first test step at 1250 s on a cold cache (run 34255164378) against
+      #    73-996 s warm, where a warm restore itself costs 30-54 s, measured
+      #    across the eight most recent green runs.
       #  - Every save costs the run that makes it 26-49 s of upload, measured
       #    across those same eight runs.
       - name: Restore SwiftPM build artifacts and dependencies
@@ -851,8 +853,8 @@ jobs:
       #    else; it earns 1.5 GB of a 10 GB store only when the next push would
       #    otherwise rebuild nearly everything. Touching TBDShared or
       #    TBDDaemonLib is exactly that case — an interface change cascades into
-      #    every downstream module, ~12 minutes of it, and this job wipes and
-      #    re-emits both libraries on every run regardless. Touching
+      #    every downstream module, and this job wipes and re-emits both
+      #    libraries on every run regardless. Touching
       #    Package.resolved moves the dependency set the restore-keys prefix is
       #    scoped to, which leaves main's entry no longer a fallback this PR can
       #    use at all; touching Package.swift re-plans the build graph, which

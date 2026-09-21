@@ -744,8 +744,8 @@ class ResultsVerdictTests(unittest.TestCase):
         # `scripts/test.sh` — checkout, the cache-save decision, mtime restore,
         # `brew install tmux`, `xcode-select`, toolchain capture, cache restore,
         # workspace repair, force rebuild — so a `brew` flake means zero tests
-        # ran, no xUnit file
-        # exists and no artifact was uploaded. Adopting 1 there tells a caller its
+        # ran, no xUnit file exists and no artifact was uploaded. Adopting 1
+        # there tells a caller its
         # suite is red when nothing ever compiled, and `scripts/test.sh` has no
         # local fallback for a 1. Every case that reaches here is answered by 78:
         # setup died, the compile died, or the upload broke on a genuinely red run

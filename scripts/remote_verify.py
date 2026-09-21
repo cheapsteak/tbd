@@ -900,8 +900,8 @@ def verdict_from_results(results: Report | None) -> int:
       restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
       restore, workspace repair, force rebuild — and any one of them failing
       means zero tests ran, no xUnit file was written and no artifact was
-      uploaded. `brew install`
-      flaking on a hosted runner is ordinary weather, and reporting that as a red
+      uploaded. `brew install` flaking on a hosted runner is ordinary weather,
+      and reporting that as a red
       suite tells a caller its tests failed when they never started, with no
       local fallback to correct it. Every case that lands here is answered
       correctly by 78: setup failed (nothing ran); the compile failed (the local
