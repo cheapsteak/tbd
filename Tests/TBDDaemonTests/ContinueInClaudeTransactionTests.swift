@@ -341,6 +341,55 @@ struct ContinueInClaudeTransactionTests {
         })
     }
 
+    @Test("recovery does not kill the replacement when tmux reuses the stale window id")
+    func recoveryKeepsReplacementWhenTmuxReusesStaleWindowID() async throws {
+        // A restarted tmux server hands the fresh replacement the same
+        // coordinate the dead row still records. Dry-run createWindow's first
+        // id is "@mock-0", so pointing the row at it reproduces that shape.
+        let fixture = try await makeRPCFixture(
+            ownsPane: false,
+            sourceWindowID: "@mock-0",
+            paneTargetOverride: .missing)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        let recoveryTask = Task {
+            await fixture.router.reconcilePendingContinueInClaude()
+        }
+        let recoveryToken = try await waitForPending(
+            terminalID: fixture.terminal.id,
+            differentFrom: crashedDestinationToken,
+            in: fixture.db)
+        try await waitForRespawnCount(1, in: fixture.recorder)
+        #expect((await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: "codex-thread",
+                transcriptPath: fixture.rollout.path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: recoveryToken)))).success)
+        await recoveryTask.value
+
+        let restored = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(restored.kind == .codex)
+        #expect(restored.pendingSessionIncarnationID == nil)
+        #expect(restored.tmuxWindowID == "@mock-0")
+        #expect(fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(!fixture.recorder.commands.contains {
+            $0.contains("kill-window") && $0.contains("@mock-0")
+        }, "recovery killed the freshly-created replacement: \(fixture.recorder.commands)")
+        #expect(fixture.recorder.commands.contains {
+            $0.contains("respawn-window") && $0.contains("@mock-0")
+        }, "replacement was not respawned: \(fixture.recorder.commands)")
+    }
+
     @Test("recovery refuses a live pane whose identity is unavailable")
     func recoveryFailsClosedForUnstampedLivePane() async throws {
         let fixture = try await makeRPCFixture(ownsPane: false)
@@ -565,7 +614,9 @@ struct ContinueInClaudeTransactionTests {
         ownsPane: Bool,
         respawnFailures: Int = 0,
         paneWindowID: String = "@source",
-        paneProbeThrows: Bool = false
+        paneProbeThrows: Bool = false,
+        sourceWindowID: String = "@source",
+        paneTargetOverride: PaneSendTarget? = nil
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
@@ -605,6 +656,7 @@ struct ContinueInClaudeTransactionTests {
             dryRunRespawnWindowError: { _ in failurePlan.next() },
             dryRunPaneSendTarget: { _, _ in
                 if paneProbeThrows { throw FailurePlan.Failure.injected }
+                if let paneTargetOverride { return paneTargetOverride }
                 return .live(terminalID: ownsPane ? terminalID.uuidString : nil)
             },
             dryRunPaneWindowID: { _, _ in paneWindowID })
@@ -632,7 +684,7 @@ struct ContinueInClaudeTransactionTests {
         let created = try await db.terminals.create(
             id: terminalID,
             worktreeID: worktree.id,
-            tmuxWindowID: "@source",
+            tmuxWindowID: sourceWindowID,
             tmuxPaneID: "%source",
             label: TerminalLabel.codex,
             kind: .codex)
