@@ -564,6 +564,145 @@ import TestSupport
         #expect(notifs[0].message?.contains("has room") == true)
     }
 
+    // MARK: - The rotation continue is governed by the rotation flag
+
+    /// Lets the scheduler's loop observe a clock advance (copied from
+    /// `LimitResumeSchedulerTests`; a raw sleep is fine in a test).
+    private func pump() async {
+        for _ in 0..<10 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            await Task.yield()
+        }
+    }
+
+    /// Builds a router whose scheduler is STARTED, so a fire actually happens.
+    private func makeStartedRotationRouter(actuator: FakeActuator) async throws -> RPCRouter {
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
+        )
+        let testRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            profilePoolCandidateSource: source,
+            actuationLog: makeTestActuationLog())
+        let scheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: actuator, clock: clock,
+            jitterProvider: { 0 }, onOutcome: { _, _ in })
+        testRouter.limitResumeScheduler = scheduler
+        testRouter.rotationSwapPerformer = { _, _ in .ok() }
+        await scheduler.start()
+        return testRouter
+    }
+
+    private func seedLimitedAndEligible() async throws {
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauth)
+        let eligibleProfileID = try await makeProfile(name: "Eligible", kind: .oauth)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-123")
+        try await makeSnapshot(for: eligibleProfileID, percent: 30, organizationID: "org-456")
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+    }
+
+    @Test func rotationContinueFollowsTheRotationFlagNotTheResetTimeToggle() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+        var config = try await db.config.get()
+        #expect(config.autoResumeEnabled(forLimitType: ScheduledResume.rotationLimitType) == true)
+        #expect(config.autoResumeEnabled(forLimitType: "session") == false)
+
+        try await db.config.setLimitRotationEnabled(false)
+        try await db.config.setAutoResumeOnLimitReset(true)
+        config = try await db.config.get()
+        #expect(config.autoResumeEnabled(forLimitType: ScheduledResume.rotationLimitType) == false)
+        #expect(config.autoResumeEnabled(forLimitType: "session") == true)
+    }
+
+    @Test func rotationContinueFiresWithOnlyTheRotationFlagOn() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)   // the older toggle stays OFF
+        try await seedLimitedAndEligible()
+        let actuator = FakeActuator([.sent])
+        let testRouter = try await makeStartedRotationRouter(actuator: actuator)
+
+        let response = await testRouter.handle(try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID, resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session", rawMessage: "You've hit your session limit · resets 3pm (UTC)")))
+        #expect(response.success)
+        let pending = try await db.scheduledResumes.pending(terminalID: terminalID)
+        #expect(pending?.limitType == ScheduledResume.rotationLimitType)
+
+        await pump()
+        #expect(actuator.calls.isEmpty, "fires after the slack, not before")
+        // The handler stamps `resetsAt` with the wall clock while the scheduler
+        // sleeps on the test clock; bring the test clock past the wall-clock
+        // fire time before asserting on delivery.
+        await clock.advance(by: Date().timeIntervalSince(clock.now()) + LimitResumeScheduler.slack + 5)
+        await pump()
+        #expect(actuator.calls.count == 1, "the rotation continue must be delivered with only limit_rotation_enabled on")
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
+        await testRouter.limitResumeScheduler?.stop()
+    }
+
+    @Test func turningRotationOffCancelsOnlyRotationContinues() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await seedLimitedAndEligible()
+        let actuator = FakeActuator([.sent])
+        let testRouter = try await makeStartedRotationRouter(actuator: actuator)
+        _ = await testRouter.handle(try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID, resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session", rawMessage: "You've hit your session limit · resets 3pm (UTC)")))
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID)?.limitType == ScheduledResume.rotationLimitType)
+
+        // A reset-time row on another terminal must survive the rotation toggle.
+        let other = try await db.terminals.create(worktreeID: worktreeID, tmuxWindowID: "@9", tmuxPaneID: "%9")
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: other.id, worktreeID: worktreeID,
+            resetsAt: clock.now().addingTimeInterval(3600),
+            fireAt: clock.now().addingTimeInterval(3660),
+            limitType: "session", rawMessage: "m"))
+
+        let off = await testRouter.handle(try! RPCRequest(
+            method: RPCMethod.configSetLimitRotationEnabled,
+            params: ConfigSetLimitRotationEnabledParams(enabled: false)))
+        #expect(off.success)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil, "rotation row cancelled")
+        #expect(try await db.scheduledResumes.pending(terminalID: other.id)?.limitType == "session", "reset-time row untouched")
+
+        // The handler stamps `resetsAt` with the wall clock while the scheduler
+        // sleeps on the test clock; bring the test clock past the wall-clock
+        // fire time before asserting on delivery.
+        await clock.advance(by: Date().timeIntervalSince(clock.now()) + LimitResumeScheduler.slack + 5)
+        await pump()
+        #expect(actuator.calls.isEmpty, "a cancelled rotation continue is never typed")
+        await testRouter.limitResumeScheduler?.stop()
+    }
+
+    @Test func resetTimeToggleOffLeavesRotationContinuesAlone() async throws {
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID,
+            resetsAt: clock.now(), fireAt: clock.now().addingTimeInterval(60),
+            limitType: ScheduledResume.rotationLimitType, rawMessage: "m"))
+        let cancelled = try await db.scheduledResumes.cancelAllPending(scope: .limitOnly)
+        #expect(cancelled == 0)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID)?.limitType == ScheduledResume.rotationLimitType)
+        let cancelledRotation = try await db.scheduledResumes.cancelAllPending(scope: .rotationOnly)
+        #expect(cancelledRotation == 1)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
+    }
+
     // MARK: - Wiring regression
 
     /// The daemon once built the router without a candidate source, which left
