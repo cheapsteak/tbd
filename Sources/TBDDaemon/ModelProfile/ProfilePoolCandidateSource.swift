@@ -72,7 +72,7 @@ public struct ProfilePoolCandidateSource: Sendable {
                 hasCredential = loginIdentity(row.id) != nil
             case .oauthToken:
                 if let snapshot = snapshot {
-                    hasCredential = ![ProfileUsageSnapshot.StatusKind.needsLogin, .noCredentials]
+                    hasCredential = ![ProfileUsageStatusKind.needsLogin, .noCredentials]
                         .contains(snapshot.statusKind)
                 } else {
                     // No snapshot yet: assume the token is stored (the profile wouldn't exist without one).
