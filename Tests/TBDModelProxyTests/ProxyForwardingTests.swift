@@ -319,6 +319,73 @@ extension ModelProxySuites {
             }
         }
 
+        // MARK: Tool search
+
+        @Test("deferred tools and a tool_reference block reach the upstream byte-identical")
+        func forwardsToolSearchBodyByteIdentical() async throws {
+            // Tool search is what first-party mode buys a proxied session
+            // (`docs/specs/2026-09-21-model-proxy-tool-search-design.md`):
+            // tools marked `defer_loading` and the `tool_reference` blocks
+            // that load them. The proxy knows neither field, and a request leg
+            // that parsed and re-wrote the body could drop or reorder both.
+            let requestBody = Data(
+                #"""
+                {"model":"claude-stub","stream":true,\#
+                "tools":[{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"},\#
+                {"name":"mcp__acme__lookup","description":"Look up","input_schema":{"type":"object"},\#
+                "defer_loading":true}],\#
+                "messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1",\#
+                "content":[{"type":"tool_reference","tool_name":"mcp__acme__lookup"}]}]}]}
+                """#.utf8)
+
+            try await withProxy(
+                prefix: "pxts",
+                script: { _, _ in
+                    FakeUpstream.Script(
+                        status: 200, headers: [("content-type", "application/json")],
+                        events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
+                }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = requestBody
+                request.setValue("application/json", forHTTPHeaderField: "content-type")
+
+                let (_, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+                let received = try #require(harness.upstream.requests.first)
+                #expect(Data(received.body) == requestBody)
+            }
+        }
+
+        @Test("a messages request's query string reaches the upstream intact")
+        func forwardsMessagesQueryString() async throws {
+            // Claude Code's beta client calls `/v1/messages?beta=true`; the
+            // query is part of what the upstream routes on, so the proxy
+            // strips only the `/r/<token>` prefix and nothing after it.
+            try await withProxy(
+                prefix: "pxqs",
+                script: { _, _ in
+                    FakeUpstream.Script(
+                        status: 200, headers: [("content-type", "application/json")],
+                        events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
+                }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages?beta=true"))
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"model":"claude-stub"}"#.utf8)
+                request.setValue("application/json", forHTTPHeaderField: "content-type")
+
+                let (_, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+                let received = try #require(harness.upstream.requests.first)
+                #expect(received.head.method == .POST)
+                #expect(received.head.uri == "/v1/messages?beta=true")
+            }
+        }
+
         // MARK: Endings
 
         @Test("a client that hangs up mid-stream still ends the relay and the tee")
