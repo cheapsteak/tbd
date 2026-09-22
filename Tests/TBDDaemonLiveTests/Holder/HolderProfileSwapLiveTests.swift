@@ -55,6 +55,7 @@ struct HolderProfileSwapLiveTests {
         #expect(!holderProcessIsAlive(oldHolder), "the old holder outlived the swap")
         let newChild = try #require(after.childPID, "the swapped row records no child")
         let newHolder = try #require(after.holderPID, "the swapped row records no holder")
+        fixture.remember(holderPID: newHolder, childPID: newChild)
         #expect(newChild != oldChild && newHolder != oldHolder,
                 "the swap re-used the pids of the session it just ended")
         #expect(holderProcessIsAlive(newChild), "the swapped row's job is not running")
@@ -106,6 +107,9 @@ struct HolderProfileSwapLiveTests {
         let freshID = try #require(after.claudeSessionID)
         #expect(freshID != Self.sessionID,
                 "a blank session was re-homed under the id it could not resume")
+        let newHolder = try #require(after.holderPID, "the swapped row records no holder")
+        let newChild = try #require(after.childPID, "the swapped row records no child")
+        fixture.remember(holderPID: newHolder, childPID: newChild)
 
         let launched = await pollUntil("the swapped session to reach its claude stub") {
             (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
@@ -328,16 +332,27 @@ private final class SwapFixture {
     /// `print`, for the reason `FlakyTestSupport` uses it: stdout is Swift
     /// Testing's, and both streams reach the tee'd run log.
     private func remember(_ handle: HolderHandle) {
+        remember(holderPID: handle.holderPID, childPID: handle.childPID)
+    }
+
+    /// Same recording, for a generation this fixture never got a `HolderHandle`
+    /// for — the swap's own wake spawns its replacement holder inside the
+    /// router, and the only way this fixture learns those two pids is the row
+    /// the swap leaves behind (`after.holderPID` / `after.childPID`). Called
+    /// from each test right after it reads that row, so the sweep pass below
+    /// can end the post-swap generation by pid, identity-checked, exactly like
+    /// the pre-swap one.
+    fileprivate func remember(holderPID: Int32, childPID: Int32) {
         spawned.append(SpawnedProcess(
-            pid: handle.holderPID,
-            startedAt: ProcessStartTime.startTime(pid: handle.holderPID),
+            pid: holderPID,
+            startedAt: ProcessStartTime.startTime(pid: holderPID),
             ourChild: true))
         spawned.append(SpawnedProcess(
-            pid: handle.childPID,
-            startedAt: ProcessStartTime.startTime(pid: handle.childPID),
+            pid: childPID,
+            startedAt: ProcessStartTime.startTime(pid: childPID),
             ourChild: false))
-        let line = "SwapFixture: holder pid \(handle.holderPID), "
-            + "job pid \(handle.childPID), scratch root \(home)\n"
+        let line = "SwapFixture: holder pid \(holderPID), "
+            + "job pid \(childPID), scratch root \(home)\n"
         FileHandle.standardError.write(Data(line.utf8))
     }
 
@@ -348,8 +363,10 @@ private final class SwapFixture {
     /// a park clears the pids off its row precisely because those processes
     /// are gone, and signalling a remembered number on a box running dozens of
     /// agent sessions would signal somebody else's work. The row pass is also
-    /// the only one that can reach the generation the WAKE spawned, which this
-    /// fixture never sees a handle for.
+    /// what reaches the generation the WAKE spawned when this pass runs first —
+    /// each test hands that generation's pids to `remember` right after it
+    /// reads them off `after`, so the sweep pass below can also end it by pid,
+    /// identity-checked, if the row read above ever comes back empty instead.
     func tearDown() {
         guard !torndown else { return }
         torndown = true
