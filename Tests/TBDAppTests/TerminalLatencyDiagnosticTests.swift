@@ -12,10 +12,11 @@ import Testing
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home —
 /// the same domain a running production TBDApp reads. Every test below drives
 /// the gate through a per-test `UserDefaults(suiteName:)` and tears the domain
-/// down afterwards, so `.standard` is never touched. Nothing here calls
-/// `startWatching()`: the request-file tests drive `consumeRequestFiles()`
-/// against a directory of their own under `NSTemporaryDirectory()`, so no
-/// dispatch source is armed and TBD's real runtime directory is never read.
+/// down afterwards, so `.standard` is never touched. The request-file tests
+/// drive `consumeRequestFiles()` against a directory of their own under
+/// `NSTemporaryDirectory()`, so TBD's real runtime directory is never read;
+/// `startWatchingDrainsStaleRequests` is the single test that arms a dispatch
+/// source, over its own temp directory, and cancels it on the way out.
 @MainActor
 @Suite("Terminal latency diagnostic")
 struct TerminalLatencyDiagnosticTests {
@@ -259,6 +260,79 @@ struct TerminalLatencyDiagnosticTests {
         diagnostic.consumeRequestFiles()
 
         #expect(remainingDuringProbe.all == [""])
+    }
+
+    /// An entry the app cannot read at all — as opposed to one it reads and
+    /// cannot decode. Left in place it would be enumerated again by every
+    /// later directory event, refused again each time, for as long as the app
+    /// ran; the removal has to happen on that path too.
+    ///
+    /// A directory wearing a request file's name is the unreadable entry here:
+    /// `Data(contentsOf:)` refuses it on every machine and under every user,
+    /// where a mode-000 file is readable by root.
+    @Test("an unreadable request entry is removed and refused, not re-enumerated")
+    func unreadableRequestFileIsRemovedAndRefused() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { lines.append($0) })
+
+        let name = TerminalLatencyDiagnostic.requestFilePrefix + "000001"
+            + TerminalLatencyDiagnostic.requestFileSuffix
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent(name), withIntermediateDirectories: false)
+
+        diagnostic.consumeRequestFiles()
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        #expect(lines.all == ["echorefused terminal=- reason=malformed"])
+
+        // The second pass is the whole point: an entry that survived the first
+        // would be refused again here.
+        diagnostic.consumeRequestFiles()
+        #expect(lines.all.count == 1)
+    }
+
+    /// A dispatch source reports only writes made after it is resumed, so a
+    /// request already on disk when the watch starts — a driver SIGKILLed, or
+    /// a run made while the diagnostic was off — is answered at watch start or
+    /// not until some unrelated write to the runtime directory.
+    ///
+    /// This is the one test that calls `startWatching()`, against a temp
+    /// directory of its own, and it cancels the source before returning. The
+    /// drain is a synchronous call inside `startWatching()`, so the assertion
+    /// needs no event and no run loop turn.
+    @Test("starting the watch drains a request that was already waiting")
+    func startWatchingDrainsStaleRequests() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { lines.append($0) })
+        defer { diagnostic.stopWatching() }
+        let id = UUID()
+        let seen = Lines()
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { seq in
+            seen.append("\(seq)")
+            return nil
+        }
+
+        let name = TerminalLatencyDiagnostic.requestFilePrefix + "000007"
+            + TerminalLatencyDiagnostic.requestFileSuffix
+        try request(terminalID: id, seq: 7).write(to: directory.appendingPathComponent(name))
+
+        diagnostic.startWatching()
+
+        #expect(seen.all == ["7"])
+        #expect(lines.all.isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
     }
 
     // MARK: - The registry

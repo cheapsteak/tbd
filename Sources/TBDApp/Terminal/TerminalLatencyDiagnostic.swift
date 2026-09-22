@@ -40,7 +40,7 @@ import os
 ///     echorefused terminal=<uuid> reason=ingestingsnapshot  a snapshot preamble is in flight
 ///     echorefused terminal=<uuid> reason=handbackinflight   the panel is collecting mode replies
 ///     echorefused terminal=<uuid> reason=unwritable         the bytes reached no transport
-///     echorefused terminal=- reason=malformed               the request did not decode
+///     echorefused terminal=- reason=malformed               unreadable, or did not decode
 ///
 /// A terminal whose kind the app has not loaded counts as not-a-shell: the
 /// refusal must fail closed, because the cost of being wrong is keystrokes in
@@ -178,9 +178,18 @@ final class TerminalLatencyDiagnostic {
     // MARK: - The directory watch
 
     /// Watch the runtime directory for request files. Only `shared` calls
-    /// this; a diagnostic built by `make(defaults:)` in a test drives
-    /// `handleRequest` or `consumeRequestFiles` directly and touches no
-    /// directory of the app's own.
+    /// this in production; a diagnostic built by `make(defaults:)` in a test
+    /// drives `handleRequest` or `consumeRequestFiles` directly, or watches a
+    /// directory of its own and stops with `stopWatching()`.
+    ///
+    /// The directory is drained once, immediately, before any event can
+    /// arrive: a dispatch source reports only writes that happen after it is
+    /// resumed, so a request already sitting there — a driver SIGKILLed
+    /// mid-run, or a run made while the diagnostic was off — would otherwise
+    /// wait for the next unrelated write to the runtime directory and be
+    /// answered then, typing a stale token into a terminal minutes or hours
+    /// late. Draining at start answers it now, or refuses it now, and either
+    /// way the file is gone.
     func startWatching() {
         guard watchSource == nil else { return }
         try? FileManager.default.createDirectory(
@@ -205,6 +214,16 @@ final class TerminalLatencyDiagnostic {
         source.setCancelHandler { close(descriptor) }
         watchSource = source
         source.resume()
+        consumeRequestFiles()
+    }
+
+    /// Stop watching and close the descriptor. Nothing in the app calls this —
+    /// the process-wide diagnostic watches for the app's whole life — but a
+    /// test that exercises `startWatching()` against a temp directory needs
+    /// the source cancelled and the file descriptor closed when it is done.
+    func stopWatching() {
+        watchSource?.cancel()
+        watchSource = nil
     }
 
     /// Read every request file waiting in the directory, oldest first, remove
@@ -218,7 +237,10 @@ final class TerminalLatencyDiagnostic {
     ///
     /// Each file's removal comes before its handling, so a probe that throws
     /// or a panel that blocks cannot leave a stale request to be replayed by
-    /// the next directory event.
+    /// the next directory event. That holds for a file this cannot even read:
+    /// it is removed first and then refused as `malformed`, because a file
+    /// left behind on the unreadable path would be re-enumerated by every
+    /// subsequent event for as long as the app ran.
     func consumeRequestFiles() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: runtimeDirectory.path))
             ?? []
@@ -226,8 +248,16 @@ final class TerminalLatencyDiagnostic {
             $0.hasPrefix(Self.requestFilePrefix) && $0.hasSuffix(Self.requestFileSuffix)
         }).sorted() {
             let url = runtimeDirectory.appendingPathComponent(name)
-            guard let data = try? Data(contentsOf: url) else { continue }
+            let data = try? Data(contentsOf: url)
             try? FileManager.default.removeItem(at: url)
+            guard let data else {
+                // Unreadable, not merely undecodable — a truncated rename, a
+                // permission, a name that is not a file at all. It still has to
+                // leave the directory, or every later directory event finds it
+                // again and refuses it again.
+                refuse(terminal: "-", reason: "malformed")
+                continue
+            }
             handleRequest(data)
         }
     }
