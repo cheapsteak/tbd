@@ -150,11 +150,12 @@ Daemon unit tests, fast pass, no live processes:
   `.profileSwap` and each still **refuse** under `.manual`, with the refusal
   text each rail emits today.
 - **The holder arm**, driven with the fakes the holder wake tests use. A
-  success returns the same terminal id carrying the new profile and a wake
-  incarnation. Each of the three failure points lands the row in the state
-  "Failure outcomes" names — awake on the old profile, parked on the old
-  profile, parked on the new profile — and finishes the actuation
-  `transportFailed` naming the half.
+  refused park and a park answered by another park already in flight each
+  leave the row awake on the old profile with nothing else changed, and a
+  refused wake leaves it parked on the new profile; each finishes the
+  actuation `transportFailed` naming the half. The success path and the
+  re-home failure need a park that really ends a process, so they are live
+  (below).
 - **The refusal is gone.** The test asserting `holderInPlaceSwapRefusal`
   becomes one asserting the swap proceeds; the app and CLI tests that pinned
   the string go with it.
@@ -166,6 +167,14 @@ holder session to a second profile, then assert the old child is gone, a new
 holder child runs under the row, the row's profile is the destination, and the
 session id is unchanged. A blank-session variant asserts a fresh spawn rather
 than a resume.
+
+A third live test pins the re-home failure, the one outcome that has no
+observable staging point from outside the RPC: a test seam on the router opens
+the instant between the successful park and the re-home, and a test moves the
+worktree out of the status the handler captured at entry so the re-home's lock
+refuses before any write. The row is then parked on the old profile with no
+replacement process, the actuation reads `transportFailed`, and a retry with
+the status restored takes the cold path and re-homes without waking.
 
 Manual soak, in the PR's test plan, after a restart from main: "Switch
 account" on a holder tab while idle, mid-turn (with the warning), and on a
