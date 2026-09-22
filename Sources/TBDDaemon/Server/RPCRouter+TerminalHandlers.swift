@@ -2359,20 +2359,6 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
-        // Resolved once, above the branch: the overlay is one file on disk and
-        // the config dir one lookup, both arms need them, and the routing
-        // decision the holder arm makes needs the overlay before any command
-        // is composed (whether the overlay sets `ANTHROPIC_BASE_URL` decides
-        // whether a route can be honoured at all).
-        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
-        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
-            fallbackModels: resolved?.fallbackModels,
-            sessionKey: plannedTerminalID.uuidString,
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            watchDeskRole: swapDeskRole,
-            worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir
-        )
         // The two facts the plan decides that are not the command itself. A
         // resume keeps the session id and wants the post-resume recapture; a
         // fresh spawn names a new id and has nothing to recapture.
@@ -2462,14 +2448,32 @@ extension RPCRouter {
         )
         // Pre-accept the folder-trust dialog before either swap spawn (resume
         // or fresh) — a swap onto a new profile's isolated config dir has never
-        // seen this path and would otherwise re-prompt. `profileConfigDir` was
-        // resolved once above the branch; seed it here before `swapSpawn` uses
-        // the same value. Claude-only handler. `swapConfig` is a `try?` read;
-        // fall back to the shipped default.
+        // seen this path and would otherwise re-prompt. Claude-only handler.
+        // `swapConfig` is a `try?` read; fall back to the shipped default.
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree.worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
-            profileConfigDir: profileConfigDir)
+            profileConfigDir: await configDirManager.resolveConfigDir(for: resolved))
+
+        // Resolved here, after the actuation is open and the transcript carry
+        // and trust seed have both succeeded — not earlier, because both calls
+        // below have real side effects: the config-dir lookup creates the
+        // profile's OAuth dir, and the overlay resolution writes an overlay
+        // file and (for a roleless session) deletes the row's statusline
+        // capture. Neither should fire for a swap `beginActuation` goes on to
+        // reject. Both arms need them, and the routing decision the holder arm
+        // makes needs the overlay before any command is composed (whether the
+        // overlay sets `ANTHROPIC_BASE_URL` decides whether a route can be
+        // honoured at all).
+        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
+        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: resolved?.fallbackModels,
+            sessionKey: plannedTerminalID.uuidString,
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            watchDeskRole: swapDeskRole,
+            worktreePath: worktree.path,
+            profileConfigDir: profileConfigDir
+        )
 
         let spawn = swapSpawn(
             plan: plan, mode: mode, resolved: resolved,
