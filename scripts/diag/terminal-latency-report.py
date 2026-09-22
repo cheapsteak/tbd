@@ -107,16 +107,53 @@ class Draw:
 
 
 @dataclass(slots=True)
+class Lost:
+    transport: str
+    terminal: str
+    seq: int
+
+
+@dataclass(slots=True)
+class Refusal:
+    terminal: str
+    reason: str
+
+
+@dataclass(slots=True)
 class Capture:
     echoes: list[Echo] = field(default_factory=list)
     draws: list[Draw] = field(default_factory=list)
-    # transport -> count
-    lost: dict[str, int] = field(default_factory=dict)
-    # reason -> count
-    refused: dict[str, int] = field(default_factory=dict)
+    # Kept as records rather than tallies, because every figure here can be
+    # restricted to the terminals that were probed and a tally cannot be.
+    lost: list[Lost] = field(default_factory=list)
+    refusals: list[Refusal] = field(default_factory=list)
     # Lines that matched the verb but not the fields they must carry. Counted
     # rather than dropped: a format drift must be visible, not silent.
     malformed: int = 0
+
+    def lost_counts(self, wanted: set[str] | None = None) -> dict[str, int]:
+        """Lost tokens per transport, over the terminals asked for."""
+        out: dict[str, int] = {}
+        for record in self.lost:
+            if wanted is not None and record.terminal.lower() not in wanted:
+                continue
+            out[record.transport] = out.get(record.transport, 0) + 1
+        return out
+
+    def refusal_counts(self, wanted: set[str] | None = None) -> dict[str, int]:
+        """Refusals per reason, over the terminals asked for.
+
+        A refusal the app could not attribute is emitted as `terminal=-` and so
+        belongs to no id: under `--terminals` it drops out with every other
+        foreign line. The driver prints this tally UNFILTERED when it refuses a
+        run, which is where an undecodable request has to be visible.
+        """
+        out: dict[str, int] = {}
+        for record in self.refusals:
+            if wanted is not None and record.terminal.lower() not in wanted:
+                continue
+            out[record.reason] = out.get(record.reason, 0) + 1
+        return out
 
 
 def parse_fields(blob: str) -> dict[str, str]:
@@ -160,11 +197,17 @@ def parse(stream) -> Capture:
                     )
                 )
             elif verb == "echolost":
-                transport = fields["transport"]
-                capture.lost[transport] = capture.lost.get(transport, 0) + 1
+                capture.lost.append(
+                    Lost(
+                        transport=fields["transport"],
+                        terminal=fields["terminal"],
+                        seq=int(fields["seq"]),
+                    )
+                )
             elif verb == "echorefused":
-                reason = fields["reason"]
-                capture.refused[reason] = capture.refused.get(reason, 0) + 1
+                capture.refusals.append(
+                    Refusal(terminal=fields["terminal"], reason=fields["reason"])
+                )
         except (KeyError, ValueError):
             capture.malformed += 1
     return capture
@@ -282,13 +325,19 @@ def report(
             file=out,
         )
 
+    # Restricted the same way, so a transport that contributed nothing to this
+    # run is absent rather than present with `(no samples)` beside another
+    # panel's lost token.
+    lost_counts = capture.lost_counts(wanted)
+    refusal_counts = capture.refusal_counts(wanted)
+
     print("\nECHO", file=out)
     for transport in TRANSPORTS:
         samples = [e for e in echoes if e.transport == transport]
-        if not samples and not capture.lost.get(transport):
+        if not samples and not lost_counts.get(transport):
             continue
         print(format_distribution(f"{transport} all", distribution([e.ms for e in samples])), file=out)
-        lost = capture.lost.get(transport, 0)
+        lost = lost_counts.get(transport, 0)
         if lost:
             print(f"  {transport + ' lost':<22} {lost} token(s) never came back", file=out)
         # Unfiltered, an arm's figures may pool two panels. Break them out so
@@ -346,10 +395,10 @@ def report(
                 file=out,
             )
 
-    if capture.refused:
+    if refusal_counts:
         print("\nREFUSED", file=out)
-        for reason in sorted(capture.refused):
-            print(f"  {reason:<22} {capture.refused[reason]}", file=out)
+        for reason in sorted(refusal_counts):
+            print(f"  {reason:<22} {refusal_counts[reason]}", file=out)
 
     print("\nDRAW (oldest chunk's wait)", file=out)
     for transport in TRANSPORTS:
@@ -430,6 +479,19 @@ SELF_TEST_SECOND_TERMINAL_LINES = """\
 2026-09-22 11:00:00.600000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=ZZZZ chunks=5 oldestms=90.000 newestms=80.000 parsemaxms=4.000 dropped=3 vis=1
 """
 
+# A capture whose holder arm is ENTIRELY somebody else's panel: one lost token
+# and one refusal, both from a terminal this run never probed. Unfiltered it is
+# an arm with no samples and a lost line; filtered to AAAA the arm must vanish
+# rather than print an empty distribution beside a foreign number.
+SELF_TEST_FOREIGN_ARM_LINES = """\
+2026-09-22 12:00:00.100000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=AAAA seq=1 ms=1.000
+2026-09-22 12:00:00.200000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=AAAA seq=2 ms=2.000
+2026-09-22 12:00:00.300000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echolost transport=holder terminal=ZZZZ seq=1
+2026-09-22 12:00:00.400000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echorefused terminal=ZZZZ reason=unwritable
+2026-09-22 12:00:00.500000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echolost transport=tmux terminal=AAAA seq=3
+2026-09-22 12:00:00.600000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echorefused terminal=AAAA reason=noview
+"""
+
 # seq 1-2 taken at idle, 3-4 under load, on both arms.
 SELF_TEST_LOAD_MAP = {
     "tmux": {"1": 1.0, "2": 2.0, "3": 30.0, "4": 41.0},
@@ -450,9 +512,9 @@ def self_test() -> int:
 
     check("echo count", len(capture.echoes), 8)
     check("draw count", len(capture.draws), 3)
-    check("tmux lost", capture.lost.get("tmux"), 1)
-    check("refused notshell", capture.refused.get("notshell"), 1)
-    check("refused malformed", capture.refused.get("malformed"), 1)
+    check("tmux lost", capture.lost_counts().get("tmux"), 1)
+    check("refused notshell", capture.refusal_counts().get("notshell"), 1)
+    check("refused malformed", capture.refusal_counts().get("malformed"), 1)
     # The truncated `draw ... chunks=9` line matched the verb and is counted,
     # never silently dropped; the prose line matches nothing.
     check("malformed lines", capture.malformed, 1)
@@ -568,6 +630,38 @@ def self_test() -> int:
     for needle in ("only terminals: aaaa", "tmux all               n=2", "2 fed, 0 dropped"):
         if needle not in filtered_text:
             failures.append(f"filtered report is missing {needle!r}")
+
+    # Lost tokens and refusals are this run's only when they name this run's
+    # terminals. Unfiltered, the holder arm is present on the strength of a
+    # foreign lost line alone -- which is what printed `(no samples)` beside
+    # somebody else's number.
+    foreign = parse(io.StringIO(SELF_TEST_FOREIGN_ARM_LINES))
+    check("foreign lost records", len(foreign.lost), 2)
+    check("foreign lost, unfiltered", foreign.lost_counts().get("holder"), 1)
+    check("foreign lost, filtered out", foreign.lost_counts({"aaaa"}).get("holder"), None)
+    check("own lost, filtered in", foreign.lost_counts({"aaaa"}).get("tmux"), 1)
+    check("foreign refusal, unfiltered", foreign.refusal_counts().get("unwritable"), 1)
+    check("foreign refusal, filtered out", foreign.refusal_counts({"aaaa"}).get("unwritable"), None)
+    check("own refusal, filtered in", foreign.refusal_counts({"aaaa"}).get("noview"), 1)
+
+    unfiltered_foreign = io.StringIO()
+    report(foreign, out=unfiltered_foreign)
+    unfiltered_foreign_text = unfiltered_foreign.getvalue()
+    for needle in ("holder all", "(no samples)", "unwritable"):
+        if needle not in unfiltered_foreign_text:
+            failures.append(f"unfiltered foreign-arm report is missing {needle!r}")
+
+    filtered_foreign = io.StringIO()
+    report(foreign, out=filtered_foreign, terminals={"AAAA"})
+    filtered_foreign_text = filtered_foreign.getvalue()
+    for absent in ("holder", "(no samples)", "unwritable"):
+        if absent in filtered_foreign_text:
+            failures.append(
+                f"a foreign terminal's {absent!r} survived --terminals"
+            )
+    for needle in ("tmux all", "1 token(s) never came back", "noview"):
+        if needle not in filtered_foreign_text:
+            failures.append(f"filtered foreign-arm report is missing {needle!r}")
 
     if failures:
         for failure in failures:

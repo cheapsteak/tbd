@@ -74,7 +74,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPORT_PATH = HERE / "terminal-latency-report.py"
-REQUEST_FILENAME = "terminal-latency-probe.json"
+REQUEST_PREFIX = "terminal-latency-probe."
+REQUEST_SUFFIX = ".json"
 ARMS = ("tmux", "holder")
 
 
@@ -148,24 +149,37 @@ def verify(rows: list[dict], terminal_id: str, expected_transport: str) -> dict:
     )
 
 
+def request_path(directory: Path, seq: int) -> Path:
+    """This request's own file. The counter is zero-padded so the app, which
+    consumes what it finds in NAME order, consumes them in request order."""
+    return directory / f"{REQUEST_PREFIX}{seq:06d}{REQUEST_SUFFIX}"
+
+
 def write_request(directory: Path, terminal_id: str, seq: int) -> None:
-    """Publish one request atomically.
+    """Publish one request atomically, under a name no other request uses.
 
     Written to a temp name in the SAME directory and `os.rename`d into place:
     the app watches the directory for writes and reads the file the moment it
     appears, so a partially written file would be read as malformed. A rename
     within one directory is atomic.
+
+    One file per request, rather than one path renamed over and over. A single
+    path silently loses a request whenever two renames land between two of the
+    app's main-queue turns — both events name one path, so only the second
+    survives — and it makes this script's own cleanup a race against the app's
+    read of the last request. Distinct names remove both: nothing overwrites
+    anything, and cleanup can wait until the app has had its turn.
     """
     payload = json.dumps({"terminalID": terminal_id, "seq": seq})
     handle, temp_path = tempfile.mkstemp(dir=directory, prefix=".probe-", suffix=".json")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(payload)
-        os.rename(temp_path, directory / REQUEST_FILENAME)
+        os.rename(temp_path, request_path(directory, seq))
     except BaseException:
         # A temp file left behind would sit in the runtime directory forever;
-        # the request file itself is removed by the app, and by our own
-        # cleanup if the app never saw it.
+        # request files themselves are removed by the app, and by our own
+        # cleanup for any the app never saw.
         try:
             os.unlink(temp_path)
         except FileNotFoundError:
@@ -173,11 +187,19 @@ def write_request(directory: Path, terminal_id: str, seq: int) -> None:
         raise
 
 
-def remove_request(directory: Path) -> None:
-    try:
-        os.unlink(directory / REQUEST_FILENAME)
-    except FileNotFoundError:
-        pass
+def remove_request_files(directory: Path) -> None:
+    """Remove every request file left in the directory, and nothing else.
+
+    Matched by the prefix and suffix the app matches on: the runtime directory
+    is shared (`claude-overlay.json` lives there), so a cleanup that swept the
+    directory would delete somebody else's state.
+    """
+    for entry in directory.iterdir():
+        if entry.name.startswith(REQUEST_PREFIX) and entry.name.endswith(REQUEST_SUFFIX):
+            try:
+                entry.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def capture_log(since: datetime.datetime) -> str:
@@ -280,8 +302,9 @@ def main() -> int:
         verify(rows, terminal_id, arm)
 
     # A stale request from an interrupted earlier run would be read as this
-    # run's first sample.
-    remove_request(directory)
+    # run's first sample: the counter restarts at 1 every run, so an old file
+    # can carry a name this run is about to reuse.
+    remove_request_files(directory)
 
     interrupted = False
 
@@ -302,13 +325,20 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\ninterrupted — reporting what was collected", file=sys.stderr)
     finally:
-        # Every exit path, including the interrupt: a request file left behind
-        # is read by the app at its next directory event, long after this run.
-        remove_request(directory)
         signal.signal(signal.SIGINT, previous_handler)
 
-    # The last request needs to make its round trip and reach the log store.
-    time.sleep(1.0)
+    # The last request needs to make its round trip and reach the log store,
+    # and the app has to get a main-queue turn to read it at all. Cleanup comes
+    # AFTER that wait, never before: a file deleted while the app has not yet
+    # turned takes the last sample with it, and the completeness check below
+    # then refuses the whole run over a request the app never got to see.
+    try:
+        time.sleep(1.0)
+    finally:
+        # Every exit path, including an interrupt inside the settle: a request
+        # file left behind is read by the app at its next directory event, long
+        # after this run.
+        remove_request_files(directory)
     text = capture_log(started)
     capture = report_module.parse(text.splitlines())
 
@@ -318,9 +348,17 @@ def main() -> int:
     # An arm whose echoes do not match its requests is not reportable: the
     # missing samples are not random, they are whatever the machine was doing
     # when they went missing.
+    # Counted exactly as `report()` counts them: by transport AND by the id
+    # this arm named, case-insensitively. A capture is the whole app's window,
+    # so another panel on the same transport would otherwise pay this arm's
+    # debts — and an arm that answered nothing could read as complete.
     incomplete = []
     for arm in ARMS:
-        answered = len([e for e in capture.echoes if e.transport == arm])
+        wanted = terminals[arm].lower()
+        answered = len([
+            e for e in capture.echoes
+            if e.transport == arm and e.terminal.lower() == wanted
+        ])
         if requested[arm] and answered != requested[arm]:
             incomplete.append(f"{arm}: {answered} echoes for {requested[arm]} requests")
 
@@ -349,11 +387,17 @@ def main() -> int:
             "  - the terminal id names a panel that is not open in the app right now\n"
             "  - the named terminal is not a plain shell, so the app refused the request\n"
             "    (look for `echorefused` lines in the capture)\n"
+            "  - the panel's holder attach came apart, so its writes reach nothing\n"
+            "    (`reason=noview`, or `reason=unwritable` once the child has exited)\n"
             "  - the session is not echoing: run `cat` in it, not a full-screen TUI",
             file=sys.stderr,
         )
-        if capture.refused:
-            print(f"  refusals seen: {dict(capture.refused)}", file=sys.stderr)
+        # Unfiltered on purpose: a refusal the app could not attribute to a
+        # terminal (`reason=malformed`) names no id, and this is the one place
+        # it has to be visible.
+        refusals = capture.refusal_counts()
+        if refusals:
+            print(f"  refusals seen: {refusals}", file=sys.stderr)
         return 1
 
     # The capture is the whole app's window, so it holds every panel that was

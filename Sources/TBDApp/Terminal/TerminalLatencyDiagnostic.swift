@@ -9,16 +9,25 @@ import os
 /// See `docs/specs/2026-09-22-terminal-transport-latency-instrument-design.md`.
 /// `TerminalLatencyTap` is the per-panel half and carries the line formats.
 ///
-/// ## A request is a file
+/// ## A request is a file, and each request is its own file
 ///
-/// The driver writes `~/tbd/runtime/terminal-latency-probe.json` naming a
-/// terminal id and a sequence number; this object watches the runtime
-/// directory with a dispatch source while the diagnostic is on, reads the
-/// file, deletes it, and asks the named panel to write one token. The
+/// The driver writes `~/tbd/runtime/terminal-latency-probe.<NNNNNN>.json`,
+/// one file per request, naming a terminal id and a sequence number; this
+/// object watches the runtime directory with a dispatch source while the
+/// diagnostic is on, enumerates the request files in name order, and for each
+/// one reads it, deletes it, and asks the named panel to write one token. The
 /// precedent is the runtime directory's other app-read file,
 /// `claude-overlay.json`. A daemon RPC was rejected: three times the plumbing
 /// to deliver two fields, and it would put the daemon's RPC latency on the
 /// path before the app stamps the start.
+///
+/// The counter in the name is what makes a request survive its neighbours. A
+/// single fixed path loses requests two ways: two directory events landing
+/// between one pair of main-queue turns leave only the second rename's
+/// content behind, and a driver that deletes the path on its way out can
+/// delete a request the main thread has not read yet. Distinct names remove
+/// both — nothing overwrites anything, and the driver's cleanup only ever
+/// removes what is genuinely left over.
 ///
 /// ## Refusals, because this writes input into a session
 ///
@@ -27,19 +36,23 @@ import os
 ///
 ///     echorefused terminal=<uuid> reason=unknownterminal    no panel registered
 ///     echorefused terminal=<uuid> reason=notshell           an agent, or kind unknown
-///     echorefused terminal=<uuid> reason=noview             the panel has no view
+///     echorefused terminal=<uuid> reason=noview             no view, or a cleared holder
 ///     echorefused terminal=<uuid> reason=ingestingsnapshot  a snapshot preamble is in flight
 ///     echorefused terminal=<uuid> reason=handbackinflight   the panel is collecting mode replies
+///     echorefused terminal=<uuid> reason=unwritable         the bytes reached no transport
 ///     echorefused terminal=- reason=malformed               the request did not decode
 ///
 /// A terminal whose kind the app has not loaded counts as not-a-shell: the
 /// refusal must fail closed, because the cost of being wrong is keystrokes in
 /// somebody's agent session.
 ///
-/// The last three come from the panel, not from here: a write that the panel's
-/// own outbound path would have swallowed must be a refusal rather than a
-/// silent lost token, because a token the transport never saw is not a
-/// measurement of the transport.
+/// The middle four come from the panel, not from here: a write that the
+/// panel's own outbound path would have swallowed must be a refusal rather
+/// than a silent lost token, because a token the transport never saw is not a
+/// measurement of the transport. `unwritable` is the one of those the panel
+/// can only know afterwards — the queue reports it when the bytes reached no
+/// transport at all — so the probe retires its own pending token before
+/// refusing, and no `echolost` line is emitted for a token nothing was given.
 @MainActor
 final class TerminalLatencyDiagnostic {
     /// Writes one token into the panel's real keystroke path and arms its tap.
@@ -59,9 +72,11 @@ final class TerminalLatencyDiagnostic {
 
     nonisolated static let logger = Logger(subsystem: "com.tbd.app", category: "terminallatency")
 
-    /// The file the driver renames into the runtime directory, one request at
-    /// a time.
-    static let requestFileName = "terminal-latency-probe.json"
+    /// What every request file the driver renames into the runtime directory
+    /// is named between: `terminal-latency-probe.000001.json`. The driver's
+    /// counter is zero-padded so name order is request order.
+    static let requestFilePrefix = "terminal-latency-probe."
+    static let requestFileSuffix = ".json"
 
     /// A panel's claim on one terminal's probe requests. Opaque, and the only
     /// thing that can withdraw the claim — same shape and the same
@@ -162,39 +177,59 @@ final class TerminalLatencyDiagnostic {
 
     // MARK: - The directory watch
 
-    /// Watch the runtime directory for the request file. Only `shared` calls
+    /// Watch the runtime directory for request files. Only `shared` calls
     /// this; a diagnostic built by `make(defaults:)` in a test drives
-    /// `handleRequest` directly and touches no filesystem.
+    /// `handleRequest` or `consumeRequestFiles` directly and touches no
+    /// directory of the app's own.
     func startWatching() {
         guard watchSource == nil else { return }
         try? FileManager.default.createDirectory(
             at: runtimeDirectory, withIntermediateDirectories: true)
         let descriptor = open(runtimeDirectory.path, O_EVTONLY)
         guard descriptor >= 0 else {
+            // Captured on the line after the failing call, before anything
+            // else can run: `errno` is thread-local but call-order sensitive,
+            // and read inside a string interpolation it is whatever the last
+            // evaluated subexpression left behind.
+            let err = errno
             Self.logger.error(
-                "could not watch \(self.runtimeDirectory.path, privacy: .public) for latency probe requests (errno \(errno, privacy: .public))"
+                "could not watch \(self.runtimeDirectory.path, privacy: .public) for latency probe requests (errno \(err, privacy: .public))"
             )
             return
         }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor, eventMask: .write, queue: .main)
         source.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.consumeRequestFile() }
+            MainActor.assumeIsolated { self?.consumeRequestFiles() }
         }
         source.setCancelHandler { close(descriptor) }
         watchSource = source
         source.resume()
     }
 
-    /// Read the request file if it is there, remove it, and act on it. Removal
-    /// comes before handling so a probe that throws or a panel that blocks
-    /// cannot leave a stale request to be replayed by the next directory
-    /// event.
-    private func consumeRequestFile() {
-        let url = runtimeDirectory.appendingPathComponent(Self.requestFileName)
-        guard let data = try? Data(contentsOf: url) else { return }
-        try? FileManager.default.removeItem(at: url)
-        handleRequest(data)
+    /// Read every request file waiting in the directory, oldest first, remove
+    /// each one, and act on it.
+    ///
+    /// **In name order**, which is request order, because one directory event
+    /// can stand for several renames: the source coalesces, so a turn that
+    /// finds two files must answer both, and must answer them in the order the
+    /// driver issued them or the sequence numbers in the log stop matching the
+    /// loads recorded against them.
+    ///
+    /// Each file's removal comes before its handling, so a probe that throws
+    /// or a panel that blocks cannot leave a stale request to be replayed by
+    /// the next directory event.
+    func consumeRequestFiles() {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: runtimeDirectory.path))
+            ?? []
+        for name in names.filter({
+            $0.hasPrefix(Self.requestFilePrefix) && $0.hasSuffix(Self.requestFileSuffix)
+        }).sorted() {
+            let url = runtimeDirectory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url) else { continue }
+            try? FileManager.default.removeItem(at: url)
+            handleRequest(data)
+        }
     }
 
     // MARK: - Gate

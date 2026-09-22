@@ -127,24 +127,39 @@ rather than a rebuild (`docs/theory-placement.md`). The app compiles the one
 thing user-land cannot do: originate a write on the keystroke path and
 observe the echo at the seam, in one process, on one clock.
 
-**A request is a file.** The driver writes
-`~/tbd/runtime/terminal-latency-probe.json` naming a terminal id and a
-sequence number; the app watches the runtime directory with a dispatch source
-while the diagnostic is on, reads the file, deletes it, and writes the token.
-The precedent is the runtime directory's other app-read file,
+**A request is a file, and each request is its own file.** The driver renames
+`~/tbd/runtime/terminal-latency-probe.<NNNNNN>.json` into place, naming a
+terminal id and a sequence number; the app watches the runtime directory with
+a dispatch source while the diagnostic is on, enumerates the request files in
+name order, and for each one reads it, deletes it, and writes the token. The
+counter is a zero-padded global sequence, so name order is request order. The
+precedent is the runtime directory's other app-read file,
 `claude-overlay.json`, and the unmerged typed-input driver on
 `tbd/741-paint-scheduling-floor`, which used the same shape. A daemon RPC that
 forwarded a probe event to the app was considered and rejected: three times
 the plumbing, and it would put the daemon's RPC latency on the path *before*
 the app stamps the start, which is harmless but pointless.
 
+One file per request rather than one path renamed repeatedly, because a single
+path loses requests two ways and the instrument's completeness check then
+refuses the whole run over them. Two renames landing between a pair of the
+app's main-queue turns both name one path, so only the second survives; and a
+driver that removes the path on its way out can remove a request the app has
+not read yet. Distinct names close both, and they are what lets the driver
+defer its cleanup until after the settle wait.
+
 **The probe writes input into a session, so it refuses anything that is not
 a scratch shell.** The app refuses a request naming a terminal whose row is
 not a plain shell, and logs the refusal; agents (Claude, Codex) can never be
-typed into by this path. The driver goes further: it creates the `cat`
-sessions it measures, verifies each one's transport from the daemon before
-the first sample, only ever names those ids, and closes them on every exit
-path including interrupt.
+typed into by this path. It refuses the same way for a write its own outbound
+path would swallow — a snapshot preamble in flight, a handback collecting mode
+replies, a panel whose attach has come apart, bytes the queue reports reached
+no transport — because a token the transport never saw is not a measurement of
+the transport. The driver holds the second half of that line: it verifies each
+id's transport and kind against the daemon before the first sample, refuses
+anything else, and only ever names those two ids. Creating the `cat` sessions
+and closing them are the operator's own two commands in the run recipe; the
+driver never creates a session and never closes one.
 
 ### How the number gets out
 
@@ -246,12 +261,21 @@ and the driver script owns the pacing.
 - The tap with a hand-cranked clock: one chunk then a draw yields one line
   whose oldest wait is the difference; three chunks then a draw report the
   first as oldest and the last as newest; a draw with no chunks emits nothing;
-  513 chunks then a draw report 512 and one dropped; the parse maximum is the
-  maximum.
+  513 chunks then a draw report 512, one dropped, and the 513th chunk's wait
+  as the newest — the ring drops the newest, so that number comes off a
+  separate scalar; the parse maximum is the maximum.
 - The echo matcher: a token in one chunk; a token split across two chunks; a
   second copy after the match is ignored; a new request retires the pending
   token as lost; a request for a non-shell terminal is refused with the
   reason.
+- The request files: two waiting at once are both consumed, in name order,
+  each removed before its probe runs, and a file the instrument does not own
+  is left alone.
+- The panel's own refusals, against a real coordinator: a probe whose write
+  reaches no transport is refused as `unwritable` and retires its token
+  silently, a panel whose holder has been cleared is refused as `noview`, and
+  an attach the daemon refuses withdraws the panel's registration — each with
+  the live-panel positive control beside it.
 - The seam: `TerminalViewHolder.feed` with no tap feeds the view exactly as
   `withView` did, and with the view cleared records nothing.
 - The line format, pinned.

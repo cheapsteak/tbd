@@ -13,7 +13,9 @@ import Testing
 /// the same domain a running production TBDApp reads. Every test below drives
 /// the gate through a per-test `UserDefaults(suiteName:)` and tears the domain
 /// down afterwards, so `.standard` is never touched. Nothing here calls
-/// `startWatching()`, so no directory is opened and no request file is read.
+/// `startWatching()`: the request-file tests drive `consumeRequestFiles()`
+/// against a directory of their own under `NSTemporaryDirectory()`, so no
+/// dispatch source is armed and TBD's real runtime directory is never read.
 @MainActor
 @Suite("Terminal latency diagnostic")
 struct TerminalLatencyDiagnosticTests {
@@ -182,6 +184,81 @@ struct TerminalLatencyDiagnosticTests {
     @MainActor
     private final class KindBox {
         var value: TerminalKind?
+    }
+
+    // MARK: - The request files
+
+    /// One directory event can stand for several renames, so a turn that finds
+    /// two request files has to answer BOTH, in the order they were issued.
+    ///
+    /// The files are created newest-first so the directory's own enumeration
+    /// order cannot be mistaken for request order, and the assertion is on the
+    /// sequence numbers the probe saw: a consumer that reads one file per event
+    /// answers `["2"]`, and one that trusts the enumeration answers `["2", "1"]`.
+    @Test("two request files waiting at once are both consumed, in name order")
+    func requestFilesAreConsumedInNameOrder() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { lines.append($0) })
+        let id = UUID()
+        let seen = Lines()
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { seq in
+            seen.append("\(seq)")
+            return nil
+        }
+
+        for seq in [2, 1] {
+            let name = "\(TerminalLatencyDiagnostic.requestFilePrefix)"
+                + String(format: "%06d", seq)
+                + TerminalLatencyDiagnostic.requestFileSuffix
+            try request(terminalID: id, seq: UInt64(seq))
+                .write(to: directory.appendingPathComponent(name))
+        }
+        // A file the instrument does not own. The runtime directory is shared
+        // — `claude-overlay.json` lives there — so a consumer that swept it
+        // would eat somebody else's state.
+        let foreign = directory.appendingPathComponent("claude-overlay.json")
+        try Data("{}".utf8).write(to: foreign)
+
+        diagnostic.consumeRequestFiles()
+
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(seen.all == ["1", "2"])
+        #expect(lines.all.isEmpty)
+        #expect(
+            remaining == ["claude-overlay.json"],
+            "every request file is removed as it is handled, and nothing else is touched")
+    }
+
+    @Test("a consumed request file is removed before its probe runs, so no event replays it")
+    func requestFileIsRemovedBeforeHandling() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { _ in })
+        let id = UUID()
+        let remainingDuringProbe = Lines()
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { _ in
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            remainingDuringProbe.append(names.joined(separator: ","))
+            return nil
+        }
+
+        let name = TerminalLatencyDiagnostic.requestFilePrefix + "000001"
+            + TerminalLatencyDiagnostic.requestFileSuffix
+        try request(terminalID: id, seq: 1).write(to: directory.appendingPathComponent(name))
+
+        diagnostic.consumeRequestFiles()
+
+        #expect(remainingDuringProbe.all == [""])
     }
 
     // MARK: - The registry
