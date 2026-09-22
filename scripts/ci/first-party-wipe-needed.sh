@@ -116,6 +116,12 @@ set -uo pipefail
 # `Package.swift` and `Package.resolved` are here because a manifest or
 # dependency change can move a library's module boundary without touching a
 # single file under `Sources/`.
+#
+# The cache-save decision step in `.github/workflows/test.yml` ("Decide whether
+# this run may save the SwiftPM cache") diffs the same set of paths to decide
+# whether a pull request has earned its own cache entry. The two lists MUST stay
+# identical — they are one question asked twice — and
+# `scripts/cache-save-policy.test.sh` reddens if they drift.
 WIPE_PATHS=(
   Sources/TBDShared
   Sources/TBDDaemon

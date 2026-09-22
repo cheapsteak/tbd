@@ -339,14 +339,33 @@ jobs:
             decide false "origin/$BASE_REF absent"
             exit 0
           fi
+          # The first-party libraries whose interface changes cascade into every
+          # downstream module, plus the package manifests. This list is the same
+          # set of paths `WIPE_PATHS` in `scripts/ci/first-party-wipe-needed.sh`
+          # compares, and the two MUST stay identical — both answer "did a
+          # first-party library move?" and a run that answers them differently
+          # is answering one of them wrongly. `scripts/cache-save-policy.test.sh`
+          # reddens if they drift, and the wipe script carries the matching note.
+          #
+          # `Sources/TBDDaemon` is where the TBDDaemonLib *library* lives:
+          # `Package.swift` declares that target with `path: "Sources/TBDDaemon"`,
+          # the `TBDDaemon` executable target beside it being `main.swift` alone.
+          # There is no `Sources/TBDDaemonLib` directory, and naming one here
+          # would be silent: a pathspec absent from both sides of a `git diff`
+          # exits 0, so every PR touching the library would score as not touching
+          # it and never save the cache this decision exists to grant it.
+          # `Sources/TBDTerminalSerialization` is TBDDaemonLib's one first-party
+          # dependency beyond TBDShared, so a change confined to it still
+          # recompiles the library and still cascades downstream.
+          #
           # Three-dot: what this PR changed since it forked, not everything that
           # has landed on the base since.
           status=0
           git diff --quiet "origin/$BASE_REF...HEAD" -- \
-            Sources/TBDShared/ Sources/TBDDaemonLib/ Package.swift Package.resolved || status=$?
+            Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
           case "$status" in
             0) decide false "no first-party library or package-manifest change" ;;
-            1) decide true "touched TBDShared, TBDDaemonLib or the package manifest" ;;
+            1) decide true "touched a first-party library or the package manifest" ;;
             *) echo "::warning::git diff against origin/$BASE_REF failed ($status); this run will not save a cache."
                decide false "git diff failed" ;;
           esac
@@ -935,10 +954,10 @@ jobs:
       #    package manifest. The primary key hashes every source file, so a PR's
       #    own entry is restorable by that same PR's later pushes and by nothing
       #    else; it earns 1.5 GB of a 10 GB store only when the next push would
-      #    otherwise rebuild nearly everything. Touching TBDShared or
-      #    TBDDaemonLib is exactly that case — an interface change cascades into
-      #    every downstream module, and this job wipes and re-emits both
-      #    libraries on every run regardless. Touching
+      #    otherwise rebuild nearly everything. Touching TBDShared,
+      #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
+      #    interface change cascades into every downstream module, and this job
+      #    wipes and re-emits the libraries on such a run regardless. Touching
       #    Package.resolved moves the dependency set the restore-keys prefix is
       #    scoped to, which leaves main's entry no longer a fallback this PR can
       #    use at all; touching Package.swift re-plans the build graph, which
