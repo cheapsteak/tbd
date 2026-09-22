@@ -61,8 +61,8 @@ struct ProviderDisambiguationScenarioTests {
         #expect(RemoteProviderIdentityPresentation.headline(management) == "agentbox")
         #expect(RemoteProviderIdentityPresentation.headline(staging) == "agentbox-staging")
 
-        let managementRows = RemoteProviderIdentityPresentation.rows(management, homeDirectory: "/Users/dev")
-        let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/dev")
+        let managementRows = RemoteProviderIdentityPresentation.rows(management, homeDirectory: "/Users/me")
+        let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/me")
 
         // The shared box handle is shown — it is true of both — but it is
         // never the only thing shown, which is what made the two look alike.
@@ -87,7 +87,7 @@ struct ProviderDisambiguationScenarioTests {
             identity: ["account": "acme-1234", "session_token": "AQoDYXdz", "api_key": "sk-live-2"],
             snapshotAt: now)
 
-        let rendered = RemoteProviderIdentityPresentation.rows(leaky, homeDirectory: "/Users/dev")
+        let rendered = RemoteProviderIdentityPresentation.rows(leaky, homeDirectory: "/Users/me")
             .map(\.value).joined(separator: " ")
 
         #expect(rendered.contains("AQoDYXdz") == false)
