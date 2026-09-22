@@ -50,6 +50,68 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(_ vc: NSTabViewController, context: Context) {
+        Self.reconcile(vc, mounts: mounts, activeSelection: activeSelection, appState: appState) { key in
+            guard let config = appState.remoteProviders.first(where: { $0.config.name == key.selection.provider })?.config
+            else { return nil } // provider unregistered/unknown — nothing to spawn against
+            let host = NSHostingController(
+                rootView: Self.makeTerminalView(for: key, provider: config, appState: appState)
+                    .environment(appState)
+                    .environmentObject(appearance)
+            )
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = key
+            return item
+        }
+    }
+
+    /// The bare attach terminal for one mount key, with both AppState bridges
+    /// wired: the spawn report and the exit report each carry the key's
+    /// generation, which is how a superseded child's late report is told apart
+    /// from the live one's. Kept separate from `updateNSViewController` so the
+    /// wiring can be driven by a test without a SwiftUI `Context`.
+    @MainActor
+    static func makeTerminalView(
+        for key: RemoteAttachMountKey,
+        provider config: RemoteProviderConfig,
+        appState: AppState
+    ) -> RemoteAttachTerminalView {
+        let selection = key.selection
+        let generation = key.generation
+        return RemoteAttachTerminalView(
+            provider: config,
+            sessionID: selection.sessionID,
+            onDetached: { [weak appState] exitCode in
+                appState?.markRemoteSessionDetached(selection, exitCode: exitCode, generation: generation)
+            },
+            // Runs from `TBDTerminalView.onReady`, which the terminal
+            // view defers through `DispatchQueue.main.async` (see its
+            // `layout()` override) — so this lands on a later
+            // main-queue turn, outside the SwiftUI update pass, and
+            // mutating AppState here is fine. Same generation tagging
+            // as `onDetached`: a spawn reported for a superseded
+            // generation is dropped rather than dating the
+            // replacement child.
+            onStarted: { [weak appState] date in
+                appState?.markRemoteAttachStarted(selection, generation: generation, at: date)
+            }
+        )
+    }
+
+    /// The whole mount-set diff, applied to `vc`: remove tab items whose key
+    /// left `mounts` (reporting each unmount to `appState` on the next main
+    /// turn), add items for keys that entered, and select the active one.
+    /// `makeItem` builds the tab item for a key — carrying that key as the
+    /// item's `identifier`, which is how a later diff recognises it — or nil
+    /// when its provider is unknown. Static so a test can drive it against a
+    /// real `NSTabViewController` without a SwiftUI `Context`.
+    @MainActor
+    static func reconcile(
+        _ vc: NSTabViewController,
+        mounts: [RemoteAttachMountKey],
+        activeSelection: RemoteSessionSelection?,
+        appState: AppState,
+        makeItem: (RemoteAttachMountKey) -> NSTabViewItem?
+    ) {
         let mountedKeys = Set(mounts)
         let currentKeys = vc.tabViewItems.compactMap { $0.identifier as? RemoteAttachMountKey }
 
@@ -61,28 +123,34 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         for (idx, key) in currentKeys.enumerated().reversed() {
             if !mountedKeys.contains(key) {
                 vc.removeTabViewItem(vc.tabViewItems[idx])
+                // That dismantle terminates the child with its own exit
+                // callback suppressed (`Coordinator.cleanup()`), so this
+                // report is the only thing that tells AppState the child is
+                // gone. Without it the recorded spawn time outlives the child
+                // it dates, and a cap-evicted selection that is later
+                // re-admitted while still backgrounded — no child, nothing to
+                // re-report — gets restarted by the next network change for a
+                // pane that has nothing to restart.
+                //
+                // Deferred one main-queue turn because this runs inside
+                // `updateNSViewController`, i.e. inside a SwiftUI update
+                // pass, where mutating observed AppState is not allowed. The
+                // generation rides along for the same reason `onDetached`
+                // carries it: when a reconnect supersedes a generation, this
+                // very loop removes the old key in the same update that mounts
+                // the replacement, and a report against the stale generation
+                // must not clear the replacement child's start.
+                let selection = key.selection
+                let generation = key.generation
+                DispatchQueue.main.async { [weak appState] in
+                    appState?.markRemoteAttachUnmounted(selection, generation: generation)
+                }
             }
         }
 
         // 2. Add tab items for newly-mounted keys.
         for key in mounts where !currentKeys.contains(key) {
-            let selection = key.selection
-            guard let config = appState.remoteProviders.first(where: { $0.config.name == selection.provider })?.config
-            else { continue } // provider unregistered/unknown — nothing to spawn against
-            let generation = key.generation
-            let host = NSHostingController(
-                rootView: RemoteAttachTerminalView(
-                    provider: config,
-                    sessionID: selection.sessionID,
-                    onDetached: { [weak appState] exitCode in
-                        appState?.markRemoteSessionDetached(selection, exitCode: exitCode, generation: generation)
-                    }
-                )
-                .environment(appState)
-                .environmentObject(appearance)
-            )
-            let item = NSTabViewItem(viewController: host)
-            item.identifier = key
+            guard let item = makeItem(key) else { continue }
             vc.addTabViewItem(item)
         }
 

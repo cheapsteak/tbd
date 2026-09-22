@@ -45,6 +45,24 @@ struct ControlModePaneKey: Hashable {
     let paneID: String
 }
 
+/// One remote selection's attach-pane restart generation, plus when the child
+/// mounted under it was spawned.
+///
+/// `startedAt` is nil until the pager's terminal reports the spawn
+/// (`AppState.markRemoteAttachStarted`), goes back to nil on every generation
+/// bump because the replacement child re-reports for itself, and goes back to
+/// nil again the moment that child stops being live — either its exit is
+/// recorded (`AppState.markRemoteSessionDetached`), or the pager reports its
+/// tab's unmount (`AppState.markRemoteAttachUnmounted`), the teardown that
+/// terminates the child with its exit callback suppressed. A spawn time must
+/// never outlive the child it dates.
+/// `AppState.handleNetworkChange` compares it against the change time to skip
+/// children that are already running on the new path.
+struct RemoteAttachGeneration: Equatable {
+    var generation: Int
+    var startedAt: Date?
+}
+
 enum TmuxStartupResolutionDiagnostic: Equatable {
     case path(String)
     case savedFallback(String)
@@ -1085,7 +1103,12 @@ final class AppState {
     /// Absent means generation 0. The generation is also how a late exit
     /// from a superseded child is told apart from the live one's exit; see
     /// `markRemoteSessionDetached(_:exitCode:generation:)`.
-    private(set) var remoteAttachGenerations: [RemoteSessionSelection: Int] = [:]
+    ///
+    /// Each entry also carries when its child was spawned
+    /// (`RemoteAttachGeneration.startedAt`), which is what lets
+    /// `handleNetworkChange` restart only the children that predate a network
+    /// change rather than every pane at once.
+    private(set) var remoteAttachGenerations: [RemoteSessionSelection: RemoteAttachGeneration] = [:]
 
     /// Cap on how many WARM BACKGROUND remote sessions may keep a live
     /// attach terminal around at once. The current selection is separately
@@ -1177,18 +1200,39 @@ final class AppState {
     /// `reconnectRemoteSession` has since superseded is dropped: that child
     /// was killed on purpose, and recording its exit would detach — or put
     /// into backoff — the fresh child that replaced it. `nil` skips the check.
-    func markRemoteSessionDetached(_ selection: RemoteSessionSelection, exitCode: Int32?, generation: Int? = nil) {
+    ///
+    /// `now` is the instant the backoff window is measured from — the date
+    /// seam, defaulted so no production call site changes, so a test can
+    /// place an entry's `nextEligibleAt` on either side of an instant it
+    /// chose without sleeping.
+    func markRemoteSessionDetached(
+        _ selection: RemoteSessionSelection,
+        exitCode: Int32?,
+        generation: Int? = nil,
+        now: Date = Date()
+    ) {
         if let generation, generation != remoteAttachGeneration(for: selection) {
             return
         }
+        // The child that reported this exit is gone, so its spawn time must
+        // not outlive it. `handleNetworkChange` reads a recorded start as "a
+        // live child has been running since then" and restarts the pane; an
+        // unexpected exit re-enters `attachedRemoteSelections` the moment its
+        // backoff elapses, so a start left behind here would make the very
+        // next network change bump the generation of a selection whose
+        // replacement child has not spawned yet — a restart of nothing, and
+        // one that skips the pane again on the change after it. The
+        // generation itself is kept: it still names the mount key a
+        // replacement spawns under, and no child was superseded here.
+        remoteAttachGenerations[selection]?.startedAt = nil
         switch RemoteAttachExitClass.classify(exitCode: exitCode) {
         case .unexpected:
             pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
-                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: now
             )
         case .authNeeded:
             pendingReconnectRemoteSessions[selection] = RemoteReconnectPolicy.nextPending(
-                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: Date()
+                exitCode: exitCode, previous: pendingReconnectRemoteSessions[selection], now: now
             )
             reportRemoteAttachExit(selection, exitCode: exitCode)
         case .clean:
@@ -1216,7 +1260,101 @@ final class AppState {
     /// The restart generation `selection`'s attach terminal is currently
     /// mounted under — 0 until the first `reconnectRemoteSession`.
     func remoteAttachGeneration(for selection: RemoteSessionSelection) -> Int {
-        remoteAttachGenerations[selection] ?? 0
+        remoteAttachGenerations[selection]?.generation ?? 0
+    }
+
+    /// When the attach child that is currently running for `selection` was
+    /// spawned, or nil when no such child exists: none has reported a spawn
+    /// under the current generation (it has not started yet, or a reconnect
+    /// just superseded the one that had), or the one that did has since
+    /// exited and been recorded by `markRemoteSessionDetached`. Non-nil
+    /// therefore means a live child, which is what `handleNetworkChange`
+    /// relies on — it reads nil as "nothing to restart; whatever spawns next
+    /// spawns on the new path" and leaves such a selection alone.
+    ///
+    /// An unmount that is not an exit — cap eviction, an explicit detach, the
+    /// session vanishing, a superseded generation — terminates the child with
+    /// its own exit callback suppressed, so the pager reports the teardown
+    /// separately through `markRemoteAttachUnmounted`, which clears the start
+    /// the same way. Without that report a cap-evicted selection would carry a
+    /// start with no child behind it, and the first network change after it
+    /// was re-admitted would restart a pane that has nothing to restart.
+    func remoteAttachStartedAt(for selection: RemoteSessionSelection) -> Date? {
+        remoteAttachGenerations[selection]?.startedAt
+    }
+
+    /// Records that the attach child for `selection` mounted under
+    /// `generation` was spawned at `date` — reported by the pager's terminal
+    /// the moment `LocalProcess.startProcess` returns.
+    ///
+    /// A report for a generation that is no longer current is dropped, for
+    /// the same reason a superseded exit is in `markRemoteSessionDetached`:
+    /// that child is already being torn down, and letting its start time land
+    /// on the replacement's entry would date the new child by the old one.
+    func markRemoteAttachStarted(_ selection: RemoteSessionSelection, generation: Int, at date: Date = Date()) {
+        guard generation == remoteAttachGeneration(for: selection) else { return }
+        remoteAttachGenerations[selection] = RemoteAttachGeneration(generation: generation, startedAt: date)
+    }
+
+    /// Records that the pane mounted for `selection` under `generation` was
+    /// torn down without its child's exit being reported — cap eviction, an
+    /// explicit detach, the session vanishing, or a superseded generation. The
+    /// pager's dismantle terminates the child with its exit callback
+    /// suppressed, so this is the only way `startedAt` learns the child is
+    /// gone. A report for a generation that is no longer current is dropped,
+    /// so the old key's removal after a reconnect cannot clear the replacement
+    /// child's start. The generation itself is kept.
+    func markRemoteAttachUnmounted(_ selection: RemoteSessionSelection, generation: Int) {
+        guard generation == remoteAttachGeneration(for: selection) else { return }
+        remoteAttachGenerations[selection]?.startedAt = nil
+    }
+
+    /// Moves back to `date` every pending-reconnect deadline that still lies
+    /// in the future AND belongs to a failure that predates `date`, keeping
+    /// each entry's `exitCode` and `attempts`. Returns how many entries moved.
+    ///
+    /// Lives here rather than beside `handleNetworkChange` in
+    /// `AppState+RemoteAttach.swift` because `pendingReconnectRemoteSessions`
+    /// is `private(set)` and Swift's `private` is file-scoped: every direct
+    /// mutator of that dictionary has to sit in this file.
+    ///
+    /// **Only an EARLIER failure is stale.** A child that died at or after
+    /// `date` died on the path the change installed, so pulling its cool-off
+    /// back would respawn it straight into whatever just killed it — and the
+    /// gap between the raw event and the debounced handling is exactly wide
+    /// enough for that to happen. `RemotePendingReconnect` records no creation
+    /// time, but it is derivable: an entry is written with
+    /// `nextEligibleAt = failedAt + backoffInterval(attempts:)`, so
+    /// subtracting that interval recovers `failedAt`. That recovery is a
+    /// `Double` round trip through `TimeInterval`, not an exact one, so a
+    /// failure landing precisely at `date` can come out either side of the
+    /// `<=` and be read as predating the change or as following it. The edge
+    /// is not load-bearing: at an instant that coincides exactly with the
+    /// change, both answers are defensible, and no caller can tell them apart.
+    ///
+    /// **`attempts` is deliberately preserved.** Escalation is what bounds
+    /// retries *between* network changes (see
+    /// `RemoteReconnectPolicy.nextPending`), so a flapping VPN must not reset
+    /// it — what a network change makes stale is the *wait*, not the count.
+    /// Across repeated changes the retry cadence is the change cadence itself,
+    /// bounded by the watcher's debounce rather than by escalation. The health
+    /// gate (`RemoteReconnectPolicy.isBlocked`) is untouched too, so a selection
+    /// under a `.needsAuth`/`.error`/`.stale` provider stays blocked.
+    @discardableResult
+    func expireRemoteReconnectBackoff(at date: Date) -> Int {
+        var moved = 0
+        for (selection, pending) in pendingReconnectRemoteSessions
+        where pending.nextEligibleAt > date
+            && pending.nextEligibleAt.addingTimeInterval(
+                -RemoteReconnectPolicy.backoffInterval(attempts: pending.attempts)) <= date {
+            pendingReconnectRemoteSessions[selection] = RemotePendingReconnect(
+                exitCode: pending.exitCode,
+                attempts: pending.attempts,
+                nextEligibleAt: date
+            )
+            moved += 1
+        }
+        return moved
     }
 
     /// Kills `selection`'s `attach` child and re-execs it immediately — the
@@ -1255,9 +1393,69 @@ final class AppState {
         guard wasDetached || attachedRemoteSelections.contains(selection) else { return false }
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
-        remoteAttachGenerations[selection] = remoteAttachGeneration(for: selection) + 1
+        // `startedAt: nil` — the replacement child reports its own spawn time
+        // through `markRemoteAttachStarted`.
+        remoteAttachGenerations[selection] = RemoteAttachGeneration(
+            generation: remoteAttachGeneration(for: selection) + 1, startedAt: nil)
         touchAttachedRemoteSession(selection)
         return true
+    }
+
+    /// Restarts every attached selection whose child has a recorded spawn time
+    /// before `date` — the network-change path's step 1 — and returns how many.
+    ///
+    /// Each restart is a plain `reconnectRemoteSession`, so a live child's
+    /// leftover pending-reconnect entry is dropped, exactly as for the manual
+    /// Reconnect: that entry predates the child that is running now, and
+    /// carrying it would re-arm the health gate
+    /// (`RemoteReconnectPolicy.isBlocked` blocks on any non-`.ok` health,
+    /// deadline or not) so that a provider going `.stale` during the very
+    /// network change would unmount the pane this just restarted. The bound on
+    /// a respawn loop is re-established by the first failure after the
+    /// restart; the restart cadence itself is bounded by the watcher's
+    /// debounce.
+    ///
+    /// `recentlyAttachedRemoteSessions` is restored to its prior order
+    /// afterwards: every restart ends in `touchAttachedRemoteSession`, which
+    /// would otherwise reorder the recency list — reversing it when every pane
+    /// restarts, and demoting a skipped (already-on-the-new-path) pane to the
+    /// tail when only some do. A network change says nothing about what the
+    /// user looked at last. That restore carries a second job — the spec's
+    /// "re-evaluate now" effect — described at the write itself.
+    ///
+    /// Lives here rather than beside `handleNetworkChange` in
+    /// `AppState+RemoteAttach.swift` for the same reason
+    /// `expireRemoteReconnectBackoff(at:)` does: `recentlyAttachedRemoteSessions`
+    /// is `private(set)` and Swift's `private` is file-scoped.
+    @discardableResult
+    func restartRemoteAttachChildren(startedBefore date: Date) -> Int {
+        let order = recentlyAttachedRemoteSessions
+        var restarted = 0
+        for selection in attachedRemoteSelections {
+            guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < date else { continue }
+            if reconnectRemoteSession(selection) { restarted += 1 }
+        }
+        // Unconditional, and load-bearing beyond the order restore: this is
+        // the spec's third effect, "re-evaluate now"
+        // (`docs/specs/2026-09-21-remote-attach-network-recovery-design.md`).
+        // `attachedRemoteSelections` is computed on read, so a pending entry
+        // whose deadline elapsed while the machine slept — restarted by
+        // nothing (its child never spawned) and moved by nothing (its deadline
+        // is already past, so the expiry pass skips it) — is re-admitted only
+        // when some property that computation reads notifies its observers.
+        // This write is that notification, and it has to fire even when the
+        // order is identical, so it must NOT be guarded by an equality check.
+        //
+        // It goes through `_modify` rather than a whole-property assignment
+        // for exactly that reason: the toolchain drops the notification for an
+        // assignment of an equal `Equatable` value, and
+        // `[RemoteSessionSelection]` is `Equatable`. That exemption is pinned
+        // by `AppStateObservationContractTests`, and a plain
+        // `recentlyAttachedRemoteSessions = order` here would land inside it
+        // and silently cost the handler its third effect.
+        let replaced = recentlyAttachedRemoteSessions.startIndex..<recentlyAttachedRemoteSessions.endIndex
+        recentlyAttachedRemoteSessions.replaceSubrange(replaced, with: order)
+        return restarted
     }
 
     /// Clears a stale explicit-detach flag for `selection`, if present —
@@ -1903,6 +2101,14 @@ final class AppState {
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
+    /// Emits a debounced event when the network path changes or the machine
+    /// wakes — the two events that most often kill a live `attach` child's
+    /// transport without the child noticing. Wired to `handleNetworkChange`
+    /// in `init`, and only outside tests: starting a real `NWPathMonitor` per
+    /// test-constructed `AppState` would put thousands of monitors on the
+    /// main queue. `@ObservationIgnored` because nothing renders it.
+    @ObservationIgnored private let remoteAttachNetworkWatcher = RemoteAttachNetworkWatcher()
+
     @ObservationIgnored private var memoryPressureSource: DispatchSourceMemoryPressure?
     @ObservationIgnored private var focusObservers: [NSObjectProtocol] = []
 
@@ -1942,6 +2148,10 @@ final class AppState {
         // pool saturates and the test runner deadlocks. Production is
         // unbundled (no .xctest in args), so this guard is a no-op there.
         if !Self.isRunningUnderTests {
+            remoteAttachNetworkWatcher.onChange = { [weak self] change in
+                self?.handleNetworkChange(change)
+            }
+            remoteAttachNetworkWatcher.start()
             Task {
                 await connectAndLoadInitialState()
                 // Eager ensure: a macOS-driven relaunch (reboot + Spotlight, OS

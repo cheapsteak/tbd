@@ -177,6 +177,82 @@ extension AppState {
     var remoteSessionHostSelection: RemoteSessionSelection? {
         selectedRemoteSession ?? recentlyAttachedRemoteSessions.first
     }
+
+    /// Re-attaches after a network path change or a wake from sleep — the
+    /// events that most often kill a transport whose `attach` child never
+    /// exits (#884). Design:
+    /// `docs/specs/2026-09-21-remote-attach-network-recovery-design.md`.
+    ///
+    /// The bug this exists for is invisible by construction: the contract
+    /// makes the child's exit the only viewer-side signal and forbids parsing
+    /// its bytes, so a child still running on a dead socket looks exactly
+    /// like an idle session, forever. Nothing here infers anything from
+    /// output; it acts on the external event instead.
+    ///
+    /// Three effects, in order:
+    ///
+    /// 1. **Restart the children that predate the change.** Every attached
+    ///    selection whose child has a recorded start time BEFORE `change.at`
+    ///    gets a fresh generation, which the pager turns into a kill and
+    ///    re-exec. A child with no recorded start has not spawned yet and
+    ///    will spawn on the new path; a child started at or after `change.at`
+    ///    is already on it. Both are skipped, so a burst costs no spawn it
+    ///    does not need. The session survives a restart untouched — its state
+    ///    lives on the provider, and `attach` is required to be targeted and
+    ///    idempotent — so the whole cost of an unnecessary one falls on the
+    ///    viewer, and it differs by whether the pane is on screen. A displayed
+    ///    pane repaints and loses its local scrollback. A pane that is NOT
+    ///    displayed — a warm background attach, or every remote pane while a
+    ///    local worktree is showing — drops its connection now and reconnects
+    ///    only when it is next shown: the replacement child spawns from
+    ///    `TBDTerminalView.onReady`, which fires from `layout()` the first
+    ///    time the view has non-zero bounds, and an `NSTabViewController`
+    ///    genuinely detaches an unselected tab's content view (`window ==
+    ///    nil`) — both in `RemoteAttachPager`, between remote panes, and in
+    ///    `DetailSectionHostPager`, across an excursion to a worktree. That is
+    ///    the mechanism the automatic re-admission path already runs on: a
+    ///    background selection readmitted when its backoff elapses also gets a
+    ///    fresh tab item that waits for layout before it spawns anything. The
+    ///    restart changes nothing about it. Each restart is a
+    ///    plain `reconnectRemoteSession`; see
+    ///    `restartRemoteAttachChildren(startedBefore:)` for why this automatic
+    ///    path drops a live child's leftover pending entry exactly as the
+    ///    manual Reconnect does, and why the recency order is restored after.
+    /// 2. **Expire stale backoff.** Every pending-reconnect entry still
+    ///    waiting whose failure PREDATES `change.at` has its deadline pulled
+    ///    back to it: a network change is exactly what makes an earlier
+    ///    transport failure stale, and a session that failed while the network
+    ///    was down would otherwise sit out up to 300 seconds after it came
+    ///    back. A failure that landed after the change keeps its cool-off —
+    ///    it already met the new path. `attempts` and the provider-health gate
+    ///    both survive untouched — see `expireRemoteReconnectBackoff(at:)`.
+    /// 3. **Re-evaluate now, with no timer and no RPC.**
+    ///    `attachedRemoteSelections` is computed on every read, so it re-runs
+    ///    only when some property that computation reads notifies its
+    ///    observers — and neither effect above is guaranteed to be one: a
+    ///    change that restarts nothing and expires nothing writes nothing.
+    ///    What guarantees the notification is the restore of
+    ///    `recentlyAttachedRemoteSessions` at the end of
+    ///    `restartRemoteAttachChildren(startedBefore:)`, which is
+    ///    unconditional and fires even when the order it writes back is
+    ///    identical — see the comment at that write for why it is neither
+    ///    guarded by an equality check nor written as a whole-property
+    ///    assignment. So `RemoteAttachPager` re-mounts on the next render
+    ///    rather than on the next ~60 s provider republish.
+    func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
+        let restarted = restartRemoteAttachChildren(startedBefore: change.at)
+        let cleared = expireRemoteReconnectBackoff(at: change.at)
+
+        let triggers = change.triggers.map(\.rawValue).joined(separator: "+")
+        let previous = change.previous?.description ?? "none"
+        let current = change.current?.description ?? "none"
+        remoteAttachLogger.info(
+            """
+            network change (\(triggers, privacy: .public)): \(previous, privacy: .public) -> \
+            \(current, privacy: .public); restarted \(restarted, privacy: .public) attach(es), \
+            cleared backoff on \(cleared, privacy: .public)
+            """)
+    }
 }
 
 /// The identity of one mounted attach terminal in `RemoteAttachPager`: the
