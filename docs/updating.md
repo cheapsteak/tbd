@@ -40,15 +40,20 @@ these steps in order.
   running, the fetched script takes over with the same arguments. That is how
   the procedure updates itself, and an environment marker holds it to a single
   hop.
-- **Stamps the build identity.** `TBDBuildIdentity.json` lands in the build
-  directory before the compiler runs, recording the commit, the branch, the
-  build time, the clone's path, and whether the tree was dirty. Every binary
-  reads the sidecar beside it, which is how `tbd version` knows what is
-  running.
 - **Builds** the same products `scripts/restart.sh` builds — `TBDDaemon`,
   `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
   `scripts/swift-safe`, with the same shared module cache. A failed build
-  stops here and the running installation is untouched.
+  stops here and the running installation, and the clone's own build
+  identity sidecar (below), are both untouched.
+- **Stamps the build identity**, once the build above actually succeeded.
+  `TBDBuildIdentity.json` lands in the build directory recording the commit,
+  the branch, the build time, the clone's path, and whether the tree was
+  dirty. Every binary reads the sidecar beside it, which is how `tbd version`
+  knows what is running. Stamping only after success matters because
+  `~/tbd/updates/src` is one long-lived clone every update reuses: a build
+  that failed here left old binaries in place, and had the sidecar been
+  written first, it would have named the commit that never actually built,
+  with nothing to correct it until the clone's next successful build.
 - **Assembles, signs and installs** `/Applications/TBD.app`, using the same
   code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.

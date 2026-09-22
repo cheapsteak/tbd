@@ -91,11 +91,19 @@ json_escape_string() {
     printf '%s' "${1-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# Write TBDBuildIdentity.json into a build directory, describing the tree the
-# build is about to compile. Called BEFORE the compiler runs, so a binary and
-# the sidecar beside it always name the same commit.
+# Write TBDBuildIdentity.json into a build directory, describing the tree
+# <repo_root> is at when this is called.
 #
 #   write_build_identity <repo_root> <build_dir>
+#
+# scripts/restart.sh calls this BEFORE the compiler runs, so a binary and the
+# sidecar beside it always name the same commit — safe there because a failed
+# build stops the whole restart before anything ships, and the next restart
+# stamps the developer's own worktree fresh regardless. scripts/update.sh
+# calls this only AFTER a successful build: its build directory lives in one
+# long-lived clone every update reuses, so a premature stamp left by a failed
+# build would misdescribe that clone indefinitely, with no later write to
+# correct it until the clone's next successful build.
 #
 # Returns non-zero without writing anything in two cases. When <repo_root> is
 # not a git checkout, a build that cannot be described gets no sidecar rather
