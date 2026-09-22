@@ -72,10 +72,13 @@ struct TerminalLatencyPanelTests {
     }
 
     /// Stands in for the daemon's attach RPCs. `readyError` is the refusal the
-    /// daemon gives a descriptor it has not accounted for.
+    /// daemon gives a descriptor it has not accounted for; `readyGate` holds
+    /// the ack open instead, which is the window the daemon is still the
+    /// session's writer in.
     private struct StubAttach: HolderAttaching {
         let attachment: HolderAttachment
         var readyError: (any Error)?
+        var readyGate: ReadyGate?
 
         func attach(
             worktreeID: UUID, paneID: String, terminalID: UUID
@@ -85,6 +88,10 @@ struct TerminalLatencyPanelTests {
             worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
         ) async throws {
             if let readyError { throw readyError }
+            if let readyGate {
+                await readyGate.noteEntered()
+                await readyGate.waitForRelease()
+            }
         }
 
         func detach(
@@ -95,6 +102,51 @@ struct TerminalLatencyPanelTests {
 
     private struct ReadyRefused: Error {}
 
+    /// A `ready` the test opens and closes by hand.
+    ///
+    /// Both halves are needed: the test has to know the panel has REACHED the
+    /// ack before it asks anything of it, and the panel has to stay there until
+    /// the test is done looking. Main-actor confined, because everything it
+    /// coordinates — the panel's attach task and the test body — already is.
+    @MainActor
+    private final class ReadyGate {
+        private var enteredWaiter: CheckedContinuation<Void, Never>?
+        private var didEnter = false
+        private var releaseWaiter: CheckedContinuation<Void, Never>?
+        private var didRelease = false
+
+        func noteEntered() {
+            didEnter = true
+            enteredWaiter?.resume()
+            enteredWaiter = nil
+        }
+
+        func waitUntilEntered() async {
+            if didEnter { return }
+            await withCheckedContinuation { enteredWaiter = $0 }
+        }
+
+        func release() {
+            didRelease = true
+            releaseWaiter?.resume()
+            releaseWaiter = nil
+        }
+
+        func waitForRelease() async {
+            if didRelease { return }
+            await withCheckedContinuation { releaseWaiter = $0 }
+        }
+    }
+
+    /// One turn of the main queue. `feedSnapshot` and its handback twin lower
+    /// their ingest flag from a `DispatchQueue.main.async` block rather than on
+    /// return, so this is how a test gets to the other side of one.
+    private func mainQueueTurn() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     @MainActor
     private struct Panel {
         /// Held for the panel's lifetime: `Coordinator.appState` is weak, and
@@ -104,11 +156,34 @@ struct TerminalLatencyPanelTests {
         let coordinator: TerminalPanelRepresentable.Coordinator
         let diagnostic: TerminalLatencyDiagnostic
         let lines: Lines
+        let worktreeID: UUID
         let terminalID: UUID
         let sessionEnd: Int32
         let view: TBDTerminalView
         let defaults: UserDefaults
         let suiteName: String
+        /// Non-nil only for a panel whose attach was left in flight, so the
+        /// test can release the gate and then join it.
+        let attaching: Task<Void, Never>?
+
+        func refusal(_ reason: String) -> String {
+            "echorefused terminal=\(terminalID.uuidString) reason=\(reason)"
+        }
+
+        /// Rewrite the terminal's row with a different kind. The probe's kind
+        /// resolver reads `AppState` at REQUEST time, which is what makes the
+        /// same panel answer differently before and after this.
+        func setKind(_ kind: TerminalKind) {
+            state.terminals[worktreeID] = [Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "",
+                tmuxPaneID: "",
+                label: "Shell",
+                kind: kind,
+                transport: .holder
+            )]
+        }
 
         func tearDown() {
             coordinator.cleanup()
@@ -119,10 +194,15 @@ struct TerminalLatencyPanelTests {
 
     /// A holder-backed panel wired as production wires one, with the latency
     /// diagnostic on. `vending` replaces the pty with a descriptor whose writes
-    /// always fail; `readyError` makes the daemon refuse the attach ack.
+    /// always fail; `readyError` makes the daemon refuse the attach ack;
+    /// `readyGate` leaves the attach suspended AT the ack, and the returned
+    /// panel's `attaching` task is what finishes it.
     @MainActor
     private func makePanel(
-        vending: Int32? = nil, readyError: (any Error)? = nil
+        vending: Int32? = nil,
+        readyError: (any Error)? = nil,
+        readyGate: ReadyGate? = nil,
+        kind: TerminalKind = .shell
     ) async throws -> Panel {
         let (sessionEnd, paired) = try makeSocketPair()
         let vended = vending ?? paired
@@ -138,7 +218,7 @@ struct TerminalLatencyPanelTests {
             tmuxWindowID: "",
             tmuxPaneID: "",
             label: "Shell",
-            kind: .shell,
+            kind: kind,
             transport: .holder
         )]
 
@@ -162,14 +242,25 @@ struct TerminalLatencyPanelTests {
         coordinator.holderAttachClient = StubAttach(
             attachment: HolderAttachment(
                 ptyFD: vended, generation: 7, snapshotPreamble: Data()),
-            readyError: readyError)
+            readyError: readyError,
+            readyGate: readyGate)
 
-        await coordinator.startHolderClient(terminalView: view)
+        // With a gate the attach is LEFT RUNNING on purpose: it suspends
+        // inside `ready`, which is the window under test, and awaiting it here
+        // would never return.
+        var attaching: Task<Void, Never>?
+        if readyGate == nil {
+            await coordinator.startHolderClient(terminalView: view)
+        } else {
+            attaching = Task { @MainActor in
+                await coordinator.startHolderClient(terminalView: view)
+            }
+        }
 
         return Panel(
             state: state, coordinator: coordinator, diagnostic: diagnostic, lines: lines,
-            terminalID: terminalID, sessionEnd: sessionEnd, view: view,
-            defaults: defaults, suiteName: suiteName)
+            worktreeID: worktreeID, terminalID: terminalID, sessionEnd: sessionEnd, view: view,
+            defaults: defaults, suiteName: suiteName, attaching: attaching)
     }
 
     // MARK: - The write the panel could not place
@@ -227,21 +318,119 @@ struct TerminalLatencyPanelTests {
 
     // MARK: - An attach that came apart
 
-    /// The tap is installed before the attach is acknowledged, so every path
-    /// that gives up after that point has to withdraw it. A claim left behind
-    /// answers a later request by writing into a session this panel does not
-    /// have.
-    @Test("an attach refused at ready withdraws the panel's latency registration")
+    /// The PASSIVE tap is installed before the attach is acknowledged — it only
+    /// observes bytes the panel is already being given — so every path that
+    /// gives up after that point has to withdraw it, from the view and from the
+    /// holder both. The probe is never registered on this path at all: a claim
+    /// standing for a panel with no session answers a later request by writing
+    /// into nothing and reports the silence as the transport's.
+    @Test("an attach refused at ready withdraws the panel's tap and registers no probe")
     func refusedReadyWithdrawsTheRegistration() async throws {
         let panel = try await makePanel(readyError: ReadyRefused())
         defer { panel.tearDown() }
 
         #expect(panel.diagnostic.registrationCount == 0)
+        #expect(panel.view.latencyTap == nil)
 
         panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 3))
-        #expect(
-            panel.lines.all
-                == ["echorefused terminal=\(panel.terminalID.uuidString) reason=unknownterminal"])
+        #expect(panel.lines.all == [panel.refusal("unknownterminal")])
+    }
+
+    /// The ack is what transfers the pty. Until it lands the daemon is still
+    /// the session's writer and still draining it, so a request answered in
+    /// that window would put the probe's bytes through `holderWriteFD` into a
+    /// descriptor this panel does not own yet.
+    ///
+    /// Its own positive control is the second half: the same panel, the same
+    /// request, once the ack has landed — so the refusal is the window and not
+    /// a panel that never worked.
+    @Test("a request landing before the attach ack is refused, and lands once it is acked")
+    func probeBeforeReadyIsRefusedAndAfterItIsWritten() async throws {
+        let gate = ReadyGate()
+        let panel = try await makePanel(readyGate: gate)
+        defer { panel.tearDown() }
+        await gate.waitUntilEntered()
+
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 5))
+        #expect(panel.lines.all == [panel.refusal("unknownterminal")])
+        #expect(readAvailable(from: panel.sessionEnd).isEmpty)
+
+        gate.release()
+        await panel.attaching?.value
+
+        #expect(panel.diagnostic.registrationCount == 1)
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 6))
+        #expect(panel.lines.all == [panel.refusal("unknownterminal")])
+        #expect(readAvailable(from: panel.sessionEnd) == Data("lp6z\r".utf8))
+    }
+
+    // MARK: - The panel that is registered but cannot answer
+
+    /// A terminal this app has not resolved to a plain shell is refused, and
+    /// the refusal is decided by the coordinator's own `panelKind()` reading
+    /// `AppState` at request time — not by a kind snapshotted at registration.
+    /// Failing closed is the point: the cost of being wrong is keystrokes in
+    /// somebody's agent session.
+    @Test("an agent panel is refused as notshell, and the same panel answers once it is a shell")
+    func agentPanelIsRefusedAsNotShell() async throws {
+        let panel = try await makePanel(kind: .claude)
+        defer { panel.tearDown() }
+
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 7))
+        #expect(panel.lines.all == [panel.refusal("notshell")])
+        #expect(readAvailable(from: panel.sessionEnd).isEmpty)
+
+        panel.setKind(.shell)
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 8))
+        #expect(panel.lines.all == [panel.refusal("notshell")])
+        #expect(readAvailable(from: panel.sessionEnd) == Data("lp8z\r".utf8))
+    }
+
+    /// A snapshot preamble is replayed history being fed into a muted window:
+    /// `send(source:data:)` drops what it is handed for the whole ingest, so a
+    /// token written there is eaten and its silence would be logged as a token
+    /// the transport lost.
+    ///
+    /// Driven through the production path — `feedSnapshot` raises the flag and
+    /// lowers it one main-queue turn later, never on return — so the control is
+    /// the far side of that turn rather than a flag the test put back itself.
+    @Test("a probe during a snapshot ingest is refused, and lands once the ingest is over")
+    func probeDuringSnapshotIngestIsRefused() async throws {
+        let panel = try await makePanel()
+        defer { panel.tearDown() }
+
+        panel.coordinator.feedSnapshot(Data("preamble".utf8), into: panel.view)
+        #expect(panel.coordinator.isIngestingSnapshot)
+
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 9))
+        #expect(panel.lines.all == [panel.refusal("ingestingsnapshot")])
+        #expect(readAvailable(from: panel.sessionEnd).isEmpty)
+
+        await mainQueueTurn()
+        #expect(!panel.coordinator.isIngestingSnapshot)
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 10))
+        #expect(panel.lines.all == [panel.refusal("ingestingsnapshot")])
+        #expect(readAvailable(from: panel.sessionEnd) == Data("lp10z\r".utf8))
+    }
+
+    /// While the handback's mode probe is in flight the panel COLLECTS replies
+    /// instead of routing them, and a token written into that window is folded
+    /// into `RecordedModeReplies` — handed to the daemon as though the terminal
+    /// had said it. Refused, not measured.
+    @Test("a probe during a handback's mode probe is refused, and lands once it is over")
+    func probeDuringHandbackIsRefused() async throws {
+        let panel = try await makePanel()
+        defer { panel.tearDown() }
+
+        panel.coordinator.isCollectingModeRepliesForTesting = true
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 13))
+        #expect(panel.lines.all == [panel.refusal("handbackinflight")])
+        #expect(readAvailable(from: panel.sessionEnd).isEmpty)
+
+        panel.coordinator.isCollectingModeRepliesForTesting = false
+        panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 14))
+        #expect(panel.lines.all == [panel.refusal("handbackinflight")])
+        #expect(readAvailable(from: panel.sessionEnd) == Data("lp14z\r".utf8))
     }
 
     /// The registration's own positive control: an attach that completes keeps
