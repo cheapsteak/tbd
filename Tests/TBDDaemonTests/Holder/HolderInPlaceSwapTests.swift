@@ -295,7 +295,11 @@ struct HolderInPlaceSwapTests {
     /// Driven through the wake half directly rather than through the RPC,
     /// because reaching it through the RPC would need a park to succeed and a
     /// park needs a reader over a real pty. The composition is the live
-    /// suite's; what this pins is the state this half leaves behind.
+    /// suite's; what this pins is the state this half leaves behind. The
+    /// RPC-level contract for this outcome — a success-shaped response carrying
+    /// the re-homed row, with the failure recorded only in the actuation — is
+    /// pinned by
+    /// `HolderProfileSwapLiveTests.inPlaceSwapWhoseWakeFailsLeavesTheRowParkedOnTheNewAccount`.
     @Test("the swap's wake half leaves a refused row parked on the account it was re-homed to")
     func swapWakeRefusalLeavesTheRowParkedOnTheNewProfile() async throws {
         // No spawner at all: `canSpawn` is false, which is the daemon whose

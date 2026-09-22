@@ -259,6 +259,124 @@ struct HolderProfileSwapLiveTests {
         #expect(retried.holderPID == nil && retried.childPID == nil,
                 "the cold path started a process for a parked row")
     }
+
+    /// The spec's third failure outcome, through the RPC: a wake that cannot
+    /// start a holder leaves the row **parked on the new account**, so the
+    /// switch has taken effect at the account level and the next wake retries
+    /// the resume.
+    ///
+    /// It is the one outcome whose response is SUCCESS-shaped. The other two
+    /// return `.error`, because nothing about the session moved; this one
+    /// returns the re-homed row, and says the resume did not happen only in the
+    /// actuation record. That asymmetry is the contract this test exists to
+    /// pin, and no direct call to the wake half can see it.
+    ///
+    /// The failure is staged on the registry rather than through a router seam:
+    /// the spawner resolves its executable path on every spawn, so removing the
+    /// fixture's own symlink to `TBDHolder` between the row's creation and the
+    /// swap reproduces the daemon whose helper moved — the spec's named wake
+    /// failure — with the park, the re-home and every other half untouched.
+    @Test func inPlaceSwapWhoseWakeFailsLeavesTheRowParkedOnTheNewAccount() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(blank: false, flushOnTerm: true)
+        let oldChild = try #require(terminal.childPID)
+        let oldHolder = try #require(terminal.holderPID)
+
+        // The running holder has already exec'd, so it and its job are
+        // unaffected: only the NEXT spawn — the swap's wake — has nothing to
+        // start.
+        try fixture.removeHolderHelper()
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+
+        #expect(response.success,
+                "a wake failure was reported as an RPC error: \(response.error ?? "")")
+        let returned = try response.decodeResult(Terminal.self)
+        #expect(returned.id == terminal.id, "the swap moved the session to another row")
+        #expect(returned.profileID == fixture.destProfileID,
+                "the response does not carry the account the switch took effect on")
+        #expect(returned.isParked, "the response claims a row a failed wake left awake")
+        #expect(returned.holderPID == nil && returned.childPID == nil,
+                "the response names processes no wake started")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a failed wake left the row awake")
+        #expect(after.profileID == fixture.destProfileID,
+                "a failed wake un-did the re-home; the switch must stand at the account level")
+        #expect(after.claudeSessionID == Self.sessionID,
+                "a failed wake lost the conversation the next wake has to resume")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "a failed wake recorded processes nothing started")
+        // Routing, as far as this fixture can see it. Its router carries no
+        // model proxy supervisor, so the arm's attachment is `.unproxied`: no
+        // route is minted and there is no route file to linger. The row's
+        // stream path is therefore nil on both paths and this assertion is a
+        // floor rather than a discriminator — it says only that a wake which
+        // started nothing left no stream file pointing at it. A test that
+        // watched a real route being retired would need a supervisor, which is
+        // the proxy suites' subject rather than this one's.
+        #expect(after.transcriptStreamPath == nil,
+                "a wake that started nothing stamped a transcript stream path")
+
+        // The park is real, so the pre-swap generation is really gone.
+        let goneSignal = kill(oldChild, 0)
+        let goneErrno = errno
+        #expect(goneSignal == -1 && goneErrno == ESRCH,
+                "the park did not end the old job (kill returned \(goneSignal), errno \(goneErrno))")
+        // Bounded for the reason the resume test spells out: an unreaped holder
+        // is a zombie, and `kill(pid, 0)` cannot tell one from a running
+        // process.
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
+                "a wake that could not start a holder still launched something")
+
+        let rows = try fixture.actuationRows()
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "a failed wake was recorded as something other than transport-failed: \(rows)")
+        let recorded = rows.last?["error"] as? String ?? ""
+        #expect(recorded.contains("starting a holder for this session failed"),
+                "the actuation does not name the wake half as what failed: \(recorded)")
+
+        // And the retry the outcome promises: the row is parked on the new
+        // account, so an ordinary focus-style wake resumes it there.
+        try fixture.restoreHolderHelper()
+        let woken = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id)))
+        #expect(woken.success, "the retry the failure promises failed: \(woken.error ?? "")")
+
+        let resumed = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!resumed.isParked, "the retry left the row parked")
+        #expect(resumed.profileID == fixture.destProfileID,
+                "the retry resumed the session on the account the swap left")
+        #expect(resumed.claudeSessionID == Self.sessionID,
+                "the retry changed the session id the swap preserved")
+        let newHolder = try #require(resumed.holderPID, "the woken row records no holder")
+        let newChild = try #require(resumed.childPID, "the woken row records no child")
+        fixture.remember(holderPID: newHolder, childPID: newChild)
+
+        let launched = await pollUntil("the retried wake to reach its claude stub") {
+            (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
+                .contains("TBD_TERMINAL_ID=") ?? false
+        }
+        #expect(launched, "the retry never launched anything through the pinned shell")
+        let argv = ((try? String(contentsOfFile: fixture.launchArgvPath, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        let resumeIndex = argv.firstIndex(of: "--resume")
+        #expect(resumeIndex != nil, "the retry did not resume anything: \(argv)")
+        if let resumeIndex, resumeIndex + 1 < argv.count {
+            // Adjacency, not mere presence, for the reason the resume test
+            // gives: a resume of some other session would pass containment.
+            #expect(argv[resumeIndex + 1] == Self.sessionID,
+                    "the retry resumed the wrong session: \(argv)")
+        }
+    }
 }
 
 // MARK: - Delta recorder
@@ -349,6 +467,9 @@ private final class SwapFixture {
     private let configDirManager: ClaudeProfileConfigDirManager
     private let home: String
     private let tempDir: URL
+    /// The symlink the spawner spawns from, and what it points at.
+    private let helperLinkPath: String
+    private let helperTargetPath: String
     private var torndown = false
 
     /// A pid this fixture spawned, and the kernel's record of when that pid
@@ -428,11 +549,20 @@ private final class SwapFixture {
         let executable = try #require(
             HolderProcessFixture.locateExecutable(),
             "TBDHolder must be built beside the test bundle")
+        // The spawner is pointed at a symlink this fixture owns rather than at
+        // the build product itself, so a test can take the helper away — see
+        // `removeHolderHelper` — without touching a file every other suite on
+        // this machine spawns from. `posix_spawn` resolves the link on each
+        // spawn, which is what makes the removal a live fact rather than a
+        // value captured at construction.
+        let helperLink = "\(home)/TBDHolder"
+        try FileManager.default.createSymbolicLink(
+            atPath: helperLink, withDestinationPath: executable.path)
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: environment,
             listTerminals: { [] },
-            spawner: HolderSpawner(executableURL: executable))
+            spawner: HolderSpawner(executableURL: URL(fileURLWithPath: helperLink)))
 
         let tmux = TmuxManager(dryRun: true)
         let configDirManager = ClaudeProfileConfigDirManager(
@@ -461,13 +591,30 @@ private final class SwapFixture {
         return SwapFixture(
             db: db, registry: registry, router: router, worktree: worktree,
             destProfileID: dest.id, configDirManager: configDirManager,
-            home: home, tempDir: tempDir)
+            home: home, tempDir: tempDir,
+            helperLinkPath: helperLink, helperTargetPath: executable.path)
+    }
+
+    /// Takes the `TBDHolder` helper out from under the spawner, leaving every
+    /// holder that is already running untouched — which is precisely the state
+    /// the spec names as a wake failure ("the `TBDHolder` helper missing beside
+    /// the daemon, a spawn that threw"). Only the symlink is removed; the build
+    /// product it pointed at is never touched.
+    func removeHolderHelper() throws {
+        try FileManager.default.removeItem(atPath: helperLinkPath)
+    }
+
+    /// Puts it back, for the retry half of a test that removed it.
+    func restoreHolderHelper() throws {
+        try FileManager.default.createSymbolicLink(
+            atPath: helperLinkPath, withDestinationPath: helperTargetPath)
     }
 
     private init(
         db: TBDDatabase, registry: HolderRegistry, router: RPCRouter,
         worktree: Worktree, destProfileID: UUID,
-        configDirManager: ClaudeProfileConfigDirManager, home: String, tempDir: URL
+        configDirManager: ClaudeProfileConfigDirManager, home: String, tempDir: URL,
+        helperLinkPath: String, helperTargetPath: String
     ) {
         self.db = db
         self.registry = registry
@@ -477,6 +624,8 @@ private final class SwapFixture {
         self.configDirManager = configDirManager
         self.home = home
         self.tempDir = tempDir
+        self.helperLinkPath = helperLinkPath
+        self.helperTargetPath = helperTargetPath
     }
 
     /// A real holder supervising a real job, plus the row that names both —

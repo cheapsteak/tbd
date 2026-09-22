@@ -151,11 +151,13 @@ Daemon unit tests, fast pass, no live processes:
   text each rail emits today.
 - **The holder arm**, driven with the fakes the holder wake tests use. A
   refused park and a park answered by another park already in flight each
-  leave the row awake on the old profile with nothing else changed, and a
-  refused wake leaves it parked on the new profile; each finishes the
-  actuation `transportFailed` naming the half. The success path and the
-  re-home failure need a park that really ends a process, so they are live
-  (below).
+  leave the row awake on the old profile with nothing else changed, both
+  through the RPC handler. A refused wake, asked of the wake half directly
+  because reaching it through the RPC needs a park over a real pty, leaves the
+  row parked on the new profile; each finishes the actuation `transportFailed`
+  naming the half. The success path, the re-home failure and the wake failure
+  as the RPC reports it need a park that really ends a process, so they are
+  live (below).
 - **The refusal is gone.** The test asserting `holderInPlaceSwapRefusal`
   becomes one asserting the swap proceeds; the app and CLI tests that pinned
   the string go with it.
@@ -175,6 +177,23 @@ worktree out of the status the handler captured at entry so the re-home's lock
 refuses before any write. The row is then parked on the old profile with no
 replacement process, the actuation reads `transportFailed`, and a retry with
 the status restored takes the cold path and re-homes without waking.
+
+A fourth pins the wake failure, whose response is the odd one of the three:
+success-shaped, carrying the re-homed row, with the failure stated only in the
+actuation. It is staged on the registry rather than through a seam — the
+spawner resolves its executable path on every spawn, so the fixture spawns
+from a symlink of its own and removing that link is the daemon whose
+`TBDHolder` helper moved, with every running holder untouched. The park and
+the re-home then run as they always do and the wake can start nothing: the RPC
+returns a parked row on the destination account naming no processes, the
+actuation reads `transportFailed` naming the wake half, and an ordinary
+`terminal.wake` with the link restored resumes that session there under
+`--resume`, which is the retry the outcome promises.
+
+All three failure outcomes are therefore driven through the RPC handler, so
+each one's response shape and actuation record are pinned as the app meets
+them: the two park refusals in the fast pass, the re-home and wake failures
+here.
 
 Manual soak, in the PR's test plan, after a restart from main: "Switch
 account" on a holder tab while idle, mid-turn (with the warning), and on a
