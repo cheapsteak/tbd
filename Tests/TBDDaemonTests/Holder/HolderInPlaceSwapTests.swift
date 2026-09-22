@@ -202,6 +202,43 @@ struct HolderInPlaceSwapTests {
         #expect(rows.count == 1, "the cold path created a second row")
     }
 
+    // MARK: - The park half, refused
+
+    /// The first of the spec's failure outcomes: a park that refuses leaves
+    /// the row AWAKE on its OLD account with nothing about it changed, and the
+    /// actuation says `transport-failed` rather than inheriting a success.
+    ///
+    /// The refusal is the park's own text, not a new one: this fixture's
+    /// registry adopted nothing, so the daemon holds no reader to write the
+    /// polite `/exit` through.
+    @Test("a swap whose park refuses leaves the row awake on its old account and records transport-failed")
+    func swapParkRefusalLeavesTheRowAwake() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: false)
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(!response.success)
+        #expect(response.error == HibernationCoordinator.holderNoReaderRefusal,
+                "the swap failed somewhere other than the park: \(response.error ?? "success")")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!after.isParked, "a refused park left the row parked")
+        #expect(after.profileID == nil, "a refused park still re-homed the row")
+        #expect(after.holderPID == 9101 && after.childPID == 9102,
+                "a refused park cleared the row's pids")
+        #expect(after.sessionIncarnationID == terminal.sessionIncarnationID,
+                "a refused park committed a replacement identity to the row")
+
+        // The record is where a swallowed transport failure is visible at all.
+        let rows = try fixture.actuationRows()
+        #expect(rows.count == 2,
+                "the swap did not open and close exactly one actuation: \(rows)")
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "a refused park was recorded as something other than transport-failed")
+    }
+
     // MARK: - The wake half, refused
 
     /// The third of the spec's failure outcomes, asked of the half that owns

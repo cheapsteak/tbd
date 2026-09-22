@@ -1021,8 +1021,18 @@ struct HolderTmuxAssumptionGateTests {
 
     // MARK: - Gate 4: terminal.swapProfile, .inPlace
 
-    @Test("an in-place profile swap refuses a holder row and leaves every column alone")
-    func inPlaceSwapRefusesHolderRow() async throws {
+    /// The gate inverted: an in-place swap on a holder row is no longer a
+    /// category error, and what stops it here is the PARK rather than the
+    /// transport.
+    ///
+    /// This suite's registry adopted nothing, so the daemon holds no reader to
+    /// write the polite `/exit` through and the park refuses by name — which
+    /// is this suite's standing way of saying a path got as far as the reader.
+    /// The row assertions are the half a return value cannot see: the arm
+    /// parks BEFORE it re-homes precisely so that a park which refuses leaves
+    /// the row claiming nothing new.
+    @Test("an in-place profile swap reaches the park on a holder row rather than refusing")
+    func inPlaceSwapOnAHolderRowReachesThePark() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1032,25 +1042,25 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .holder)
         let before = RowFingerprint(terminal)
 
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+        let router = self.router(db, tmux: tmux)
+        let registry = holderRegistry(listing: [terminal])
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
+
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(
                 terminalID: terminal.id, newProfileID: nil, mode: .inPlace)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.holderInPlaceSwapRefusal(terminalID: terminal.id))
+        #expect(response.error == HibernationCoordinator.holderNoReaderRefusal,
+                "the swap failed somewhere other than the park: \(response.error ?? "success")")
 
-        // The row is the whole point. Unguarded, `inPlaceSwapRespawn` commits
-        // the replacement identity — a fresh `sessionIncarnationID`, the new
-        // profile — BEFORE it asks tmux for anything, and only then fails
-        // against `tmuxWindowID == ""`. A test that read the error string alone
-        // would go green against exactly that bug.
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
-                "a refused in-place swap still committed a new identity to the holder row")
-        // The other half a return value cannot see: the graceful interrupt that
-        // precedes the respawn addresses `tmuxPaneID == ""`, so the real
-        // process is never interrupted while the row is being told it was.
+                "a swap whose park refused still committed a new identity to the holder row")
+        // The other half a return value cannot see: no arm of this swap may
+        // address a tmux coordinate a holder row has not got.
         #expect(recorded.snapshot().isEmpty,
                 "the in-place swap reached tmux for a holder row: \(recorded.snapshot())")
     }

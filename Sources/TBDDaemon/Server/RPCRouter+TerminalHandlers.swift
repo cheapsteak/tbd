@@ -1473,26 +1473,14 @@ extension RPCRouter {
             + "tmux window to recreate. Its session is unchanged."
     }
 
-    /// The refusal an `.inPlace` `terminal.swapProfile` returns for a
-    /// holder-backed row. A sibling of `holderRecreateRefusal` rather than a
-    /// reuse of it: both refuse the same transport for the same reason, and the
-    /// only thing that differs is the tmux verb each one had no coordinate for,
-    /// so the wording tracks the verb and nothing else. One named factory per
-    /// verb, so the app, the CLI and the tests assert the same text.
-    static func holderInPlaceSwapRefusal(terminalID: UUID) -> String {
-        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
-            + "tmux window to respawn in place. Its session and profile are unchanged "
-            + "— fork the session instead."
-    }
-
     /// The refusal `terminal.recreateWindow` returns when tmux gave no usable
     /// answer about the window.
     ///
-    /// A sibling of `holderRecreateRefusal` and `holderInPlaceSwapRefusal` for
-    /// the same reason: one named factory per refusal, so the app, the CLI and
-    /// the tests assert the same text. This one is not about a transport that
-    /// has no window — it is about a window whose state could not be
-    /// established, which is a retry rather than a category error.
+    /// A sibling of `holderRecreateRefusal` for the same reason: one named
+    /// factory per refusal, so the app, the CLI and the tests assert the same
+    /// text. This one is not about a transport that has no window — it is
+    /// about a window whose state could not be established, which is a retry
+    /// rather than a category error.
     static func unansweredWindowProbeRefusal(terminalID: UUID) -> String {
         "tmux did not answer whether terminal \(terminalID)'s window is still "
             + "there within \(TmuxManager.commandTimeout). The window was left "
@@ -2277,10 +2265,12 @@ extension RPCRouter {
         }
 
         // Two reshaping modes (see `TerminalSwapMode`):
-        //   .inPlace (default) — SEAMLESS "Switch account": interrupt the
-        //     pane's Claude, respawn `claude --resume <id>` under the new
-        //     profile IN THE SAME window, and update the existing terminal row.
-        //     One tab, no new row.
+        //   .inPlace (default) — "Switch account": replace the session's
+        //     process with `claude --resume <id>` under the new profile and
+        //     update the existing terminal row. One tab, no new row. How the
+        //     replacement happens is the transport's — a tmux row is respawned
+        //     in its own window and never stops painting, a holder row is
+        //     parked and woken and blinks.
         //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
         //     leaving the source session untouched (the old behavior).
         //
@@ -2295,31 +2285,11 @@ extension RPCRouter {
         // so we spawn a brand-new session instead.
         let mode = params.resolvedMode
 
-        // Taken the instant the mode is known, and deliberately not one line
-        // later: everything below — the actuation row, the transcript carried
-        // into the destination profile's config dir, the trust seed — is
-        // already state outside this handler, and `inPlaceSwapRespawn` then
-        // commits the new profile and session identity to the row BEFORE it
-        // touches tmux. On a holder row every one of those steps would land and
-        // only the last would fail, because the graceful interrupt addresses
-        // `tmuxPaneID == ""` (so the real process is never interrupted) and the
-        // `respawn-window` addresses `tmuxWindowID == ""`. The row would end up
-        // naming a session that never started while the original process ran on
-        // under an identity nothing records.
-        //
-        // Scoped to `.inPlace`, not to the whole handler: `.fork` builds a
-        // fresh tmux window and a fresh row and never touches this one, and the
-        // cold (parked) swap above only re-homes `profile_id`. Refusing those
-        // would take away a working action to close a hole they do not have.
-        //
-        // Milestone A has no holder equivalent for an in-place respawn, so this
-        // refuses rather than teaching one. An action the user has to take
-        // another way is recoverable; a row that lies about a live process is
-        // not.
-        if mode == .inPlace, oldTerminal.transport == .holder {
-            return RPCResponse(error: Self.holderInPlaceSwapRefusal(terminalID: oldTerminal.id))
-        }
-
+        // `.inPlace` on a holder row is a holder arm, not a refusal: park the
+        // session, re-home its profile, wake it under the new account. See
+        // `holderInPlaceSwap` for why the order is exactly that, and
+        // `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md` for
+        // why the blink that costs is the right trade.
         let repo: Repo?
         if let rid = worktree.repoID {
             repo = try await db.repos.get(id: rid)
@@ -2340,10 +2310,11 @@ extension RPCRouter {
         let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
         // The transport gate, asked once per swap from that one config read.
-        // Only `.fork` spawns anything — `.inPlace` respawns the row it already
-        // has, and refused above on a holder row — so this is the transport the
-        // fork tab is born onto, decided before the command is composed and
-        // carried into the spawn rather than re-derived there.
+        // Only `.fork` decides a transport at all — `.inPlace` reshapes the row
+        // it already has, on whichever transport that row is already on — so
+        // this is the transport the fork tab is born onto, decided before the
+        // command is composed and carried into the spawn rather than
+        // re-derived there.
         let forkTransport = TerminalSpawnTransport.decide(
             config: swapConfig, registry: holderRegistry)
         var env = SystemPromptBuilder.promptLayers(
@@ -2475,24 +2446,27 @@ extension RPCRouter {
             profileConfigDir: profileConfigDir
         )
 
-        let spawn = swapSpawn(
-            plan: plan, mode: mode, resolved: resolved,
-            // The profile's own endpoint. Only the holder arm can have a route
-            // to name here, and it composes its own command after its park —
-            // see `swapSpawn`.
-            builderBaseURL: resolved?.baseURL,
-            overlayPath: overlayPath, profileConfigDir: profileConfigDir,
-            worktree: worktree, repo: repo, swapConfig: swapConfig,
-            claudeEnvOverrides: claudeEnvOverrides)
+        // The spawn each arm runs, as a closure rather than a value: the
+        // holder arm cannot compose its own until after its park, because its
+        // endpoint comes from a model proxy route and that route may only be
+        // minted once the park has finished retiring the old one.
+        let composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result = { builderBaseURL in
+            self.swapSpawn(
+                plan: plan, mode: mode, resolved: resolved,
+                builderBaseURL: builderBaseURL,
+                overlayPath: overlayPath, profileConfigDir: profileConfigDir,
+                worktree: worktree, repo: repo, swapConfig: swapConfig,
+                claudeEnvOverrides: claudeEnvOverrides)
+        }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
-        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
         let response: RPCResponse
-        // Set when the in-place respawn's tmux call failed. That failure is
+        // Set when the in-place swap's transport half failed: the tmux arm's
+        // respawn, or the holder arm's park, re-home or wake. That failure is
         // deliberately swallowed downstream — the RPC still returns the updated
         // row (pre-existing contract) — so it is invisible in the response and
         // has to be carried out separately, or the record would call a failed
@@ -2501,6 +2475,8 @@ extension RPCRouter {
         do {
             switch mode {
             case .fork:
+                let spawn = composeSpawn(resolved?.baseURL)
+                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
@@ -2515,7 +2491,25 @@ extension RPCRouter {
                     transport: forkTransport
                 )
 
+            case .inPlace where oldTerminal.transport == .holder:
+                let outcome = try await holderInPlaceSwap(
+                    oldTerminal: oldTerminal,
+                    worktree: worktree,
+                    storedSessionID: storedSessionID,
+                    env: env,
+                    envOverrides: mergedEnvOverrides,
+                    overlayPath: overlayPath,
+                    resolved: resolved,
+                    swapConfig: swapConfig,
+                    cols: resolvedCols,
+                    rows: resolvedRows,
+                    composeSpawn: composeSpawn)
+                response = outcome.response
+                respawnFailure = outcome.failure
+
             case .inPlace:
+                let spawn = composeSpawn(resolved?.baseURL)
+                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 let expectedIncarnation = TerminalSessionIncarnation(terminal: oldTerminal)
                 let replacementBaseEnv = env
                 let outcome = try await tmux.withWorktreeServerLock(
@@ -2608,12 +2602,12 @@ extension RPCRouter {
     /// The spawn a `terminal.swapProfile` will run, composed from its plan.
     ///
     /// A named helper rather than the inline switch it replaces, because the
-    /// two transports compose it at different moments. The tmux and fork arms
-    /// compose before the branch, as they always have. The holder arm cannot:
-    /// its spawn's endpoint is decided by a model proxy route, and that route
-    /// has to be minted AFTER the park — the park ends by retiring whatever
-    /// route its terminal id holds, so a route minted before it is one the
-    /// park itself may drop.
+    /// arms compose it at different moments. The tmux and fork arms compose as
+    /// soon as they are chosen, from the profile's own endpoint. The holder
+    /// arm cannot: its spawn's endpoint is decided by a model proxy route, and
+    /// that route has to be minted AFTER the park — the park ends by retiring
+    /// whatever route its terminal id holds, so a route minted before it is
+    /// one the park itself may drop.
     ///
     /// - Parameter builderBaseURL: the endpoint the built command re-exports
     ///   inline, where the export runs after the shell's rc files — a route's
@@ -2679,6 +2673,172 @@ extension RPCRouter {
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: worktree.displayName
             )
+        }
+    }
+
+    /// `.inPlace` swap of a HOLDER-backed row: park the session, re-home its
+    /// profile, and wake it under the new account. One tab, one row, one
+    /// session id — and one visible blink, because a holder's pty dies with
+    /// its child and no replacement can keep the viewer's attachment painting
+    /// the way tmux's `respawn-window` does.
+    ///
+    /// **Park comes before re-home, and the order is load-bearing.** If the
+    /// profile were re-homed first and the child then survived the ladder, the
+    /// row would claim the new account while the old process ran on under the
+    /// old one — the state the removed refusal existed to prevent. With park
+    /// first, every point at which the daemon could die lands in a state
+    /// something owns: parked on the old profile (the next focus-wake resumes
+    /// it there, and a retry of the swap takes the cold path), or parked on
+    /// the new one (the next focus-wake resumes it there).
+    ///
+    /// Each half fails into a named state, and the answer names the half:
+    ///
+    /// - **Park refused, or the child survived the ladder.** The row stays
+    ///   awake on the old profile with nothing changed. The park's own reason
+    ///   is both the RPC error and the actuation's.
+    /// - **Re-home failed.** The row is parked on the old profile; the message
+    ///   says so, and that a retry now takes the cold path.
+    /// - **Wake failed.** The row is parked on the NEW profile, so the switch
+    ///   has taken effect at the account level and the next focus-wake or menu
+    ///   wake retries the resume. The response is the updated row and the
+    ///   failure is reported out of band — the same contract the tmux arm has,
+    ///   where the row keeps the new profile before the respawn.
+    ///
+    /// No tmux server lock is taken around any of this. A holder session has
+    /// no server, the park polls for a process to exit, and `reHomeParkedRow`
+    /// takes the lock for its own write.
+    ///
+    /// - Parameter composeSpawn: the swap's command, composed from the base
+    ///   URL the route decides. A closure because the route may only be minted
+    ///   after the park.
+    /// - Returns: the response to send, and the transport failure to record
+    ///   against the actuation (nil when the swap completed).
+    private func holderInPlaceSwap(
+        oldTerminal: Terminal,
+        worktree: LocalWorktree,
+        storedSessionID: String,
+        env: [String: String],
+        envOverrides: [String: String],
+        overlayPath: String?,
+        resolved: ResolvedModelProfile?,
+        swapConfig: Config?,
+        cols: Int,
+        rows: Int,
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+    ) async throws -> (response: RPCResponse, failure: String?) {
+        // 1. PARK, through the coordinator's own holder park under the
+        //    `.profileSwap` policy: the ladder and its rollback unchanged, the
+        //    live rails bypassed, `.auto` as the reason so a daemon that dies
+        //    here leaves a row the next focus-wake heals.
+        switch await hibernationCoordinator.parkForProfileSwap(terminalID: oldTerminal.id) {
+        case .ok:
+            break
+        case .alreadyHibernated:
+            // The row parked between the handler's read and this call — a
+            // focus-wake, or the idle sweep. It is parked now, which is all
+            // this step was for, so carry on: what follows is exactly the cold
+            // path, which is what a retry would have taken anyway.
+            logger.info("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) was already parked when the switch asked; re-homing it where it stands")
+        case .notFound:
+            let reason = "Terminal not found: \(oldTerminal.id)"
+            return (RPCResponse(error: reason), reason)
+        case .notEligible(let reason):
+            logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
+            return (RPCResponse(error: reason), reason)
+        }
+        guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
+              parkedRow.isParked else {
+            let reason = "Terminal \(oldTerminal.id) did not pause for its account switch; its session and profile are unchanged"
+            return (RPCResponse(error: reason), reason)
+        }
+
+        // 2. RE-HOME, the same write the cold path makes. The transcript was
+        //    carried into the destination config dir upstream.
+        let rehomed: Terminal
+        do {
+            rehomed = try await reHomeParkedRow(
+                terminal: parkedRow, worktree: worktree, destProfileID: resolved?.profileID)
+        } catch {
+            logger.error("inPlace swap: re-home failed for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            let reason = "This session was paused for the account switch, but its account could not be updated (\(error)). It is parked on its previous account — the next focus wakes it there, and switching again now takes the path that has no process to interrupt."
+            return (RPCResponse(error: reason), reason)
+        }
+
+        // A blank session is spawned fresh rather than resumed (resuming one
+        // shows "no conversation found"), and the row has to name the new
+        // conversation before the wake starts it — the same fact the tmux arm
+        // commits through `prepareProfileAgentRespawn`. A resume keeps the id
+        // it has, which is the whole point of `.inPlace`.
+        var target = rehomed
+        if storedSessionID != rehomed.claudeSessionID {
+            do {
+                try await db.terminals.updateSession(
+                    id: rehomed.id,
+                    sessionID: storedSessionID,
+                    transcriptPath: rehomed.transcriptPath)
+                target = try await db.terminals.get(id: rehomed.id) ?? rehomed
+            } catch {
+                logger.error("inPlace swap: could not record the fresh session id for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                let reason = "This session moved to the new account but its new conversation could not be recorded (\(error)). It is parked on the new account; the next focus wakes the previous conversation there."
+                return (RPCResponse(error: reason), reason)
+            }
+        }
+
+        // 3. WAKE. The routing decision first, because the builder re-exports
+        //    the endpoint inline into the command and that export runs after
+        //    the shell's rc files — the same five steps, through the same
+        //    function, that the create path and `HibernationCoordinator.wake`
+        //    take. It is minted HERE rather than before the park: the park
+        //    ends by retiring whatever route this terminal id holds.
+        let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: target.id,
+            isHolderSpawn: true,
+            config: swapConfig,
+            profileKind: resolved?.kind,
+            profileBaseURL: resolved?.baseURL,
+            envOverrides: envOverrides,
+            overlayPath: overlayPath,
+            holderEnvironment: holderRegistry?.environment,
+            supervisor: modelProxySupervisor)
+        let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
+        let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
+        let woken = await hibernationCoordinator.wakeHolderForProfileSwap(
+            terminal: target,
+            worktree: worktree,
+            sessionID: storedSessionID,
+            expectedReplacementState: TerminalReplacementSnapshot(terminal: target),
+            spawnCommand: spawn.command,
+            env: env,
+            attachment: attachment.withEnvironment(sensitiveEnv),
+            cols: cols,
+            rows: rows)
+
+        guard let updated = try await db.terminals.get(id: target.id) else {
+            return (RPCResponse(error: "Terminal vanished after swap"), nil)
+        }
+        guard let failure = Self.swapWakeFailure(woken) else {
+            // No `SessionRecaptureScheduler`: a holder wake knows the id it
+            // started, and the hooks report the id the agent settles on.
+            logger.info("inPlace swap: holder terminal \(updated.id, privacy: .public) switched to profile \(resolved?.profileID.uuidString ?? "ambient", privacy: .public) and resumed session \(storedSessionID, privacy: .public)")
+            return (try RPCResponse(result: updated), nil)
+        }
+        logger.warning("inPlace swap: holder terminal \(updated.id, privacy: .public) is on its new account but was not resumed: \(failure, privacy: .public)")
+        return (try RPCResponse(result: updated), failure)
+    }
+
+    /// The wake half's failure, or nil when it woke — so the arm above states
+    /// "did the resume happen" once, and the actuation cannot inherit a
+    /// success the session did not have.
+    private static func swapWakeFailure(_ result: WakeResult) -> String? {
+        switch result {
+        case .ok:
+            return nil
+        case .respawnFailed(let reason):
+            return reason
+        case .inFlight:
+            return "another wake for this session was already running; it resumes under the new account"
+        default:
+            return "this session moved to the new account but could not be resumed: \(result)"
         }
     }
 

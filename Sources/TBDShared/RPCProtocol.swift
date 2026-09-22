@@ -634,10 +634,14 @@ public struct NightwatchSetModeParams: Codable, Sendable {
 
 /// How `terminal.swapProfile` reshapes the session.
 ///
-/// - `inPlace`: SEAMLESS account switch — interrupt the pane's current Claude,
-///   respawn `claude --resume <id>` under the new profile IN THE SAME tmux
-///   window, and update the existing terminal row in place. One tab, no new
-///   row/tab. This is the "Switch account" action.
+/// - `inPlace`: same-tab account switch — the daemon replaces the session's
+///   process with `claude --resume <id>` under the new profile and updates the
+///   EXISTING terminal row. One tab, no new row, same session id. This is the
+///   "Switch account" action. How the replacement happens is the transport's
+///   business: a tmux row is respawned inside its own window and the attached
+///   viewer keeps painting throughout, while a holder row is parked and woken
+///   — a visible blink for the second or two its polite shutdown takes,
+///   because a holder's pty dies with its child.
 /// - `fork`: duplicate the conversation into a NEW tab/terminal row (the old
 ///   fork-into-new-tab behavior), leaving the source session untouched. This
 ///   is the explicit "Fork session" action.
@@ -653,8 +657,8 @@ public struct TerminalSwapProfileParams: Codable, Sendable {
     public let cols: Int?
     public let rows: Int?
     /// Swap reshaping mode. Optional + `decodeIfPresent` so payloads from older
-    /// clients still decode; a missing value defaults to `.inPlace` (seamless
-    /// same-tab switch) — the common "Switch account" path.
+    /// clients still decode; a missing value defaults to `.inPlace` (same-tab
+    /// switch) — the common "Switch account" path.
     public let mode: TerminalSwapMode?
     public init(
         terminalID: UUID,
