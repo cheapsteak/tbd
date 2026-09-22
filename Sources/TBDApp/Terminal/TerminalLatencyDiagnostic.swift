@@ -248,7 +248,7 @@ final class TerminalLatencyDiagnostic {
             $0.hasPrefix(Self.requestFilePrefix) && $0.hasSuffix(Self.requestFileSuffix)
         }).sorted() {
             let url = runtimeDirectory.appendingPathComponent(name)
-            let data = try? Data(contentsOf: url)
+            let data = readRequestFile(at: url)
             try? FileManager.default.removeItem(at: url)
             guard let data else {
                 // Unreadable, not merely undecodable — a truncated rename, a
@@ -260,6 +260,42 @@ final class TerminalLatencyDiagnostic {
             }
             handleRequest(data)
         }
+    }
+
+    /// The most a request file may be. A request is two fields; 4 KiB is room
+    /// for any of them and for none of what a runtime directory might
+    /// otherwise be holding.
+    static let maxRequestBytes = 4096
+
+    /// Read one request file, refusing anything that is not a small regular
+    /// file, on this thread, with no allocation the file's own size controls.
+    ///
+    /// The runtime directory is shared and world-writable in practice, and
+    /// this runs on the main actor. `Data(contentsOf:)` there is two hazards
+    /// at once: a FIFO or a device node carrying a matching name blocks the
+    /// main thread until something writes to it, and an ordinary file of any
+    /// size allocates that size. So the descriptor is opened
+    /// `O_NOFOLLOW | O_NONBLOCK` — a symlink is refused outright rather than
+    /// followed out of the directory, and a FIFO opens instead of blocking —
+    /// the mode is checked to be a regular file, the size is capped, and the
+    /// read is bounded. Anything that fails returns nil, and the caller
+    /// removes the entry and refuses it as `malformed`.
+    private func readRequestFile(at url: URL) -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+            (info.st_mode & S_IFMT) == S_IFREG,
+            info.st_size > 0,
+            info.st_size <= Self.maxRequestBytes
+        else { return nil }
+        var buffer = [UInt8](repeating: 0, count: Self.maxRequestBytes)
+        let count = buffer.withUnsafeMutableBytes { raw in
+            read(descriptor, raw.baseAddress, raw.count)
+        }
+        guard count > 0 else { return nil }
+        return Data(buffer[0..<count])
     }
 
     // MARK: - Gate

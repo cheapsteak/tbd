@@ -297,6 +297,97 @@ struct TerminalLatencyDiagnosticTests {
         #expect(lines.all.count == 1)
     }
 
+    /// The runtime directory is shared, so an entry wearing a request file's
+    /// name was not necessarily written by the driver.
+    ///
+    /// A symlink is the sharp case: followed, it reads whatever it points at —
+    /// out of the directory entirely, and on a FIFO or a device node it blocks
+    /// the MAIN ACTOR until somebody writes. `O_NOFOLLOW` refuses the link
+    /// itself, and the link is removed and refused like any other entry it
+    /// cannot read. The target must survive: it is not in the runtime
+    /// directory, and removing it would be this instrument deleting a file
+    /// nobody asked it about.
+    @Test("a symlink wearing a request file's name is refused, and its target is untouched")
+    func symlinkedRequestFileIsRefusedAndItsTargetSurvives() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { lines.append($0) })
+        let id = UUID()
+        let seen = Lines()
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { seq in
+            seen.append("\(seq)")
+            return nil
+        }
+
+        // A perfectly well-formed request, parked OUTSIDE the watched
+        // directory, and a link to it from inside. Following the link would
+        // answer this request — which is the behaviour being refused.
+        let target = directory.appendingPathComponent("elsewhere.json")
+        try request(terminalID: id, seq: 42).write(to: target)
+        let link = directory.appendingPathComponent(
+            TerminalLatencyDiagnostic.requestFilePrefix + "000001"
+                + TerminalLatencyDiagnostic.requestFileSuffix)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        diagnostic.consumeRequestFiles()
+
+        #expect(seen.all.isEmpty)
+        #expect(lines.all == ["echorefused terminal=- reason=malformed"])
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                == ["elsewhere.json"])
+    }
+
+    /// A file larger than a request can be is not a request. Read whole it
+    /// would allocate whatever the writer chose to leave in the shared
+    /// directory, on the main actor; the cap refuses it by `fstat` before a
+    /// byte is read.
+    ///
+    /// The positive control is the second file: the same pass, one byte under
+    /// the cap, answered normally — so the refusal is the size and not the
+    /// hardening refusing everything.
+    @Test("an oversized request file is refused while one within the cap is answered")
+    func oversizedRequestFileIsRefused() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TBDAppTests.TerminalLatency.\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(
+            now: { 0 }, runtimeDirectory: directory, emit: { lines.append($0) })
+        let id = UUID()
+        let seen = Lines()
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { seq in
+            seen.append("\(seq)")
+            return nil
+        }
+
+        func name(_ seq: Int) -> String {
+            TerminalLatencyDiagnostic.requestFilePrefix + String(format: "%06d", seq)
+                + TerminalLatencyDiagnostic.requestFileSuffix
+        }
+        // Valid JSON for a real request, padded past the cap with whitespace
+        // the decoder would happily skip: the size is the only thing wrong
+        // with it.
+        var oversized = request(terminalID: id, seq: 1)
+        oversized.append(contentsOf: [UInt8](
+            repeating: 0x20, count: TerminalLatencyDiagnostic.maxRequestBytes))
+        try oversized.write(to: directory.appendingPathComponent(name(1)))
+        try request(terminalID: id, seq: 2).write(to: directory.appendingPathComponent(name(2)))
+
+        diagnostic.consumeRequestFiles()
+
+        #expect(seen.all == ["2"])
+        #expect(lines.all == ["echorefused terminal=- reason=malformed"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
     /// A dispatch source reports only writes made after it is resumed, so a
     /// request already on disk when the watch starts — a driver SIGKILLed, or
     /// a run made while the diagnostic was off — is answered at watch start or
@@ -363,7 +454,7 @@ struct TerminalLatencyDiagnosticTests {
         let tap = diagnostic.makeTap(terminalID: id, transport: .holder)
         #expect(tap.now() == 1.5)
         tap.noteChunk(Array("x".utf8)[...], feedAt: 1.0, feedReturnedAt: 1.002)
-        tap.noteDrawWillBegin(at: 1.5, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
         #expect(
             lines.all == [
                 "draw transport=holder terminal=0A0A0A0A-0B0B-0C0C-0D0D-0E0E0E0E0E0E"
