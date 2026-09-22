@@ -25,10 +25,16 @@ struct HolderProfileSwapLiveTests {
     /// it, which is the ordinary case for an agent that is busy.
     static let job = "while :; do sleep 0.2; done"
 
+    /// The line the resume fixture's job appends to its transcript on the way
+    /// out, standing in for the tail Claude flushes when the park's polite
+    /// `/exit` reaches it. Everything about the re-carry hangs on this landing
+    /// in the transcript AFTER the handler's pre-park copy was taken.
+    static let flushMarker = "flushed as the job ended"
+
     @Test func inPlaceSwapReparksAndResumesUnderTheNewAccount() async throws {
         let fixture = try await SwapFixture.make()
         defer { fixture.tearDown() }
-        let terminal = try await fixture.spawnHolderRow(blank: false)
+        let terminal = try await fixture.spawnHolderRow(blank: false, flushOnTerm: true)
         let oldChild = try #require(terminal.childPID)
         let oldHolder = try #require(terminal.holderPID)
 
@@ -52,7 +58,13 @@ struct HolderProfileSwapLiveTests {
         let goneErrno = errno
         #expect(goneSignal == -1 && goneErrno == ESRCH,
                 "the old job survived the swap (kill returned \(goneSignal), errno \(goneErrno))")
-        #expect(!holderProcessIsAlive(oldHolder), "the old holder outlived the swap")
+        // Bounded rather than immediate. The holder is `posix_spawn`ed by this
+        // process, so between its exit and `HolderRegistry.reap` collecting it
+        // it is a ZOMBIE — and `kill(pid, 0)` answers a corpse exactly as it
+        // answers a running process. The reap runs on its own 2 s budget, so an
+        // immediate read reddens on a saturated runner for a process that is
+        // already dead.
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
         let newChild = try #require(after.childPID, "the swapped row records no child")
         let newHolder = try #require(after.holderPID, "the swapped row records no holder")
         fixture.remember(holderPID: newHolder, childPID: newChild)
@@ -84,6 +96,23 @@ struct HolderProfileSwapLiveTests {
         let launchEnv = (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8)) ?? ""
         #expect(launchEnv.contains("TBD_TERMINAL_ID=\(terminal.id.uuidString)"),
                 "the resumed agent is attributed to the wrong terminal: \(launchEnv)")
+
+        // WHAT it has to resume FROM. The handler copies the transcript into
+        // the destination profile before it parks anything, and that copy skips
+        // a destination that already exists — so a turn written while the park
+        // is ending (which is exactly what the polite `/exit` asks Claude for)
+        // reaches the source jsonl and nothing else. This job writes such a
+        // turn from its `SIGTERM` trap; the copy the resume reads has to carry
+        // it.
+        let source = try #require(
+            try? String(contentsOfFile: fixture.sourceTranscriptPath, encoding: .utf8))
+        #expect(source.contains(Self.flushMarker),
+                "the job never wrote its ending turn, so this test cannot see a stale copy")
+        let carried = try #require(
+            try? String(contentsOfFile: fixture.destTranscriptPath.path, encoding: .utf8),
+            "no transcript reached \(fixture.destTranscriptPath.path)")
+        #expect(carried.contains(Self.flushMarker),
+                "the resumed session reads a copy taken before the park flushed its last turn")
     }
 
     /// The other plan. A blank session resumed would show "no conversation
@@ -91,7 +120,10 @@ struct HolderProfileSwapLiveTests {
     @Test func inPlaceSwapOfABlankSessionSpawnsFresh() async throws {
         let fixture = try await SwapFixture.make()
         defer { fixture.tearDown() }
+        let deltas = SwapDeltaRecorder()
+        deltas.subscribe(to: fixture.router)
         let terminal = try await fixture.spawnHolderRow(blank: true)
+        let oldHolder = try #require(terminal.holderPID)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -110,6 +142,18 @@ struct HolderProfileSwapLiveTests {
         let newHolder = try #require(after.holderPID, "the swapped row records no holder")
         let newChild = try #require(after.childPID, "the swapped row records no child")
         fixture.remember(holderPID: newHolder, childPID: newChild)
+        // Bounded, for the reason the resume test spells out: an unreaped
+        // holder is a zombie, and `kill(pid, 0)` cannot tell one from a running
+        // process.
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
+
+        // The app throws the `.inPlace` result away and reconciles its cached
+        // row from the deltas alone, so the fresh conversation reaches it only
+        // if the arm broadcasts one. Nothing above this line can tell: the row
+        // read from the database is right either way.
+        let sessions = deltas.terminalSessions()
+        #expect(sessions.contains { $0.terminalID == terminal.id && $0.sessionID == freshID },
+                "the swap never told the app its fresh session id: \(sessions.map(\.sessionID))")
 
         let launched = await pollUntil("the swapped session to reach its claude stub") {
             (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
@@ -125,6 +169,36 @@ struct HolderProfileSwapLiveTests {
         if let idIndex, idIndex + 1 < argv.count {
             #expect(argv[idIndex + 1] == freshID,
                     "the row and the spawn disagree about the new session: \(argv)")
+        }
+    }
+}
+
+// MARK: - Delta recorder
+
+/// Every `StateDelta` the router broadcast while a test ran.
+///
+/// The app's `.inPlace` path discards the RPC's result and reconciles from
+/// these, so a swap that updates the database and tells nobody is invisible to
+/// a test that only reads rows.
+private final class SwapDeltaRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [StateDelta] = []
+
+    func subscribe(to router: RPCRouter) {
+        router.subscriptions.addSubscriber { [weak self] data in
+            guard let delta = try? JSONDecoder().decode(StateDelta.self, from: data) else {
+                return true
+            }
+            guard let self else { return false }
+            self.lock.withLock { self.values.append(delta) }
+            return true
+        }
+    }
+
+    func terminalSessions() -> [TerminalSessionDelta] {
+        lock.withLock { values }.compactMap { delta in
+            guard case .terminalSessionUpdated(let session) = delta else { return nil }
+            return session
         }
     }
 }
@@ -150,6 +224,26 @@ private final class SwapFixture {
     var launchArgvPath: String { "\(home)/launch-argv" }
     var launchEnvPath: String { "\(home)/launch-env" }
 
+    /// The row's own transcript — the jsonl the SOURCE side writes, which is
+    /// what a live agent would still be appending to as its park ends.
+    var sourceTranscriptPath: String {
+        "\(home)/\(HolderProfileSwapLiveTests.sessionID).jsonl"
+    }
+
+    /// Where a `claude --resume` under the DESTINATION profile looks for that
+    /// conversation: the derived cwd-slug directory under the destination
+    /// config dir's `projects/` tree. Named the way the product names it, so
+    /// the assertion cannot pass against a copy the resume would never read.
+    var destTranscriptPath: URL {
+        TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: worktree.localPath,
+            projectsRoot: configDirManager
+                .configDirectory(forProfileID: destProfileID)
+                .appendingPathComponent("projects", isDirectory: true)
+        ).appendingPathComponent("\(HolderProfileSwapLiveTests.sessionID).jsonl")
+    }
+
+    private let configDirManager: ClaudeProfileConfigDirManager
     private let home: String
     private let tempDir: URL
     private var torndown = false
@@ -263,18 +357,21 @@ private final class SwapFixture {
 
         return SwapFixture(
             db: db, registry: registry, router: router, worktree: worktree,
-            destProfileID: dest.id, home: home, tempDir: tempDir)
+            destProfileID: dest.id, configDirManager: configDirManager,
+            home: home, tempDir: tempDir)
     }
 
     private init(
         db: TBDDatabase, registry: HolderRegistry, router: RPCRouter,
-        worktree: Worktree, destProfileID: UUID, home: String, tempDir: URL
+        worktree: Worktree, destProfileID: UUID,
+        configDirManager: ClaudeProfileConfigDirManager, home: String, tempDir: URL
     ) {
         self.db = db
         self.registry = registry
         self.router = router
         self.worktree = worktree
         self.destProfileID = destProfileID
+        self.configDirManager = configDirManager
         self.home = home
         self.tempDir = tempDir
     }
@@ -286,13 +383,23 @@ private final class SwapFixture {
     /// `blank: false` writes a transcript with one complete turn in it, which
     /// is what makes the swap plan a resume; `blank: true` leaves the row with
     /// no transcript at all, which is what makes it plan a fresh spawn.
-    func spawnHolderRow(blank: Bool) async throws -> Terminal {
+    ///
+    /// `flushOnTerm: true` swaps the job for one that appends a turn to the
+    /// row's transcript from its `SIGTERM` trap before exiting — the stand-in
+    /// for what a real Claude does when the park's polite `/exit` reaches it,
+    /// and the only way a test can tell a transcript carried before the park
+    /// from one re-taken after it. It still ends on the ladder's `SIGTERM`
+    /// rung, so the park it drives is the same park.
+    func spawnHolderRow(blank: Bool, flushOnTerm: Bool = false) async throws -> Terminal {
         let terminalID = UUID()
+        let arguments = flushOnTerm
+            ? [try writeFlushOnTermJob()]
+            : ["-c", HolderProfileSwapLiveTests.job]
         let handle = try await registry.spawn(
             terminalID: terminalID,
             launch: HolderLaunchRequest(
                 executable: "/bin/sh",
-                arguments: ["-c", HolderProfileSwapLiveTests.job],
+                arguments: arguments,
                 workingDirectory: "/tmp",
                 environment: ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color"],
                 columns: 80,
@@ -321,6 +428,32 @@ private final class SwapFixture {
                 transcriptPath: transcript)
         }
         return try #require(try await db.terminals.get(id: terminalID))
+    }
+
+    /// The job that flushes on the way out, as a script file rather than a
+    /// `-c` string: the trap body carries quoted JSON, and a file keeps that
+    /// out of two layers of Swift and shell quoting.
+    ///
+    /// `sleep 0.2` rather than a longer nap because a POSIX shell runs a trap
+    /// only once its foreground child returns — the append therefore lands
+    /// within a fifth of a second of the `SIGTERM`, and always before the exit
+    /// the park is polling for.
+    private func writeFlushOnTermJob() throws -> String {
+        let path = "\(home)/flush-on-term-job"
+        try """
+        #!/bin/sh
+        flush() {
+            printf '%s\\n' \
+        '{"type":"assistant","message":{"content":"\(HolderProfileSwapLiveTests.flushMarker)"}}' \
+        >> "\(sourceTranscriptPath)"
+            exit 0
+        }
+        trap flush TERM
+        while :; do sleep 0.2; done
+        """.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: path)
+        return path
     }
 
     /// Records the pair this spawn produced, and names it in the run log.

@@ -2365,6 +2365,11 @@ extension RPCRouter {
         // forked `claude --resume <id>` finds the conversation. Only matters on
         // the resume path — a fresh spawn has no prior transcript to carry.
         // Best-effort: never blocks the swap.
+        //
+        // The destination profile's `projects/` tree, held past this block for
+        // the holder arm's post-park re-carry. nil on a fresh spawn, which has
+        // no conversation to carry at all.
+        var resumeProjectsRoot: URL?
         if case .resume = plan {
             // Source config dir: where the OLD session's transcript lives — the
             // old terminal's profile config dir, or the ambient (host) config
@@ -2401,12 +2406,15 @@ extension RPCRouter {
             // — looks in the dir derived from the CURRENT path instead. Make
             // sure the session is fresh there too (copy-if-newer, best-effort,
             // detached off this handler's executor).
+            let destProjectsRoot = destConfigDir
+                .appendingPathComponent("projects", isDirectory: true)
             await TranscriptProjectDirSync.ensureSessionResumableDetached(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
-                projectsRoot: destConfigDir.appendingPathComponent("projects", isDirectory: true),
+                projectsRoot: destProjectsRoot,
                 storedTranscriptPath: oldTerminal.transcriptPath
             )
+            resumeProjectsRoot = destProjectsRoot
         }
 
         let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
@@ -2503,6 +2511,7 @@ extension RPCRouter {
                     swapConfig: swapConfig,
                     cols: resolvedCols,
                     rows: resolvedRows,
+                    resumeProjectsRoot: resumeProjectsRoot,
                     composeSpawn: composeSpawn)
                 response = outcome.response
                 respawnFailure = outcome.failure
@@ -2708,6 +2717,11 @@ extension RPCRouter {
     /// no server, the park polls for a process to exit, and `reHomeParkedRow`
     /// takes the lock for its own write.
     ///
+    /// - Parameter resumeProjectsRoot: the destination profile's `projects/`
+    ///   tree on a resume, nil on a fresh spawn. The park's polite `/exit` is
+    ///   what makes Claude flush the tail of its transcript, so the copy the
+    ///   handler took before the park is short by exactly that flush; this is
+    ///   where the arm re-takes it.
     /// - Parameter composeSpawn: the swap's command, composed from the base
     ///   URL the route decides. A closure because the route may only be minted
     ///   after the park.
@@ -2724,6 +2738,7 @@ extension RPCRouter {
         swapConfig: Config?,
         cols: Int,
         rows: Int,
+        resumeProjectsRoot: URL?,
         composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
     ) async throws -> (response: RPCResponse, failure: String?) {
         // 1. PARK, through the coordinator's own holder park under the
@@ -2736,8 +2751,11 @@ extension RPCRouter {
         case .alreadyHibernated:
             // The row parked between the handler's read and this call — a
             // focus-wake, or the idle sweep. It is parked now, which is all
-            // this step was for, so carry on: what follows is exactly the cold
-            // path, which is what a retry would have taken anyway.
+            // this step was for, so the re-home and the wake below run exactly
+            // as if this arm had parked it itself. That is NOT the cold path
+            // taken further up: the cold path deliberately re-homes a parked
+            // row and returns without waking it, while here the user asked for
+            // a live session to move accounts and gets it resumed there.
             logger.info("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) was already parked when the switch asked; re-homing it where it stands")
         case .notFound:
             let reason = "Terminal not found: \(oldTerminal.id)"
@@ -2752,8 +2770,28 @@ extension RPCRouter {
             return (RPCResponse(error: reason), reason)
         }
 
+        // 1b. RE-CARRY the transcript, now that the park has ended. The handler
+        //     copied it into the destination config dir before the transport
+        //     branch, and that copy skips a destination that already exists —
+        //     but the park's polite `/exit` is precisely the gesture that makes
+        //     Claude flush the tail of the conversation, and that flush lands
+        //     in the SOURCE profile's jsonl afterwards. Without this pass the
+        //     resume below reads a copy that stops short of the last turn.
+        //     Copy-if-newer, detached off this handler's executor, and
+        //     best-effort in the same way the carry upstream is: every failure
+        //     inside it is logged where it happens and none of them fails the
+        //     swap.
+        if let resumeProjectsRoot {
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                sessionID: storedSessionID,
+                worktreePath: worktree.path,
+                projectsRoot: resumeProjectsRoot,
+                storedTranscriptPath: oldTerminal.transcriptPath)
+        }
+
         // 2. RE-HOME, the same write the cold path makes. The transcript was
-        //    carried into the destination config dir upstream.
+        //    carried into the destination config dir upstream, and re-taken
+        //    just above now that the park has flushed the conversation's tail.
         let rehomed: Terminal
         do {
             rehomed = try await reHomeParkedRow(
@@ -2777,6 +2815,22 @@ extension RPCRouter {
                     sessionID: storedSessionID,
                     transcriptPath: rehomed.transcriptPath)
                 target = try await db.terminals.get(id: rehomed.id) ?? rehomed
+                // Tell the app, in the shape the tmux arm uses. `.inPlace`
+                // keeps the tab, so `swapTerminalProfile` discards the RPC's
+                // result entirely and reconciles its cached row from the
+                // `terminalProfileChanged` + `terminalSessionUpdated` pair —
+                // `reHomeParkedRow` sent the first, and without this one the
+                // row would keep pointing at the conversation the fresh spawn
+                // just replaced.
+                if let freshSessionID = target.claudeSessionID {
+                    subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+                        terminalID: target.id,
+                        worktreeID: target.worktreeID,
+                        sessionID: freshSessionID,
+                        transcriptPath: target.transcriptPath,
+                        sessionOrderObservedAt: target.sessionOrderObservedAt
+                    )))
+                }
             } catch {
                 logger.error("inPlace swap: could not record the fresh session id for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 let reason = "This session moved to the new account but its new conversation could not be recorded (\(error)). It is parked on the new account; the next focus wakes the previous conversation there."
@@ -2829,6 +2883,11 @@ extension RPCRouter {
     /// The wake half's failure, or nil when it woke — so the arm above states
     /// "did the resume happen" once, and the actuation cannot inherit a
     /// success the session did not have.
+    ///
+    /// Every case is listed and there is no `default:`, deliberately: these
+    /// strings are read by a person whose account switch half-finished, and a
+    /// catch-all would quietly render a new `WakeResult` case as a raw enum in
+    /// front of them. A case added later is a compile error here instead.
     private static func swapWakeFailure(_ result: WakeResult) -> String? {
         switch result {
         case .ok:
@@ -2837,8 +2896,20 @@ extension RPCRouter {
             return reason
         case .inFlight:
             return "another wake for this session was already running; it resumes under the new account"
-        default:
-            return "this session moved to the new account but could not be resumed: \(result)"
+        case .notHibernated:
+            return "this session moved to the new account, but TBD no longer saw it as paused and did not resume it; focus the tab to start it there"
+        case .sessionGone:
+            return "this session moved to the new account, but the paused session could not be found to resume; focus the tab to start it there"
+        case .notFound:
+            return "this session moved to the new account, but its row could not be read back, so nothing was resumed"
+        case .noSessionID:
+            return "this session moved to the new account, but it names no conversation to resume"
+        case .worktreeMissing(let path):
+            return "this session moved to the new account, but its worktree directory is missing (\(path)), so nothing was resumed"
+        case .profileMissing(let profileID):
+            return "this session moved to the new account, but that account could not be resolved (profile \(profileID.uuidString)), so it was not resumed"
+        case .paneBusy(let pid):
+            return "this session moved to the new account, but another process (pid \(pid)) still holds its terminal, so it was not resumed"
         }
     }
 
