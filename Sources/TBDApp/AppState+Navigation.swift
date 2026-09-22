@@ -382,6 +382,7 @@ extension AppState {
         if isTransition || tab == .attach {
             clearRemoteSessionDetachedFlag(selection)
         }
+        focusRemoteTerminalAfterSelectionChange(selection)
     }
 
     /// Point the remote-session surface at the selected worktree row when that

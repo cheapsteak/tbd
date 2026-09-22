@@ -50,6 +50,10 @@ class TBDTerminalView: TerminalView {
     var onReady: (() -> Void)?
     private var didFireReady = false
 
+    /// Called every time the view is inserted into a window — including a
+    /// kept-alive pane that a tab switch puts back on screen.
+    var onMovedToWindow: (() -> Void)?
+
     /// Intercept a pasteboard paste of ANY size (the paste ruling v2). Set while
     /// a control-mode attach is live; cleared on detach/cleanup. Returns true
     /// when the handler consumed `data` — shipped it as a `.paste` sidecar frame,
@@ -579,6 +583,7 @@ class TBDTerminalView: TerminalView {
             }
             installMouseMonitor()
             registerForDraggedTypes([.fileURL])
+            onMovedToWindow?()
         } else {
             removeMouseMonitor()
         }

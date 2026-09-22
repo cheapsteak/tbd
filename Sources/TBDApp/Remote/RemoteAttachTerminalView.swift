@@ -33,6 +33,10 @@ struct RemoteAttachTerminalView: View {
     /// change can tell a child that predates it — and is therefore running on
     /// a path that no longer exists — from one spawned since.
     let onStarted: (Date) -> Void
+    /// Forwarded to `LocalPTYTerminalRepresentable`: the pager registers the
+    /// view as this selection's focus target while it is mounted.
+    var onViewMounted: ((TBDTerminalView) -> Void)?
+    var onViewDismantled: ((TBDTerminalView) -> Void)?
     @EnvironmentObject var appearance: AppearanceSettings
 
     /// Whether the local `attach` process ended in the UNEXPECTED class —
@@ -61,7 +65,9 @@ struct RemoteAttachTerminalView: View {
             environment: Self.attachEnvironment(),
             appearance: appearance,
             onExit: onDetached,
-            onStarted: onStarted
+            onStarted: onStarted,
+            onViewMounted: onViewMounted,
+            onViewDismantled: onViewDismantled
         )
     }
 

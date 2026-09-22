@@ -44,6 +44,12 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// Optional, so the synthesized memberwise initializer defaults it to nil
     /// and the remediation terminal — which has no use for it — is untouched.
     var onStarted: ((Date) -> Void)?
+    /// Called with the terminal view when it is made, and again when it is
+    /// dismantled — the attach pane registers it as its selection's focus
+    /// target (`AppState.registerRemoteTerminalView`). Optional for the same
+    /// reason as `onStarted`.
+    var onViewMounted: ((TBDTerminalView) -> Void)?
+    var onViewDismantled: ((TBDTerminalView) -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -70,6 +76,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         context.coordinator.terminalView = tv
         context.coordinator.onExit = onExit
         context.coordinator.onStarted = onStarted
+        context.coordinator.onViewDismantled = onViewDismantled
+        onViewMounted?(tv)
 
         // TBDTerminalView fires `onReady` exactly once, the first time it's
         // laid out with non-zero bounds — the same hook TerminalPanelView
@@ -86,6 +94,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: TBDTerminalView, context: Context) {}
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
+        coordinator.onViewDismantled?(nsView)
         coordinator.cleanup()
     }
 
@@ -97,6 +106,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// Mirrors `onExit`'s storage for the spawn side — see the
         /// representable's `onStarted`.
         var onStarted: ((Date) -> Void)?
+        var onViewDismantled: ((TBDTerminalView) -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,

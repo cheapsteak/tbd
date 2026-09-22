@@ -101,6 +101,45 @@ extension AppState {
 }
 
 extension AppState {
+    /// Register the mounted `attach` terminal for `selection`, and have it
+    /// claim focus whenever it lands in a window while it is the selected
+    /// session: first mount, and a kept-alive pane that a pager tab switch
+    /// puts back on screen. Hidden panes are out of their window (the pagers
+    /// are `NSTabViewController`s), so they never reach the claim.
+    func registerRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+        remoteTerminalFocusTargets[selection] = TerminalFocusTarget(view)
+        view.onMovedToWindow = { [weak self] in
+            self?.focusRemoteTerminalAfterSelectionChange(selection)
+        }
+    }
+
+    func unregisterRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+        view.onMovedToWindow = nil
+        guard remoteTerminalFocusTargets[selection]?.view === view else { return }
+        remoteTerminalFocusTargets.removeValue(forKey: selection)
+    }
+
+    /// The remote counterpart of `focusTerminalAfterSelectionChange`. A kept-
+    /// alive pane never re-runs its spawn-time focus claim, so without this a
+    /// revisited session draws a hollow cursor until the user presses Tab.
+    /// Deferred one main turn, and re-checked then: the selection may have
+    /// moved on, and a pane not yet in a window is left to `onMovedToWindow`.
+    func focusRemoteTerminalAfterSelectionChange(_ selection: RemoteSessionSelection) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.selectedRemoteSession == selection,
+                  let terminalView = self.remoteTerminalFocusTargets[selection]?.view,
+                  let window = terminalView.window,
+                  window.firstResponder !== terminalView
+            else {
+                return
+            }
+            window.makeFirstResponder(terminalView)
+        }
+    }
+}
+
+extension AppState {
     /// Install the app's answer to a daemon injection, once, for the app's
     /// life.
     ///
