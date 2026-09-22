@@ -155,6 +155,40 @@ struct ProviderIdentityTests {
         #expect(redacted == ["--token", "--staging"])
     }
 
+    /// Review catch: `--flag=value` only redacted when the FLAG name matched
+    /// a secret-key substring, unlike the bare-positional and
+    /// space-separated shapes, which both judge an unrecognized value on its
+    /// own merits. `--bearer=` and `--pat=` are neither in
+    /// `secretKeySubstrings`, so a secret-shaped value riding either flag
+    /// name used to reach the screen verbatim — exactly the gap this PR's
+    /// redaction fix exists to close.
+    @Test("an unrecognized flag's = value is still judged on its own merits")
+    func redactsSecretShapedValueBehindUnrecognizedFlagName() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "--bearer=eyJhbGciOiJIUzI1NiJ9.xxx.yyy",
+            "--pat=ghp_abcdefghijklmnopqrstuvwxyz",
+        ])
+
+        #expect(redacted == [
+            "--bearer=\(ProviderIdentityRedaction.redactedPlaceholder)",
+            "--pat=\(ProviderIdentityRedaction.redactedPlaceholder)",
+        ])
+    }
+
+    /// The other half: an unrecognized flag's `=` value that does NOT look
+    /// like a secret must still pass through untouched — this shape must not
+    /// become as aggressive as blanket-redacting every `=`-joined argument
+    /// whose flag name is merely unrecognized.
+    @Test("an unrecognized flag's = value that is not secret-shaped is not redacted")
+    func doesNotRedactOrdinaryEqualsValue() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "--size=large",
+            "--region=us-east-1",
+        ])
+
+        #expect(redacted == ["--size=large", "--region=us-east-1"])
+    }
+
     @Test("bare positional secrets with known prefixes are redacted")
     func redactsBarePositionalWithKnownPrefix() {
         // The reported gap: a bare positional secret like `sk-live-…` was

@@ -217,6 +217,18 @@ public enum ProviderIdentityRedaction {
                     out.append("\(flag)=\(redactedPlaceholder)")
                     continue
                 }
+                // The flag name itself isn't a recognized secret key
+                // (--bearer=…, --pat=…), but the bare-positional and
+                // space-separated shapes below both still judge an
+                // unrecognized value on its own merits — this shape must
+                // too, or a secret-shaped value only ever escapes redaction
+                // by riding an `=`. The flag name is never itself
+                // secret-shaped, so only the value is checked.
+                let value = String(arg[arg.index(after: separator)...])
+                if looksLikeSecret(value) {
+                    out.append("\(flag)=\(redactedPlaceholder)")
+                    continue
+                }
                 out.append(arg)
                 continue
             }
