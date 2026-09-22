@@ -67,6 +67,9 @@ struct TerminalDeletePaneOwnershipTests {
                 "the stale row must still be removed from the list")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
                 "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+        let captured = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
+        #expect(captured.isEmpty,
+                "a stranger's screen must never be captured into this row's Closed Terminals history")
     }
 
     /// The positive control: a pane answering with THIS row's own id closes
