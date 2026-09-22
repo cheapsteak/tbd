@@ -1127,15 +1127,23 @@ main() {
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
 
-    # Stamp before the compiler runs so the sidecar and the binaries beside it
-    # name the same commit. A clone that has never been built has no
-    # .build/<config> yet and the stamp defers — expected, and silenced here
-    # because the retry below covers it.
-    write_build_identity "$UPDATE_SRC" "$build_dir" >/dev/null 2>&1 || true
     build_products "$UPDATE_SRC" || return 1
-    if [ ! -f "$build_dir/TBDBuildIdentity.json" ]; then
-        write_build_identity "$UPDATE_SRC" "$build_dir" || log "WARNING: no build identity stamped"
-    fi
+
+    # Stamp only now that the build actually succeeded. This used to run
+    # BEFORE build_products, on the theory that the sidecar should always
+    # name the same commit as the binaries beside it — but a build that then
+    # FAILED left the opposite: a sidecar naming the commit that was
+    # attempted, sitting next to binaries that were never touched, with
+    # nothing to ever put it right, since the only later write in this same
+    # clone is the next update's — success or failure. `$UPDATE_SRC` is one
+    # long-lived clone every update reuses (see docs/updating.md), so that
+    # wrong sidecar persists until this clone next builds successfully: any
+    # `tbd version` or manual inspection pointed at it in the meantime learns
+    # about a commit whose fix, or whose bug, was never actually built.
+    # Moving the write here removes the premature half entirely — there is
+    # now one write site, sequenced after success, so there is nothing to
+    # roll back on failure and no separate temp file to manage.
+    write_build_identity "$UPDATE_SRC" "$build_dir" || log "WARNING: no build identity stamped"
 
     local advanced
     advanced="$(commits_advanced "$old_commit" "$new_commit" || true)"
