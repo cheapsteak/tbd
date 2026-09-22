@@ -41,6 +41,19 @@ final class TerminalViewHolder: @unchecked Sendable {
         lock.withLockUnchecked { $0.view = nil }
     }
 
+    /// Whether a feed would reach a view right now.
+    ///
+    /// The panel keeps its own `terminalView` reference for as long as SwiftUI
+    /// holds the NSView, so that reference outliving this one is the normal
+    /// shape of a torn-down attach rather than an anomaly: an attach that fails
+    /// after the reader started clears the holder and leaves the view in place.
+    /// Anything that must know whether bytes can still flow — the latency
+    /// probe, which would otherwise report a write into a cleared holder as a
+    /// lost token — asks here, not there.
+    var hasView: Bool {
+        lock.withLockUnchecked { $0.view != nil }
+    }
+
     /// Installs the panel's latency tap. Only ever called when the
     /// default-off `TerminalLatencyDiagnostic` is on; with no tap installed
     /// `feed(_:)` is exactly the `withView` call it replaced.

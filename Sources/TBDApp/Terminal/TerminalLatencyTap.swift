@@ -94,6 +94,13 @@ final class TerminalLatencyTap: @unchecked Sendable {
         /// Feed timestamps for chunks not yet reported by a draw, oldest
         /// first.
         var pendingFeeds: [Double] = []
+        /// The most recent chunk's feed timestamp since the last draw, kept
+        /// OUTSIDE the ring. Overflow drops the newest chunk rather than the
+        /// oldest — the oldest is the wait being reported — so the ring's last
+        /// element stops advancing once the ring is full, and reading
+        /// `newestms` off it would report a stale chunk's wait in exactly the
+        /// frames that say `dropped > 0`.
+        var newestFeed: Double?
         /// Chunks the ring had no room for since the last draw.
         var dropped: Int = 0
         /// The longest `feed` call since the last draw, in milliseconds.
@@ -143,6 +150,7 @@ final class TerminalLatencyTap: @unchecked Sendable {
             } else {
                 state.dropped += 1
             }
+            state.newestFeed = feedAt
             if parseMs > state.parseMaxMs { state.parseMaxMs = parseMs }
             return state.echo
         }
@@ -202,6 +210,22 @@ final class TerminalLatencyTap: @unchecked Sendable {
         )
     }
 
+    /// Retire a token the panel could not actually write, without reporting
+    /// it as lost.
+    ///
+    /// The probe has to arm before it writes — a reply can come back inside
+    /// that window — so a write the panel then swallows leaves a token pending
+    /// that nothing will ever echo. Left there, the next request's `armEcho`
+    /// would report it as `echolost`, which says the transport lost a token it
+    /// was never given. Keyed on the sequence number, so a request that landed
+    /// in between keeps its own pending token.
+    func cancelEcho(seq: UInt64) {
+        state.withLockUnchecked { state in
+            guard state.echo?.seq == seq else { return }
+            state.echo = nil
+        }
+    }
+
     /// This panel's view is about to draw. Reports the chunks that have been
     /// waiting and resets the window.
     ///
@@ -211,23 +235,22 @@ final class TerminalLatencyTap: @unchecked Sendable {
     /// sitting there undrawn. One line per draw carries the tail exactly, since
     /// the oldest chunk in a frame is that frame's worst wait.
     func noteDrawWillBegin(at drawAt: Double, isOnScreen: Bool) {
-        var taken: (feeds: [Double], dropped: Int, parseMaxMs: Double)?
+        var taken: (feeds: [Double], newest: Double, dropped: Int, parseMaxMs: Double)?
         state.withLockUnchecked { state in
-            guard !state.pendingFeeds.isEmpty else { return }
-            taken = (state.pendingFeeds, state.dropped, state.parseMaxMs)
+            guard !state.pendingFeeds.isEmpty, let newest = state.newestFeed else { return }
+            taken = (state.pendingFeeds, newest, state.dropped, state.parseMaxMs)
             state.pendingFeeds.removeAll(keepingCapacity: true)
+            state.newestFeed = nil
             state.dropped = 0
             state.parseMaxMs = 0
         }
-        guard let taken, let oldest = taken.feeds.first, let newest = taken.feeds.last else {
-            return
-        }
+        guard let taken, let oldest = taken.feeds.first else { return }
         emit(
             "draw transport=\(transport.rawValue)"
                 + " terminal=\(terminalID.uuidString)"
                 + " chunks=\(taken.feeds.count)"
                 + " oldestms=\(Self.millis(drawAt - oldest))"
-                + " newestms=\(Self.millis(drawAt - newest))"
+                + " newestms=\(Self.millis(drawAt - taken.newest))"
                 + " parsemaxms=\(Self.formatted(taken.parseMaxMs))"
                 + " dropped=\(taken.dropped)"
                 + " vis=\(isOnScreen ? 1 : 0)"

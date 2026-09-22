@@ -322,8 +322,17 @@ final class OutgoingInputQueue {
     /// has exited that is true of every keystroke, so a human types and the
     /// only diagnostic is absence. `noteUserWriteOutcome` turns that into one
     /// log line per episode.
-    func enqueueUserBytes(_ data: Data) {
-        noteUserWriteOutcome(submit(data))
+    ///
+    /// The return value is that same fact handed back rather than only logged,
+    /// for the one caller that has somewhere to put it: the latency probe,
+    /// which must report a write the panel could not place as a refusal rather
+    /// than measure it as a slow transport. Discardable, because every other
+    /// caller is the fire-and-forget delegate path described above.
+    @discardableResult
+    func enqueueUserBytes(_ data: Data) -> Bool {
+        let reachedTransport = submit(data)
+        noteUserWriteOutcome(reachedTransport)
+        return reachedTransport
     }
 
     /// Edge-triggered diagnostic for the user's stream: one line when

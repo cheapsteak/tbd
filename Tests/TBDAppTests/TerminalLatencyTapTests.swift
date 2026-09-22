@@ -144,7 +144,16 @@ struct TerminalLatencyTapTests {
         #expect(lines.all.count == 1)
     }
 
-    @Test("overflowing the ring reports the cap and counts the drops")
+    /// The overflow case is also the case that can make `newestms` lie.
+    ///
+    /// The ring drops the NEWEST chunk when it is full — the oldest is the
+    /// wait being reported — so its last element stops advancing at capacity.
+    /// Here 513 chunks are fed one millisecond apart and the draw is taken one
+    /// millisecond after the last: the newest wait is the 513th chunk's
+    /// 1.000 ms. Read off the ring instead it would be the 512th chunk's
+    /// 2.000 ms, which is the shape of the bug — wrong in exactly the frames
+    /// that report a drop.
+    @Test("overflowing the ring reports the cap, counts the drops, and still dates the newest chunk")
     func ringOverflowIsCountedNotSilent() throws {
         let (tap, clock, lines) = makeTap()
         for _ in 0..<(TerminalLatencyTap.ringCapacity + 1) {
@@ -157,6 +166,8 @@ struct TerminalLatencyTapTests {
         let parsed = fields(try #require(lines.all.first))
         #expect(parsed["chunks"] == "512")
         #expect(parsed["dropped"] == "1")
+        #expect(parsed["oldestms"] == "513.000")
+        #expect(parsed["newestms"] == "1.000")
     }
 
     @Test("the draw line's shape is exactly what the report script parses")
@@ -260,6 +271,42 @@ struct TerminalLatencyTapTests {
             lock.unlock()
             body?()
         }
+    }
+
+    /// A write the panel could not place is not a token the transport lost.
+    ///
+    /// The probe arms before it writes, so a swallowed write leaves a token
+    /// pending that nothing will echo; left there, the NEXT request's arm
+    /// reports it as `echolost` and the run counts a transport failure that
+    /// never happened. The discriminator is the second arm: without the
+    /// cancel, it emits one `echolost` line.
+    @Test("a cancelled token is retired silently, and is not later reported lost")
+    func cancelRetiresThePendingTokenWithoutALostLine() {
+        let (tap, clock, lines) = makeTap()
+        tap.armEcho(seq: 1, token: TerminalLatencyTap.token(seq: 1), sentAt: clock.seconds)
+        tap.cancelEcho(seq: 1)
+        #expect(lines.all.isEmpty)
+
+        clock.advance(ms: 250)
+        tap.armEcho(seq: 2, token: TerminalLatencyTap.token(seq: 2), sentAt: clock.seconds)
+        #expect(lines.all.isEmpty, "nothing was ever handed to the transport to lose")
+
+        // The live token is untouched by the cancel that preceded it.
+        clock.advance(ms: 5)
+        feed(tap, clock, Array("lp2z".utf8))
+        #expect(lines.all.filter { $0.hasPrefix("echo ") }.count == 1)
+    }
+
+    @Test("a cancel naming a retired sequence leaves the live token alone")
+    func cancelIsKeyedOnTheSequenceNumber() {
+        let (tap, clock, lines) = makeTap()
+        tap.armEcho(seq: 1, token: TerminalLatencyTap.token(seq: 1), sentAt: clock.seconds)
+        tap.armEcho(seq: 2, token: TerminalLatencyTap.token(seq: 2), sentAt: clock.seconds)
+        tap.cancelEcho(seq: 1)
+
+        clock.advance(ms: 3)
+        feed(tap, clock, Array("lp2z".utf8))
+        #expect(lines.all.filter { $0.hasPrefix("echo ") }.count == 1)
     }
 
     @Test("an arm landing mid-search is not cleared by the stale match it raced")
