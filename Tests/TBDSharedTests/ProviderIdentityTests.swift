@@ -155,6 +155,43 @@ struct ProviderIdentityTests {
         #expect(redacted == ["--token", "--staging"])
     }
 
+    /// Review catch: `isSecretKey`'s substring table can never match a
+    /// single-letter flag — `t`/`p`/`k` alone can't contain a five-letter
+    /// word like `token`. Before this fix, a short-flag secret like
+    /// `-t mypassword1` fell through to the bare-positional heuristic, which
+    /// only redacts values >=20 characters, so an ordinary short password
+    /// rode straight through. All three of the review's named short flags
+    /// (token, password, key) must now redact their value unconditionally,
+    /// the same as their long-form spellings do.
+    @Test("short-flag credential aliases redact their value even when short")
+    func redactsShortFlagAliasValues() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "-t", "mypassword1",
+            "-p", "mypassword1",
+            "-k", "mypassword1",
+        ])
+
+        #expect(redacted == [
+            "-t", ProviderIdentityRedaction.redactedPlaceholder,
+            "-p", ProviderIdentityRedaction.redactedPlaceholder,
+            "-k", ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
+    /// The narrowness of the fix above: an ordinary short flag NOT in the
+    /// reviewer-named set must not start swallowing its value. This is the
+    /// regression guard against widening `shortSecretFlagAliases` too far.
+    @Test("ordinary short flags outside the credential set still pass their value through")
+    func doesNotRedactOrdinaryShortFlagValues() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "-n", "myworktree",
+            "-e", "staging",
+            "-v",
+        ])
+
+        #expect(redacted == ["-n", "myworktree", "-e", "staging", "-v"])
+    }
+
     /// Review catch: `--flag=value` only redacted when the FLAG name matched
     /// a secret-key substring, unlike the bare-positional and
     /// space-separated shapes, which both judge an unrecognized value on its

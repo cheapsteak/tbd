@@ -153,8 +153,21 @@ public enum ProviderIdentityRedaction {
     /// prefix: a prefix of a secret is still a piece of a secret.
     public static let redactedPlaceholder = "‹redacted›"
 
+    /// Single-letter short-flag aliases that conventionally take a credential
+    /// as their value, matched EXACTLY (never as a substring — `t` alone
+    /// would otherwise swallow every flag with a `t` anywhere in it, like
+    /// `--format`). `secretKeySubstrings` above can never catch these: a
+    /// one-letter flag can't contain a five-letter word. Deliberately short
+    /// and reviewer-named rather than exhaustive — `-p` in particular
+    /// collides with "port"/"profile" in plenty of real CLIs, but per this
+    /// type's own bias (a lost display pair costs a line of context; a shown
+    /// secret costs the secret), redacting an occasional port number is the
+    /// correct side to be wrong on.
+    public static let shortSecretFlagAliases: Set<String> = ["t", "p", "k"]
+
     public static func isSecretKey(_ key: String) -> Bool {
         let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
+        if shortSecretFlagAliases.contains(normalized) { return true }
         return secretKeySubstrings.contains { normalized.contains($0) }
     }
 
