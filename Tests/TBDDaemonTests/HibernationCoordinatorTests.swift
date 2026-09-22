@@ -2460,6 +2460,72 @@ struct HibernationCoordinatorTests {
                 "a pane with no identity to compare must fall back to un-parking, not stay parked")
     }
 
+    /// The race the joint `.live`/`.dead` match exists to catch: between the
+    /// `paneCurrentCommand` liveness check above and this identity probe (two
+    /// separate tmux round trips), the STRANGER pane's process exits. A guard
+    /// matching only `.live` would see no case match at all here and silently
+    /// fall through to un-parking onto the stranger's pane; matching `.dead`
+    /// too must still catch the mismatch.
+    @Test func reconcileOnStartupLeavesAParkedRowWhoseStrangerPaneWentDeadBetweenProbes() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .dead(terminalID: UUID().uuidString) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a dead stranger pane must still be caught as a mismatch, not slip through unmatched")
+    }
+
+    /// The pane the earlier liveness checks just confirmed vanishes entirely by
+    /// the time of this probe. That is a race, not evidence of anything — stay
+    /// parked rather than guess.
+    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneWentMissingBetweenProbes() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .missing })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a pane that went missing mid-probe must stay parked")
+    }
+
+    /// An unreadable probe (a wedged server timing out the subprocess) is not
+    /// the same fact as "no id to compare" — it is no evidence at all, so it
+    /// must NOT fall through to un-parking. Mirrors the sibling reconciler's
+    /// "an unreadable identity is not evidence of staleness."
+    @Test func reconcileOnStartupLeavesAParkedRowWhoseProbeThrows() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in
+                throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(5))
+            })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a probe that throws must leave the row parked, not un-park it")
+    }
+
     // MARK: - Keep-warm
 
     @Test func setKeepWarmPersists() async throws {

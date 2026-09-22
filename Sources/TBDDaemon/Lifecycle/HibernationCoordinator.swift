@@ -1726,18 +1726,40 @@ public actor HibernationCoordinator {
             // runs `claude`. A false park is recoverable by `wake`; a false
             // un-park is not.
             //
+            // Matched jointly against `.live` AND `.dead` — mirroring the
+            // sibling reconciler's identical check in
+            // `WorktreeLifecycle+Reconcile.swift` — because `.dead`'s own doc
+            // comment exists precisely so a stranger pane whose process exited
+            // in the gap between this probe and the `paneCurrentCommand` check
+            // above still reads as a mismatch instead of silently slipping
+            // through unmatched.
+            //
             // When the option is ABSENT — a pane spawned before this stamp
-            // existed, or the probe itself couldn't be read — fall back to
-            // today's behavior (the window/process checks above) rather than
-            // refusing: the stamp is deliberately not backfilled onto
-            // existing panes (`stampTerminalID`'s doc comment), so treating
-            // "no answer" the same as "wrong answer" would leave every
-            // pre-existing session parked after every daemon restart —
-            // reproducing the "sessions keep falling asleep" symptom this
-            // reconcile pass exists to prevent.
-            if let probe = try? await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID),
-               case .live(let terminalID) = probe,
-               let terminalID, terminalID != terminal.id.uuidString {
+            // existed — fall back to today's behavior (the window/process
+            // checks above) rather than refusing: the stamp is deliberately
+            // not backfilled onto existing panes (`stampTerminalID`'s doc
+            // comment), so treating "no answer" the same as "wrong answer"
+            // would leave every pre-existing session parked after every
+            // daemon restart — reproducing the "sessions keep falling asleep"
+            // symptom this reconcile pass exists to prevent. `.missing` (the
+            // pane vanished between the liveness checks above and this probe)
+            // and a thrown probe error are each their own kind of
+            // inconclusive and, unlike an absent id, are not evidence the row
+            // is safe to un-park — mirroring the sibling reconciler's "an
+            // unreadable identity is not evidence of staleness," they leave
+            // the row parked for a later sweep to retry rather than guessing.
+            do {
+                switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
+                case .live(let paneTerminalID), .dead(let paneTerminalID):
+                    if let paneTerminalID,
+                       paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                        continue
+                    }
+                case .missing:
+                    continue
+                }
+            } catch {
+                logger.warning("startup: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public) — leaving it parked")
                 continue
             }
 
