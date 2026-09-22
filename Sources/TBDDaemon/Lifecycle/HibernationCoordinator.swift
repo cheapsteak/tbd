@@ -40,8 +40,20 @@ extension HibernateEligibilityPolicy {
     /// Whether this park is judged by the rails that read live state — the
     /// typed screen and the transcript tail — as opposed to the row alone.
     ///
-    /// One predicate, named once, so the two rails cannot come to disagree
-    /// about which policies they answer to.
+    /// One predicate, named once, so the rails that do answer to it cannot
+    /// come to disagree about which policies they answer to.
+    ///
+    /// **What it reaches.** Three rails consult it: the holder park's screen
+    /// reading and its typed-input check (`HibernationCoordinator+Holder`),
+    /// and the transcript-tail rail both transports share
+    /// (`transcriptTailRefusal`). The tmux leg's own typed-input rail, which
+    /// reads the pane through `capturePaneWithAnsi` before taking the server
+    /// lock, is **not** gated by this predicate and refuses under every
+    /// policy. That is not an oversight left to fix: `.profileSwap` is
+    /// holder-only today — `handleTerminalSwapProfile` branches on
+    /// `transport == .holder` and no other caller passes the policy — so a
+    /// tmux park never sees it, and gating a rail no `.profileSwap` park can
+    /// reach would be a behaviour change dressed as consistency.
     var honoursLiveRails: Bool {
         if case .profileSwap = self { return false }
         return true
@@ -416,7 +428,12 @@ public actor HibernationCoordinator {
     ///
     /// It does not check the transport. The park mechanic exists on both, and
     /// `performHibernate` already routes a holder row to the holder arm; what
-    /// the swap handler decides is which rows it calls this for.
+    /// the swap handler decides is which rows it calls this for — and today it
+    /// calls this for **holder rows only**, because `handleTerminalSwapProfile`
+    /// branches on `transport == .holder` before reaching the arm that calls
+    /// here. So `.profileSwap` never reaches a tmux park, and the rails a tmux
+    /// park applies unconditionally (its pre-lock typed-input check) are
+    /// untouched by this policy existing. See `honoursLiveRails`.
     func parkForProfileSwap(terminalID: UUID) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
