@@ -571,6 +571,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// This panel's claim on its session's daemon injections, held for as
         /// long as it owns the pty.
         private var injectionRegistration: TerminalInjectionRouter.Registration?
+        /// This panel's claim on its terminal's latency-probe requests, held
+        /// only while the default-off terminal latency diagnostic is on.
+        private var latencyRegistration: TerminalLatencyDiagnostic.Registration?
         /// The live holder attach this panel owns, and everything its detach
         /// needs to name itself: a holder row has no pane, so the session is
         /// named by `panelID` and the attach by the generation the daemon
@@ -830,6 +833,73 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             Self.transportPreparationNotice(for: panelTransport())
         }
 
+        /// This panel's terminal kind, or nil when AppState has not loaded the
+        /// row. Nil is NOT defaulted the way `panelTransport()` defaults its
+        /// answer: the only consumer is the latency echo probe's refusal, which
+        /// writes keystrokes into a session and so must fail closed — an
+        /// unresolvable panel is refused, never assumed to be a shell.
+        @MainActor
+        func panelKind() -> TerminalKind? {
+            appState?.terminals.values
+                .lazy
+                .flatMap { $0 }
+                .first(where: { $0.id == panelID })?
+                .kind
+        }
+
+        /// Wire this panel into the terminal latency instrument, if it is on.
+        ///
+        /// Does nothing at all when the diagnostic is off, which is the
+        /// default — that nil check is the whole gate for this panel. When it
+        /// is on, one tap is shared by the feed seam (which stamps every
+        /// chunk) and the view (which reports the wait when it draws), and a
+        /// probe closure is registered so the driver's request file can make
+        /// this panel write one token through its real keystroke path.
+        ///
+        /// The registered closure is what makes the echo comparable across
+        /// transports: it goes through `send(source:data:)`, the delegate entry
+        /// a keystroke reaches after SwiftTerm's input hop, so the write pays
+        /// whatever a keystroke pays on this transport.
+        @MainActor
+        private func installLatencyTap(
+            on terminalView: TerminalView, transport: TerminalTransport
+        ) {
+            guard let diagnostic = TerminalLatencyDiagnostic.shared else { return }
+            let tap = diagnostic.makeTap(terminalID: panelID, transport: transport)
+            viewHolder.setTap(tap)
+            (terminalView as? TBDTerminalView)?.latencyTap = tap
+            let now = diagnostic.now
+            latencyRegistration = diagnostic.register(
+                terminalID: panelID, kind: panelKind()
+            ) { [weak self] seq in
+                guard let self, let view = self.terminalView else { return false }
+                var token = TerminalLatencyTap.token(seq: seq)
+                // Armed BEFORE the write, and stamped at the same moment: a
+                // reply that came back between the write and the arm would
+                // otherwise be missed, and a start stamped after the write
+                // would omit the write's own cost from the number.
+                tap.armEcho(seq: seq, token: token, sentAt: now())
+                // The carriage return goes out but is not matched on: it makes
+                // each token start a fresh line so it can never wrap mid-token,
+                // and a cooked tty echoes it as CR LF rather than as itself.
+                token.append(0x0d)
+                self.send(source: view, data: token[...])
+                return true
+            }
+        }
+
+        /// Withdraw everything `installLatencyTap` wired up. Called from
+        /// `cleanup()`: a closure left registered for a torn-down panel would
+        /// answer a later request by writing into a view that is gone.
+        @MainActor
+        private func removeLatencyTap() {
+            viewHolder.clearTap()
+            (terminalView as? TBDTerminalView)?.latencyTap = nil
+            guard let registration = latencyRegistration else { return }
+            latencyRegistration = nil
+            TerminalLatencyDiagnostic.shared?.unregister(registration)
+        }
+
         /// Renders the attach-failed placard for a holder attach that did not
         /// complete, and logs why. One place for the copy and the log line so
         /// every failure in `startHolderClient` tells the same, truthful
@@ -967,6 +1037,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // terminal-lag investigation implicates in paint starvation; do not
             // "tidy" this into looking like its neighbour.
             viewHolder.set(terminalView)
+            installLatencyTap(on: terminalView, transport: .holder)
             // Taken BEFORE the reader owns the descriptor, because the reader
             // is the only thing allowed to close it afterwards. `dup` failing
             // is not fatal to rendering — the session still paints — so it is
@@ -1008,7 +1079,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 label: panelID.uuidString, fd: attachment.ptyFD
             ) { chunk in
                 let bytes = [UInt8](chunk)
-                holder.withView { $0.feed(byteArray: bytes[...]) }
+                holder.feed(bytes[...])
             }
             holderReader = reader
             onHolderReaderWillStart?()
@@ -1809,6 +1880,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `dataReceived`. Cleared by `cleanup()` before the process is
             // released.
             viewHolder.set(terminalView)
+            installLatencyTap(on: terminalView, transport: .tmux)
 
             process.startProcess(
                 executable: tmuxPath,
@@ -1863,6 +1935,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
+            removeLatencyTap()
             // Releases any injection still parked behind an open paste
             // (Task 10). Safe to call even if `send(source:data:)` never ran —
             // the lazy queue is simply constructed here for the first time and
@@ -2300,7 +2373,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // (the parse runs under SwiftTerm's terminal lock) and the view
             // reference is owned by the holder, so a batch racing teardown
             // either completes against a live view or reads nil and drops.
-            viewHolder.withView { $0.feed(byteArray: slice) }
+            viewHolder.feed(slice)
             // The viewer-MRU signal keeps its main hop.
             DispatchQueue.main.async { [weak self] in
                 self?.groupedViewerDidReceiveOutput()

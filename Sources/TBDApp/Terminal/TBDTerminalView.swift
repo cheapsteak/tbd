@@ -155,16 +155,35 @@ class TBDTerminalView: TerminalView {
         return .passthrough
     }
 
-    /// Instrumented only while the commit-latency diagnostic is on. With the
-    /// flag off `shared` is nil and this is `super.viewWillDraw()` plus one
-    /// branch: no timestamps, no completion block, no logging.
+    /// This panel's latency tap, installed by the panel coordinator only while
+    /// the default-off terminal latency diagnostic is on. Nil is the gate: the
+    /// draw hook below then does one nil-check.
+    var latencyTap: TerminalLatencyTap?
+
+    /// Instrumented only while a terminal diagnostic is on. With both flags
+    /// off this is `super.viewWillDraw()` plus two nil-checks: no timestamps,
+    /// no completion block, no logging.
+    ///
+    /// The two instruments are independent and neither gates the other. The
+    /// latency tap reports the wait BEFORE this draw (how long the oldest
+    /// chunk in this frame sat parsed but undrawn); the commit probe reports
+    /// what happens FROM here on. They are the two halves of the same trail,
+    /// so a run with one enabled and the other not is a legitimate
+    /// configuration and the early `guard` must not swallow either.
     ///
     /// `viewWillDraw` rather than `draw(_:)` because SwiftTerm's `draw(_:)` is
     /// `public`, not `open`, and so cannot be overridden from this module. See
     /// `TerminalCommitLatencyProbe` for how the far end of the draw is stamped
-    /// and for what the numbers do and do not cover.
+    /// and for what the numbers do and do not cover, and `TerminalLatencyTap`
+    /// for what the wait before it does and does not include.
     override func viewWillDraw() {
         super.viewWillDraw()
+        if let tap = latencyTap {
+            tap.noteDrawWillBegin(
+                at: tap.now(),
+                isOnScreen: TerminalCommitLatencyProbe.isOnScreen(self)
+            )
+        }
         guard let probe = TerminalCommitLatencyProbe.shared else { return }
         probe.recordDrawWillBegin(
             at: probe.timestamp(),

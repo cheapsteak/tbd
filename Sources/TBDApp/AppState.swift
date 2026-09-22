@@ -4251,6 +4251,32 @@ final class AppState {
             ?? enableCommitLatencyDiagnosticDefault
     }
 
+    /// UserDefaults key gating the terminal transport latency instrument
+    /// (`TerminalLatencyDiagnostic` and its per-panel `TerminalLatencyTap`),
+    /// which measures bytes-waiting-for-a-draw on both transports and closes
+    /// an echo loop through a panel's real keystroke path. There is
+    /// deliberately no Settings toggle: it logs at `.info` once per draw and
+    /// its echo probe writes input into a session, neither of which may be
+    /// armed by default —
+    /// `defaults write TBDApp enableTerminalLatencyDiagnostic -bool true`,
+    /// then relaunch.
+    nonisolated static let enableTerminalLatencyDiagnosticKey =
+        "enableTerminalLatencyDiagnostic"
+
+    /// The one default for `enableTerminalLatencyDiagnosticKey`. OFF: a
+    /// per-draw `.info` line is a measurement-session cost, and a probe that
+    /// types into terminals must never be live on a fleet.
+    nonisolated static let enableTerminalLatencyDiagnosticDefault = false
+
+    /// Read of the terminal latency diagnostic gate. Defaults to off when the
+    /// user has never set the key.
+    nonisolated static func terminalLatencyDiagnosticEnabled(
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        defaults.object(forKey: enableTerminalLatencyDiagnosticKey) as? Bool
+            ?? enableTerminalLatencyDiagnosticDefault
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"

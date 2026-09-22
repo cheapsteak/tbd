@@ -235,6 +235,7 @@ jobs:
           bash scripts/restart-build-lib.test.sh
           bash scripts/ci/first-party-wipe-needed.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
+          python3 scripts/diag/terminal-latency-report.py --self-test
 
   review-scripts-tests:
     name: Review scripts tests
