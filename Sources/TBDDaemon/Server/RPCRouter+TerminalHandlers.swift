@@ -2205,7 +2205,6 @@ extension RPCRouter {
         guard let worktree = try await db.worktrees.getLocal(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
-        let expectedReplacementState = TerminalReplacementSnapshot(terminal: oldTerminal)
 
         // Resolve the requested profile (nil = no override; keychain login).
         // We do NOT touch the old terminal — both tabs coexist after the swap.
@@ -2269,24 +2268,11 @@ extension RPCRouter {
                 }
             }
 
-            let destProfileID: UUID? = resolved?.profileID
-            let updated = try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-            ) { _ in
-                guard let updated = try await self.db.terminals.setParkedProfileID(
-                    id: oldTerminal.id,
-                    expectedState: expectedReplacementState,
-                    profileID: destProfileID) else {
-                    throw StaleTerminalReplacementError()
-                }
-                return updated
-            }
-            subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
-                terminalID: updated.id,
-                worktreeID: updated.worktreeID,
-                newProfileID: destProfileID
-            )))
-            logger.info("cold swap: re-homed parked terminal \(oldTerminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public) — not woken")
+            let updated = try await reHomeParkedRow(
+                terminal: oldTerminal,
+                worktree: worktree,
+                destProfileID: resolved?.profileID)
+            logger.info("cold swap: parked terminal \(oldTerminal.id, privacy: .public) re-homed and deliberately not woken")
             return try RPCResponse(result: updated)
         }
 
@@ -2601,6 +2587,51 @@ extension RPCRouter {
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
         }
         return response
+    }
+
+    /// Re-home a PARKED row onto another profile: set `profile_id` and tell
+    /// the app, and touch nothing else.
+    ///
+    /// The whole mutation of the cold swap, and the middle step of the holder
+    /// in-place arm — one helper, because they are the same act on the same
+    /// row shape and a second copy would be a second opinion about what
+    /// re-homing means. The transcript carry is the caller's: it has already
+    /// happened upstream by the time either reaches here.
+    ///
+    /// Under the worktree's tmux-server lock, as the cold swap has always
+    /// been. That lock does not start a server and is not about tmux here: it
+    /// is the daemon's per-worktree mutual exclusion, and it re-reads the
+    /// worktree under the caller's `allowedStatuses` so a row being archived
+    /// out from under the write is rejected rather than raced. It is taken for
+    /// this write alone and never held across the park, which polls for a
+    /// process to exit.
+    ///
+    /// - Throws: `StaleTerminalReplacementError` when the row changed under
+    ///   the caller, and whatever the database throws.
+    private func reHomeParkedRow(
+        terminal: Terminal,
+        worktree: LocalWorktree,
+        destProfileID: UUID?
+    ) async throws -> Terminal {
+        let expected = TerminalReplacementSnapshot(terminal: terminal)
+        let updated = try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+        ) { _ in
+            guard let updated = try await self.db.terminals.setParkedProfileID(
+                id: terminal.id,
+                expectedState: expected,
+                profileID: destProfileID) else {
+                throw StaleTerminalReplacementError()
+            }
+            return updated
+        }
+        subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
+            terminalID: updated.id,
+            worktreeID: updated.worktreeID,
+            newProfileID: destProfileID
+        )))
+        logger.info("swap: re-homed parked terminal \(terminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public)")
+        return updated
     }
 
     /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,

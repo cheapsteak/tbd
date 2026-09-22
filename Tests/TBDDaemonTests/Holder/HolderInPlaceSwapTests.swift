@@ -1,0 +1,204 @@
+import Foundation
+import Testing
+@testable import TBDDaemonLib
+@testable import TBDShared
+import TestSupport
+
+/// `terminal.swapProfile` in `.inPlace` mode, where the row it is asked about
+/// runs on the pty-holder transport.
+///
+/// The arm under test is a composition of three verbs that already soak —
+/// park, re-home, wake — and what this suite can reach in the fast pass is
+/// everything up to the first one that needs a live pty. A park needs a reader
+/// the daemon only has over a real holder, so the success path and the
+/// "child is really gone" half live in `HolderProfileSwapLiveTests`; what is
+/// here is the routing (which arm runs at all), the cold path, and the states
+/// the two halves leave behind when they refuse.
+@Suite("terminal.swapProfile, in place, on the pty-holder transport")
+struct HolderInPlaceSwapTests {
+
+    /// The session the row carries and the swap resumes. Never reaches a real
+    /// agent: nothing in this suite spawns.
+    static let sessionID = "swap-holder-session"
+
+    // MARK: - Fixture
+
+    private final class TmuxArgvRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var argvs: [[String]] = []
+        func record(_ argv: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            argvs.append(argv)
+        }
+        var all: [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return argvs
+        }
+        func count(_ subcommand: String) -> Int {
+            all.filter { $0.contains(subcommand) }.count
+        }
+    }
+
+    private struct Fixture {
+        let db: TBDDatabase
+        let router: RPCRouter
+        let recorder: TmuxArgvRecorder
+        let worktree: Worktree
+        let destProfileID: UUID
+        let home: String
+        let actuationLogPath: String
+
+        func tearDown() {
+            try? ModelProfileKeychain.delete(id: destProfileID.uuidString)
+            try? FileManager.default.removeItem(atPath: home)
+        }
+
+        func swap(_ terminalID: UUID) async throws -> RPCResponse {
+            await router.handle(try RPCRequest(
+                method: RPCMethod.terminalSwapProfile,
+                params: TerminalSwapProfileParams(
+                    terminalID: terminalID,
+                    newProfileID: destProfileID,
+                    mode: .inPlace)))
+        }
+
+        func local() async throws -> LocalWorktree {
+            try #require(try await db.worktrees.getLocal(id: worktree.id))
+        }
+
+        /// Every actuation line the log holds, decoded. The record is the only
+        /// place a swallowed transport failure is visible, so a test that
+        /// asserts on the response alone cannot tell a dispatched swap from a
+        /// failed one.
+        func actuationRows() throws -> [[String: Any]] {
+            guard let contents = try? String(
+                contentsOfFile: actuationLogPath, encoding: .utf8) else { return [] }
+            return try contents
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { line in
+                    try #require(
+                        try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                }
+        }
+    }
+
+    /// A spawner whose executable does not exist: `canSpawn` is true, so the
+    /// wake reaches its spawn, and the spawn always throws. That is what makes
+    /// "this path never tried to spawn" an assertion rather than a hope — a
+    /// registry with no spawner at all refuses earlier and for a different
+    /// reason.
+    private static func unspawnableSpawner() -> HolderSpawner {
+        HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
+    }
+
+    private static func makeFixture(spawner: HolderSpawner?) async throws -> Fixture {
+        let home = fencedScratchRoot(prefix: "tbdhis")
+        try FileManager.default.createDirectory(
+            atPath: home, withIntermediateDirectories: true)
+        let recorder = TmuxArgvRecorder()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.record($0) },
+            dryRunCapturePane: { _, _ in "" })
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(true)
+
+        let configDirManager = makeIsolatedConfigDirManager(tag: "holder-in-place-swap")
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: configDirManager)
+        let actuationLogPath = "\(home)/actuations.jsonl"
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            configDirManager: configDirManager,
+            actuationLog: ActuationLog(path: actuationLogPath))
+        // The registry both halves reach: the router's own for the swap's
+        // transport decision, and the coordinator's for the park and the wake.
+        // Its environment is explicit, so no rendezvous path can reach the
+        // developer's real `~/tbd` even for an instant.
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
+            listTerminals: { [] },
+            spawner: spawner)
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
+
+        let repoPath = "\(home)/repo"
+        try FileManager.default.createDirectory(
+            atPath: repoPath, withIntermediateDirectories: true)
+        let repo = try await db.repos.create(
+            path: repoPath, displayName: "acme", defaultBranch: "main")
+        let worktreePath = "\(home)/wt"
+        try FileManager.default.createDirectory(
+            atPath: worktreePath, withIntermediateDirectories: true)
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "tbd/wt",
+            path: worktreePath, tmuxServer: "tbd-his-test")
+        let dest = try await db.modelProfiles.create(name: "Dest", kind: .oauth)
+
+        return Fixture(
+            db: db, router: router, recorder: recorder, worktree: worktree,
+            destProfileID: dest.id, home: home, actuationLogPath: actuationLogPath)
+    }
+
+    /// A holder-backed Claude row with a NON-blank transcript, so the swap
+    /// plans a resume rather than a fresh spawn.
+    ///
+    /// A parked row names no processes — that is what a park leaves behind —
+    /// so the two shapes differ in their pids as well as in their park columns.
+    private static func holderRow(_ fixture: Fixture, parked: Bool) async throws -> Terminal {
+        let transcript = "\(fixture.home)/\(UUID().uuidString).jsonl"
+        try #"{"type":"user","message":{"content":"switch me"}}"#
+            .write(toFile: transcript, atomically: true, encoding: .utf8)
+        let created = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id,
+            tmuxWindowID: "",
+            tmuxPaneID: "",
+            label: TerminalLabel.claudeCode,
+            claudeSessionID: sessionID,
+            kind: .claude,
+            transport: .holder,
+            holderPID: parked ? nil : 9101,
+            childPID: parked ? nil : 9102)
+        try await fixture.db.terminals.updateSession(
+            id: created.id, sessionID: sessionID, transcriptPath: transcript)
+        if parked {
+            try await fixture.db.terminals.setHibernated(
+                id: created.id, sessionID: sessionID, reason: .auto)
+        }
+        return try #require(try await fixture.db.terminals.get(id: created.id))
+    }
+
+    // MARK: - The cold path, unchanged
+
+    /// An `.inPlace` swap of a row that is ALREADY parked takes the cold path
+    /// on either transport: re-home, and wake nothing.
+    ///
+    /// The discriminator against a fall-through to the holder arm is the
+    /// pending incarnation. That arm's wake reserves a replacement identity
+    /// before it spawns and this fixture's spawner always throws, so a swap
+    /// that took the arm would leave a row still reading parked with a pending
+    /// incarnation no launch will ever confirm.
+    @Test("an in-place swap of an already parked holder row re-homes it and spawns nothing")
+    func coldSwapOfAParkedHolderRowOnlyReHomes() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: true)
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(response.success, "\(response.error ?? "")")
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.profileID == fixture.destProfileID, "the parked row was not re-homed")
+        #expect(after.isParked, "the cold path woke a parked row")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the cold path reached the wake's replacement reservation")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "the cold path recorded processes for a session it must not have started")
+        #expect(fixture.recorder.count("respawn-window") == 0,
+                "the cold path reached tmux: \(fixture.recorder.all)")
+        let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+        #expect(rows.count == 1, "the cold path created a second row")
+    }
+}
