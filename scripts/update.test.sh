@@ -1025,6 +1025,47 @@ EOF
     assert_not_contains "a failed build does not hand over" "handing over" "$out"
 }
 
+# THE REGRESSION: the update clone under $UPDATE_HOME is one long-lived
+# checkout every update reuses (docs/updating.md), and its build identity
+# sidecar used to be stamped BEFORE build_products ran. A build that then
+# failed left that sidecar naming the commit it never finished building,
+# right next to the still-old binaries a first, successful update had left
+# there — and nothing ever wrote it again to put that right, since the only
+# later write in the same clone is the next update's, success or failure.
+# Reproduce exactly that: one good update stamps commit A, then a second,
+# broken commit B fails to build, and the sidecar this clone carries must
+# still say A — not B, and not disappear.
+test_a_failed_build_leaves_the_previous_stamp_alone() {
+    local case_dir sidecar commit_a commit_b out
+    case_dir="$(mkcase stamp-on-failure-case)"
+    sidecar="$case_dir/home/tbd/updates/src/.build/release/TBDBuildIdentity.json"
+
+    run_update "$case_dir" --dry-run >/dev/null 2>&1
+    commit_a="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    if [ -f "$sidecar" ]; then
+        pass "the first, successful update stamps the sidecar"
+    else
+        fail "the first, successful update stamps the sidecar: missing $sidecar"
+    fi
+    assert_eq "the sidecar names the first build's commit" "$commit_a" \
+        "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$sidecar")"
+
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "error: it did not compile" >&2
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+    commit_b="$(git -C "$case_dir/remote" rev-parse HEAD)"
+
+    out="$(run_update "$case_dir" --dry-run 2>&1)"
+    assert_contains "the second, broken update still fetches the new commit" \
+        "latest main is $commit_b" "$out"
+    assert_eq "the sidecar still names the commit that actually built" "$commit_a" \
+        "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$sidecar")"
+}
+
 test_auto_logs_without_printing() {
     local case_dir out
     case_dir="$(mkcase auto-case)"
@@ -1637,6 +1678,7 @@ test_check_fallback_decides_ancestry_like_the_daemon
 test_dry_run_builds_but_installs_nothing
 test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
+test_a_failed_build_leaves_the_previous_stamp_alone
 test_auto_logs_without_printing
 test_no_wake_skips_the_stage
 test_no_app_skips_the_relaunch
