@@ -225,9 +225,15 @@ public enum ProviderIdentityRedaction {
                 redactNext = true
                 continue
             }
-            // Third shape: bare positional argument that looks like a secret.
-            // Check for well-known secret prefixes or high-entropy characteristics.
-            if looksLikeSecret(arg) {
+            // Third shape: a BARE POSITIONAL argument that looks like a
+            // secret — never one that starts with `-`. An argument this
+            // point is reached for already failed the known-secret-flag
+            // check above, so a dash-prefixed one here is an ordinary flag
+            // this registry entry happens to pass (`--use-http2-multiplexing`
+            // is exactly this shape: long, has a digit, no reason to hide
+            // it). Excluding it is what keeps this heuristic scoped to
+            // values, matching its own doc comment.
+            if !arg.hasPrefix("-"), looksLikeSecret(arg) {
                 out.append(redactedPlaceholder)
                 continue
             }
@@ -337,16 +343,39 @@ public enum ProviderIdentityRedaction {
             return false
         }
 
-        // Semver or version-like strings: typically X.Y.Z, often with more dots
-        let dotCount = arg.filter { $0 == "." }.count
-        if dotCount >= 2 {
-            // Looks like a version string; likely not a secret
+        // Semver-style version strings (X.Y.Z) are the one common dotted,
+        // long, letter-and-digit-bearing shape that isn't a secret — but
+        // several real dot-segmented token formats are just as dotted and
+        // must NOT get the same pass: a Discord bot token
+        // (`id.timestamp.hmac`) and a PASETO token (`v2.local.payload`)
+        // both carry 2+ dots with no known prefix. The distinguishing
+        // property is that every segment of a real version string is
+        // digits-only (optionally with a leading "v"); a token's segments
+        // are base64/hex-ish and contain letters a version segment never
+        // does. So the carve-out checks segment shape, not just dot count.
+        if isVersionLike(arg) {
             return false
         }
 
         // At this point: 20+ chars, has letters and digits, no excessive repetition,
         // not a UUID, not a version string. Looks like a plausible secret.
         return true
+    }
+
+    /// Whether `arg` is shaped like a semantic-version string: at least two
+    /// dot-separated segments, every one of them numeric once an optional
+    /// leading `v`/`V` is stripped from the first. Deliberately stricter than
+    /// "contains dots" — see the comment at its call site for the dotted
+    /// secret formats that distinction exists to keep unredacted.
+    private static func isVersionLike(_ arg: String) -> Bool {
+        var segments = arg.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count >= 2 else { return false }
+        if let first = segments.first, first.hasPrefix("v") || first.hasPrefix("V") {
+            segments[0] = first.dropFirst()
+        }
+        return segments.allSatisfy { segment in
+            !segment.isEmpty && segment.allSatisfy(\.isNumber)
+        }
     }
 
     /// Returns true if the argument looks like a UUID pattern

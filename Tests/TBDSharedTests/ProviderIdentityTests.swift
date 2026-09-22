@@ -263,4 +263,55 @@ struct ProviderIdentityTests {
             "f47ac10b-58cc-4372-a567-0e02b2c3d479",
         ])
     }
+
+    /// Review catch: the bare-positional heuristic didn't check for a
+    /// leading `-`, so a long, digit-bearing, unrecognized FLAG (not a
+    /// value) could be redacted right along with a real secret value. This
+    /// flag clears every other gate the heuristic applies (24 chars, has a
+    /// digit, no excessive repetition, no dots) and must still survive,
+    /// because it never reaches the value position the heuristic exists to
+    /// judge.
+    @Test("a long unrecognized flag is not mistaken for a bare positional secret")
+    func doesNotRedactLongFlags() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "--use-http2-multiplexing",
+        ])
+
+        #expect(redacted == ["--use-http2-multiplexing"])
+    }
+
+    /// Review catch: the original semver carve-out fired on dot COUNT alone
+    /// (`>= 2` dots), so any dotted, letter-bearing token format with no
+    /// known prefix rode the same exemption real version strings get — the
+    /// exact failure mode this whole heuristic exists to close. Both
+    /// fixtures below mimic real dot-segmented token shapes (a Discord bot
+    /// token's `id.timestamp.hmac`, a PASETO token's `v2.purpose.payload`)
+    /// and must be redacted despite their dots.
+    @Test("dot-segmented tokens with no known prefix are redacted, not exempted as semver")
+    func redactsDottedTokensDespiteSemverShapedDots() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "86274815234787328.1234567890.ABCDEFGHIJKLMNOPQRSTUV",
+            "v2.local.AbCdEfGhIjKlMnOpQrStUvWxYz1234567890AbCd",
+        ])
+
+        #expect(redacted == [
+            ProviderIdentityRedaction.redactedPlaceholder,
+            ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
+    /// The other half of the same fix: a genuine version string, long
+    /// enough to actually reach the version-shape check (a plain "1.2.3"
+    /// is short-circuited by the length floor before ever exercising it —
+    /// see `doesNotRedactOrdinaryPositionals`), must still be recognized
+    /// and left alone. The leading "v" is what gives this fixture a letter,
+    /// which is what clears the entropy gate and reaches the check at all.
+    @Test("a long v-prefixed version string is recognized as version-like, not a secret")
+    func doesNotRedactLongVersionString() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "v10.2000.30000.400000",
+        ])
+
+        #expect(redacted == ["v10.2000.30000.400000"])
+    }
 }
