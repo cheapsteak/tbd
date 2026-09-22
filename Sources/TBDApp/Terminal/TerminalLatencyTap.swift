@@ -235,29 +235,37 @@ final class TerminalLatencyTap: @unchecked Sendable {
     /// sitting there undrawn. One line per draw carries the tail exactly, since
     /// the oldest chunk in a frame is that frame's worst wait.
     ///
-    /// Both waits are floored at zero. `drawAt` is stamped on the main actor
-    /// and a feed timestamp on the IO thread, so a chunk that lands between the
-    /// two — after the stamp, before this takes the lock — is newer than the
-    /// draw it is being measured against, and the subtraction goes negative. A
-    /// negative wait is not a measurement of anything; zero is the truth for a
-    /// chunk that waited no time at all. The caller narrows that window by
-    /// stamping immediately before the call; the floor closes it. The count of
-    /// floored samples is deliberately not a field: the line format is pinned
-    /// by `scripts/diag/terminal-latency-report.py` and by the tests that
-    /// assert it verbatim, and the report script refuses a negative wait on its
-    /// own, so a build without this floor still cannot smuggle one into a
+    /// **The draw stamp is taken INSIDE the lock**, and that is what makes the
+    /// numbers honest rather than merely non-negative. A stamp taken by the
+    /// caller, or here before the lock, dates the draw earlier than a chunk the
+    /// IO thread appends while this call is still waiting for the lock: that
+    /// chunk is then reported with a floored-to-zero wait and, having been
+    /// taken out of the ring, cannot be reported by the next draw either. Under
+    /// the lock no feed can be later than the stamp, because `noteChunk` takes
+    /// the same lock to append. The read is one `systemUptime` in production —
+    /// a cheap, non-blocking counter read, and the same source the feed side
+    /// uses.
+    ///
+    /// Both waits keep a `max(0, …)` floor, as belt and braces for a build
+    /// whose `now` is not monotonic; with the stamp under the lock it is
+    /// unreachable in practice. The count of floored samples is deliberately
+    /// not a field: the line format is pinned by
+    /// `scripts/diag/terminal-latency-report.py` and by the tests that assert
+    /// it verbatim, and the report script refuses a negative wait on its own,
+    /// so a build without this floor still cannot smuggle one into a
     /// distribution.
-    func noteDrawWillBegin(at drawAt: Double, isOnScreen: Bool) {
-        var taken: (feeds: [Double], newest: Double, dropped: Int, parseMaxMs: Double)?
+    func noteDrawWillBegin(isOnScreen: Bool) {
+        var taken: (drawAt: Double, feeds: [Double], newest: Double, dropped: Int, parseMaxMs: Double)?
         state.withLockUnchecked { state in
             guard !state.pendingFeeds.isEmpty, let newest = state.newestFeed else { return }
-            taken = (state.pendingFeeds, newest, state.dropped, state.parseMaxMs)
+            taken = (now(), state.pendingFeeds, newest, state.dropped, state.parseMaxMs)
             state.pendingFeeds.removeAll(keepingCapacity: true)
             state.newestFeed = nil
             state.dropped = 0
             state.parseMaxMs = 0
         }
         guard let taken, let oldest = taken.feeds.first else { return }
+        let drawAt = taken.drawAt
         emit(
             "draw transport=\(transport.rawValue)"
                 + " terminal=\(terminalID.uuidString)"

@@ -180,11 +180,11 @@ class TBDTerminalView: TerminalView {
         super.viewWillDraw()
         if let tap = latencyTap {
             // The screen check walks the view hierarchy, so it is taken FIRST
-            // and the stamp is taken last: as an argument it would run between
-            // `tap.now()` and the call, and a chunk landing in that window gets
-            // a feed timestamp later than the draw stamp it is subtracted from.
+            // and the tap is called last. The tap stamps the draw itself, under
+            // its own lock — a stamp taken out here would predate any chunk the
+            // IO thread appends while the call waits for that lock.
             let isOnScreen = TerminalCommitLatencyProbe.isOnScreen(self)
-            tap.noteDrawWillBegin(at: tap.now(), isOnScreen: isOnScreen)
+            tap.noteDrawWillBegin(isOnScreen: isOnScreen)
         }
         guard let probe = TerminalCommitLatencyProbe.shared else { return }
         probe.recordDrawWillBegin(

@@ -90,7 +90,7 @@ struct TerminalLatencyTapTests {
         let (tap, clock, lines) = makeTap()
         feed(tap, clock, Array("hello".utf8))
         clock.advance(ms: 7)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
 
         #expect(lines.all.count == 1)
         let line = try #require(lines.all.first)
@@ -112,7 +112,7 @@ struct TerminalLatencyTapTests {
         clock.advance(ms: 2)
         feed(tap, clock, Array("c".utf8), parseMs: 2)
         clock.advance(ms: 5)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: false)
+        tap.noteDrawWillBegin(isOnScreen: false)
 
         #expect(lines.all.count == 1)
         let parsed = fields(try #require(lines.all.first))
@@ -125,30 +125,97 @@ struct TerminalLatencyTapTests {
         #expect(parsed["vis"] == "0")
     }
 
-    /// The draw stamp is taken on the main actor and a feed stamp on the IO
-    /// thread, so a chunk can land after the stamp and before the draw takes
-    /// the lock. It is then newer than the draw that reports it, and the
-    /// subtraction is negative. Zero is the truth for a chunk that waited no
-    /// time; a negative number is not a measurement of anything, and the
-    /// report script discards a line carrying one.
-    @Test("a chunk that lands after the draw stamp is floored at zero, never negative")
+    /// The floor is belt and braces, and this is the only way left to reach it.
+    ///
+    /// The draw stamps itself under the same lock `noteChunk` appends under, so
+    /// no feed a draw reports can be later than that draw's stamp — the window
+    /// that used to produce a negative wait is closed by construction. What
+    /// remains is a clock that is not monotonic, which only an injected one can
+    /// be: this rewinds the tap's `now` behind the feed it already took, and
+    /// the line must still carry zero rather than a negative number, because a
+    /// negative wait is not a measurement of anything and the report script
+    /// discards a line carrying one.
+    @Test("a wait against a clock that went backwards is floored at zero, never negative")
     func waitsAreFlooredAtZero() throws {
         let (tap, clock, lines) = makeTap()
-        let drawAt = clock.seconds
         clock.advance(ms: 3)
         feed(tap, clock, Array("late".utf8))
-        tap.noteDrawWillBegin(at: drawAt, isOnScreen: true)
+        clock.advance(ms: -3)
+        tap.noteDrawWillBegin(isOnScreen: true)
 
         let parsed = fields(try #require(lines.all.first))
         #expect(parsed["oldestms"] == "0.000")
         #expect(parsed["newestms"] == "0.000")
     }
 
+    /// The stamp belongs INSIDE the lock, and this is the difference that
+    /// makes: a chunk racing the draw is left for the draw that can honestly
+    /// report it, rather than folded into this one at a floored zero and then
+    /// gone from the ring.
+    ///
+    /// The `now` seam is the wedge. It signals that the stamp is being taken
+    /// and then waits, so a second thread's `noteChunk` runs exactly in the
+    /// window between the stamp and the report. With the stamp under the lock
+    /// that feed CANNOT run there — it blocks on the same lock — so this draw
+    /// reports one chunk and the next draw reports the late one with a real
+    /// wait. Stamped before the lock, the late chunk joins this frame with a
+    /// floored-to-zero wait and the next draw has nothing left to report.
+    @Test("a chunk racing the draw stamp is left for the next draw, not floored into this one")
+    func aChunkRacingTheStampIsLeftForTheNextDraw() throws {
+        let lines = Lines()
+        let stampStarted = DispatchSemaphore(value: 0)
+        let feedReturned = DispatchSemaphore(value: 0)
+        let feederFinished = DispatchSemaphore(value: 0)
+        let stamps = Clock()
+        let tap = TerminalLatencyTap(
+            terminalID: UUID(),
+            transport: .holder,
+            now: {
+                // Only the first stamp opens the window; the second draw just
+                // needs a later time to report the late chunk against.
+                if stamps.seconds == 0 {
+                    stamps.seconds = 0.010
+                    stampStarted.signal()
+                    // Times out under the fix, because the feed it is waiting
+                    // for is blocked on the lock this call is holding. A
+                    // generous bound: it is a floor on the race window, never
+                    // an assertion about how fast anything runs.
+                    _ = feedReturned.wait(timeout: .now() + 0.25)
+                    return 0.010
+                }
+                return 0.030
+            },
+            emit: { lines.append($0) })
+
+        tap.noteChunk(Array("early".utf8)[...], feedAt: 0, feedReturnedAt: 0)
+        DispatchQueue.global().async {
+            stampStarted.wait()
+            // Fed at 20 ms, which is AFTER the 10 ms stamp: the shape that used
+            // to produce a floored zero.
+            tap.noteChunk(Array("late".utf8)[...], feedAt: 0.020, feedReturnedAt: 0.020)
+            feedReturned.signal()
+            feederFinished.signal()
+        }
+
+        tap.noteDrawWillBegin(isOnScreen: true)
+        #expect(feederFinished.wait(timeout: .now() + 2) == .success)
+        tap.noteDrawWillBegin(isOnScreen: true)
+
+        #expect(lines.all.count == 2)
+        let first = fields(try #require(lines.all.first))
+        #expect(first["chunks"] == "1")
+        #expect(first["oldestms"] == "10.000")
+        #expect(first["newestms"] == "10.000")
+        let second = fields(try #require(lines.all.last))
+        #expect(second["chunks"] == "1")
+        #expect(second["oldestms"] == "10.000")
+    }
+
     @Test("a draw with no chunks waiting emits nothing — a caret blink is silent")
     func drawWithNoChunksIsSilent() {
         let (tap, clock, lines) = makeTap()
         clock.advance(ms: 20)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
         #expect(lines.all.isEmpty)
     }
 
@@ -157,9 +224,9 @@ struct TerminalLatencyTapTests {
         let (tap, clock, lines) = makeTap()
         feed(tap, clock, Array("a".utf8))
         clock.advance(ms: 3)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
         clock.advance(ms: 3)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
         #expect(lines.all.count == 1)
     }
 
@@ -179,7 +246,7 @@ struct TerminalLatencyTapTests {
             feed(tap, clock, Array("x".utf8))
             clock.advance(ms: 1)
         }
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: false)
+        tap.noteDrawWillBegin(isOnScreen: false)
 
         #expect(lines.all.count == 1)
         let parsed = fields(try #require(lines.all.first))
@@ -195,7 +262,7 @@ struct TerminalLatencyTapTests {
         let (tap, clock, lines) = makeTap(terminalID: id, transport: .tmux)
         feed(tap, clock, Array("a".utf8), parseMs: 0.5)
         clock.advance(ms: 1.5)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
 
         #expect(
             lines.all == [
@@ -453,7 +520,7 @@ struct TerminalLatencyTapTests {
         holder.setTap(tap)
         holder.feed(Array("TAPPED-MARKER-9b2\r\n".utf8)[...])
         clock.advance(ms: 6)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
 
         let text = String(data: view.getBufferAsData(), encoding: .utf8) ?? ""
         #expect(text.contains("TAPPED-MARKER-9b2"))
@@ -468,7 +535,7 @@ struct TerminalLatencyTapTests {
         holder.setTap(tap)
         holder.feed(Array("dropped".utf8)[...])
         clock.advance(ms: 9)
-        tap.noteDrawWillBegin(at: clock.seconds, isOnScreen: true)
+        tap.noteDrawWillBegin(isOnScreen: true)
         #expect(lines.all.isEmpty)
     }
 }
