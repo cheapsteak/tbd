@@ -237,6 +237,53 @@ struct RemoteAttachFocusTests {
             """)
     }
 
+    /// Fires the claim a spawning attach child makes, wired the way
+    /// `RemoteAttachPager.makeTerminalView` wires it, without spawning one.
+    @MainActor
+    private func fireSpawnClaim(_ fixture: Fixture) {
+        let config = RemoteProviderConfig(name: Self.selected.provider, exec: "/usr/bin/true")
+        let attach = RemoteAttachPager.makeTerminalView(
+            for: RemoteAttachMountKey(selection: Self.selected, generation: 0),
+            provider: config, appState: fixture.state)
+        let coordinator = LocalPTYTerminalRepresentable.Coordinator()
+        coordinator.onClaimFocus = attach.onClaimFocus
+        coordinator.claimSpawnFocus(fixture.view)
+    }
+
+    @MainActor
+    @Test("a pane that spawns while its Log tab is shown leaves focus alone")
+    func aSpawnBehindTheLogTabLeavesFocusAlone() async throws {
+        let fixture = Fixture(mounted: true, slotShown: false)
+        defer { fixture.tearDown() }
+
+        fixture.select(Self.selected)
+        await drainMainQueue()
+        fixture.focusElsewhere()
+
+        fireSpawnClaim(fixture)
+        await drainMainQueue()
+        await drainMainQueue()
+
+        #expect(fixture.window.firstResponder === fixture.sink, """
+            the attach child's spawn took focus into a pane the detail view keeps transparent: \
+            "View Log" on a never-attached session would send typing to it unseen
+            """)
+    }
+
+    @MainActor
+    @Test("a pane that spawns while its attach slot is shown takes focus")
+    func aSpawnInTheShownSlotClaimsFocus() async throws {
+        let fixture = Fixture(mounted: true)
+        defer { fixture.tearDown() }
+
+        fixture.select(Self.selected)
+        try await fixture.waitForFirstResponder()
+        fixture.focusElsewhere()
+
+        fireSpawnClaim(fixture)
+        try await fixture.waitForFirstResponder()
+    }
+
     /// The pager's registration wiring, and the identity guard a reconnect
     /// depends on: the replacement generation's view mounts before the
     /// superseded one is dismantled, so the superseded dismantle must leave

@@ -37,6 +37,9 @@ struct RemoteAttachTerminalView: View {
     /// view as this selection's focus target while it is mounted.
     var onViewMounted: ((TBDTerminalView) -> Void)?
     var onViewDismantled: ((TBDTerminalView) -> Void)?
+    /// Forwarded to `LocalPTYTerminalRepresentable`: the pager gates the
+    /// spawn-time focus claim on the attach slot being shown.
+    var onClaimFocus: (() -> Void)?
     @EnvironmentObject var appearance: AppearanceSettings
 
     /// Whether the local `attach` process ended in the UNEXPECTED class —
@@ -67,7 +70,8 @@ struct RemoteAttachTerminalView: View {
             onExit: onDetached,
             onStarted: onStarted,
             onViewMounted: onViewMounted,
-            onViewDismantled: onViewDismantled
+            onViewDismantled: onViewDismantled,
+            onClaimFocus: onClaimFocus
         )
     }
 

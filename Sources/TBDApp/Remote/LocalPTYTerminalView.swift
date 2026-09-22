@@ -50,6 +50,13 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// reason as `onStarted`.
     var onViewMounted: ((TBDTerminalView) -> Void)?
     var onViewDismantled: ((TBDTerminalView) -> Void)?
+    /// Replaces the spawn-time focus claim. The attach pane routes it through
+    /// `AppState.focusRemoteTerminalAfterSelectionChange`, because a pane can
+    /// spawn while its detail view keeps it transparent (the Log tab, a
+    /// detached or sign-in prompt), and an ungated claim there would send
+    /// typing to the remote session unseen. Nil — the remediation sheet, which
+    /// is always visible while it runs — claims unconditionally.
+    var onClaimFocus: (() -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -77,6 +84,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         context.coordinator.onExit = onExit
         context.coordinator.onStarted = onStarted
         context.coordinator.onViewDismantled = onViewDismantled
+        context.coordinator.onClaimFocus = onClaimFocus
         onViewMounted?(tv)
 
         // TBDTerminalView fires `onReady` exactly once, the first time it's
@@ -107,6 +115,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// representable's `onStarted`.
         var onStarted: ((Date) -> Void)?
         var onViewDismantled: ((TBDTerminalView) -> Void)?
+        /// See the representable's `onClaimFocus`.
+        var onClaimFocus: (() -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,
@@ -177,6 +187,18 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
                 _ = ioctl(process.childfd, TIOCSWINSZ, &size)
             }
 
+            claimSpawnFocus(terminalView)
+        }
+
+        /// The claim `start` makes once its child is spawned. Separate from
+        /// `start` so `RemoteAttachFocusTests` can fire it without spawning a
+        /// child.
+        @MainActor
+        func claimSpawnFocus(_ terminalView: TerminalView) {
+            if let onClaimFocus {
+                onClaimFocus()
+                return
+            }
             DispatchQueue.main.async { [weak terminalView] in
                 terminalView?.window?.makeFirstResponder(terminalView)
             }
