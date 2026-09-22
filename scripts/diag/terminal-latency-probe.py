@@ -34,8 +34,14 @@ On this machine a load swing from 7 to 139 once faked a threefold effect that
 vanished under matched load. So this driver INTERLEAVES the arms sample by
 sample -- both arms see the same machine, sample for sample -- and records
 `os.getloadavg()[0]` alongside every request. The report splits echo figures
-into idle and load bands and never pools them. Nothing heavy may run on the
-machine during an idle arm, and no build may run during either.
+into idle and load bands and never pools them.
+
+ONE invocation has to span both bands. The flatness verdict is p90 load over
+p90 idle, computed from the single capture and the single load map this run
+produces, so a band that is empty here cannot be filled by another run: start
+at idle and induce load partway through, or run long enough to cross a load
+change. Nothing heavy may run during the idle stretch, and no build may run at
+any point.
 
 SETUP THIS DRIVER CANNOT DO FOR YOU
 -----------------------------------
@@ -108,13 +114,29 @@ def runtime_dir() -> Path:
     return tbd_home() / "runtime"
 
 
+# A daemon that is wedged, or a `log show` against a store this run has filled,
+# would otherwise hang this script with no output and no way to tell it apart
+# from a long capture. Both bounds are far above what either call takes when it
+# is healthy, so neither can fire on a slow-but-working machine.
+TERMINAL_LIST_TIMEOUT_SECONDS = 30
+LOG_SHOW_TIMEOUT_SECONDS = 120
+
+
 def terminal_rows(tbd: str, worktree: str) -> list[dict]:
-    result = subprocess.run(
-        [tbd, "terminal", "list", "--json", worktree],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [tbd, "terminal", "list", "--json", worktree],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=TERMINAL_LIST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"`{tbd} terminal list --json {worktree}` did not answer within"
+            f" {TERMINAL_LIST_TIMEOUT_SECONDS}s. The daemon is probably wedged or not"
+            " running; nothing has been written to any terminal."
+        ) from None
     return json.loads(result.stdout)
 
 
@@ -204,20 +226,30 @@ def remove_request_files(directory: Path) -> None:
 
 def capture_log(since: datetime.datetime) -> str:
     stamp = since.strftime("%Y-%m-%d %H:%M:%S")
-    result = subprocess.run(
-        [
-            "log",
-            "show",
-            "--start",
-            stamp,
-            "--info",
-            "--predicate",
-            'subsystem == "com.tbd.app" AND category == "terminallatency"',
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "log",
+                "show",
+                "--start",
+                stamp,
+                "--info",
+                "--predicate",
+                'subsystem == "com.tbd.app" AND category == "terminallatency"',
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=LOG_SHOW_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"`log show` did not return within {LOG_SHOW_TIMEOUT_SECONDS}s, so this run"
+            " has no capture to report. The samples were taken and are in the log store;"
+            " re-run `log show --start"
+            f" '{stamp}' --info --predicate 'subsystem == \"com.tbd.app\" AND category =="
+            " \"terminallatency\"'` by hand and pipe it to terminal-latency-report.py."
+        ) from None
     return result.stdout
 
 
@@ -362,12 +394,14 @@ def main() -> int:
     # so another panel on the same transport would otherwise pay this arm's
     # debts — and an arm that answered nothing could read as complete.
     incomplete = []
+    answered_counts: dict[str, int] = {}
     for arm in ARMS:
         wanted = terminals[arm].lower()
         answered = len([
             e for e in capture.echoes
             if e.transport == arm and e.terminal.lower() == wanted
         ])
+        answered_counts[arm] = answered
         if requested[arm] and answered != requested[arm]:
             incomplete.append(f"{arm}: {answered} echoes for {requested[arm]} requests")
 
@@ -386,7 +420,34 @@ def main() -> int:
             )
             load_map[arm] = {}
 
-    if incomplete and not interrupted:
+    # An interrupt explains EXACTLY ONE missing echo per arm: the request that
+    # was in flight when Ctrl-C landed. It does not explain two, and it does
+    # not explain an arm that answered more than it was asked — those are the
+    # same unexplained mismatch an uninterrupted run refuses to report, and a
+    # run that stopped early is not a licence to publish them as ordinary
+    # figures. So the interrupt widens the tolerance by one sample; it does not
+    # remove the check.
+    explained_by_interrupt = interrupted and all(
+        0 <= requested[arm] - answered_counts[arm] <= 1 for arm in ARMS
+    )
+
+    # Whatever else happens, a reader of an interrupted run's figures must know
+    # it was interrupted BEFORE they read a number. The banner names each arm's
+    # counts, goes to stderr, and is handed to the report so it sits in the
+    # header above the table too.
+    note = None
+    if interrupted:
+        counts = ", ".join(
+            f"{arm} {answered_counts[arm]}/{requested[arm]}" for arm in ARMS
+        )
+        note = (
+            "!!!!  INTERRUPTED — this run did not finish. Answered/requested: "
+            + counts
+            + "  !!!!"
+        )
+        print(f"\n{note}", file=sys.stderr)
+
+    if incomplete and not explained_by_interrupt:
         print("\nREFUSING TO REPORT — an arm's echoes do not match its requests:", file=sys.stderr)
         for line in incomplete:
             print(f"  {line}", file=sys.stderr)
@@ -417,6 +478,7 @@ def main() -> int:
         idle_max=args.idle_max,
         load_map=load_map,
         terminals=set(terminals.values()),
+        note=note,
     )
     return 0
 

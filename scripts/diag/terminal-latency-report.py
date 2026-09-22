@@ -299,7 +299,15 @@ def report(
     idle_max: float | None = None,
     load_map: dict | None = None,
     terminals: set[str] | None = None,
+    note: str | None = None,
 ) -> None:
+    """Print the run's figures.
+
+    `note` is a banner the CALLER knows and this function cannot: whether the
+    run that produced this capture finished. It is printed with the header,
+    above every figure, so a reader cannot reach the table without having read
+    it.
+    """
     # A capture is whatever the app logged in the window, which includes every
     # OTHER panel that happened to be open. Restricting to the probed ids is
     # the only way a pooled figure is known to be one terminal's.
@@ -320,6 +328,8 @@ def report(
         "draw = oldest chunk's wait before its panel drew (does NOT compare transports)",
         file=out,
     )
+    if note:
+        print(f"\n{note}", file=out)
     if terminals is not None:
         # Echoed as given, not as compared: the lowercase form is an
         # implementation detail of the match, and a reader is checking these
@@ -396,9 +406,15 @@ def report(
             f" (excluded from both bands)",
             file=out,
         )
-        if idle and under_load:
+        # The two verdicts need different things, so they are printed under
+        # different conditions. Flatness is a RATIO and needs both bands; the
+        # absolute bound is a statement about the load band alone, and a
+        # capture taken entirely under load -- an arm that never saw an idle
+        # minute -- can still answer it. Gating both on `idle and under_load`
+        # silently withheld the one verdict such a capture supports.
+        load_p90 = percentile(sorted(under_load), 0.90) if under_load else None
+        if idle and load_p90 is not None:
             idle_p90 = percentile(sorted(idle), 0.90)
-            load_p90 = percentile(sorted(under_load), 0.90)
             ratio = load_p90 / idle_p90 if idle_p90 else float("inf")
             flat = "WITHIN" if ratio <= 2.0 else "OVER"
             print(
@@ -406,6 +422,7 @@ def report(
                 f" ({flat} the 2x bound)",
                 file=out,
             )
+        if load_p90 is not None:
             bound = "WITHIN" if load_p90 <= 5.0 else "OVER"
             print(
                 f"  {transport + ' absolute':<22} p90 under load = {load_p90:.3f} ms"
@@ -648,6 +665,33 @@ def self_test() -> int:
             failures.append(f"unknown-load report is missing {needle!r}")
     if "0.82x" in unknown_text:
         failures.append("an unknown-load sample was banded as idle")
+
+    # A capture taken entirely under load -- an arm that never saw an idle
+    # minute -- still answers the absolute bound, and must. The flatness ratio
+    # has no denominator here and must stay absent rather than be invented.
+    load_only_map = {
+        "tmux": {"1": 30.0, "2": 31.0, "3": 32.0, "4": 33.0},
+        "holder": {"1": 30.0, "2": 31.0, "3": 32.0, "4": 33.0},
+    }
+    load_only = io.StringIO()
+    report(capture, out=load_only, idle_max=8.0, load_map=load_only_map)
+    load_only_text = load_only.getvalue()
+    for needle in (
+        "p90 under load = 11.000 ms (OVER the 5 ms bound)",
+        "p90 under load = 1.100 ms (WITHIN the 5 ms bound)",
+        "tmux idle              (no samples)",
+    ):
+        if needle not in load_only_text:
+            failures.append(f"load-only report is missing {needle!r}")
+    if "flatness" in load_only_text:
+        failures.append("a load-only capture printed a flatness ratio with no idle band")
+
+    # The driver's incomplete banner reaches the reader through the header,
+    # above every figure.
+    noted = io.StringIO()
+    report(capture, out=noted, note="INTERRUPTED -- tmux answered 4 of 5")
+    if "INTERRUPTED -- tmux answered 4 of 5" not in noted.getvalue():
+        failures.append("report did not print the caller's note")
 
     # Terminals: unfiltered, a second panel on the same arm is broken out;
     # filtered, it is gone from both the echo and the draw figures.

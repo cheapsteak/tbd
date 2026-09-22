@@ -155,7 +155,12 @@ typed into by this path. It refuses the same way for a write its own outbound
 path would swallow — a snapshot preamble in flight, a handback collecting mode
 replies, a panel whose attach has come apart, bytes the queue reports reached
 no transport — because a token the transport never saw is not a measurement of
-the transport. The driver holds the second half of that line: it verifies each
+the transport. And a holder panel does not offer the probe at all until its
+`attach.ready` has been acked: until then the daemon is still the session's
+writer and still draining the pty, so a request in that window is refused as
+`unknownterminal` rather than answered by writing into a descriptor this panel
+does not own yet. The passive tap goes in earlier, before the reader starts,
+because it only observes. The driver holds the second half of that line: it verifies each
 id's transport and kind against the daemon before the first sample, refuses
 anything else, and only ever names those two ids. Creating the `cat` sessions
 and closing them are the operator's own two commands in the run recipe; the
@@ -268,14 +273,30 @@ and the driver script owns the pacing.
   second copy after the match is ignored; a new request retires the pending
   token as lost; a request for a non-shell terminal is refused with the
   reason.
+- The draw stamp is taken under the lock: a chunk fed from another thread in
+  the window a stamp taken outside it would have opened is reported by the
+  NEXT draw, with a real wait, rather than folded into this one at zero and
+  lost. The `max(0, …)` floor keeps a test of its own, reached by rewinding
+  the injected clock, since nothing else can now produce a negative wait.
 - The request files: two waiting at once are both consumed, in name order,
   each removed before its probe runs, and a file the instrument does not own
-  is left alone.
-- The panel's own refusals, against a real coordinator: a probe whose write
-  reaches no transport is refused as `unwritable` and retires its token
-  silently, a panel whose holder has been cleared is refused as `noview`, and
-  an attach the daemon refuses withdraws the panel's registration — each with
-  the live-panel positive control beside it.
+  is left alone. The directory is shared, so an entry that is not a small
+  regular file is removed and refused as `malformed` without being read: a
+  symlink wearing a request file's name is refused with its target untouched,
+  and an oversized file is refused beside a within-cap one that is answered.
+- The panel's own refusals, against a real coordinator driving the closure the
+  panel itself registered — each beside the positive control that makes it
+  evidence: `unwritable` (the write reached no transport, and the token is
+  retired silently), `noview` (the holder was cleared), `notshell` (the row
+  says agent, and the same panel answers once it says shell),
+  `ingestingsnapshot` (a preamble is in flight, driven through `feedSnapshot`
+  and controlled by the main-queue turn that lowers it), and
+  `handbackinflight` (the mode-reply collector is up).
+- The probe registration is deferred past the holder attach's ack: a request
+  landing while `attach.ready` is suspended is refused `unknownterminal` and
+  puts no byte on the pty, and the same request lands once the ack returns.
+  An attach the daemon refuses registers no probe and withdraws the passive
+  tap from the view.
 - The seam: `TerminalViewHolder.feed` with no tap feeds the view exactly as
   `withView` did, and with the view cleared records nothing.
 - The line format, pinned.
@@ -290,9 +311,14 @@ and the driver script owns the pacing.
    it on, in a scratch worktree, and confirm their transports from
    `tbd terminal list --json`. The driver re-verifies both before its first
    sample and refuses any id whose transport or kind is not what it expects.
-3. Run the driver at idle; run it again under load, or let it run across a
-   load change and bucket. Nothing heavy may run on the machine during the
-   idle arm, and no build may run during either.
+3. Run the driver **once**, in a single invocation that spans both load
+   bands. The flatness verdict is `p90 load / p90 idle` computed from one
+   capture against one load map, so both bands have to come from that one
+   run: start it while the machine is idle and induce load partway through,
+   or run it long enough to cross a load change that is coming anyway. Two
+   separate invocations produce two captures and two load maps, and the
+   reporter can compare neither pair. Nothing heavy may run during the idle
+   stretch, and no build may run at any point.
 4. Read the report. Graduation is a judgement over the four conditions the
    transport spec lists (workload, sample size, absolute bound, flatness
    bound); this instrument supplies the numbers, not the verdict.
