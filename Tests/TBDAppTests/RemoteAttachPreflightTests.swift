@@ -89,6 +89,24 @@ struct RemoteAttachPreflightTests {
         #expect(diagnosis == .providerNotRegistered(provider: "ghost"))
     }
 
+    /// Review catch, pinned deliberately: `sessions` is a polled mirror, not
+    /// the session's source of truth. A session id absent from every
+    /// provider's mirror — no row for the selected provider, and no OTHER
+    /// provider claiming it either — is not a diagnosis of its own; it's the
+    /// ordinary shape of "selected right after creation, before the mirror
+    /// caught up". The selected, registered, attach-capable, executable
+    /// provider still resolves `.ready`. Only an actual OTHER-provider claim
+    /// (`neverFallsBackToAnotherProvider` above) is the failure worth naming.
+    @Test("a session id absent from every provider's mirror still resolves through the selected provider")
+    func resolvesReadyWhenSessionIsInNoMirrorYet() {
+        let diagnosis = resolve(
+            provider: "agentbox",
+            providers: [provider("agentbox")],
+            sessions: [])
+
+        #expect(diagnosis.readyConfig?.name == "agentbox")
+    }
+
     @Test("a provider that does not declare attach is not invoked for it")
     func respectsTheAttachCapability() {
         let diagnosis = resolve(

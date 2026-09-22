@@ -132,6 +132,18 @@ enum RemoteAttachPreflight {
                 requested: selection.provider, actual: owner.provider,
                 sessionID: selection.sessionID)
         }
+        // `mineHasSession` being false with no OTHER owner either — the id
+        // is absent from `sessions` entirely — is deliberately not a
+        // diagnosis of its own, and deliberately does not block resolution
+        // below. `sessions` is a polled mirror, not the session's source of
+        // truth: a session selected the moment it was created, or right
+        // after a provider republish that hasn't landed yet, has no row
+        // anywhere for a beat that is entirely normal. `sessions` exists
+        // here for exactly one positive fact — some OTHER provider claims
+        // this id, which is the wrong-control-plane case worth naming — and
+        // has no business gating the selected provider's own resolution:
+        // that would turn an ordinary mirror lag into a spurious refusal to
+        // attach through the provider the user actually asked for.
 
         guard provider.describe?.capabilities.contains("attach") == true else {
             return .attachUnsupported(provider: provider.config.name)
