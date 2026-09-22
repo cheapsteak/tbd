@@ -87,6 +87,10 @@ def load_report_module():
     attribute '__dict__'` on Python 3.12+.
     """
     spec = importlib.util.spec_from_file_location("terminal_latency_report", REPORT_PATH)
+    if spec is None or spec.loader is None:
+        raise SystemExit(
+            f"cannot import {REPORT_PATH} — this driver only reports through it."
+        )
     module = importlib.util.module_from_spec(spec)
     sys.modules["terminal_latency_report"] = module
     spec.loader.exec_module(module)
@@ -196,8 +200,13 @@ def capture_log(since: datetime.datetime) -> str:
 
 
 def run_samples(
-    directory: Path, terminals: dict[str, str], samples: int, gap_ms: float
-) -> dict[str, dict[str, float]]:
+    directory: Path,
+    terminals: dict[str, str],
+    samples: int,
+    gap_ms: float,
+    load_map: dict[str, dict[str, float]],
+    requested: dict[str, int],
+) -> None:
     """Interleave the arms A/B/B/A..., one request at a time.
 
     A/B/B/A rather than a plain alternation: a strict A,B,A,B order gives one
@@ -208,18 +217,27 @@ def run_samples(
 
     The app holds at most one pending token per panel and retires an older one
     as lost, so requests are never overlapped within an arm.
+
+    `load_map` and `requested` are OWNED BY THE CALLER and filled in place. An
+    interrupt is the normal way a long run ends, and a return value would take
+    every reading taken before it with it — the caller would then report a full
+    capture against an empty map, banding every sample as unknown-load.
     """
-    load_map: dict[str, dict[str, float]] = {arm: {} for arm in ARMS}
     gap = gap_ms / 1000.0
     seq = 0
     for index in range(samples):
         order = ARMS if index % 2 == 0 else tuple(reversed(ARMS))
         for arm in order:
             seq += 1
-            load_map[arm][str(seq)] = os.getloadavg()[0]
+            # Counted before the write and recorded after it, so a request
+            # interrupted mid-write leaves the two disagreeing — which is what
+            # `main` refuses to band on, rather than silently banding a sample
+            # whose load it never saw.
+            requested[arm] += 1
+            load = os.getloadavg()[0]
             write_request(directory, terminals[arm], seq)
+            load_map[arm][str(seq)] = load
             time.sleep(gap)
-    return load_map
 
 
 def main() -> int:
@@ -275,9 +293,12 @@ def main() -> int:
     previous_handler = signal.signal(signal.SIGINT, on_sigint)
 
     started = datetime.datetime.now() - datetime.timedelta(seconds=2)
+    # Owned here, not returned: an interrupt must not take the readings with
+    # it. Everything recorded up to the interrupt is still a measurement.
     load_map: dict[str, dict[str, float]] = {arm: {} for arm in ARMS}
+    requested: dict[str, int] = {arm: 0 for arm in ARMS}
     try:
-        load_map = run_samples(directory, terminals, args.samples, args.gap_ms)
+        run_samples(directory, terminals, args.samples, args.gap_ms, load_map, requested)
     except KeyboardInterrupt:
         print("\ninterrupted — reporting what was collected", file=sys.stderr)
     finally:
@@ -299,10 +320,24 @@ def main() -> int:
     # when they went missing.
     incomplete = []
     for arm in ARMS:
-        requested = len(load_map[arm])
         answered = len([e for e in capture.echoes if e.transport == arm])
-        if requested and answered != requested:
-            incomplete.append(f"{arm}: {answered} echoes for {requested} requests")
+        if requested[arm] and answered != requested[arm]:
+            incomplete.append(f"{arm}: {answered} echoes for {requested[arm]} requests")
+
+    # An arm with a load reading missing for some request cannot be banded:
+    # the samples it would put in a band are not the samples it measured. Drop
+    # that arm's readings so the report shows them as unbanded rather than
+    # quietly assigning them a load nobody recorded.
+    for arm in ARMS:
+        if requested[arm] != len(load_map[arm]):
+            print(
+                f"\nNOT BANDING {arm}: {requested[arm]} request(s) issued but"
+                f" {len(load_map[arm])} load reading(s) recorded — a sample whose load"
+                " is unknown belongs to neither band, so this arm's figures are"
+                " reported pooled.",
+                file=sys.stderr,
+            )
+            load_map[arm] = {}
 
     if incomplete and not interrupted:
         print("\nREFUSING TO REPORT — an arm's echoes do not match its requests:", file=sys.stderr)
@@ -321,7 +356,15 @@ def main() -> int:
             print(f"  refusals seen: {dict(capture.refused)}", file=sys.stderr)
         return 1
 
-    report_module.report(capture, idle_max=args.idle_max, load_map=load_map)
+    # The capture is the whole app's window, so it holds every panel that was
+    # open. Only these two were probed; anything else in it is another panel's
+    # traffic and would pool into the arm it shares a transport with.
+    report_module.report(
+        capture,
+        idle_max=args.idle_max,
+        load_map=load_map,
+        terminals=set(terminals.values()),
+    )
     return 0
 
 

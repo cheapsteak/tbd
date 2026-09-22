@@ -34,7 +34,13 @@ WHAT IT CANNOT SHOW
 - A fair comparison without a fair run. On this machine a load swing from 7 to
   139 once faked a threefold effect that vanished under matched load, so
   samples are never pooled across load bands: pass `--load-map` and
-  `--idle-max` and the echo figures split into idle and load.
+  `--idle-max` and the echo figures split into idle and load. A sample whose
+  load was never recorded joins NEITHER band and is counted on its arm's
+  `no load recorded` line.
+- Which panel a number came from, unless you say. A capture holds every panel
+  that was open, so `--terminals` restricts the echo and draw figures to the
+  ids that were probed; without it, an arm whose lines came from more than one
+  terminal is broken out per terminal so the contamination is visible.
 - Anything under the Metal renderer (`viewWillDraw` is not on that frame
   path, so no draw lines are emitted at all) or on the control-mode attach
   path.
@@ -215,12 +221,43 @@ def load_for(load_map: dict | None, transport: str, seq: int) -> float | None:
     return None if value is None else float(value)
 
 
+def short_terminal(terminal: str) -> str:
+    """A terminal id short enough to label a column with, still recognisable.
+
+    Ids are opaque to this script; uppercase UUIDs are only what the app
+    happens to emit today.
+    """
+    return terminal if len(terminal) <= 14 else f"{terminal[:8]}..{terminal[-4:]}"
+
+
+def by_terminal(records: list, transport: str) -> dict[str, list]:
+    """One transport's records, grouped by the terminal that produced them."""
+    grouped: dict[str, list] = {}
+    for record in records:
+        if record.transport != transport:
+            continue
+        grouped.setdefault(record.terminal, []).append(record)
+    return grouped
+
+
 def report(
     capture: Capture,
     out=sys.stdout,
     idle_max: float | None = None,
     load_map: dict | None = None,
+    terminals: set[str] | None = None,
 ) -> None:
+    # A capture is whatever the app logged in the window, which includes every
+    # OTHER panel that happened to be open. Restricting to the probed ids is
+    # the only way a pooled figure is known to be one terminal's.
+    wanted = {t.lower() for t in terminals} if terminals is not None else None
+    if wanted is not None:
+        echoes = [e for e in capture.echoes if e.terminal.lower() in wanted]
+        draws = [d for d in capture.draws if d.terminal.lower() in wanted]
+    else:
+        echoes = capture.echoes
+        draws = capture.draws
+
     print("terminal transport latency, milliseconds", file=out)
     print(
         "echo = keystroke round trip through the real input path (compares transports)",
@@ -230,6 +267,14 @@ def report(
         "draw = oldest chunk's wait before its panel drew (does NOT compare transports)",
         file=out,
     )
+    if terminals is not None:
+        # Echoed as given, not as compared: the lowercase form is an
+        # implementation detail of the match, and a reader is checking these
+        # against the ids they passed.
+        print(
+            "\nonly terminals: " + ", ".join(sorted(short_terminal(t) for t in terminals)),
+            file=out,
+        )
     if capture.malformed:
         print(
             f"\n!! {capture.malformed} line(s) carried the verb but not its fields --"
@@ -237,28 +282,53 @@ def report(
             file=out,
         )
 
-    banded = idle_max is not None and load_map is not None
-
     print("\nECHO", file=out)
     for transport in TRANSPORTS:
-        samples = [e for e in capture.echoes if e.transport == transport]
+        samples = [e for e in echoes if e.transport == transport]
         if not samples and not capture.lost.get(transport):
             continue
         print(format_distribution(f"{transport} all", distribution([e.ms for e in samples])), file=out)
         lost = capture.lost.get(transport, 0)
         if lost:
             print(f"  {transport + ' lost':<22} {lost} token(s) never came back", file=out)
-        if not banded:
+        # Unfiltered, an arm's figures may pool two panels. Break them out so
+        # that is visible rather than assumed away.
+        groups = by_terminal(samples, transport)
+        if wanted is None and len(groups) > 1:
+            for terminal, group in sorted(groups.items()):
+                print(
+                    format_distribution(
+                        f"{transport} {short_terminal(terminal)}",
+                        distribution([e.ms for e in group]),
+                    ),
+                    file=out,
+                )
+        # Both or neither — `main` refuses the half-given form — and naming
+        # each one here is also what lets a type checker see that the
+        # comparison below is against a number.
+        if idle_max is None or load_map is None:
             continue
-        idle = [e.ms for e in samples if (load_for(load_map, transport, e.seq) or 0.0) <= idle_max]
-        under_load = [
-            e.ms
-            for e in samples
-            if load_for(load_map, transport, e.seq) is not None
-            and load_for(load_map, transport, e.seq) > idle_max
-        ]
+        # A sample whose load was never recorded belongs to NEITHER band. It
+        # used to be counted as idle, which quietly put an under-load sample in
+        # the denominator of the flatness ratio.
+        idle: list[float] = []
+        under_load: list[float] = []
+        unknown = 0
+        for sample in samples:
+            load = load_for(load_map, transport, sample.seq)
+            if load is None:
+                unknown += 1
+            elif load <= idle_max:
+                idle.append(sample.ms)
+            else:
+                under_load.append(sample.ms)
         print(format_distribution(f"{transport} idle", distribution(idle)), file=out)
         print(format_distribution(f"{transport} load", distribution(under_load)), file=out)
+        print(
+            f"  {transport + ' unbanded':<22} no load recorded: {unknown}"
+            f" (excluded from both bands)",
+            file=out,
+        )
         if idle and under_load:
             idle_p90 = percentile(sorted(idle), 0.90)
             load_p90 = percentile(sorted(under_load), 0.90)
@@ -283,7 +353,7 @@ def report(
 
     print("\nDRAW (oldest chunk's wait)", file=out)
     for transport in TRANSPORTS:
-        arm = [d for d in capture.draws if d.transport == transport]
+        arm = [d for d in draws if d.transport == transport]
         if not arm:
             continue
         visible = [d for d in arm if d.visible]
@@ -302,6 +372,19 @@ def report(
             ),
             file=out,
         )
+        groups = by_terminal(arm, transport)
+        if wanted is None and len(groups) > 1:
+            # The draw line is the CHECK on the echo comparison, so an arm
+            # whose draws came from two panels has to say so: one of them may
+            # be a panel nobody probed, drawing on a different schedule.
+            for terminal, group in sorted(groups.items()):
+                print(
+                    format_distribution(
+                        f"{transport} {short_terminal(terminal)}",
+                        distribution([d.oldest_ms for d in group]),
+                    ),
+                    file=out,
+                )
         parse_max = max((d.parse_max_ms for d in arm), default=0.0)
         dropped = sum(d.dropped for d in arm)
         chunks = sum(d.chunks for d in arm)
@@ -333,6 +416,18 @@ SELF_TEST_LINES = """\
 2026-09-22 10:00:01.400000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=holder terminal=BBBB chunks=2 oldestms=12.000 newestms=1.000 parsemaxms=0.300 dropped=0 vis=1
 2026-09-22 10:00:01.500000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=9
 this line is not ours at all
+"""
+
+# One arm, two panels: the second is a terminal nobody probed, drawing and
+# echoing on its own schedule. Pooling the two is the contamination
+# `--terminals` exists to remove and the per-terminal breakdown exists to show.
+SELF_TEST_SECOND_TERMINAL_LINES = """\
+2026-09-22 11:00:00.100000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=AAAA seq=1 ms=1.000
+2026-09-22 11:00:00.200000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=AAAA seq=2 ms=2.000
+2026-09-22 11:00:00.300000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=ZZZZ seq=1 ms=40.000
+2026-09-22 11:00:00.400000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echo transport=tmux terminal=ZZZZ seq=2 ms=50.000
+2026-09-22 11:00:00.500000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=2 oldestms=3.000 newestms=1.000 parsemaxms=0.100 dropped=0 vis=1
+2026-09-22 11:00:00.600000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=ZZZZ chunks=5 oldestms=90.000 newestms=80.000 parsemaxms=4.000 dropped=3 vis=1
 """
 
 # seq 1-2 taken at idle, 3-4 under load, on both arms.
@@ -373,16 +468,20 @@ def self_test() -> int:
     check("holder echo p90", percentile(holder_echo, 0.90), 1.1)
 
     # Banding: idle = seqs 1-2, load = seqs 3-4, against --idle-max 8.
-    idle = sorted(
-        e.ms
-        for e in capture.echoes
-        if e.transport == "tmux" and load_for(SELF_TEST_LOAD_MAP, "tmux", e.seq) <= 8
-    )
-    load = sorted(
-        e.ms
-        for e in capture.echoes
-        if e.transport == "tmux" and load_for(SELF_TEST_LOAD_MAP, "tmux", e.seq) > 8
-    )
+    def band(transport: str, load_map: dict, over: bool) -> list[float]:
+        out: list[float] = []
+        for echo in capture.echoes:
+            if echo.transport != transport:
+                continue
+            load = load_for(load_map, transport, echo.seq)
+            if load is None:
+                continue
+            if (load > 8) == over:
+                out.append(echo.ms)
+        return sorted(out)
+
+    idle = band("tmux", SELF_TEST_LOAD_MAP, over=False)
+    load = band("tmux", SELF_TEST_LOAD_MAP, over=True)
     check("tmux idle band", idle, [1.0, 2.0])
     check("tmux load band", load, [9.0, 11.0])
     check("tmux flatness", round(percentile(load, 0.90) / percentile(idle, 0.90), 3), 5.5)
@@ -425,6 +524,51 @@ def self_test() -> int:
     if "flatness" in plain.getvalue():
         failures.append("unbanded report printed a flatness line")
 
+    # A sample whose load was never recorded is in NEITHER band. Dropping
+    # tmux seq 4 (11.000 ms, taken under load) from the map leaves the load
+    # band [9.000] and the idle band untouched: counting the unknown as idle
+    # would put 11.000 in the DENOMINATOR and report 0.82x WITHIN.
+    partial_map = {
+        "tmux": {"1": 1.0, "2": 2.0, "3": 30.0},
+        "holder": SELF_TEST_LOAD_MAP["holder"],
+    }
+    unknown_out = io.StringIO()
+    report(capture, out=unknown_out, idle_max=8.0, load_map=partial_map)
+    unknown_text = unknown_out.getvalue()
+    for needle in (
+        "tmux unbanded          no load recorded: 1 (excluded from both bands)",
+        "holder unbanded        no load recorded: 0 (excluded from both bands)",
+        "4.50x (OVER the 2x bound)",
+        "p90 under load = 9.000 ms (OVER the 5 ms bound)",
+    ):
+        if needle not in unknown_text:
+            failures.append(f"unknown-load report is missing {needle!r}")
+    if "0.82x" in unknown_text:
+        failures.append("an unknown-load sample was banded as idle")
+
+    # Terminals: unfiltered, a second panel on the same arm is broken out;
+    # filtered, it is gone from both the echo and the draw figures.
+    contaminated = parse(io.StringIO(SELF_TEST_SECOND_TERMINAL_LINES))
+    check("second-terminal echo count", len(contaminated.echoes), 4)
+
+    pooled = io.StringIO()
+    report(contaminated, out=pooled)
+    pooled_text = pooled.getvalue()
+    for needle in ("tmux AAAA", "tmux ZZZZ", "tmux all               n=4"):
+        if needle not in pooled_text:
+            failures.append(f"unfiltered report is missing {needle!r}")
+
+    filtered = io.StringIO()
+    # Lowercase on purpose: the app emits uppercase UUIDs, and an id typed by
+    # hand must still match. It is echoed back as typed.
+    report(contaminated, out=filtered, terminals={"aaaa"})
+    filtered_text = filtered.getvalue()
+    if "ZZZZ" in filtered_text:
+        failures.append("--terminals did not exclude the other terminal")
+    for needle in ("only terminals: aaaa", "tmux all               n=2", "2 fed, 0 dropped"):
+        if needle not in filtered_text:
+            failures.append(f"filtered report is missing {needle!r}")
+
     if failures:
         for failure in failures:
             print(f"FAIL {failure}", file=sys.stderr)
@@ -449,6 +593,11 @@ def main() -> int:
         type=float,
         help="1-minute load at or below which a sample counts as idle. Needs --load-map.",
     )
+    parser.add_argument(
+        "--terminals",
+        help="Comma-separated terminal ids to restrict echo AND draw figures to."
+        " Compared case-insensitively. Omit for a per-terminal breakdown instead.",
+    )
     parser.add_argument("--self-test", action="store_true", help="Run the fixture self-test.")
     args = parser.parse_args()
 
@@ -468,6 +617,13 @@ def main() -> int:
         with open(args.load_map, encoding="utf-8") as handle:
             load_map = json.load(handle)
 
+    terminals: set[str] | None = None
+    if args.terminals:
+        terminals = {part.strip() for part in args.terminals.split(",") if part.strip()}
+        if not terminals:
+            print("--terminals was given but named no terminal.", file=sys.stderr)
+            return 2
+
     stream = open(args.logfile, encoding="utf-8") if args.logfile else sys.stdin
     try:
         capture = parse(stream)
@@ -484,7 +640,7 @@ def main() -> int:
         )
         return 1
 
-    report(capture, idle_max=args.idle_max, load_map=load_map)
+    report(capture, idle_max=args.idle_max, load_map=load_map, terminals=terminals)
     return 0
 
 
