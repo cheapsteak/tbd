@@ -202,6 +202,12 @@ struct RemoteSessionDetailView: View {
             RemoteRemediationTerminalSheet(run: run)
         }
         .onAppear { adoptPendingTab() }
+        // Tells AppState which session's attach slot is actually visible, so
+        // a focus claim never lands in a pane this view is keeping
+        // transparent (the Log tab, a detached or auth prompt).
+        .onChange(of: showsAttachSlot ? selection : nil, initial: true) { _, shown in
+            appState.setRemoteAttachSlotShown(shown)
+        }
         .onChange(of: selection) { _, _ in resetForNewSelection() }
         .onChange(of: appState.remoteSessionRequestedTab) { _, _ in adoptPendingTab() }
         .onChange(of: availableTabs) { _, tabs in
