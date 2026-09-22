@@ -1688,6 +1688,10 @@ public actor HibernationCoordinator {
     /// checks BOTH the authoritative `hibernatedAt` and the legacy `suspendedAt`
     /// so a row parked by either path is reconciled, and `clearHibernated` nils
     /// both. Called once on daemon startup.
+    ///
+    /// The window, the process, AND the pane's own `@tbd_terminal_id` all have
+    /// to check out before a row un-parks — see the guard below for why the
+    /// identity check exists alongside the liveness ones.
     public func reconcileOnStartup() async {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
@@ -1712,7 +1716,23 @@ public actor HibernationCoordinator {
                 continue
             }
 
-            // Window and process are alive — clear the parked state
+            // Verify the pane still belongs to THIS row, via the
+            // `@tbd_terminal_id` option every spawn stamps. A tmux server
+            // restart can reuse pane ids, and a window/process check alone
+            // cannot tell this terminal's own pane from a stranger's that
+            // happens to sit at the same coordinate and also runs `claude`.
+            // Un-parking onto the wrong pane hands that stranger's session
+            // this row's identity with nothing to catch it. A false park is
+            // recoverable by `wake`; a false un-park is not — so an
+            // inconclusive answer (missing, dead, or no id to compare) leaves
+            // the row parked rather than guessing.
+            guard let probe = try? await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID),
+                  case .live(let terminalID) = probe,
+                  terminalID == terminal.id.uuidString else {
+                continue
+            }
+
+            // Window, process, and pane identity all check out — clear the parked state
             do {
                 try await db.terminals.clearHibernated(id: terminal.id)
                 logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")

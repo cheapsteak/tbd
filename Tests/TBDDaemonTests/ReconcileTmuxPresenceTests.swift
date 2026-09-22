@@ -292,9 +292,13 @@ struct ReconcileTmuxPresenceTests {
         // there only leaves a row parked, which is the conservative direction.
         // `dryRunPaneCurrentCommand` reporting a version string is how the
         // existing coordinator fixtures spell "a live claude process".
+        // `dryRunPaneSendTarget` answering with the row's own id is required
+        // too, now that the un-park pass verifies pane identity alongside
+        // liveness.
         let repairingTmux = TmuxManager(
             dryRun: true,
-            dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: rows.claude.id.uuidString) })
         let coordinator = HibernationCoordinator(
             db: db, tmux: repairingTmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-unpark"),

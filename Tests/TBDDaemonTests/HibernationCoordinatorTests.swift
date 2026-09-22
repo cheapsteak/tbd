@@ -341,7 +341,8 @@ struct HibernationCoordinatorTests {
 
         let liveTmux = TmuxManager(
             dryRun: true,
-            dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -2330,9 +2331,13 @@ struct HibernationCoordinatorTests {
         let parked = try #require(try await db.terminals.get(id: terminalID))
         #expect(parked.hibernatedAt != nil)
 
-        // Pane still runs claude (reported as its version string) → the parked
-        // state is stale and must be cleared.
-        let tmux = TmuxManager(dryRun: true, dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        // Pane still runs claude (reported as its version string) and answers
+        // with this row's own id → the parked state is stale and must be
+        // cleared.
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2359,7 +2364,10 @@ struct HibernationCoordinatorTests {
         #expect(staged.isParked)
         #expect(staged.sessionIncarnationID == replacementToken)
 
-        let tmux = TmuxManager(dryRun: true, dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -2402,6 +2410,50 @@ struct HibernationCoordinatorTests {
 
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
                 "a genuinely parked row (shell in pane) must stay parked")
+    }
+
+    /// A tmux server restart can hand this row's window/pane coordinate to a
+    /// DIFFERENT terminal's pane, which also happens to be running claude. The
+    /// window-alive and process-alive checks alone cannot see that — only the
+    /// pane's own `@tbd_terminal_id` answer can. A false park is recoverable
+    /// by `wake`; a false un-park is not, so a mismatched id must leave the
+    /// row parked.
+    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneAnswersWithAStrangersID() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a pane answering with a different terminal's id must stay parked")
+    }
+
+    /// The mirror case: the pane carries no identity to compare at all — a
+    /// pane spawned before TBD stamped one, or a probe that could not resolve
+    /// the pane. No answer is not the same fact as a matching one, and the
+    /// same asymmetry applies: stay parked rather than guess.
+    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneAnswersWithNoID() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a pane with no identity to compare must stay parked")
     }
 
     // MARK: - Keep-warm

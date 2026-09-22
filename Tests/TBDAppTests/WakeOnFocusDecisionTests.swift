@@ -126,12 +126,11 @@ struct WakeOnFocusDecisionTests {
     }
 
     /// An exit-stamped session (`hibernateReason == .exited`) must NOT
-    /// focus-wake: `stampSessionExited` writes only two DB columns and never
-    /// replaces the pane with an inert placeholder the way every other park
-    /// does, so waking it runs `tmux respawn-window -k` against the live
-    /// shell Claude's exit left behind — killing it. Excluded exactly like
-    /// `.manual`, but for a different reason (no placeholder, not "user
-    /// explicitly parked this").
+    /// focus-wake: `stampSessionExited` never replaces the pane with an inert
+    /// placeholder the way every other park does, so waking it runs
+    /// `tmux respawn-window -k` against the live shell Claude's exit left
+    /// behind — killing it. Excluded exactly like `.manual`, but for a
+    /// different reason (no placeholder, not "user explicitly parked this").
     @Test func skipsExitedParkedTerminalEvenWhenFocused() {
         let state = AppState()
         let wt = UUID()
