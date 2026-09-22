@@ -220,6 +220,23 @@ struct RemoteAttachFocusTests {
             """)
     }
 
+    @MainActor
+    @Test("hiding the attach slot leaves focus alone when the pane does not hold it")
+    func hidingTheAttachSlotLeavesOtherFocusAlone() async throws {
+        let fixture = Fixture(mounted: true)
+        defer { fixture.tearDown() }
+
+        fixture.select(Self.selected)
+        try await fixture.waitForFirstResponder()
+        fixture.focusElsewhere()
+
+        fixture.state.setRemoteAttachSlotShown(nil)
+
+        #expect(fixture.window.firstResponder === fixture.sink, """
+            hiding the attach slot cleared focus the pane did not hold
+            """)
+    }
+
     /// The pager's registration wiring, and the identity guard a reconnect
     /// depends on: the replacement generation's view mounts before the
     /// superseded one is dismantled, so the superseded dismantle must leave
