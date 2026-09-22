@@ -47,10 +47,10 @@ struct TerminalDeletePaneOwnershipTests {
     /// `kill-window` it.
     @Test func refusesToKillAWindowWhosePaneNamesADifferentTerminal() async throws {
         let fx = try await makeFixture()
-        var recorded: [[String]] = []
+        let recorder = RecordedTmuxArgs()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
+            dryRunRecorder: { recorder.append($0) },
             dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
         let router = RPCRouter(
             db: fx.db,
@@ -65,18 +65,18 @@ struct TerminalDeletePaneOwnershipTests {
         #expect(result.closed)
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil,
                 "the stale row must still be removed from the list")
-        #expect(!recorded.contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorded)")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
     }
 
     /// The positive control: a pane answering with THIS row's own id closes
     /// exactly as before — killed.
     @Test func killsTheWindowWhenThePaneAnswersWithItsOwnID() async throws {
         let fx = try await makeFixture()
-        var recorded: [[String]] = []
+        let recorder = RecordedTmuxArgs()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
+            dryRunRecorder: { recorder.append($0) },
             dryRunPaneSendTarget: { _, _ in .live(terminalID: fx.terminal.id.uuidString) })
         let router = RPCRouter(
             db: fx.db,
@@ -87,18 +87,18 @@ struct TerminalDeletePaneOwnershipTests {
         let resp = try await close(router, fx.terminal.id)
 
         #expect(resp.success)
-        #expect(recorded.contains { $0.contains("kill-window") },
-                "a pane confirmed as this row's own must still be killed: \(recorded)")
+        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane confirmed as this row's own must still be killed: \(recorder.snapshot())")
     }
 
     /// A pane with no identity to compare (unstamped, or a pre-#901 daemon
     /// build) falls back to today's close behavior — killed, not refused.
     @Test func killsTheWindowWhenThePaneCarriesNoIdentity() async throws {
         let fx = try await makeFixture()
-        var recorded: [[String]] = []
+        let recorder = RecordedTmuxArgs()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
+            dryRunRecorder: { recorder.append($0) },
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
         let router = RPCRouter(
             db: fx.db,
@@ -109,18 +109,18 @@ struct TerminalDeletePaneOwnershipTests {
         let resp = try await close(router, fx.terminal.id)
 
         #expect(resp.success)
-        #expect(recorded.contains { $0.contains("kill-window") },
-                "a pane with no identity to compare must fall back to killing the window: \(recorded)")
+        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane with no identity to compare must fall back to killing the window: \(recorder.snapshot())")
     }
 
     /// An unreadable probe (a wedged server) is not evidence of a mismatch
     /// either — it must not newly turn an ordinary close into a refusal.
     @Test func killsTheWindowWhenTheProbeThrows() async throws {
         let fx = try await makeFixture()
-        var recorded: [[String]] = []
+        let recorder = RecordedTmuxArgs()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
+            dryRunRecorder: { recorder.append($0) },
             dryRunPaneSendTarget: { _, _ in
                 throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(5))
             })
@@ -133,7 +133,7 @@ struct TerminalDeletePaneOwnershipTests {
         let resp = try await close(router, fx.terminal.id)
 
         #expect(resp.success)
-        #expect(recorded.contains { $0.contains("kill-window") },
-                "an unreadable probe must fall back to killing the window, not refuse: \(recorded)")
+        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
+                "an unreadable probe must fall back to killing the window, not refuse: \(recorder.snapshot())")
     }
 }

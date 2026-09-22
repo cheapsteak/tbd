@@ -152,9 +152,9 @@ struct ReconcileTmuxPresenceTests {
     func mismatchedPaneIdentityIsParkedLikeAGoneWindow() async throws {
         let tmux = TmuxManager(
             dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) },
             dryRunServerPresence: { _ in .alive },
-            dryRunWindowPresence: { _, _ in .alive },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunWindowPresence: { _, _ in .alive })
         let run = try await runReconcile(tmux: tmux)
         defer { run.cleanup() }
 
@@ -176,9 +176,9 @@ struct ReconcileTmuxPresenceTests {
     func noPaneIdentityFallsBackToLivenessOnly() async throws {
         let tmux = TmuxManager(
             dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
             dryRunServerPresence: { _ in .alive },
-            dryRunWindowPresence: { _, _ in .alive },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
+            dryRunWindowPresence: { _, _ in .alive })
         let run = try await runReconcile(tmux: tmux)
         defer { run.cleanup() }
 
@@ -198,15 +198,15 @@ struct ReconcileTmuxPresenceTests {
 
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunServerPresence: { _ in .alive },
-            dryRunWindowPresence: { _, _ in .alive },
             dryRunPaneSendTarget: { _, paneID in
                 switch paneID {
                 case "%1": return .live(terminalID: rows.claude.id.uuidString)
                 case "%2": return .live(terminalID: rows.shell.id.uuidString)
                 default: return .missing
                 }
-            })
+            },
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .alive })
         let lifecycle = makeLifecycle(db: db, tmux: tmux)
         try await lifecycle.reconcile(
             repoID: repo.id, actuationLog: makeTestActuationLog(),

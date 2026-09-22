@@ -1417,6 +1417,39 @@ public struct TmuxManager: Sendable {
         }
     }
 
+    /// Whether a coordinate-destroying action (`kill-window` chief among them)
+    /// on this pane is safe to perform on behalf of `terminalID`.
+    ///
+    /// A tmux server restart resets its window/pane numbering from `@1`/`%1`,
+    /// and several worktrees of one repo share a server — so a DB row's
+    /// recorded coordinate can collide with a completely different, later-
+    /// spawned live terminal's, purely by numeric reuse. Every call site that
+    /// tears down a pane by coordinate shares this one question before it
+    /// acts, rather than each re-deriving the `.live`/`.dead` match by hand.
+    ///
+    /// Returns `false` ONLY on a positive mismatch: the pane answers with a
+    /// DIFFERENT terminal's id (checked jointly against `.live` and `.dead`,
+    /// case-insensitively — a stranger pane whose process has already exited
+    /// still answers `.dead` and must still be caught). An unstamped pane
+    /// (`nil` id), a pane that already answers `.missing`, or an unreadable
+    /// probe all return `true` — the deliberate fallback to today's
+    /// behavior, because refusing on any of those would turn an ordinary
+    /// teardown of an already-dead window into a new failure.
+    public func paneStillBelongsTo(
+        terminalID: UUID, server: String, paneID: String
+    ) async -> Bool {
+        guard let probe = try? await paneSendTarget(server: server, paneID: paneID) else {
+            return true
+        }
+        let paneTerminalID: String?
+        switch probe {
+        case .live(let id), .dead(let id): paneTerminalID = id
+        case .missing: paneTerminalID = nil
+        }
+        guard let paneTerminalID else { return true }
+        return paneTerminalID.caseInsensitiveCompare(terminalID.uuidString) == .orderedSame
+    }
+
     /// Stamp `@tbd_terminal_id` onto a freshly created or respawned pane, when
     /// the spawn's environment says which terminal it is.
     ///
