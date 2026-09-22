@@ -2436,10 +2436,14 @@ struct HibernationCoordinatorTests {
     }
 
     /// The mirror case: the pane carries no identity to compare at all — a
-    /// pane spawned before TBD stamped one, or a probe that could not resolve
-    /// the pane. No answer is not the same fact as a matching one, and the
-    /// same asymmetry applies: stay parked rather than guess.
-    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneAnswersWithNoID() async throws {
+    /// pane spawned before TBD stamped `@tbd_terminal_id` onto it. That stamp
+    /// is deliberately never backfilled onto existing panes, so refusing here
+    /// too (treating "no answer" the same as "wrong answer") would leave every
+    /// pre-existing session parked after every daemon restart forever —
+    /// exactly the "sessions keep falling asleep" symptom this pass exists to
+    /// prevent. So the row falls back to today's behavior instead: un-park on
+    /// the window/process checks alone.
+    @Test func reconcileOnStartupUnparksARowWhosePaneCarriesNoIDToCompare() async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
 
@@ -2452,8 +2456,8 @@ struct HibernationCoordinatorTests {
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
-        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
-                "a pane with no identity to compare must stay parked")
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
+                "a pane with no identity to compare must fall back to un-parking, not stay parked")
     }
 
     // MARK: - Keep-warm
