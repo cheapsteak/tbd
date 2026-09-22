@@ -1627,6 +1627,16 @@ extension RPCRouter {
                     // The durable park intent above preserves the old token.
                     // Once the dead pane is eliminated, rotate the token and
                     // clear its process-local facts before exposing the park.
+                    //
+                    // No `paneStillBelongsTo` check needed here (unlike the
+                    // codex/shell branches below): the `probeWindow` switch
+                    // above already returned `.absent` — tmux's own
+                    // definitive "no such window" answer — so there is no
+                    // live occupant, stranger or otherwise, for a pane-
+                    // identity probe to protect. And this whole closure runs
+                    // inside `tmux.withWorktreeServerLock`, so no sibling
+                    // spawn can race a fresh window into this coordinate
+                    // between the probe and this kill.
                     try? await self.tmux.killWindow(
                         server: currentWorktree.tmuxServer,
                         windowID: currentTerminal.tmuxWindowID)
