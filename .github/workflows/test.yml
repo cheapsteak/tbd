@@ -233,6 +233,7 @@ jobs:
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/restart-guard-lib.test.sh
           bash scripts/restart-build-lib.test.sh
+          bash scripts/ci/first-party-wipe-needed.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
 
   review-scripts-tests:
@@ -455,10 +456,47 @@ jobs:
       # required-checks work bit TBDDaemonLib (new PRStatusManager.CheckContext
       # / checkSignals / mapStateAndReason signatures). Wiping just these
       # library build artifacts forces SPM to re-emit them while keeping the
-      # rest of `.build/` warm. Costs a couple min per run (library rebuild +
-      # downstream cascade relink) in exchange for never seeing the flake.
+      # rest of `.build/` warm.
+      #
+      # The wipe is not free: measured on a run whose commit touched only
+      # `Sources/TBDDaemon` and one test file, it cost about three of the 278
+      # seconds the first pass spent compiling — 89 TBDShared files and 265
+      # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted
+      # on top, and a 38-second relink. Over the last 40 commits on `main`, 18
+      # touched neither library's sources nor the manifest and paid it for
+      # nothing.
+      #
+      # The bug's precondition is that a library's SOURCES differ from the
+      # sources its cached artifacts were built from, so the wipe is conditional
+      # on exactly that. A step at the end of this job, after every compile and
+      # just before the cache save, records a fingerprint of those sources — one
+      # git object id per compared path — in
+      # `.build/tbd-first-party-fingerprint`, which rides the same cache entry
+      # as the artifacts it describes; `scripts/ci/first-party-wipe-needed.sh`
+      # compares it against the tree being built now and answers `wipe` or
+      # `skip`. Every uncertainty answers `wipe` — no marker, an unreadable one,
+      # a compared path that no longer resolves, or any difference at all —
+      # because skipping wrongly costs a link flake nobody will trace back here
+      # while wiping wrongly costs three minutes. `|| echo wipe` keeps even a
+      # broken decider on the safe side rather than failing the job.
+      #
+      # The marker is REMOVED the moment it has been read, and a fresh one is
+      # recorded only by that later step. That is what keeps the marker and the
+      # artifacts from drifting apart no matter how this run ends: a job that
+      # dies anywhere after this step leaves no marker at all, so the next run
+      # wipes, while a job that dies before this step leaves the restored marker
+      # untouched, still describing the restored artifacts.
       - name: Force-rebuild first-party libraries (workaround SPM #7715)
         run: |
+          decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-first-party-fingerprint || echo wipe)"
+          rm -f .build/tbd-first-party-fingerprint
+          if [ "$decision" = "skip" ]; then
+            echo "Keeping the restored first-party artifacts: nothing either library target is built from changed since these artifacts were built (reason above)."
+            exit 0
+          fi
+          # Adding a module here means adding its sources — and the sources of
+          # every first-party target it depends on — to `WIPE_PATHS` in the
+          # script above, or its wipe becomes conditional on unrelated files.
           for module in TBDShared TBDDaemonLib; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
@@ -842,6 +880,37 @@ jobs:
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j "$TBD_SWIFT_JOBS"
 
+      # Record which sources produced the artifacts now sitting in `.build/`, so
+      # the next run that restores this cache can tell whether the SPM #7715
+      # wipe above is needed at all. It goes after every compile in the job and
+      # immediately before the cache-save step below, and writes inside
+      # `.build/` so a saved entry carries the marker with the artifacts it
+      # describes.
+      #
+      # A marker beats reading the cache key: the key is built from
+      # `hashFiles(...)` digests, which identify a tree but say nothing that can
+      # be compared path by path against another one. Object ids can, and unlike
+      # a commit they survive the ephemeral merge commit a `pull_request` run is
+      # checked out at.
+      #
+      # It carries NO condition, so it runs only when every step before it
+      # succeeded. A fingerprint of the sources says what `.build/` was built
+      # FROM, never that the build finished: a run whose compile was OOM-killed
+      # or wedged part way through — shapes this job's comments record as real —
+      # would otherwise record a marker over half-written artifacts, and a rerun
+      # of the same commit restores that cache by an exact key hit and skips the
+      # wipe that used to heal it. Reaching this step is the completion signal,
+      # and the step's own position, after every compile in the job, is what
+      # makes it one.
+      #
+      # A run that ends before here therefore records nothing, and that is the
+      # safe outcome in every case: the wipe step already removed the marker it
+      # read, so the next run to restore this cache finds none and wipes. A run
+      # that ended before the wipe step leaves the restored marker untouched,
+      # still describing the artifacts it was restored with.
+      - name: Record the sources these build artifacts came from
+        run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint
+
       # Saved LAST, after the final writer into `.build`, so the stored entry
       # carries the linked executables as well as the test artifacts. `key:` is
       # the restore step's own resolved primary key rather than a second copy of
@@ -852,9 +921,9 @@ jobs:
       #  - `success()`. A red run stores nothing. That is also what
       #    `actions/cache` does unattended — its `action.yml` declares
       #    `post-if: success()`, so its saving post step does not run on a failed
-      #    job — and the build above, the last step that writes into `.build`, is
-      #    itself skipped on a red run, so there would be nothing freshly linked
-      #    to store.
+      #    job — and the build step above, the last step that compiles into
+      #    `.build`, is itself skipped on a red run, so there would be nothing
+      #    freshly linked to store.
       #  - `cache-hit != 'true'`. An exact hit means this key is already in the
       #    store and the save would be a duplicate of what was just restored.
       #  - The event. A `push` (main, per this workflow's triggers) always saves:
