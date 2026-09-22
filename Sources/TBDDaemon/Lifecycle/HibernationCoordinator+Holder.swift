@@ -932,6 +932,54 @@ extension HibernationCoordinator {
         return .sessionGone(paneID: "", detail: .processExited)
     }
 
+    /// Wake a parked holder row onto a spawn command the CALLER composed — the
+    /// wake half of an in-place profile swap.
+    ///
+    /// `wakeHolderSection` is the mutate half and claims nothing, while the
+    /// public `wake` claims the in-flight sets and then composes its own
+    /// resume. The swap needs the first without the second: its plan may say
+    /// fresh (a blank session swapped on tmux spawns fresh rather than showing
+    /// "no conversation found", and this arm matches it), and its route and
+    /// command were minted together so that the command's inline
+    /// `export ANTHROPIC_BASE_URL=…` — which runs after the shell's rc files —
+    /// names the same endpoint the process environment carries.
+    ///
+    /// A refused claim retires the route here rather than in the section,
+    /// because the section is never entered: the caller minted a route for a
+    /// spawn that is not going to happen, and leaving it behind would make the
+    /// row's route ambiguous for as long as it stayed parked.
+    func wakeHolderForProfileSwap(
+        terminal: Terminal,
+        worktree: LocalWorktree,
+        sessionID: String,
+        expectedReplacementState: TerminalReplacementSnapshot,
+        spawnCommand: String,
+        env: [String: String],
+        attachment: ModelProxyRouteAttachment.Outcome,
+        cols: Int?,
+        rows: Int?
+    ) async -> WakeResult {
+        guard !hibernatesInFlight.contains(terminal.id),
+              !wakesInFlight.contains(terminal.id) else {
+            await ModelProxyRouteAttachment.retire(
+                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            return .inFlight
+        }
+        wakesInFlight.insert(terminal.id)
+        defer { wakesInFlight.remove(terminal.id) }
+
+        return await wakeHolderSection(
+            terminal: terminal,
+            worktree: worktree,
+            sessionID: sessionID,
+            expectedReplacementState: expectedReplacementState,
+            spawnCommand: spawnCommand,
+            env: env,
+            attachment: attachment,
+            cols: cols,
+            rows: rows)
+    }
+
     /// The mutate half of a holder wake: spawn a fresh holder running the
     /// resume command, record what it started, then un-park the row.
     ///

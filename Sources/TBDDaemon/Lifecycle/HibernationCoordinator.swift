@@ -157,7 +157,8 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight wake respawn, so a double-focus can't
     /// spawn two `claude --resume` processes into the same window.
-    private var wakesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var wakesInFlight: Set<UUID> = []
 
     /// Invoked after EVERY `ensureServer` on the wake-recreate path (whether or
     /// not a server was actually created — the downstream control-mode
@@ -169,7 +170,8 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight hibernate, so a manual "Hibernate now"
     /// racing the idle sweep (or two sweeps) can't respawn-to-shell twice.
-    private var hibernatesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var hibernatesInFlight: Set<UUID> = []
 
     /// Debounce after a terminal first crosses the idle threshold: the sweep
     /// marks it `pendingKillSince`, and only actually hibernates on a LATER

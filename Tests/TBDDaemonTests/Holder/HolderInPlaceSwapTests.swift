@@ -201,4 +201,54 @@ struct HolderInPlaceSwapTests {
         let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
         #expect(rows.count == 1, "the cold path created a second row")
     }
+
+    // MARK: - The wake half, refused
+
+    /// The third of the spec's failure outcomes, asked of the half that owns
+    /// it: a wake that cannot start a holder leaves the row PARKED and on the
+    /// NEW profile, so the swap has taken effect at the account level and the
+    /// next focus-wake retries the resume.
+    ///
+    /// Driven through the wake half directly rather than through the RPC,
+    /// because reaching it through the RPC would need a park to succeed and a
+    /// park needs a reader over a real pty. The composition is the live
+    /// suite's; what this pins is the state this half leaves behind.
+    @Test("the swap's wake half leaves a refused row parked on the account it was re-homed to")
+    func swapWakeRefusalLeavesTheRowParkedOnTheNewProfile() async throws {
+        // No spawner at all: `canSpawn` is false, which is the daemon whose
+        // TBDHolder helper has moved — the spec's named wake failure.
+        let fixture = try await Self.makeFixture(spawner: nil)
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: true)
+        // The state the arm's second step leaves: parked, on the destination.
+        let rehomed = try #require(try await fixture.db.terminals.setParkedProfileID(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            profileID: fixture.destProfileID))
+
+        let result = await fixture.router.hibernationCoordinator.wakeHolderForProfileSwap(
+            terminal: rehomed,
+            worktree: try await fixture.local(),
+            sessionID: Self.sessionID,
+            expectedReplacementState: TerminalReplacementSnapshot(terminal: rehomed),
+            spawnCommand: "claude --resume \(Self.sessionID)",
+            env: ["TBD_TERMINAL_ID": rehomed.id.uuidString],
+            attachment: .unproxied([:]),
+            cols: 80,
+            rows: 24)
+
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
+            return
+        }
+        #expect(reason.contains("TBDHolder"),
+                "the refusal does not name what is missing: \(reason)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: rehomed.id))
+        #expect(after.isParked, "a refused wake un-parked the row")
+        #expect(after.profileID == fixture.destProfileID,
+                "a refused wake un-did the re-home; the swap must stand at the account level")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "a refused wake recorded processes nothing started")
+    }
 }
