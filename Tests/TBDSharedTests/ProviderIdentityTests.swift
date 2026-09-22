@@ -154,4 +154,113 @@ struct ProviderIdentityTests {
 
         #expect(redacted == ["--token", "--staging"])
     }
+
+    @Test("bare positional secrets with known prefixes are redacted")
+    func redactsBarePositionalWithKnownPrefix() {
+        // The reported gap: a bare positional secret like `sk-live-…` was
+        // not being redacted. This test covers the fix.
+        let redacted = ProviderIdentityRedaction.redactArguments(
+            ["login", "sk-live-abcdef1234567890"])
+
+        #expect(redacted == [
+            "login",
+            ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
+    @Test("multiple known secret prefixes are recognized")
+    func redactsBarePositionalMultiplePrefixes() {
+        // Test coverage of distinct well-known prefixes
+        let inputs = [
+            ["sk_test_abcdef1234567890"],      // Stripe test
+            ["github_pat_abc123xyz789abc"],    // GitHub PAT
+            ["ghp_abc123xyz789"],              // GitHub personal
+            ["gho_abc123"],                    // GitHub OAuth
+            ["xoxb-1234567890-1234567890"],   // Slack bot
+            ["xoxp-user-token"],               // Slack user
+            ["AKIA1234567890EXAMPLE"],         // AWS access key
+            ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"], // JWT
+        ]
+
+        for input in inputs {
+            let redacted = ProviderIdentityRedaction.redactArguments(input)
+            #expect(redacted == [ProviderIdentityRedaction.redactedPlaceholder])
+        }
+    }
+
+    @Test("high-entropy bare positional arguments are redacted even without known prefix")
+    func redactsBarePositionalHighEntropy() {
+        // A long, random-looking string with mixed letters and digits,
+        // no known prefix, but high entropy characteristics
+        let redacted = ProviderIdentityRedaction.redactArguments(
+            ["api", "Hj8kL2mN9pQrS5tUvW3xYz4AbCdEfG6hIjKl"])
+
+        #expect(redacted == [
+            "api",
+            ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
+    @Test("ordinary positional arguments are not redacted")
+    func doesNotRedactOrdinaryPositionals() {
+        // Regression guard: short words, paths, numbers, semver, etc.
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "login",              // Short word
+            "acme-1234",          // Benign identifier
+            "staging",            // Environment name
+            "main",               // Branch name
+            "1234",               // Port or ID number
+            "1.2.3",              // Semver-like version
+            "/path/to/repo",      // Path
+            "~/config",           // Home path
+            "aaaaa",              // Short repetitive
+        ])
+
+        #expect(redacted == [
+            "login",
+            "acme-1234",
+            "staging",
+            "main",
+            "1234",
+            "1.2.3",
+            "/path/to/repo",
+            "~/config",
+            "aaaaa",
+        ])
+    }
+
+    @Test("arguments with excessive repetition are not redacted")
+    func doesNotRedactExcessiveRepetition() {
+        // Both fixtures clear the 20-character floor on their own (21 and 22
+        // chars) so this actually exercises the repetition guard rather than
+        // being vacuously true because the length check alone excludes them —
+        // dropping the guard would make both of these redact.
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "abc1111111111abcdefgh", // 10 consecutive digits
+            "xxxxxxxxxxxxxxx1234abc", // 15 consecutive letters
+        ])
+
+        #expect(redacted == [
+            "abc1111111111abcdefgh",
+            "xxxxxxxxxxxxxxx1234abc",
+        ])
+    }
+
+    @Test("UUIDs are not redacted even though they are long and high-entropy")
+    func doesNotRedactUUIDs() {
+        // UUIDs have high entropy (mix of hex digits and dashes) but are
+        // legitimate identifiers, not credentials. They should not be redacted
+        // even when bare positional, because they are not secrets by nature.
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "list",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        ])
+
+        #expect(redacted == [
+            "list",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        ])
+    }
 }

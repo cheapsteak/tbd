@@ -179,11 +179,21 @@ public enum ProviderIdentityRedaction {
 
     /// A registry entry's argv, safe to show.
     ///
-    /// Two shapes carry a secret on a command line, and both are handled:
-    /// `--token=abc` (the value rides the same argument as the flag) and
-    /// `--token abc` (the value is the NEXT argument). The second is why this
-    /// takes the whole list rather than mapping over it — an argument is only
-    /// judged in the company of the one before it.
+    /// Three shapes carry a secret on a command line, and all are handled:
+    /// `--token=abc` (the value rides the same argument as the flag),
+    /// `--token abc` (the value is the NEXT argument), and a bare positional
+    /// argument that looks like a secret (no preceding flag, but the argument
+    /// itself has characteristics of a token or API key). The second and third
+    /// are why this takes the whole list — an argument is only judged in the
+    /// company of what precedes it and in its own characteristics.
+    ///
+    /// For bare positional arguments, detection is heuristic: well-known secret
+    /// prefixes (e.g. `sk-`, `github_pat_`, `AKIA`) are redacted immediately,
+    /// and other arguments are redacted if they are long and high-entropy
+    /// enough to plausibly be a token. The heuristic is conservative (biased
+    /// toward redacting) to avoid leaking real credentials. Ordinary short
+    /// identifiers, paths, branch names, port numbers, and semver strings are
+    /// not redacted.
     ///
     /// Never used to decide anything; the result is display text only.
     public static func redactArguments(_ args: [String]) -> [String] {
@@ -215,8 +225,150 @@ public enum ProviderIdentityRedaction {
                 redactNext = true
                 continue
             }
+            // Third shape: bare positional argument that looks like a secret.
+            // Check for well-known secret prefixes or high-entropy characteristics.
+            if looksLikeSecret(arg) {
+                out.append(redactedPlaceholder)
+                continue
+            }
             out.append(arg)
         }
         return out
+    }
+
+    /// Returns true if a bare positional argument has characteristics that
+    /// suggest it is a secret (token, API key, etc.).
+    ///
+    /// Matches well-known secret prefixes (case-sensitive) first, then falls
+    /// back to heuristics for unknown secrets: length, entropy, and character
+    /// composition. Conservative (biased toward redacting) to avoid leaking
+    /// real credentials; false positives cost only display clarity.
+    ///
+    /// Does not redact: short words, paths (starting with / or ~), pure
+    /// lowercase alphabetic strings under ~20 characters, plain numbers,
+    /// semver-looking strings, or UUIDs. UUIDs are not credentials by nature,
+    /// so they are identified and skipped explicitly.
+    private static func looksLikeSecret(_ arg: String) -> Bool {
+        // Well-known secret prefixes (case-sensitive). These are strong signals
+        // that an argument is a credential, regardless of length or composition.
+        let knownSecretPrefixes = [
+            "sk-",         // Stripe secret key
+            "sk_live_",    // Stripe live secret
+            "sk_test_",    // Stripe test secret
+            "ghp_",        // GitHub personal access token
+            "gho_",        // GitHub OAuth token
+            "ghs_",        // GitHub server-to-server token
+            "ghu_",        // GitHub user-to-server token
+            "ghr_",        // GitHub refresh token
+            "github_pat_", // GitHub PAT (alternative form)
+            "xoxb-",       // Slack bot token
+            "xoxp-",       // Slack user token
+            "xoxa-",       // Slack app token
+            "xoxr-",       // Slack refresh token
+            "xoxs-",       // Slack xoxs token
+            "AKIA",        // AWS access key ID
+            "eyJ",         // JWT (base64url header typically starts with eyJ)
+        ]
+
+        for prefix in knownSecretPrefixes {
+            if arg.hasPrefix(prefix) {
+                return true
+            }
+        }
+
+        // Fallback heuristic for unknown secrets. Be conservative.
+        // A secret typically: is long, contains a mix of letters and digits,
+        // and does not have excessive repetition or look like a normal identifier.
+
+        // Skip short words and common short identifiers
+        if arg.count < 20 {
+            return false // Argument is too short to plausibly be a secret
+        }
+
+        // An implausibly long argument is more likely a path, a pasted
+        // document, or free-form text than a token, so it skips the rest of
+        // the heuristic entirely rather than being judged by it.
+        if arg.count > 500 {
+            return false // Likely a path or document, not a secret
+        }
+
+        // Paths should never be redacted
+        if arg.hasPrefix("/") || arg.hasPrefix("~") {
+            return false
+        }
+
+        // UUIDs are not credentials and should not be redacted. They have a
+        // distinctive pattern: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX where X is
+        // a hex digit. While they satisfy the "high entropy" heuristic, they are
+        // legitimate identifiers, not secrets. Identify via pattern: exactly 36
+        // chars, 4 internal dashes at positions 8, 13, 18, 23, and all other
+        // chars are hex digits.
+        if arg.count == 36 && isUUIDPattern(arg) {
+            return false
+        }
+
+        // Check for basic entropy: needs both letters and digits
+        let hasLetter = arg.contains { $0.isLetter }
+        let hasDigit = arg.contains { $0.isNumber }
+
+        // At least one letter and one digit suggests random composition
+        if !hasLetter || !hasDigit {
+            return false
+        }
+
+        // Check for no excessive repetition of the same character
+        // (tokens often have varied content; padding or repetition suggests otherwise)
+        var maxConsecutive = 1
+        var lastChar: Character? = nil
+        var consecutiveCount = 1
+        for char in arg {
+            if char == lastChar {
+                consecutiveCount += 1
+                maxConsecutive = max(maxConsecutive, consecutiveCount)
+            } else {
+                consecutiveCount = 1
+                lastChar = char
+            }
+        }
+
+        // If more than 5 consecutive identical characters, probably not a secret
+        // (e.g. "aaaaaaa" or "111111" looks more like padding or bad input)
+        if maxConsecutive > 5 {
+            return false
+        }
+
+        // Semver or version-like strings: typically X.Y.Z, often with more dots
+        let dotCount = arg.filter { $0 == "." }.count
+        if dotCount >= 2 {
+            // Looks like a version string; likely not a secret
+            return false
+        }
+
+        // At this point: 20+ chars, has letters and digits, no excessive repetition,
+        // not a UUID, not a version string. Looks like a plausible secret.
+        return true
+    }
+
+    /// Returns true if the argument looks like a UUID pattern
+    /// (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX, where X is a hex digit).
+    private static func isUUIDPattern(_ arg: String) -> Bool {
+        let chars = Array(arg)
+        guard chars.count == 36 else { return false }
+
+        // Dashes at positions 8, 13, 18, 23 (0-indexed)
+        let dashPositions = [8, 13, 18, 23]
+        for pos in dashPositions {
+            guard chars[pos] == "-" else { return false }
+        }
+
+        // All other characters must be hex digits (0-9, a-f, A-F)
+        for (index, char) in chars.enumerated() {
+            if dashPositions.contains(index) {
+                continue // Already checked dashes
+            }
+            guard char.isHexDigit else { return false }
+        }
+
+        return true
     }
 }
