@@ -505,6 +505,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// `terminalView` weak var. Written before `startProcess`, cleared by
         /// `cleanup()` before the `LocalProcess` is released.
         private let viewHolder = TerminalViewHolder()
+        /// Test seam: the holder both transports feed through, so a test can
+        /// put this panel into the cleared-holder state a torn-down attach
+        /// leaves behind — a panel that still owns its NSView and can no
+        /// longer read a byte back.
+        var viewHolderForTesting: TerminalViewHolder { viewHolder }
         /// Drains the vended pty for a holder-backed panel. Held here rather
         /// than in the app-scoped `ControlModeReaderRegistry` because a holder
         /// reader has nothing to outlive the view for: it feeds THIS view, and
@@ -571,6 +576,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// This panel's claim on its session's daemon injections, held for as
         /// long as it owns the pty.
         private var injectionRegistration: TerminalInjectionRouter.Registration?
+        /// This panel's claim on its terminal's latency-probe requests, held
+        /// only while the default-off terminal latency diagnostic is on.
+        private var latencyRegistration: TerminalLatencyDiagnostic.Registration?
+        /// The tap the feed seam and the view share, kept because the probe is
+        /// registered later than the tap is installed — on the holder
+        /// transport, only once the attach ack has landed — and the probe's
+        /// closure arms THIS tap.
+        private var latencyTap: TerminalLatencyTap?
+        /// The diagnostic that issued `latencyRegistration`, kept so the
+        /// withdrawal goes back to the object that granted the claim rather
+        /// than to whatever the process-wide gate resolves to later.
+        private var latencyDiagnostic: TerminalLatencyDiagnostic?
+        /// Test seam: the diagnostic this panel wires into, in place of the
+        /// process-wide gate. Resolving that gate reads
+        /// `UserDefaults.standard` — this unbundled executable's real
+        /// `TBDApp.plist` — and starts a directory watch, neither of which
+        /// belongs in a test.
+        var latencyDiagnosticForTesting: TerminalLatencyDiagnostic?
         /// The live holder attach this panel owns, and everything its detach
         /// needs to name itself: a holder row has no pane, so the session is
         /// named by `panelID` and the attach by the generation the daemon
@@ -587,6 +610,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// two mean opposite things: the ingest guard drops replies, and this
         /// one is here to keep them.
         private var modeReplyCollector: [UInt8]?
+        /// Test seam: raise and lower the handback's reply collector exactly as
+        /// `captureHandbackPreamble` does with its own two assignments.
+        ///
+        /// That method is `private` and `async`, and the window it opens is
+        /// closed by a main-queue hop inside it, so a test cannot drive it and
+        /// still observe the probe's `handbackinflight` refusal — which is the
+        /// refusal this seam exists to make reachable through the real
+        /// registered closure.
+        var isCollectingModeRepliesForTesting: Bool {
+            get { modeReplyCollector != nil }
+            set { modeReplyCollector = newValue ? [] : nil }
+        }
         /// Whether a handback task owns `viewHolder` and will clear it itself.
         ///
         /// Raised by `detachHolderSession` for the span between the reader's
@@ -830,6 +865,137 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             Self.transportPreparationNotice(for: panelTransport())
         }
 
+        /// This panel's terminal kind, or nil when AppState has not loaded the
+        /// row. Nil is NOT defaulted the way `panelTransport()` defaults its
+        /// answer: the only consumer is the latency echo probe's refusal, which
+        /// writes keystrokes into a session and so must fail closed — an
+        /// unresolvable panel is refused, never assumed to be a shell.
+        @MainActor
+        func panelKind() -> TerminalKind? {
+            appState?.terminals.values
+                .lazy
+                .flatMap { $0 }
+                .first(where: { $0.id == panelID })?
+                .kind
+        }
+
+        /// Wire this panel's PASSIVE half of the terminal latency instrument,
+        /// if it is on.
+        ///
+        /// Does nothing at all when the diagnostic is off, which is the
+        /// default — that nil check is the whole gate for this panel. When it
+        /// is on, one tap is shared by the feed seam (which stamps every
+        /// chunk) and the view (which reports the wait when it draws). Both
+        /// only observe bytes this panel is already being given, so this half
+        /// is safe to install the moment the panel has a view to feed.
+        ///
+        /// The probe — the half that *writes* — is `registerLatencyProbe()`,
+        /// and on the holder transport it must wait for the attach ack. See
+        /// its own comment.
+        @MainActor
+        private func installLatencyTap(
+            on terminalView: TerminalView, transport: TerminalTransport
+        ) {
+            guard let diagnostic = latencyDiagnosticForTesting ?? TerminalLatencyDiagnostic.shared
+            else { return }
+            latencyDiagnostic = diagnostic
+            let tap = diagnostic.makeTap(terminalID: panelID, transport: transport)
+            latencyTap = tap
+            viewHolder.setTap(tap)
+            (terminalView as? TBDTerminalView)?.latencyTap = tap
+        }
+
+        /// Register this panel's echo probe, so the driver's request file can
+        /// make it write one token through its real keystroke path.
+        ///
+        /// **Separate from the tap install, and later than it, because this
+        /// half writes into the session.** On the holder transport the app is
+        /// not the pty's writer until `attach.ready` has been accepted; the
+        /// daemon is, and it is still draining. A request answered while that
+        /// ack is in flight would put bytes through `holderWriteFD` into a pty
+        /// the daemon still owns — interleaved with its own reads, on a
+        /// session this panel does not yet have. An unregistered panel refuses
+        /// the request as `unknownterminal`, which is the truth for that
+        /// window: this panel cannot answer for that terminal yet.
+        ///
+        /// The registered closure is what makes the echo comparable across
+        /// transports: it enters the outbound path at `deliverOutgoing`, the
+        /// body of `send(source:data:)` — the delegate entry a keystroke
+        /// reaches after SwiftTerm's input hop — minus only the two guards it
+        /// checks itself, so the write pays whatever a keystroke pays on this
+        /// transport and reports what a keystroke cannot.
+        @MainActor
+        private func registerLatencyProbe() {
+            guard let diagnostic = latencyDiagnostic, let tap = latencyTap else { return }
+            let now = diagnostic.now
+            latencyRegistration = diagnostic.register(
+                // Asked at request time, not snapshotted here: a panel is
+                // installed as soon as it has a view, which can be before
+                // `AppState.terminals` carries its row — and a kind captured
+                // as nil then would refuse this panel for its whole life.
+                terminalID: panelID, kind: { [weak self] in self?.panelKind() }
+            ) { [weak self] seq in
+                guard let self, self.terminalView != nil else { return "noview" }
+                // A panel whose holder was cleared still owns its NSView: an
+                // attach that came apart after the reader started clears the
+                // holder and leaves the view. Nothing would read the echo back
+                // in that state, so the request is refused rather than counted
+                // as a token the transport lost.
+                guard self.viewHolder.hasView else { return "noview" }
+                // The two early exits in `send(source:data:)` that swallow
+                // bytes, checked BEFORE the tap is armed. A token the panel
+                // eats is not a slow transport, and must never be reported as
+                // one: the handback's collector would fold it into
+                // `RecordedModeReplies`, and a snapshot preamble drops it.
+                if self.modeReplyCollector != nil { return "handbackinflight" }
+                guard !self.isIngestingSnapshot else { return "ingestingsnapshot" }
+                var token = TerminalLatencyTap.token(seq: seq)
+                // Armed BEFORE the write, and stamped at the same moment: a
+                // reply that came back between the write and the arm would
+                // otherwise be missed, and a start stamped after the write
+                // would omit the write's own cost from the number.
+                tap.armEcho(seq: seq, token: token, sentAt: now())
+                // The carriage return goes out but is not matched on: it makes
+                // each token start a fresh line so it can never wrap mid-token,
+                // and a cooked tty echoes it as CR LF rather than as itself.
+                token.append(0x0d)
+                // The third swallowing case, and the only one that cannot be
+                // checked in advance: the queue reports `.unwritable` when the
+                // bytes reached no transport at all — a pty whose child has
+                // exited, a sidecar between attaches. The pending token is
+                // retired quietly, because a token the panel never handed over
+                // is not one the transport lost.
+                guard self.deliverOutgoing(token[...]) else {
+                    tap.cancelEcho(seq: seq)
+                    return "unwritable"
+                }
+                return nil
+            }
+        }
+
+        /// Withdraw everything `installLatencyTap` and `registerLatencyProbe`
+        /// wired up. Called from `cleanup()`, and from every holder-attach
+        /// path that gives up after the tap is installed: a closure left
+        /// registered for a panel whose session is gone would answer a later
+        /// request by writing into nothing, and report the silence as the
+        /// transport's.
+        ///
+        /// Covers both halves unconditionally, and must stay on every failure
+        /// path for that reason: most of them give up before the probe was
+        /// ever registered, and the passive tap they DID install still has to
+        /// come off the view and the holder.
+        @MainActor
+        private func removeLatencyTap() {
+            latencyTap = nil
+            viewHolder.clearTap()
+            (terminalView as? TBDTerminalView)?.latencyTap = nil
+            let diagnostic = latencyDiagnostic
+            latencyDiagnostic = nil
+            guard let registration = latencyRegistration else { return }
+            latencyRegistration = nil
+            diagnostic?.unregister(registration)
+        }
+
         /// Renders the attach-failed placard for a holder attach that did not
         /// complete, and logs why. One place for the copy and the log line so
         /// every failure in `startHolderClient` tells the same, truthful
@@ -967,6 +1133,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // terminal-lag investigation implicates in paint starvation; do not
             // "tidy" this into looking like its neighbour.
             viewHolder.set(terminalView)
+            installLatencyTap(on: terminalView, transport: .holder)
             // Taken BEFORE the reader owns the descriptor, because the reader
             // is the only thing allowed to close it afterwards. `dup` failing
             // is not fatal to rendering — the session still paints — so it is
@@ -1008,7 +1175,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 label: panelID.uuidString, fd: attachment.ptyFD
             ) { chunk in
                 let bytes = [UInt8](chunk)
-                holder.withView { $0.feed(byteArray: bytes[...]) }
+                holder.feed(bytes[...])
             }
             holderReader = reader
             onHolderReaderWillStart?()
@@ -1025,6 +1192,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // refused again by its generation check.
                 stopHolderReader()
                 viewHolder.clear()
+                removeLatencyTap()
                 feedHolderAttachFailure(
                     reason: "attach.ready refused: \(error.localizedDescription)",
                     into: terminalView)
@@ -1033,8 +1201,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             guard !isTornDown else {
                 stopHolderReader()
                 viewHolder.clear()
+                removeLatencyTap()
                 return
             }
+            // The probe's first legal moment: the daemon has acked, so this
+            // app is the session's writer, and the teardown check behind the
+            // ack has passed. Before here a request is refused as
+            // `unknownterminal` rather than answered by writing into a pty the
+            // daemon still owns. The passive tap has been live since before
+            // the reader started — it only observes.
+            registerLatencyProbe()
             // Recorded with the injection claim below and for the same reason:
             // both are true exactly while this panel owns the pty. The detach
             // reads it to decide whether there is a session to hand back, so a
@@ -1809,6 +1985,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `dataReceived`. Cleared by `cleanup()` before the process is
             // released.
             viewHolder.set(terminalView)
+            installLatencyTap(on: terminalView, transport: .tmux)
+            // Single-step on this transport, deliberately: there is no ack to
+            // wait for. The panel's viewer process owns its own pty from the
+            // moment it is spawned, so there is no window in which a probe
+            // write would land on a descriptor somebody else is still driving
+            // — which is exactly the window the holder arm defers past.
+            registerLatencyProbe()
 
             process.startProcess(
                 executable: tmuxPath,
@@ -1863,6 +2046,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
+            removeLatencyTap()
             // Releases any injection still parked behind an open paste
             // (Task 10). Safe to call even if `send(source:data:)` never ran —
             // the lazy queue is simply constructed here for the first time and
@@ -2300,7 +2484,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // (the parse runs under SwiftTerm's terminal lock) and the view
             // reference is owned by the holder, so a batch racing teardown
             // either completes against a live view or reads nil and drops.
-            viewHolder.withView { $0.feed(byteArray: slice) }
+            viewHolder.feed(slice)
             // The viewer-MRU signal keeps its main hop.
             DispatchQueue.main.async { [weak self] in
                 self?.groupedViewerDidReceiveOutput()
@@ -2344,6 +2528,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // preamble is in flight is replayed history or a keystroke aimed at
             // history — neither is input for the live child.
             guard !isIngestingSnapshot else { return }
+            deliverOutgoing(data)
+        }
+
+        /// Everything `send(source:data:)` does once its two swallowing guards
+        /// have let the bytes through, and the answer to whether a transport
+        /// took them.
+        ///
+        /// Factored out for the latency probe, which enters here rather than at
+        /// `send` because it has already made those two checks itself and needs
+        /// the verdict `send` has nobody to report to. Every other caller is
+        /// `send`, and for them the result is still discardable: a synchronous
+        /// SwiftTerm delegate callback has nowhere to put a transport failure,
+        /// which is what `noteUserWriteOutcome` exists to say instead.
+        @discardableResult
+        func deliverOutgoing(_ data: ArraySlice<UInt8>) -> Bool {
             // Interrupt detection (Ctrl-C / Esc) must keep working in every
             // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
@@ -2386,10 +2585,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if payload.elementsEqual(EscapeSequences.bracketedPasteStart) {
                 outgoingQueue.beginUserPaste()
             }
-            outgoingQueue.enqueueUserBytes(payload)
+            let reachedTransport = outgoingQueue.enqueueUserBytes(payload)
             if payload.elementsEqual(EscapeSequences.bracketedPasteEnd) {
                 outgoingQueue.endUserPaste()
             }
+            return reachedTransport
         }
 
         /// The single serialization point for everything this panel writes to
