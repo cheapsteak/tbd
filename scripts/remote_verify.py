@@ -46,7 +46,7 @@ somewhere that cannot make it up.
 A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds four jobs
 with no `needs:` between them — lint, the committed-plans guard, the review-script
 tests and the test job — plus a `swift build` step after the results are uploaded,
-and eight fallible setup steps before the first `scripts/test.sh`; and
+and nine fallible setup steps before the first `scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
 path, for both subcommands.
@@ -895,12 +895,13 @@ def verdict_from_results(results: Report | None) -> int:
       one that failed. Only `actions/upload-artifact`'s `if-no-files-found: warn`
       keeps the second shape off the wire today, by publishing no artifact when
       nothing matches; that is a third party's behavior, not a guard of ours.
-      `test.yml`'s test job runs eight fallible setup steps before it reaches
-      the first `scripts/test.sh` — checkout, mtime restore, `brew
-      install tmux`, `xcode-select`, toolchain capture, cache restore, workspace
-      repair, force rebuild — and any one of them failing means zero tests ran,
-      no xUnit file was written and no artifact was uploaded. `brew install`
-      flaking on a hosted runner is ordinary weather, and reporting that as a red
+      `test.yml`'s test job runs nine fallible setup steps before it reaches
+      the first `scripts/test.sh` — checkout, the cache-save decision, mtime
+      restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
+      restore, workspace repair, force rebuild — and any one of them failing
+      means zero tests ran, no xUnit file was written and no artifact was
+      uploaded. `brew install` flaking on a hosted runner is ordinary weather,
+      and reporting that as a red
       suite tells a caller its tests failed when they never started, with no
       local fallback to correct it. Every case that lands here is answered
       correctly by 78: setup failed (nothing ran); the compile failed (the local

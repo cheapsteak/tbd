@@ -206,6 +206,14 @@ jobs:
       # that socket — still no egress, and it self-skips on runners, which
       # have no `claude` installed.
       #
+      # `cache-save-policy.test.sh` is the odd one out in what it reads: it
+      # extracts two pieces of THIS file — the cache-save decision step's shell
+      # and the save step's `if:` — and drives the first against fixture repos.
+      # It is here rather than in the `test` job because a wrong answer there
+      # has no red symptom anywhere else: too few saves leaves every later run
+      # paying a cold build, too many churns main's entry out of a 10 GB store,
+      # and neither shows up in a suite.
+      #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -221,6 +229,7 @@ jobs:
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/restart-guard-lib.test.sh
           bash scripts/restart-build-lib.test.sh
@@ -293,6 +302,54 @@ jobs:
         with:
           fetch-depth: 0  # git-restore-mtime needs full history
 
+      # Which runs may SAVE the SwiftPM cache is a storage-policy question, and
+      # the pull_request half of it needs the diff — so it is answered once here,
+      # next to the checkout that makes the diff available, and the save step at
+      # the end of the job is left as a single `if:`. `fetch-depth: 0` above is
+      # what puts `origin/<base>` in the clone; without it there is no ref to
+      # diff against.
+      #
+      # Only `pull_request` runs ask the question. A `push` run (restricted to
+      # main by this workflow's triggers) always saves and a `workflow_dispatch`
+      # run never does; both of those follow from the event name alone and are
+      # decided in the save step's `if:`.
+      - name: Decide whether this run may save the SwiftPM cache
+        id: cache_policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          decide() {
+            echo "library_touched=$1" >> "$GITHUB_OUTPUT"
+            echo "library_touched=$1 — $2"
+          }
+          if [ "$EVENT_NAME" != pull_request ]; then
+            decide false "not a pull_request run; the save step decides on the event alone"
+            exit 0
+          fi
+          # A base ref that will not resolve cannot be told apart from "this PR
+          # changed nothing", so it resolves to the conservative answer and says
+          # so loudly. One PR rebuilding more than it had to is cheap; a wrong
+          # `true` spends 1.5 GB of a 10 GB store and evicts main's entry for
+          # everyone.
+          if ! git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null; then
+            echo "::warning::origin/$BASE_REF is absent, so this run cannot tell whether it touched a first-party library; it will not save a cache."
+            decide false "origin/$BASE_REF absent"
+            exit 0
+          fi
+          # Three-dot: what this PR changed since it forked, not everything that
+          # has landed on the base since.
+          status=0
+          git diff --quiet "origin/$BASE_REF...HEAD" -- \
+            Sources/TBDShared/ Sources/TBDDaemonLib/ Package.swift Package.resolved || status=$?
+          case "$status" in
+            0) decide false "no first-party library or package-manifest change" ;;
+            1) decide true "touched TBDShared, TBDDaemonLib or the package manifest" ;;
+            *) echo "::warning::git diff against origin/$BASE_REF failed ($status); this run will not save a cache."
+               decide false "git diff failed" ;;
+          esac
+
       # Restore source-file mtimes to their last git commit times BEFORE the
       # cache restore. Without this, fresh checkout writes every source mtime
       # to "now", which looks newer than what llbuild recorded in the cached
@@ -325,8 +382,45 @@ jobs:
       - name: Record runner CPU width
         run: 'echo "runner cores: $(sysctl -n hw.ncpu)"'
 
-      - name: Cache SwiftPM build artifacts and dependencies
-        uses: actions/cache@v4
+      # Restore. Whether this run also SAVES is decided by the last step in
+      # this job, and the reason the two are separate is GitHub's cache access
+      # scope: a run reads caches created on its own branch, on its base branch,
+      # or on the default branch, and among prefix matches it takes the most
+      # recently created one. The store is capped at 10 GB and an entry for this
+      # package is ~1.56 GB, so it holds about six of them and evicts the least
+      # recently used.
+      #
+      # The measurement that shapes the policy, taken over the 30 days to
+      # 2026-09-21: this workflow ran 849 times — 516 on `pull_request`, 195 on
+      # `workflow_dispatch`, 138 on `push` to main — and 475 of those runs
+      # concluded successfully, which is the set that writes an entry, since
+      # `actions/cache` saves under `post-if: success()`. The store held six
+      # entries at that moment, 9.4 GB in all: two on `refs/heads/main` and four
+      # on `refs/pull/<n>/merge`, every one of them created or last read within
+      # the previous hour. The whole store turns over in under an hour. Three
+      # consequences follow, and together they are the save policy.
+      #
+      #  - An entry written by a `workflow_dispatch` run is created on the ref
+      #    that run was dispatched against. The remote verification valve
+      #    (docs/specs/2026-08-16-remote-verification-valve-design.md) dispatches
+      #    this workflow against an inert `preflight/` ref, which is nobody's
+      #    branch and nobody's base and which the preflight sweep then deletes,
+      #    so no later run can ever read what that entry cost 1.5 GB to store.
+      #    That was 77 of the 475.
+      #  - A `pull_request` entry is created on that PR's merge ref, so only that
+      #    same PR can read it. Those were 317 of the 475, and four of the six
+      #    entries in the store — which is what pushes main's entry, the one
+      #    entry every branch can read, toward the bottom of the LRU. When it
+      #    goes, the next push to main and the next PR's first run restore
+      #    nothing and rebuild from scratch — the step comment below puts the
+      #    first test step at 1250 s on a cold cache (run 34255164378) against
+      #    73-996 s warm, where a warm restore itself costs 30-54 s, measured
+      #    across the eight most recent green runs.
+      #  - Every save costs the run that makes it 26-49 s of upload, measured
+      #    across those same eight runs.
+      - name: Restore SwiftPM build artifacts and dependencies
+        id: spm-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .build
@@ -608,10 +702,10 @@ jobs:
         # (2026-09-05 to 2026-09-09), the first test step took between 73 s and
         # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
         # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
-        # "Cache SwiftPM build artifacts" step finished in 1–4 s, which is what
-        # a cache MISS looks like: a hit spends 25–56 s restoring. So 1250 s is
-        # the measured cold-cache figure, and it covers a full 5,529-test daemon
-        # pass, more than this step now runs. Warm-cache runs still spread
+        # SwiftPM cache restore finished in 1–4 s, which is what a cache MISS
+        # looks like: a hit spends 25–56 s restoring. So 1250 s is the measured
+        # cold-cache figure, and it covers a full 5,529-test daemon pass, more
+        # than this step now runs. Warm-cache runs still spread
         # 73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib
         # and a PR's first run restores only the deps-only fallback key.
         #
@@ -747,3 +841,47 @@ jobs:
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j "$TBD_SWIFT_JOBS"
+
+      # Saved LAST, after the final writer into `.build`, so the stored entry
+      # carries the linked executables as well as the test artifacts. `key:` is
+      # the restore step's own resolved primary key rather than a second copy of
+      # that expression, so the two cannot drift apart.
+      #
+      # The conditions, in the order they are written:
+      #
+      #  - `success()`. A red run stores nothing. That is also what
+      #    `actions/cache` does unattended — its `action.yml` declares
+      #    `post-if: success()`, so its saving post step does not run on a failed
+      #    job — and the build above, the last step that writes into `.build`, is
+      #    itself skipped on a red run, so there would be nothing freshly linked
+      #    to store.
+      #  - `cache-hit != 'true'`. An exact hit means this key is already in the
+      #    store and the save would be a duplicate of what was just restored.
+      #  - The event. A `push` (main, per this workflow's triggers) always saves:
+      #    main's entry is the one every branch can read, and it is all that
+      #    stands between a fresh PR and a cold build. A `workflow_dispatch`
+      #    never saves, because nothing can read what it would write — see the
+      #    restore step above.
+      #  - For a `pull_request`, whether it touched a first-party library or the
+      #    package manifest. The primary key hashes every source file, so a PR's
+      #    own entry is restorable by that same PR's later pushes and by nothing
+      #    else; it earns 1.5 GB of a 10 GB store only when the next push would
+      #    otherwise rebuild nearly everything. Touching TBDShared or
+      #    TBDDaemonLib is exactly that case — an interface change cascades into
+      #    every downstream module, and this job wipes and re-emits both
+      #    libraries on every run regardless. Touching
+      #    Package.resolved moves the dependency set the restore-keys prefix is
+      #    scoped to, which leaves main's entry no longer a fallback this PR can
+      #    use at all; touching Package.swift re-plans the build graph, which
+      #    cascades the way a library change does. A PR that touches
+      #    neither rebuilds a small delta on top of main's entry for about what
+      #    restoring its own would have cost, so it keeps main's entry alive for
+      #    everyone instead of evicting it.
+      - name: Save SwiftPM build artifacts and dependencies
+        if: ${{ success() && steps.spm-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && steps.cache_policy.outputs.library_touched == 'true')) }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
