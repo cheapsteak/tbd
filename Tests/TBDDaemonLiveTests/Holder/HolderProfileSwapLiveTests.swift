@@ -171,6 +171,94 @@ struct HolderProfileSwapLiveTests {
                     "the row and the spawn disagree about the new session: \(argv)")
         }
     }
+
+    /// The spec's second failure outcome: a re-home that fails after the park
+    /// succeeded leaves the row **parked on the old account**, and a retry
+    /// takes the cold path.
+    ///
+    /// Only a live park can reach that window. The re-home's write is guarded
+    /// twice — a CAS on the terminal row, and the worktree-server lock's
+    /// `allowedStatuses` — and both are checked inside the same closure that
+    /// does the write, so there is no instant visible from outside the RPC at
+    /// which either can be made to fail. `holderSwapBetweenParkAndReHome` is
+    /// that instant: the swap has parked the row and re-read it, and has
+    /// written nothing. Moving the worktree out of the status the handler
+    /// captured at entry is what the lock refuses.
+    ///
+    /// What the test is for is the guarantee rather than the mechanism — that
+    /// a failure here costs the user the account switch and nothing else. The
+    /// park really ended the child, so the row must still name the session, on
+    /// the profile it started on, with no replacement process anywhere.
+    @Test func inPlaceSwapWhoseReHomeFailsLeavesTheRowParkedOnTheOldAccount() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(blank: false, flushOnTerm: true)
+        let oldChild = try #require(terminal.childPID)
+        let oldHolder = try #require(terminal.holderPID)
+
+        let db = fixture.db
+        let worktreeID = fixture.worktree.id
+        fixture.router.holderSwapBetweenParkAndReHome = { _ in
+            // Archived is outside `[worktree.status]` — the handler captured
+            // `.main` at entry — so the lock refuses before any write runs.
+            try? await db.worktrees.updateStatus(id: worktreeID, status: .archived)
+        }
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+
+        #expect(!response.success, "a swap whose re-home could not run reported success")
+        let error = response.error ?? "success"
+        #expect(error.contains("It is parked on its previous account"),
+                "the failure does not say where the row was left: \(error)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a failed re-home left the row awake")
+        #expect(after.profileID == nil,
+                "a re-home that threw still moved the row to the new account")
+        #expect(after.claudeSessionID == Self.sessionID,
+                "a failed re-home lost the conversation the next wake has to resume")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "a failed re-home left a replacement process on the row")
+        // The park is real, so the pre-swap generation is really gone.
+        let goneSignal = kill(oldChild, 0)
+        let goneErrno = errno
+        #expect(goneSignal == -1 && goneErrno == ESRCH,
+                "the park did not end the old job (kill returned \(goneSignal), errno \(goneErrno))")
+        // Bounded for the reason the resume test spells out: an unreaped holder
+        // is a zombie, and `kill(pid, 0)` cannot tell one from a running
+        // process.
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
+
+        let rows = try fixture.actuationRows()
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "a failed re-home was recorded as something other than transport-failed: \(rows)")
+
+        // And the retry the message promises. The row is parked, so the swap
+        // takes the cold path at the top of the handler: re-home, no park, no
+        // wake, no process to interrupt.
+        fixture.router.holderSwapBetweenParkAndReHome = nil
+        try await fixture.db.worktrees.updateStatus(id: worktreeID, status: .main)
+
+        let retry = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+        #expect(retry.success, "the retry the failure message promises failed: \(retry.error ?? "")")
+
+        let retried = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(retried.profileID == fixture.destProfileID,
+                "the retry did not re-home the row to the new account")
+        #expect(retried.isParked, "the cold path woke a row it must only have re-homed")
+        #expect(retried.holderPID == nil && retried.childPID == nil,
+                "the cold path started a process for a parked row")
+    }
 }
 
 // MARK: - Delta recorder
@@ -223,6 +311,21 @@ private final class SwapFixture {
     /// file has a complete argv file to read.
     var launchArgvPath: String { "\(home)/launch-argv" }
     var launchEnvPath: String { "\(home)/launch-env" }
+
+    /// Every actuation line the log holds, decoded. A swap whose transport
+    /// half failed is visible nowhere else: the arm reports the failure out of
+    /// band, so a test reading only the response and the row cannot tell a
+    /// completed swap from one recorded `transport-failed`.
+    func actuationRows() throws -> [[String: Any]] {
+        guard let contents = try? String(
+            contentsOfFile: "\(home)/actuations.jsonl", encoding: .utf8) else { return [] }
+        return try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+    }
 
     /// The row's own transcript — the jsonl the SOURCE side writes, which is
     /// what a live agent would still be appending to as its park ends.
@@ -343,7 +446,7 @@ private final class SwapFixture {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
-            actuationLog: makeTestActuationLog())
+            actuationLog: ActuationLog(path: "\(home)/actuations.jsonl"))
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)
 

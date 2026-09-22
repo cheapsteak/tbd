@@ -2786,6 +2786,10 @@ extension RPCRouter {
             return (RPCResponse(error: reason), reason)
         }
 
+        // The seam a test uses to stage the re-home failure. Production leaves
+        // it nil and this awaits nothing. See its declaration on `RPCRouter`.
+        await holderSwapBetweenParkAndReHome?(oldTerminal.id)
+
         // 1b. RE-CARRY the transcript, now that the park has ended. The handler
         //     copied it into the destination config dir before the transport
         //     branch, and that copy skips a destination that already exists —
