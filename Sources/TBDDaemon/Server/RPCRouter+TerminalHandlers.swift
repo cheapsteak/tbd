@@ -1010,16 +1010,54 @@ extension RPCRouter {
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
-            await db.terminalHistory.captureOnClose(terminal: terminal) {
-                try await tmux.capturePaneScrollback(
-                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+            // Refuse to kill a window whose pane belongs to a DIFFERENT
+            // terminal. A reboot restarts a tmux server's window/pane
+            // numbering from scratch, and several worktrees of one repo share
+            // a server, so a stale row's recorded coordinate can collide with
+            // a live stranger's freshly-spawned window — `reconcile()` will
+            // eventually re-probe and park such a stale row, but a close
+            // racing that window would otherwise `kill-window` a session it
+            // was never asked to touch. Checked only for a POSITIVE
+            // mismatch: an unstamped pane, a pane that has already gone
+            // missing, or an unreadable probe all fall back to today's close
+            // behavior — refusing on those would turn an ordinary close of an
+            // already-dead window into a new failure.
+            var paneOwnershipMismatch: String?
+            if let probe = try? await tmux.paneSendTarget(
+                server: worktree.tmuxServer, paneID: terminal.tmuxPaneID) {
+                let paneTerminalID: String?
+                switch probe {
+                case .live(let id), .dead(let id): paneTerminalID = id
+                case .missing: paneTerminalID = nil
+                }
+                if let paneTerminalID,
+                   paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                    paneOwnershipMismatch =
+                        "pane \(terminal.tmuxPaneID) now belongs to a different terminal " +
+                        "(\(paneTerminalID)) — the tmux coordinate was recycled, so the " +
+                        "window was left untouched"
+                }
             }
-            // Kill the tmux window
-            do {
-                try await tmux.killWindow(
-                    server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            } catch {
-                transportCleanupFailure = "\(error)"
+
+            if let paneOwnershipMismatch {
+                logger.warning("""
+                    terminalDelete: refusing to kill-window for terminal \
+                    \(terminal.id.uuidString, privacy: .public) — \
+                    \(paneOwnershipMismatch, privacy: .public)
+                    """)
+                transportCleanupFailure = paneOwnershipMismatch
+            } else {
+                await db.terminalHistory.captureOnClose(terminal: terminal) {
+                    try await tmux.capturePaneScrollback(
+                        server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+                }
+                // Kill the tmux window
+                do {
+                    try await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+                } catch {
+                    transportCleanupFailure = "\(error)"
+                }
             }
         }
 
