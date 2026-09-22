@@ -837,6 +837,18 @@ final class AppState {
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
+    /// The remote-session analogue of `terminalFocusTargets`: the mounted
+    /// `attach` terminal for each remote selection, so selecting a session
+    /// again can hand its kept-alive pane first responder. Keyed by selection
+    /// because a remote pane has no terminal id.
+    @ObservationIgnored var remoteTerminalFocusTargets: [RemoteSessionSelection: TerminalFocusTarget] = [:]
+    /// The remote selection whose attach slot `RemoteSessionDetailView` is
+    /// currently showing, or nil when it shows the Log tab, a detached or auth
+    /// prompt, or nothing. The pager stays in its window at zero opacity in
+    /// all of those, so window membership alone cannot tell a visible pane
+    /// from a hidden one; this is what keeps a focus claim out of a pane the
+    /// user cannot see. Written by the view (`setRemoteAttachSlotShown`).
+    @ObservationIgnored var remoteAttachSlotShownSelection: RemoteSessionSelection?
     /// Where a daemon injection for a holder-backed session goes: the panel
     /// that currently owns that session's pty. Registered by
     /// `TerminalPanelView.Coordinator` for as long as its holder attach is

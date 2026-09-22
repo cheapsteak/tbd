@@ -93,6 +93,22 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
             // replacement child.
             onStarted: { [weak appState] date in
                 appState?.markRemoteAttachStarted(selection, generation: generation, at: date)
+            },
+            // A kept-alive pane never re-runs its spawn-time focus claim, so
+            // selecting it again goes through this registration instead. A
+            // reconnect's replacement registers over the superseded view, and
+            // the unregister is identity-guarded against that order.
+            onViewMounted: { [weak appState] view in
+                appState?.registerRemoteTerminalView(view, for: selection)
+            },
+            onViewDismantled: { [weak appState] view in
+                appState?.unregisterRemoteTerminalView(view, for: selection)
+            },
+            // The spawn-time claim takes the selection path's gate: a session
+            // opened straight to its Log tab still mounts and spawns this
+            // pane, transparent, and must not take focus into it.
+            onClaimFocus: { [weak appState] in
+                appState?.focusRemoteTerminalAfterSelectionChange(selection)
             }
         )
     }
