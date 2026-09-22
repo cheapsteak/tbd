@@ -2705,6 +2705,27 @@ extension RPCRouter {
     /// - **Park refused, or the child survived the ladder.** The row stays
     ///   awake on the old profile with nothing changed. The park's own reason
     ///   is both the RPC error and the actuation's.
+    ///
+    ///   A park **already in flight** for this row is one of those refusals,
+    ///   and the reason it cannot be read as "parked now, carry on" is the
+    ///   rollback. `performHibernate`'s singleflight guard answers
+    ///   `.alreadyHibernated` whenever any other hibernate of this terminal is
+    ///   mid-ladder — the idle sweep's autopark, a racing "Hibernate now" —
+    ///   independent of whether that ladder will finish. The holder park
+    ///   writes `hibernatedAt` as INTENT before it sends the polite `/exit`,
+    ///   so the row can read parked while its ladder is still deciding, and a
+    ///   child that survives the escalation makes that ladder call
+    ///   `clearHibernated`. A re-home committed in between would land the row
+    ///   awake, labelled with the NEW account, while the un-killed process
+    ///   runs on under the old one — the exact state the park-before-re-home
+    ///   order exists to prevent. `reHomeParkedRow`'s CAS does not cover it:
+    ///   it guards the write against a park state that changed BEFORE the
+    ///   write, not against a rollback that lands after. So this arm changes
+    ///   nothing and says so, and a retry is sound either way — the ladder
+    ///   either finished, in which case the retry takes the cold path at the
+    ///   top of `handleTerminalSwapProfile` and re-homes a parked row with no
+    ///   process to interrupt, or it rolled back, in which case the retry
+    ///   parks the row itself.
     /// - **Re-home failed.** The row is parked on the old profile; the message
     ///   says so, and that a retry now takes the cold path.
     /// - **Wake failed.** The row is parked on the NEW profile, so the switch
@@ -2749,14 +2770,9 @@ extension RPCRouter {
         case .ok:
             break
         case .alreadyHibernated:
-            // The row parked between the handler's read and this call — a
-            // focus-wake, or the idle sweep. It is parked now, which is all
-            // this step was for, so the re-home and the wake below run exactly
-            // as if this arm had parked it itself. That is NOT the cold path
-            // taken further up: the cold path deliberately re-homes a parked
-            // row and returns without waking it, while here the user asked for
-            // a live session to move accounts and gets it resumed there.
-            logger.info("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) was already parked when the switch asked; re-homing it where it stands")
+            let reason = "Terminal \(oldTerminal.id) was not paused for its account switch: another park of this session is in flight, or it was parked a moment ago; nothing was changed. Retry: a parked row takes the cold path."
+            logger.warning("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) has a park in flight; refusing rather than re-homing a row whose park may still roll back")
+            return (RPCResponse(error: reason), reason)
         case .notFound:
             let reason = "Terminal not found: \(oldTerminal.id)"
             return (RPCResponse(error: reason), reason)

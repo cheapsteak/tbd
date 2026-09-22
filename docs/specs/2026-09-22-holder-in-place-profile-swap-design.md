@@ -91,10 +91,16 @@ after any wake.
 
 Each half fails into a named state, and the RPC error names the half:
 
-- **Park refused, or the child survived the ladder.** The row stays awake on
-  the old profile with nothing about it changed. The actuation finishes
-  `transportFailed` with the park's reason. Same shape as the tmux arm's
-  failed interrupt.
+- **Park refused (including a park already in flight for this row, whose
+  outcome the swap cannot know), or the child survived the ladder.** The row
+  stays awake on the old profile with nothing about it changed. The actuation
+  finishes `transportFailed` with the park's reason. Same shape as the tmux
+  arm's failed interrupt. An in-flight park belongs here because park intent is
+  written before the ladder runs and a surviving child rolls it back: a swap
+  that re-homed on the strength of that intent could leave the row awake under
+  the new account with the old process still running. The retry is sound
+  whichever way the ladder went — a row it parked takes the cold path, and a
+  row it rolled back is parked by the retry itself.
 - **Re-home failed** (a database write after a successful park). The row is
   parked on the old profile. The error says so and that the next focus wakes
   it there; a retry of "Switch account" takes the cold path and succeeds with

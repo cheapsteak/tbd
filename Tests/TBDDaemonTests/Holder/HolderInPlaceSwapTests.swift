@@ -239,6 +239,52 @@ struct HolderInPlaceSwapTests {
                 "a refused park was recorded as something other than transport-failed")
     }
 
+    /// A park the coordinator answers `.alreadyHibernated` to is a REFUSAL,
+    /// not a park: `performHibernate`'s singleflight guard returns that case
+    /// for any hibernate of this terminal that is currently mid-ladder — the
+    /// idle sweep's autopark, or a racing manual "Hibernate now" — and the
+    /// swap cannot see whether that ladder will finish parking the row or roll
+    /// its intent back because the child survived. So the arm must change
+    /// nothing and say so.
+    ///
+    /// Staged by claiming the singleflight slot for this terminal before the
+    /// RPC, which is exactly what a concurrent ladder holds while it runs. The
+    /// row stays awake in the database, because a row that reads parked at the
+    /// handler's entry takes the cold path further up and never reaches this
+    /// arm at all — the in-flight ladder's park intent, when it lands, is
+    /// invisible to a swap that has already passed that branch.
+    @Test("a swap whose park is answered by another in-flight park changes nothing and says which half refused")
+    func swapParkAnsweredByAnInFlightParkChangesNothing() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: false)
+        await fixture.router.hibernationCoordinator.claimHibernateSlotForTest(terminal.id)
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(!response.success)
+        let error = response.error ?? "success"
+        #expect(error.contains("another park of this session is in flight"),
+                "the refusal does not name the in-flight park: \(error)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.profileID == nil,
+                "a park that never happened still re-homed the row")
+        #expect(!after.isParked, "an in-flight park's swap parked the row itself")
+        #expect(after.holderPID == 9101 && after.childPID == 9102,
+                "an in-flight park's swap cleared the row's pids")
+        #expect(after.sessionIncarnationID == terminal.sessionIncarnationID,
+                "an in-flight park's swap committed a replacement identity")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "an in-flight park's swap reached the wake's replacement reservation")
+
+        let rows = try fixture.actuationRows()
+        #expect(rows.count == 2,
+                "the swap did not open and close exactly one actuation: \(rows)")
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "an in-flight park was recorded as something other than transport-failed")
+    }
+
     // MARK: - The wake half, refused
 
     /// The third of the spec's failure outcomes, asked of the half that owns
@@ -287,5 +333,14 @@ struct HolderInPlaceSwapTests {
                 "a refused wake un-did the re-home; the swap must stand at the account level")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "a refused wake recorded processes nothing started")
+    }
+}
+
+/// The seam the in-flight-park test needs: claim the per-terminal singleflight
+/// slot `performHibernate` checks, without running a ladder. A real concurrent
+/// hibernate holds exactly this for the length of its ladder.
+extension HibernationCoordinator {
+    func claimHibernateSlotForTest(_ terminalID: UUID) {
+        hibernatesInFlight.insert(terminalID)
     }
 }
