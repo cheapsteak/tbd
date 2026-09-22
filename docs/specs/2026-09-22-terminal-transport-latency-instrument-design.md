@@ -104,7 +104,8 @@ precisely where tmux sits, is invisible to it on both arms. A comparison needs
 a loop the app closes itself: write a token through the panel's real keystroke
 path, watch the seam for its echo, and stamp both ends in the same process.
 
-`TerminalEchoProbe` does exactly one thing per request: it writes one token
+The echo probe, which lives in `TerminalLatencyDiagnostic`, does exactly one
+thing per request: it writes one token
 into one terminal through `Coordinator.send(source:data:)`, the delegate entry
 a keystroke reaches after SwiftTerm's input hop, so the write pays whatever a
 keystroke pays on that transport (a `DispatchIO` write to the attach client's
@@ -165,7 +166,7 @@ The format is pinned by a test because the scripts match it verbatim.
 ### Two scripts
 
 - `scripts/diag/terminal-latency-probe.py` drives a paired run. Given the two
-  scratch terminal ids (or a worktree to create them in), it interleaves
+  scratch terminal ids and their worktree, it interleaves
   samples across the arms so both see the same machine, records the load
   average alongside every sample, and reads the lines back with `log show`
   when the run ends. It refuses to report an arm whose echo count does not
@@ -263,7 +264,8 @@ and the driver script owns the pacing.
    worktree's daemon is running.
 2. Create one `cat` shell terminal with the pty-holder flag off and one with
    it on, in a scratch worktree, and confirm their transports from
-   `tbd terminal list --json`. The driver can do this itself.
+   `tbd terminal list --json`. The driver re-verifies both before its first
+   sample and refuses any id whose transport or kind is not what it expects.
 3. Run the driver at idle; run it again under load, or let it run across a
    load change and bucket. Nothing heavy may run on the machine during the
    idle arm, and no build may run during either.
