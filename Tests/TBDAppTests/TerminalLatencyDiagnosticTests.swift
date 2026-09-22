@@ -90,9 +90,9 @@ struct TerminalLatencyDiagnosticTests {
         let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
         let id = UUID()
         let invoked = Lines()
-        _ = diagnostic.register(terminalID: id, kind: .claude) { seq in
+        _ = diagnostic.register(terminalID: id, kind: { .claude }) { seq in
             invoked.append("\(seq)")
-            return true
+            return nil
         }
         diagnostic.handleRequest(request(terminalID: id, seq: 3))
         #expect(lines.all == ["echorefused terminal=\(id.uuidString) reason=notshell"])
@@ -104,7 +104,7 @@ struct TerminalLatencyDiagnosticTests {
         let lines = Lines()
         let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
         let id = UUID()
-        _ = diagnostic.register(terminalID: id, kind: nil) { _ in true }
+        _ = diagnostic.register(terminalID: id, kind: { nil }) { _ in nil }
         diagnostic.handleRequest(request(terminalID: id, seq: 3))
         #expect(lines.all == ["echorefused terminal=\(id.uuidString) reason=notshell"])
     }
@@ -122,7 +122,7 @@ struct TerminalLatencyDiagnosticTests {
         let lines = Lines()
         let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
         let id = UUID()
-        _ = diagnostic.register(terminalID: id, kind: .shell) { _ in false }
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { _ in "noview" }
         diagnostic.handleRequest(request(terminalID: id, seq: 5))
         #expect(lines.all == ["echorefused terminal=\(id.uuidString) reason=noview"])
     }
@@ -133,13 +133,55 @@ struct TerminalLatencyDiagnosticTests {
         let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
         let id = UUID()
         let invoked = Lines()
-        _ = diagnostic.register(terminalID: id, kind: .shell) { seq in
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { seq in
             invoked.append("\(seq)")
-            return true
+            return nil
         }
         diagnostic.handleRequest(request(terminalID: id, seq: 42))
         #expect(invoked.all == ["42"])
         #expect(lines.all.isEmpty)
+    }
+
+    @Test("a panel that would swallow the write refuses with its own reason, not noview")
+    func probeRefusalReasonIsReportedVerbatim() {
+        for reason in ["ingestingsnapshot", "handbackinflight"] {
+            let lines = Lines()
+            let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
+            let id = UUID()
+            _ = diagnostic.register(terminalID: id, kind: { .shell }) { _ in reason }
+            diagnostic.handleRequest(request(terminalID: id, seq: 8))
+            #expect(lines.all == ["echorefused terminal=\(id.uuidString) reason=\(reason)"])
+        }
+    }
+
+    @Test("the kind is asked for at request time, so a row loaded later is honoured")
+    func kindIsResolvedPerRequest() {
+        let lines = Lines()
+        let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
+        let id = UUID()
+        let invoked = Lines()
+        // A panel registers as soon as it has a view; AppState may not carry
+        // its row yet. The box is that row arriving afterwards.
+        let kind = KindBox()
+        _ = diagnostic.register(terminalID: id, kind: { kind.value }) { seq in
+            invoked.append("\(seq)")
+            return nil
+        }
+
+        diagnostic.handleRequest(request(terminalID: id, seq: 1))
+        #expect(lines.all == ["echorefused terminal=\(id.uuidString) reason=notshell"])
+        #expect(invoked.all.isEmpty)
+
+        kind.value = .shell
+        diagnostic.handleRequest(request(terminalID: id, seq: 2))
+        #expect(lines.all.count == 1)
+        #expect(invoked.all == ["2"])
+    }
+
+    /// A terminal kind the app learns after the panel registered.
+    @MainActor
+    private final class KindBox {
+        var value: TerminalKind?
     }
 
     // MARK: - The registry
@@ -148,14 +190,14 @@ struct TerminalLatencyDiagnosticTests {
     func supersededUnregisterIsANoOp() {
         let diagnostic = TerminalLatencyDiagnostic(now: { 0 }, emit: { _ in })
         let id = UUID()
-        let stale = diagnostic.register(terminalID: id, kind: .shell) { _ in false }
-        _ = diagnostic.register(terminalID: id, kind: .shell) { _ in true }
+        let stale = diagnostic.register(terminalID: id, kind: { .shell }) { _ in "noview" }
+        _ = diagnostic.register(terminalID: id, kind: { .shell }) { _ in nil }
         diagnostic.unregister(stale)
         #expect(diagnostic.registrationCount == 1)
 
         let lines = Lines()
         let live = TerminalLatencyDiagnostic(now: { 0 }, emit: { lines.append($0) })
-        let registration = live.register(terminalID: id, kind: .shell) { _ in true }
+        let registration = live.register(terminalID: id, kind: { .shell }) { _ in nil }
         live.unregister(registration)
         #expect(live.registrationCount == 0)
         live.handleRequest(request(terminalID: id, seq: 1))

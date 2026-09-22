@@ -42,6 +42,14 @@ import os
 /// `OSAllocatedUnfairLock`, and every emission happens **outside** it — the
 /// emit closure is a `Logger` call in production and a test's array append
 /// otherwise, and neither belongs under a lock the IO thread holds per chunk.
+///
+/// The echo search is outside it too, and for the same reason: the main thread
+/// takes this same unfair lock from `viewWillDraw`, so anything proportional to
+/// a chunk's size must not run while the IO thread holds it. `noteChunk`
+/// therefore *snapshots* the pending echo under the lock, searches outside it,
+/// and re-acquires to commit — committing only if the pending echo is still the
+/// one it snapshotted, since `armEcho` can land in that window. Two searches
+/// never race each other: one panel's chunks arrive on one IO thread.
 final class TerminalLatencyTap: @unchecked Sendable {
     /// How many un-drawn chunk timestamps one panel keeps. TBD feeds panels
     /// for unselected worktrees that never draw, so the ring is what bounds an
@@ -62,6 +70,12 @@ final class TerminalLatencyTap: @unchecked Sendable {
     let now: @Sendable () -> Double
 
     private let emit: @Sendable (String) -> Void
+
+    /// Test seam: called by `noteChunk` after it has snapshotted the pending
+    /// echo and before it commits, which is the one window where an `armEcho`
+    /// from the main actor can invalidate a search already in flight. Empty in
+    /// production, and never called while the lock is held.
+    private let didSnapshotEcho: @Sendable () -> Void
 
     /// One pending token. There is at most one because the probe is
     /// deliberately stateless beyond it: a new request retires the old one as
@@ -95,12 +109,14 @@ final class TerminalLatencyTap: @unchecked Sendable {
         now: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
         emit: @escaping @Sendable (String) -> Void = { line in
             TerminalLatencyTap.logger.info("\(line, privacy: .public)")
-        }
+        },
+        didSnapshotEcho: @escaping @Sendable () -> Void = {}
     ) {
         self.terminalID = terminalID
         self.transport = transport
         self.now = now
         self.emit = emit
+        self.didSnapshotEcho = didSnapshotEcho
     }
 
     /// The token written for `seq`: short lowercase ASCII, no escape bytes, and
@@ -119,27 +135,40 @@ final class TerminalLatencyTap: @unchecked Sendable {
     /// emulator has parsed it.
     func noteChunk(_ bytes: ArraySlice<UInt8>, feedAt: Double, feedReturnedAt: Double) {
         let parseMs = (feedReturnedAt - feedAt) * 1000
-        var matched: (seq: UInt64, sentAt: Double)?
-        state.withLockUnchecked { state in
+        // Under the lock: only the ring and parse bookkeeping, both O(1), plus
+        // a snapshot of the pending echo. The copy and the search are not here.
+        let pending: PendingEcho? = state.withLockUnchecked { state in
             if state.pendingFeeds.count < Self.ringCapacity {
                 state.pendingFeeds.append(feedAt)
             } else {
                 state.dropped += 1
             }
             if parseMs > state.parseMaxMs { state.parseMaxMs = parseMs }
+            return state.echo
+        }
+        guard let pending else { return }
 
-            guard var echo = state.echo else { return }
-            var haystack = echo.tail
-            haystack.append(contentsOf: bytes)
-            if Self.contains(haystack, echo.token) {
-                matched = (echo.seq, echo.sentAt)
+        var haystack = pending.tail
+        haystack.append(contentsOf: bytes)
+        let found = Self.contains(haystack, pending.token)
+        // Carry only what a match could still straddle.
+        let carry = max(0, pending.token.count - 1)
+        let tail = carry >= haystack.count ? haystack : Array(haystack.suffix(carry))
+
+        didSnapshotEcho()
+
+        let matched: (seq: UInt64, sentAt: Double)? = state.withLockUnchecked { state in
+            // An `armEcho` may have landed while the search ran. A result
+            // computed against the token it replaced must neither report that
+            // token nor clear its successor — drop it and let the next chunk
+            // match the live one.
+            guard state.echo?.seq == pending.seq else { return nil }
+            if found {
                 state.echo = nil
-                return
+                return (pending.seq, pending.sentAt)
             }
-            // Carry only what a match could still straddle.
-            let carry = max(0, echo.token.count - 1)
-            echo.tail = carry >= haystack.count ? haystack : Array(haystack.suffix(carry))
-            state.echo = echo
+            state.echo?.tail = tail
+            return nil
         }
         guard let matched else { return }
         // `feedAt`, not "now": the echo's arrival is the moment the bytes
@@ -209,8 +238,9 @@ final class TerminalLatencyTap: @unchecked Sendable {
 
     /// Naive substring search. The needle is a handful of bytes and the
     /// haystack is one terminal chunk, so nothing cleverer earns its
-    /// complexity here — and this runs on the IO thread under a lock only for
-    /// the state it mutates, never for the search's result.
+    /// complexity here — and its caller runs it on the IO thread with the
+    /// state lock RELEASED, so the main thread's `viewWillDraw` never waits
+    /// behind a scan proportional to a chunk.
     private static func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
         guard !needle.isEmpty, haystack.count >= needle.count else { return false }
         let last = haystack.count - needle.count

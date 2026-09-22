@@ -870,9 +870,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             (terminalView as? TBDTerminalView)?.latencyTap = tap
             let now = diagnostic.now
             latencyRegistration = diagnostic.register(
-                terminalID: panelID, kind: panelKind()
+                // Asked at request time, not snapshotted here: a panel is
+                // installed as soon as it has a view, which can be before
+                // `AppState.terminals` carries its row — and a kind captured
+                // as nil then would refuse this panel for its whole life.
+                terminalID: panelID, kind: { [weak self] in self?.panelKind() }
             ) { [weak self] seq in
-                guard let self, let view = self.terminalView else { return false }
+                guard let self, let view = self.terminalView else { return "noview" }
+                // The two early exits in `send(source:data:)` that swallow
+                // bytes, checked BEFORE the tap is armed. A token the panel
+                // eats is not a slow transport, and must never be reported as
+                // one: the handback's collector would fold it into
+                // `RecordedModeReplies`, and a snapshot preamble drops it.
+                if self.modeReplyCollector != nil { return "handbackinflight" }
+                guard !self.isIngestingSnapshot else { return "ingestingsnapshot" }
                 var token = TerminalLatencyTap.token(seq: seq)
                 // Armed BEFORE the write, and stamped at the same moment: a
                 // reply that came back between the write and the arm would
@@ -884,7 +895,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // and a cooked tty echoes it as CR LF rather than as itself.
                 token.append(0x0d)
                 self.send(source: view, data: token[...])
-                return true
+                return nil
             }
         }
 

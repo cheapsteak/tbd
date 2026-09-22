@@ -238,6 +238,97 @@ struct TerminalLatencyTapTests {
         #expect(lines.all.filter { $0.hasPrefix("echo ") }.count == 1)
     }
 
+    /// A closure a test can fill in after the tap it needs to talk to exists.
+    /// The tap's seam is a `let`, so the indirection is what lets the seam
+    /// arm the very tap that calls it.
+    private final class Hook: @unchecked Sendable {
+        private let lock = NSLock()
+        private var body: (@Sendable () -> Void)?
+
+        func set(_ body: @escaping @Sendable () -> Void) {
+            lock.lock()
+            self.body = body
+            lock.unlock()
+        }
+
+        /// Runs the body once and forgets it: the seam fires on every chunk,
+        /// and a test wants the interleaving in exactly one window.
+        func fireOnce() {
+            lock.lock()
+            let body = self.body
+            self.body = nil
+            lock.unlock()
+            body?()
+        }
+    }
+
+    @Test("an arm landing mid-search is not cleared by the stale match it raced")
+    func armDuringSearchIsNotClearedByAStaleMatch() {
+        let clock = Clock()
+        let lines = Lines()
+        let hook = Hook()
+        let tap = TerminalLatencyTap(
+            terminalID: UUID(),
+            transport: .holder,
+            now: { clock.seconds },
+            emit: { lines.append($0) },
+            didSnapshotEcho: { hook.fireOnce() })
+
+        tap.armEcho(seq: 1, token: TerminalLatencyTap.token(seq: 1), sentAt: clock.seconds)
+        // Fires between the snapshot of seq 1 and the commit of its result,
+        // which is the window the commit's identity check defends.
+        hook.set { tap.armEcho(seq: 2, token: TerminalLatencyTap.token(seq: 2), sentAt: 0.010) }
+
+        clock.advance(ms: 5)
+        // This chunk DOES contain seq 1's token, so the search succeeds — and
+        // must still be discarded, because the token it matched was retired
+        // while the search ran.
+        feed(tap, clock, Array("lp1z\r\n".utf8))
+
+        #expect(lines.all.filter { $0.hasPrefix("echo ") }.isEmpty)
+        #expect(lines.all.filter { $0.hasPrefix("echolost ") }.count == 1)
+
+        // The token that landed in the window is still live: a stale match
+        // must not have cleared it.
+        clock.advance(ms: 20)
+        feed(tap, clock, Array("lp2z\r\n".utf8))
+        let echoes = lines.all.filter { $0.hasPrefix("echo ") }
+        #expect(echoes.count == 1)
+        #expect(echoes.first?.contains(" seq=2 ") == true)
+    }
+
+    @Test("a tail carried by a search the arm raced is not grafted onto the new token")
+    func staleTailIsNotCommittedOverANewToken() {
+        let clock = Clock()
+        let lines = Lines()
+        let hook = Hook()
+        let tap = TerminalLatencyTap(
+            terminalID: UUID(),
+            transport: .holder,
+            now: { clock.seconds },
+            emit: { lines.append($0) },
+            didSnapshotEcho: { hook.fireOnce() })
+
+        tap.armEcho(seq: 1, token: TerminalLatencyTap.token(seq: 1), sentAt: clock.seconds)
+        hook.set { tap.armEcho(seq: 2, token: TerminalLatencyTap.token(seq: 2), sentAt: 0.100) }
+
+        // Bytes seq 1 saw, ending in the first three of seq 2's token. Seq 2
+        // is armed while this chunk is being searched, so this tail belongs to
+        // a token that no longer exists and carrying it forward would let the
+        // next single byte complete a match seq 2's own bytes never made.
+        feed(tap, clock, Array("noise lp2".utf8))
+        clock.advance(ms: 1)
+        feed(tap, clock, Array("z".utf8))
+        #expect(lines.all.filter { $0.hasPrefix("echo ") }.isEmpty)
+
+        // The real echo, when it comes, is the one that gets reported.
+        clock.advance(ms: 4)
+        feed(tap, clock, Array("lp2z\r\n".utf8))
+        let echoes = lines.all.filter { $0.hasPrefix("echo ") }
+        #expect(echoes.count == 1)
+        #expect(echoes.first?.contains(" seq=2 ") == true)
+    }
+
     @Test("the echo line's shape is exactly what the report script parses")
     func echoLineFormatIsPinned() {
         let id = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!

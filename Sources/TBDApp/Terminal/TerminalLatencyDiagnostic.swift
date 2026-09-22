@@ -25,20 +25,33 @@ import os
 /// The probe types into a terminal. It therefore refuses anything that is not
 /// a plain shell, and says why:
 ///
-///     echorefused terminal=<uuid> reason=unknownterminal   no panel registered
-///     echorefused terminal=<uuid> reason=notshell          an agent, or kind unknown
-///     echorefused terminal=<uuid> reason=noview            the panel has no view
-///     echorefused terminal=- reason=malformed              the request did not decode
+///     echorefused terminal=<uuid> reason=unknownterminal    no panel registered
+///     echorefused terminal=<uuid> reason=notshell           an agent, or kind unknown
+///     echorefused terminal=<uuid> reason=noview             the panel has no view
+///     echorefused terminal=<uuid> reason=ingestingsnapshot  a snapshot preamble is in flight
+///     echorefused terminal=<uuid> reason=handbackinflight   the panel is collecting mode replies
+///     echorefused terminal=- reason=malformed               the request did not decode
 ///
 /// A terminal whose kind the app has not loaded counts as not-a-shell: the
 /// refusal must fail closed, because the cost of being wrong is keystrokes in
 /// somebody's agent session.
+///
+/// The last three come from the panel, not from here: a write that the panel's
+/// own outbound path would have swallowed must be a refusal rather than a
+/// silent lost token, because a token the transport never saw is not a
+/// measurement of the transport.
 @MainActor
 final class TerminalLatencyDiagnostic {
     /// Writes one token into the panel's real keystroke path and arms its tap.
-    /// Returns false when the panel has no view to write through — the panel
-    /// is still registered, it just cannot answer right now.
-    typealias Probe = @MainActor (UInt64) -> Bool
+    /// Returns `nil` when the token went out, or the reason it did not — the
+    /// panel is still registered, it just cannot answer right now.
+    typealias Probe = @MainActor (UInt64) -> String?
+
+    /// A panel's terminal kind, asked for at REQUEST time rather than snapshot
+    /// at registration: a panel registers as soon as it has a view, which can
+    /// be before `AppState.terminals` carries its row, and a kind snapshotted
+    /// as nil then would refuse every request for that panel's whole life.
+    typealias KindResolver = @MainActor () -> TerminalKind?
 
     /// Where a finished line goes. Injected so tests can capture without a
     /// log-store round trip.
@@ -62,9 +75,9 @@ final class TerminalLatencyDiagnostic {
 
     private struct Entry {
         let token: UUID
-        /// The terminal's kind as the app knows it, or nil when AppState has
-        /// not loaded the row. Nil is refused, not assumed.
-        let kind: TerminalKind?
+        /// Answers with the terminal's kind as the app knows it *now*, or nil
+        /// when AppState has not loaded the row. Nil is refused, not assumed.
+        let kind: KindResolver
         let probe: Probe
     }
 
@@ -108,7 +121,7 @@ final class TerminalLatencyDiagnostic {
     var registrationCount: Int { entries.count }
 
     func register(
-        terminalID: UUID, kind: TerminalKind?, probe: @escaping Probe
+        terminalID: UUID, kind: @escaping KindResolver, probe: @escaping Probe
     ) -> Registration {
         let token = UUID()
         entries[terminalID] = Entry(token: token, kind: kind, probe: probe)
@@ -134,13 +147,12 @@ final class TerminalLatencyDiagnostic {
             refuse(terminal: request.terminalID.uuidString, reason: "unknownterminal")
             return
         }
-        guard entry.kind == .shell else {
+        guard entry.kind() == .shell else {
             refuse(terminal: request.terminalID.uuidString, reason: "notshell")
             return
         }
-        guard entry.probe(request.seq) else {
-            refuse(terminal: request.terminalID.uuidString, reason: "noview")
-            return
+        if let reason = entry.probe(request.seq) {
+            refuse(terminal: request.terminalID.uuidString, reason: reason)
         }
     }
 
@@ -195,9 +207,11 @@ final class TerminalLatencyDiagnostic {
     /// one nil-check, the view does one nil-check, and no directory is
     /// watched.
     ///
-    /// Resolved once, on the first panel that asks. Flipping the key takes
-    /// effect on the next launch; a measurement session starts with a relaunch
-    /// anyway.
+    /// Resolved once, from `applicationDidFinishLaunching`, so the request
+    /// directory is watched before any panel exists; the first panel to ask
+    /// resolves it instead if that startup call ever goes away. Flipping the
+    /// key takes effect on the next launch; a measurement session starts with
+    /// a relaunch anyway.
     static var shared: TerminalLatencyDiagnostic? {
         if !didResolveShared {
             didResolveShared = true
