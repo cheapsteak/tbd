@@ -370,19 +370,32 @@ extension HibernationCoordinator {
         // line stood for over a minute while the real composer was empty. The
         // screen carries that as `contentObserved`, and this rail refuses it
         // like every other screen it may not judge.
+        //
+        // **A profile swap's park does not ask at all.** Not "asks and
+        // ignores the answer": the question is what the user's own gesture has
+        // already answered, the tmux arm of the same action has never asked
+        // it, and asking would hold this session's emulator lock for a
+        // whole-buffer walk on the way to a decision that cannot change. The
+        // snapshot goes with it — a swap's park has no screen to freeze, so
+        // the tab shows the parked placeholder without a backdrop for the
+        // second or two the ladder takes.
         let capturedSnapshot: String?
-        switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
-        case .refused(let refusal):
-            idleSince[terminal.id] = nil
-            pendingKillSince[terminal.id] = nil
-            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
-            return .notEligible(reason: refusal)
-        case .readable(let screen):
-            if HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output) {
-                logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
-                return .notEligible(reason: "Terminal has unsent typed input")
+        if policy.honoursLiveRails {
+            switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
+            case .refused(let refusal):
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
+                return .notEligible(reason: refusal)
+            case .readable(let screen):
+                if HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output) {
+                    logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
+                    return .notEligible(reason: "Terminal has unsent typed input")
+                }
+                capturedSnapshot = screen.output.isEmpty ? nil : screen.output
             }
-            capturedSnapshot = screen.output.isEmpty ? nil : screen.output
+        } else {
+            capturedSnapshot = nil
         }
 
         // The reader the polite `/exit` below is written through. Read after
@@ -396,13 +409,14 @@ extension HibernationCoordinator {
             return .notEligible(reason: Self.holderNoReaderRefusal)
         }
 
-        // Rail: transcript-tail validity, identical to the tmux path. Killing
-        // mid-write can leave an unresumable jsonl.
-        if let transcriptPath = currentTerminal.transcriptPath,
-           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
-           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+        // Rail: transcript-tail validity, identical to the tmux path — and
+        // bypassed by the same policy, for the same reason: this park is a
+        // user's account switch, not a background reclaim, and the tmux arm
+        // has never refused one over a tail that was mid-write.
+        if let refusal = Self.transcriptTailRefusal(
+            transcriptPath: currentTerminal.transcriptPath, policy: policy) {
             logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
-            return .notEligible(reason: "Transcript is mid-write; try again shortly")
+            return refusal
         }
 
         // Park INTENT, before anything touches the process. A crash between

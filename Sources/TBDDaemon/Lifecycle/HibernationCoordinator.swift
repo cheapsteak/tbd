@@ -23,6 +23,29 @@ enum HibernateEligibilityPolicy: Sendable {
         inputVetoEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
+    /// The park half of an in-place profile swap.
+    ///
+    /// A fourth policy rather than a switch on the others, because it is the
+    /// only one that deliberately bypasses the live rails: the user asked for
+    /// this session to move accounts, the tmux arm of the same action has
+    /// never honoured any of them, and a "Switch account" that refuses on a
+    /// re-adopted row until its screen has been observed again would refuse
+    /// exactly the case a user reaching for it after a daemon restart is in.
+    /// See `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md`,
+    /// "The swap interrupts regardless, matching tmux".
+    case profileSwap
+}
+
+extension HibernateEligibilityPolicy {
+    /// Whether this park is judged by the rails that read live state — the
+    /// typed screen and the transcript tail — as opposed to the row alone.
+    ///
+    /// One predicate, named once, so the two rails cannot come to disagree
+    /// about which policies they answer to.
+    var honoursLiveRails: Bool {
+        if case .profileSwap = self { return false }
+        return true
+    }
 }
 
 /// How an unparked terminal's pane disagreed with the row that claims it is
@@ -379,6 +402,27 @@ public actor HibernationCoordinator {
             terminal: terminal, reason: .manual, policy: .manual)
     }
 
+    /// Park a session because an in-place profile swap is about to re-home it
+    /// onto another account and resume it there.
+    ///
+    /// The park half of `terminal.swapProfile`'s holder arm, and the only
+    /// caller of `.profileSwap`. `.auto` rather than `.manual` as the reason,
+    /// deliberately: a daemon that dies between this park and the wake that
+    /// follows it leaves a row the next focus-wake heals, where a manual park
+    /// is excluded from wake-on-focus and would sit there until somebody woke
+    /// it by hand.
+    ///
+    /// It does not check the transport. The park mechanic exists on both, and
+    /// `performHibernate` already routes a holder row to the holder arm; what
+    /// the swap handler decides is which rows it calls this for.
+    func parkForProfileSwap(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        return await performHibernate(
+            terminal: terminal, reason: .auto, policy: .profileSwap)
+    }
+
     /// The reason a manual hibernate was refused, for the RPC error string.
     private func manualBlockReason(_ terminal: Terminal) -> String {
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
@@ -537,11 +581,10 @@ public actor HibernationCoordinator {
         // unresumable jsonl (#18880). Only park when the last line is
         // complete JSON. Missing/empty transcript is allowed (nothing to
         // corrupt); the resume will just find no prior turns.
-        if let transcriptPath = terminal.transcriptPath,
-           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
-           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+        if let refusal = Self.transcriptTailRefusal(
+            transcriptPath: terminal.transcriptPath, policy: policy) {
             logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
-            return .notEligible(reason: "Transcript is mid-write; try again shortly")
+            return refusal
         }
 
         do {
@@ -801,7 +844,44 @@ public actor HibernationCoordinator {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
             }
             return nil
+
+        case .profileSwap:
+            // The one refusal this policy keeps. The swap handler routes an
+            // already-parked row down the cold path before it ever asks for a
+            // park, so reaching here means the row parked between that read
+            // and this call — a focus-wake, or the idle sweep. The swap's
+            // holder arm reads this answer as "the row is parked now" and
+            // carries on to the re-home, which is what the cold path would
+            // have done with it. Every other rail is deliberately absent: the
+            // handler has already established that this is a resumable Claude
+            // session, and refusing a *working* session is precisely what this
+            // policy exists not to do.
+            guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
+            return nil
         }
+    }
+
+    /// The park's transcript-tail rail: the refusal a mid-write transcript
+    /// earns, or nil when the tail is complete, absent, or the policy does not
+    /// honour the rail.
+    ///
+    /// Killing claude mid-write can leave an unresumable jsonl, so both
+    /// transports ask this before they touch the process. Named and shared so
+    /// the tmux park, the holder park and the test assert one decision rather
+    /// than three copies of it — and so the `.profileSwap` bypass is stated
+    /// once. An unreadable or missing file is not a refusal: there is nothing
+    /// there to corrupt.
+    static func transcriptTailRefusal(
+        transcriptPath: String?,
+        policy: HibernateEligibilityPolicy
+    ) -> HibernateResult? {
+        guard policy.honoursLiveRails else { return nil }
+        guard let transcriptPath,
+              let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
+              !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) else {
+            return nil
+        }
+        return .notEligible(reason: "Transcript is mid-write; try again shortly")
     }
 
     /// Confirm the respawn-to-shell actually replaced claude, and log any
