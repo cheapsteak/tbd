@@ -846,7 +846,22 @@ public actor DeskSessionManager: DeskSessionManaging {
                             "Watch Desk close left a holder running: \(failure, privacy: .public)")
                     }
                 } else {
-                    try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+                    // Refuse to kill a window whose pane belongs to a
+                    // DIFFERENT terminal — see `TmuxManager.paneStillBelongsTo`.
+                    // The row is gone from the DB either way (below); only the
+                    // tmux-side teardown is gated, the same asymmetry
+                    // `handleTerminalDelete` uses.
+                    let stillOwned = await tmux.paneStillBelongsTo(
+                        terminalID: t.id, server: wt.tmuxServer, paneID: t.tmuxPaneID)
+                    if stillOwned {
+                        try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+                    } else {
+                        logger.warning("""
+                            Watch Desk close: leaving window \(t.tmuxWindowID, privacy: .public) \
+                            untouched for terminal \(t.id, privacy: .public) — its pane now \
+                            belongs to a different terminal
+                            """)
+                    }
                 }
             }
             await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)

@@ -303,6 +303,23 @@ public struct WorktreeLifecycle: Sendable {
     /// never-throws capture (failures are logged inside `captureOnClose` and
     /// never block the teardown).
     func captureThenKillWindow(terminal: Terminal, server: String) async {
+        // Refuse to capture or kill a pane that belongs to a DIFFERENT
+        // terminal — see `TmuxManager.paneStillBelongsTo`. Shared by both
+        // callers of this function (explicit archive, and the vanished-
+        // worktree reconcile sweep), so guarding here covers both: a stale
+        // worktree's recorded coordinate colliding with a live sibling
+        // worktree's terminal (several worktrees of one repo share a tmux
+        // server) must not capture the stranger's screen into this row's
+        // Closed Terminals history, nor destroy their window.
+        guard await tmux.paneStillBelongsTo(
+            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID) else {
+            logger.warning("""
+                captureThenKillWindow: leaving window \(terminal.tmuxWindowID, privacy: .public) \
+                untouched for terminal \(terminal.id, privacy: .public) — its pane now belongs \
+                to a different terminal
+                """)
+            return
+        }
         await db.terminalHistory.captureOnClose(terminal: terminal) {
             try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
         }
