@@ -13,12 +13,27 @@
 # Neither failure has a symptom this repo's suites can see, so the branches are
 # exercised here instead.
 #
-# NOTHING HERE TOUCHES A REAL REPO, REMOTE OR CACHE. Each case builds a
-# throwaway git repo in a temp dir, plants `refs/remotes/origin/<base>` in it by
-# hand, and runs the workflow's own shell against it with `$GITHUB_OUTPUT`
-# pointed at a scratch file. The step is EXTRACTED from the workflow rather than
-# copied here, so a divergence between what CI runs and what this proves cannot
-# arise.
+# NOTHING HERE TOUCHES A REAL REPO, REMOTE OR CACHE, with one deliberate
+# exception noted below. Each case builds a throwaway git repo in a temp dir,
+# plants `refs/remotes/origin/<base>` in it by hand, and runs the workflow's own
+# shell against it with `$GITHUB_OUTPUT` pointed at a scratch file. The step is
+# EXTRACTED from the workflow rather than copied here, so a divergence between
+# what CI runs and what this proves cannot arise.
+#
+# THE FIXTURE REPOSITORIES MIRROR THIS PACKAGE'S REAL LAYOUT, and that is
+# load-bearing rather than decorative. `Sources/TBDDaemonLib` does not exist:
+# the TBDDaemonLib library target is declared with `path: "Sources/TBDDaemon"`,
+# the `TBDDaemon` executable target beside it being `main.swift` alone. A
+# fixture that invented the directory let the step's path list name it and pass
+# every case here while matching nothing in the real repository — a `git diff`
+# over a path absent from both sides exits 0, so every library-touching PR was
+# scored as not library-touching and never saved the cache the decision exists
+# to grant it. Two cases guard that now, and they are the exception to the
+# paragraph above: `test_the_gated_paths_exist_in_this_repository` resolves each
+# gated path against the checkout the harness is running in, and
+# `test_the_gated_paths_match_the_wipe_scripts_list` pins the list to
+# `WIPE_PATHS` in `scripts/ci/first-party-wipe-needed.sh`, which asks the same
+# question about the same paths. Both read git trees and nothing else.
 #
 # shellcheck disable=SC2329 # test_* are dispatched dynamically via `declare -F` below
 # shellcheck disable=SC2016 # the workflow's own text is matched literally, not expanded
@@ -85,9 +100,13 @@ trap cleanup EXIT
 mkrepo() {
   local root="$1"
   git init -q -b main "$root"
-  mkdir -p "$root/Sources/TBDShared" "$root/Sources/TBDDaemonLib" "$root/Sources/TBDApp" "$root/docs"
+  mkdir -p "$root/Sources/TBDShared" "$root/Sources/TBDDaemon/Server" \
+           "$root/Sources/TBDTerminalSerialization" "$root/Sources/TBDApp" "$root/docs"
   echo base > "$root/Sources/TBDShared/Base.swift"
-  echo base > "$root/Sources/TBDDaemonLib/Base.swift"
+  # TBDDaemonLib's sources, under the directory Package.swift gives that target.
+  echo base > "$root/Sources/TBDDaemon/Server/Router.swift"
+  echo base > "$root/Sources/TBDDaemon/main.swift"
+  echo base > "$root/Sources/TBDTerminalSerialization/Frame.swift"
   echo base > "$root/Sources/TBDApp/Base.swift"
   echo base > "$root/docs/notes.md"
   echo base > "$root/Package.swift"
@@ -152,8 +171,65 @@ with_repo() {
 test_the_extraction_found_the_real_step() {
   local script; script="$(cat "$SCRIPT")"
   assert_contains "extracted the step's shell" "$script" 'library_touched'
-  assert_contains "and the paths it gates on" "$script" 'Sources/TBDShared/ Sources/TBDDaemonLib/ Package.swift Package.resolved'
+  assert_contains "and the paths it gates on" "$script" 'Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved'
   assert_contains "and the three-dot diff" "$script" 'origin/$BASE_REF...HEAD'
+}
+
+# The gated paths, one per line, read out of the extracted shell rather than
+# retyped — a list this harness typed for itself would agree with itself while
+# CI gated on something else.
+gated_paths() {
+  awk '
+    /^git diff --quiet/ { grab = 1; next }
+    grab {
+      sub(/\|\| status=\$\?/, "")
+      for (i = 1; i <= NF; i++) print $i
+      exit
+    }
+  ' "$SCRIPT"
+}
+
+# `WIPE_PATHS` from the sibling script, same treatment.
+wipe_script_paths() {
+  awk '
+    /^WIPE_PATHS=\(/ { grab = 1; next }
+    grab && /^\)/ { exit }
+    grab { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "") print }
+  ' "$HERE/ci/first-party-wipe-needed.sh"
+}
+
+# The case the original list failed: `Sources/TBDDaemonLib/` is not a directory
+# in this package, so a `git diff` naming it matched nothing on either side,
+# exited 0, and scored every library-touching PR as not library-touching. A
+# pathspec that cannot be resolved against this checkout is not a gate.
+test_the_gated_paths_exist_in_this_repository() {
+  local path count=0
+  while read -r path; do
+    [[ -n "$path" ]] || continue
+    count=$((count + 1))
+    if git -C "$HERE/.." rev-parse --verify --quiet "HEAD:$path" >/dev/null; then
+      echo "ok   - the step gates on $path, which exists here"
+    else
+      echo "FAIL - the step gates on $path, which does not exist in this repository"
+      FAIL=1
+    fi
+  done <<<"$(gated_paths)"
+  # Without this the loop above passes vacuously when the extraction breaks.
+  if [[ "$count" -gt 0 ]]; then
+    echo "ok   - the gated path list was read out of the step ($count paths)"
+  else
+    echo "FAIL - no gated paths were read out of the step"
+    FAIL=1
+  fi
+}
+
+# Both lists answer "did a first-party library move?" — this one to decide
+# whether the PR has earned a cache entry, the wipe script's to decide whether
+# the cached artifacts can be trusted. Two answers to one question that disagree
+# means one of them is wrong, so they are pinned to each other.
+test_the_gated_paths_match_the_wipe_scripts_list() {
+  assert_eq "the gated paths are the wipe script's WIPE_PATHS" \
+    "$(wipe_script_paths)" "$(gated_paths)"
 }
 
 # A push run never consults the diff — the save step decides it on the event
@@ -178,10 +254,20 @@ case_shared() {
   assert_eq "TBDShared -> true" "true" "$(decision "$1" pull_request main)"
 }
 
+# TBDDaemonLib's sources live under `Sources/TBDDaemon`, so that is the path a
+# real library change appears at.
 test_a_pr_touching_tbddaemonlib_answers_true() { with_repo case_daemonlib; }
 case_daemonlib() {
-  change_file "$1" Sources/TBDDaemonLib/Base.swift
+  change_file "$1" Sources/TBDDaemon/Server/Router.swift
   assert_eq "TBDDaemonLib -> true" "true" "$(decision "$1" pull_request main)"
+}
+
+# TBDDaemonLib imports TBDTerminalSerialization, so a change confined to that
+# target recompiles the library just the same and earns the entry too.
+test_a_pr_touching_tbdterminalserialization_answers_true() { with_repo case_serialization; }
+case_serialization() {
+  change_file "$1" Sources/TBDTerminalSerialization/Frame.swift
+  assert_eq "TBDTerminalSerialization -> true" "true" "$(decision "$1" pull_request main)"
 }
 
 test_a_pr_touching_the_manifest_answers_true() { with_repo case_manifest; }
