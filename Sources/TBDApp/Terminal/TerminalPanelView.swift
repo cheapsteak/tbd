@@ -753,15 +753,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         /// Whether the tmux-subprocess transport's scroll monitor claims a
         /// wheel event over this terminal, and how many wheel reports it
-        /// forwards: none unless the terminal is mouse-reporting, else one per
-        /// whole line of `deltaY` with a minimum of one for any non-zero
-        /// delta. A zero delta is still claimed with zero reports, because
-        /// trackpads deliver sub-line events whose `deltaY` is zero, and one
-        /// that passes through reaches SwiftTerm's own `scrollWheel`, which on
-        /// the alternate screen converts the accumulated pixels into Up/Down
-        /// arrow keys.
-        nonisolated static func wheelReports(deltaY: CGFloat, mouseReporting: Bool) -> (claim: Bool, count: Int) {
-            guard mouseReporting else { return (claim: false, count: 0) }
+        /// forwards. A wheel event that passes through reaches SwiftTerm's
+        /// own `scrollWheel`, whose fallback (no mouse reporting) differs by
+        /// buffer: on the alternate screen it converts accumulated motion
+        /// into Up/Down arrow keys, which land on whatever is attached,
+        /// including a composer draft; on the normal screen it instead
+        /// scrolls SwiftTerm's own local scrollback, which is exactly what an
+        /// un-mouse-aware shell prompt needs. Claiming must tell those two
+        /// apart — claiming on the normal screen would silence scrollback for
+        /// every ordinary shell tab.
+        ///
+        /// Once reporting is on, buffer doesn't matter: always claim, and a
+        /// zero `deltaY` is still claimed and dropped (trackpads deliver
+        /// sub-line events whose `deltaY` is zero), while a non-zero delta
+        /// forwards one report per whole line, minimum one.
+        ///
+        /// Before reporting is on — at spawn, or any other moment it is
+        /// transiently off — claim and drop on the alternate screen (there is
+        /// no reporting session to forward to, and dropping is far less
+        /// surprising than turning a scroll into keystrokes), but pass
+        /// through unclaimed on the normal screen so SwiftTerm's native
+        /// scrollback keeps working.
+        nonisolated static func wheelReports(
+            deltaY: CGFloat, mouseReporting: Bool, alternateScreen: Bool
+        ) -> (claim: Bool, count: Int) {
+            guard mouseReporting else { return (claim: alternateScreen, count: 0) }
             guard deltaY != 0 else { return (claim: true, count: 0) }
             return (claim: true, count: max(1, Int(abs(deltaY))))
         }
@@ -1500,18 +1516,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// control mode (`startControlModeClient`) — and each needs it for
         /// the same reason: they all render into the one `TBDTerminalView`,
         /// which keeps `allowMouseReporting` off so click-drag selects text
-        /// locally, and the session sits on the alternate screen. A wheel
-        /// event that reaches SwiftTerm's own `scrollWheel` in that state is
-        /// turned into Up/Down arrow keys — keystrokes the session never
-        /// asked for. So every wheel event over a mouse-reporting terminal is
-        /// claimed here, including one whose `deltaY` is zero: trackpads
-        /// deliver such events (a few pixels of `scrollingDeltaY`, no whole
-        /// line), and an unclaimed one would fall through to that arrow-key
-        /// fallback, interleaving stray keys with the real wheel reports.
-        /// `Coordinator.wheelReports` decides claim and count; a zero-report
-        /// claim drops the event. An in-bounds point with no grid cell (the
-        /// sub-cell remainder strip at the view's bottom and right edges) is
-        /// likewise claimed and dropped, since there is no cell to report at.
+        /// locally. A wheel event that reaches SwiftTerm's own `scrollWheel`
+        /// with reporting off is turned into Up/Down arrow keys whenever the
+        /// session is on the alternate screen — keystrokes the session never
+        /// asked for, landing on whatever is attached, including a composer
+        /// draft. So every wheel event over an attached terminal is claimed
+        /// here when mouse reporting is on, or when it's off and the buffer
+        /// is alternate; a wheel event over a mouse-reporting-off *normal*
+        /// buffer (an ordinary shell prompt, say) is deliberately left
+        /// unclaimed so SwiftTerm's own local scrollback still works. A zero
+        /// `deltaY` claim is likewise unconditional once reporting is on:
+        /// trackpads deliver such events (a few pixels of `scrollingDeltaY`,
+        /// no whole line), and an unclaimed one would fall through to the
+        /// arrow-key fallback, interleaving stray keys with the real wheel
+        /// reports. `Coordinator.wheelReports` decides claim and count; a
+        /// zero-report claim drops the event. An in-bounds point with no grid
+        /// cell (the sub-cell remainder strip at the view's bottom and right
+        /// edges) is likewise claimed and dropped, since there is no cell to
+        /// report at.
         ///
         /// The reports leave through `term.sendEvent`, which is SwiftTerm's
         /// own mouse-reporting path: `Terminal` hands the bytes to the view,
@@ -1566,7 +1588,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
                     let isUp = deltaY > 0
                     return tv.withTerminal { term -> Bool in
-                        let wheel = Self.wheelReports(deltaY: deltaY, mouseReporting: term.mouseMode != .off)
+                        let wheel = Self.wheelReports(
+                            deltaY: deltaY,
+                            mouseReporting: term.mouseMode != .off,
+                            alternateScreen: term.isCurrentBufferAlternate)
                         guard wheel.claim else { return false }
                         if let (col, row) = grid {
                             let buttonFlags = term.encodeButton(
