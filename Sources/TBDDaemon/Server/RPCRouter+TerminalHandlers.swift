@@ -2359,6 +2359,34 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
+        // Resolved once, above the branch: the overlay is one file on disk and
+        // the config dir one lookup, both arms need them, and the routing
+        // decision the holder arm makes needs the overlay before any command
+        // is composed (whether the overlay sets `ANTHROPIC_BASE_URL` decides
+        // whether a route can be honoured at all).
+        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
+        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: resolved?.fallbackModels,
+            sessionKey: plannedTerminalID.uuidString,
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            watchDeskRole: swapDeskRole,
+            worktreePath: worktree.path,
+            profileConfigDir: profileConfigDir
+        )
+        // The two facts the plan decides that are not the command itself. A
+        // resume keeps the session id and wants the post-resume recapture; a
+        // fresh spawn names a new id and has nothing to recapture.
+        let storedSessionID: String
+        let scheduleRecapture: Bool
+        switch plan {
+        case .resume(let resumeID):
+            storedSessionID = resumeID
+            scheduleRecapture = true
+        case .fresh(let newSessionID):
+            storedSessionID = newSessionID
+            scheduleRecapture = false
+        }
+
         // One row for the whole swap, on the two branches that actually reshape
         // a live session. It sits here, as soon as the plan names what will be
         // acted on, because the very next step already mutates state outside the
@@ -2434,85 +2462,24 @@ extension RPCRouter {
         )
         // Pre-accept the folder-trust dialog before either swap spawn (resume
         // or fresh) — a swap onto a new profile's isolated config dir has never
-        // seen this path and would otherwise re-prompt. Both build calls below
-        // resolve the same `resolveConfigDir(for: resolved)`; seed it once here.
-        // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
-        // shipped default.
+        // seen this path and would otherwise re-prompt. `profileConfigDir` was
+        // resolved once above the branch; seed it here before `swapSpawn` uses
+        // the same value. Claude-only handler. `swapConfig` is a `try?` read;
+        // fall back to the shipped default.
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree.worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
-            profileConfigDir: await configDirManager.resolveConfigDir(for: resolved))
+            profileConfigDir: profileConfigDir)
 
-        let spawn: ClaudeSpawnCommandBuilder.Result
-        let storedSessionID: String
-        let scheduleRecapture: Bool
-        switch plan {
-        case .resume(let resumeID):
-            logger.debug("swap: resuming session \(resumeID, privacy: .public)")
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: resumeID,
-                forkSession: mode == .fork,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: resolved?.secret,
-                profileKind: resolved?.kind,
-                profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
-                profileAwsRegion: resolved?.awsRegion,
-                profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: await configDirManager.resolveConfigDir(for: resolved),
-                cmd: nil,
-                shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    watchDeskRole: swapDeskRole,
-                    worktreePath: worktree.path,
-                    profileConfigDir: await configDirManager.resolveConfigDir(for: resolved)
-                ),
-                pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
-            )
-            storedSessionID = resumeID
-            scheduleRecapture = true
-        case .fresh(let newSessionID):
-            logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
-            let appendPrompt = SystemPromptBuilder.build(
-                repo: repo, worktree: worktree.worktree, isResume: false,
-                scratchInstructions: swapConfig?.scratchInstructions,
-                scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: newSessionID,
-                appendSystemPrompt: appendPrompt,
-                initialPrompt: nil,
-                profileSecret: resolved?.secret,
-                profileKind: resolved?.kind,
-                profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
-                profileAwsRegion: resolved?.awsRegion,
-                profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: await configDirManager.resolveConfigDir(for: resolved),
-                cmd: nil,
-                shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    watchDeskRole: swapDeskRole,
-                    worktreePath: worktree.path,
-                    profileConfigDir: await configDirManager.resolveConfigDir(for: resolved)
-                ),
-                pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
-            )
-            storedSessionID = newSessionID
-            scheduleRecapture = false
-        }
+        let spawn = swapSpawn(
+            plan: plan, mode: mode, resolved: resolved,
+            // The profile's own endpoint. Only the holder arm can have a route
+            // to name here, and it composes its own command after its park —
+            // see `swapSpawn`.
+            builderBaseURL: resolved?.baseURL,
+            overlayPath: overlayPath, profileConfigDir: profileConfigDir,
+            worktree: worktree, repo: repo, swapConfig: swapConfig,
+            claudeEnvOverrides: claudeEnvOverrides)
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
@@ -2632,6 +2599,83 @@ extension RPCRouter {
         )))
         logger.info("swap: re-homed parked terminal \(terminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public)")
         return updated
+    }
+
+    /// The spawn a `terminal.swapProfile` will run, composed from its plan.
+    ///
+    /// A named helper rather than the inline switch it replaces, because the
+    /// two transports compose it at different moments. The tmux and fork arms
+    /// compose before the branch, as they always have. The holder arm cannot:
+    /// its spawn's endpoint is decided by a model proxy route, and that route
+    /// has to be minted AFTER the park — the park ends by retiring whatever
+    /// route its terminal id holds, so a route minted before it is one the
+    /// park itself may drop.
+    ///
+    /// - Parameter builderBaseURL: the endpoint the built command re-exports
+    ///   inline, where the export runs after the shell's rc files — a route's
+    ///   own URL where one is in play, the profile's otherwise. Callers with a
+    ///   route pass `ModelProxyRouteAttachment.Outcome.builderBaseURL(profile:)`
+    ///   rather than deriving it a second way.
+    private func swapSpawn(
+        plan: SwapSpawnPlan,
+        mode: TerminalSwapMode,
+        resolved: ResolvedModelProfile?,
+        builderBaseURL: String?,
+        overlayPath: String?,
+        profileConfigDir: String?,
+        worktree: LocalWorktree,
+        repo: Repo?,
+        swapConfig: Config?,
+        claudeEnvOverrides: [String: ClaudeEnvValue]
+    ) -> ClaudeSpawnCommandBuilder.Result {
+        switch plan {
+        case .resume(let resumeID):
+            logger.debug("swap: resuming session \(resumeID, privacy: .public)")
+            return ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID,
+                forkSession: mode == .fork,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                initialPrompt: nil,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: builderBaseURL,
+                profileModel: resolved?.model,
+                profileAwsRegion: resolved?.awsRegion,
+                profileAwsProfile: resolved?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: "",
+                settingsOverlayPath: overlayPath,
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
+            )
+        case .fresh(let newSessionID):
+            logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
+            return ClaudeSpawnCommandBuilder.build(
+                resumeID: nil,
+                freshSessionID: newSessionID,
+                appendSystemPrompt: SystemPromptBuilder.build(
+                    repo: repo, worktree: worktree.worktree, isResume: false,
+                    scratchInstructions: swapConfig?.scratchInstructions,
+                    scratchRenamePrompt: swapConfig?.scratchRenamePrompt),
+                initialPrompt: nil,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: builderBaseURL,
+                profileModel: resolved?.model,
+                profileAwsRegion: resolved?.awsRegion,
+                profileAwsProfile: resolved?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: "",
+                settingsOverlayPath: overlayPath,
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
+            )
+        }
     }
 
     /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,
