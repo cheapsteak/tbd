@@ -334,6 +334,15 @@ def main() -> int:
     # then refuses the whole run over a request the app never got to see.
     try:
         time.sleep(1.0)
+    except KeyboardInterrupt:
+        # The handler above is restored by now, so a SECOND Ctrl-C lands here
+        # as a plain KeyboardInterrupt. Swallowed on purpose: everything
+        # already collected is still a measurement, and letting it out would
+        # skip the capture and the report entirely — the opposite of what a
+        # second interrupt means, which is "stop waiting", not "throw the run
+        # away". The last sample may be missing from the capture, and the
+        # completeness check below is what says so.
+        print("\ninterrupted — reporting what was collected", file=sys.stderr)
     finally:
         # Every exit path, including an interrupt inside the settle: a request
         # file left behind is read by the app at its next directory event, long

@@ -234,6 +234,19 @@ final class TerminalLatencyTap: @unchecked Sendable {
     /// wait because that is the symptom: bytes parsed into the emulator and
     /// sitting there undrawn. One line per draw carries the tail exactly, since
     /// the oldest chunk in a frame is that frame's worst wait.
+    ///
+    /// Both waits are floored at zero. `drawAt` is stamped on the main actor
+    /// and a feed timestamp on the IO thread, so a chunk that lands between the
+    /// two — after the stamp, before this takes the lock — is newer than the
+    /// draw it is being measured against, and the subtraction goes negative. A
+    /// negative wait is not a measurement of anything; zero is the truth for a
+    /// chunk that waited no time at all. The caller narrows that window by
+    /// stamping immediately before the call; the floor closes it. The count of
+    /// floored samples is deliberately not a field: the line format is pinned
+    /// by `scripts/diag/terminal-latency-report.py` and by the tests that
+    /// assert it verbatim, and the report script refuses a negative wait on its
+    /// own, so a build without this floor still cannot smuggle one into a
+    /// distribution.
     func noteDrawWillBegin(at drawAt: Double, isOnScreen: Bool) {
         var taken: (feeds: [Double], newest: Double, dropped: Int, parseMaxMs: Double)?
         state.withLockUnchecked { state in
@@ -249,8 +262,8 @@ final class TerminalLatencyTap: @unchecked Sendable {
             "draw transport=\(transport.rawValue)"
                 + " terminal=\(terminalID.uuidString)"
                 + " chunks=\(taken.feeds.count)"
-                + " oldestms=\(Self.millis(drawAt - oldest))"
-                + " newestms=\(Self.millis(drawAt - taken.newest))"
+                + " oldestms=\(Self.millis(max(0, drawAt - oldest)))"
+                + " newestms=\(Self.millis(max(0, drawAt - taken.newest)))"
                 + " parsemaxms=\(Self.formatted(taken.parseMaxMs))"
                 + " dropped=\(taken.dropped)"
                 + " vis=\(isOnScreen ? 1 : 0)"

@@ -58,7 +58,9 @@ USAGE
 -----
     defaults write TBDApp enableTerminalLatencyDiagnostic -bool true
     # relaunch TBDApp (scripts/restart.sh), then drive a run:
-    scripts/diag/terminal-latency-probe.py --worktree <name>
+    scripts/diag/terminal-latency-probe.py \\
+        --worktree <name> \\
+        --tmux-terminal <uuid> --holder-terminal <uuid>
 
     # or read a capture by hand:
     log show --last 10m --info \\
@@ -130,6 +132,12 @@ class Capture:
     # Lines that matched the verb but not the fields they must carry. Counted
     # rather than dropped: a format drift must be visible, not silent.
     malformed: int = 0
+    # Draw lines whose reported wait was negative. A wait cannot be negative,
+    # so such a line is REFUSED rather than floored into a distribution: a
+    # fabricated 0.000 would pull p50 down and look like a measurement. The
+    # app floors these at the source; this is the defence against a capture
+    # taken from a build that does not.
+    negative_waits: int = 0
 
     def lost_counts(self, wanted: set[str] | None = None) -> dict[str, int]:
         """Lost tokens per transport, over the terminals asked for."""
@@ -184,18 +192,20 @@ def parse(stream) -> Capture:
                     )
                 )
             elif verb == "draw":
-                capture.draws.append(
-                    Draw(
-                        transport=fields["transport"],
-                        terminal=fields["terminal"],
-                        chunks=int(fields["chunks"]),
-                        oldest_ms=float(fields["oldestms"]),
-                        newest_ms=float(fields["newestms"]),
-                        parse_max_ms=float(fields["parsemaxms"]),
-                        dropped=int(fields["dropped"]),
-                        visible=fields["vis"] == "1",
-                    )
+                draw = Draw(
+                    transport=fields["transport"],
+                    terminal=fields["terminal"],
+                    chunks=int(fields["chunks"]),
+                    oldest_ms=float(fields["oldestms"]),
+                    newest_ms=float(fields["newestms"]),
+                    parse_max_ms=float(fields["parsemaxms"]),
+                    dropped=int(fields["dropped"]),
+                    visible=fields["vis"] == "1",
                 )
+                if draw.oldest_ms < 0 or draw.newest_ms < 0:
+                    capture.negative_waits += 1
+                else:
+                    capture.draws.append(draw)
             elif verb == "echolost":
                 capture.lost.append(
                     Lost(
@@ -322,6 +332,14 @@ def report(
         print(
             f"\n!! {capture.malformed} line(s) carried the verb but not its fields --"
             " the emitted format and this parser have drifted apart.",
+            file=out,
+        )
+    if capture.negative_waits:
+        print(
+            f"\n!! {capture.negative_waits} draw line(s) reported a negative wait and were"
+            " DISCARDED -- a draw was stamped before a chunk it then reported."
+            " Expect none from a current build; a capture full of them is not a"
+            " measurement of the draw path.",
             file=out,
         )
 
@@ -492,6 +510,15 @@ SELF_TEST_FOREIGN_ARM_LINES = """\
 2026-09-22 12:00:00.600000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] echorefused terminal=AAAA reason=noview
 """
 
+# A wait cannot be negative. Two draw lines that say otherwise -- one on each
+# field -- beside one ordinary line, so the check sees both that the bad lines
+# are refused and that the good one still lands.
+SELF_TEST_NEGATIVE_WAIT_LINES = """\
+2026-09-22 13:00:00.100000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=1 oldestms=-0.250 newestms=-0.250 parsemaxms=0.100 dropped=0 vis=1
+2026-09-22 13:00:00.200000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=2 oldestms=4.000 newestms=-1.000 parsemaxms=0.100 dropped=0 vis=1
+2026-09-22 13:00:00.300000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=1 oldestms=7.000 newestms=1.000 parsemaxms=0.100 dropped=0 vis=1
+"""
+
 # seq 1-2 taken at idle, 3-4 under load, on both arms.
 SELF_TEST_LOAD_MAP = {
     "tmux": {"1": 1.0, "2": 2.0, "3": 30.0, "4": 41.0},
@@ -551,6 +578,20 @@ def self_test() -> int:
     check("missing load entry is None", load_for(SELF_TEST_LOAD_MAP, "tmux", 99), None)
     check("missing arm is None", load_for(SELF_TEST_LOAD_MAP, "nope", 1), None)
     check("no load map is None", load_for(None, "tmux", 1), None)
+
+    # A negative wait is impossible, so it is refused rather than reported:
+    # flooring it to 0 would put a fabricated sample in the distribution, and
+    # the p50 of [0, 7] is 0 where the p50 of [7] is 7.
+    negative = parse(io.StringIO(SELF_TEST_NEGATIVE_WAIT_LINES))
+    check("negative waits refused", negative.negative_waits, 2)
+    check("surviving draws", [d.oldest_ms for d in negative.draws], [7.0])
+    check("a negative wait is not counted as a format drift", negative.malformed, 0)
+    negative_out = io.StringIO()
+    report(negative, out=negative_out)
+    negative_text = negative_out.getvalue()
+    for needle in ("2 draw line(s) reported a negative wait", "p50=   7.000"):
+        if needle not in negative_text:
+            failures.append(f"negative-wait report is missing {needle!r}")
 
     # Percentile edge: n=100 must not put p99 on the maximum.
     hundred = [float(i) for i in range(1, 101)]

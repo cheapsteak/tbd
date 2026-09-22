@@ -125,6 +125,25 @@ struct TerminalLatencyTapTests {
         #expect(parsed["vis"] == "0")
     }
 
+    /// The draw stamp is taken on the main actor and a feed stamp on the IO
+    /// thread, so a chunk can land after the stamp and before the draw takes
+    /// the lock. It is then newer than the draw that reports it, and the
+    /// subtraction is negative. Zero is the truth for a chunk that waited no
+    /// time; a negative number is not a measurement of anything, and the
+    /// report script discards a line carrying one.
+    @Test("a chunk that lands after the draw stamp is floored at zero, never negative")
+    func waitsAreFlooredAtZero() throws {
+        let (tap, clock, lines) = makeTap()
+        let drawAt = clock.seconds
+        clock.advance(ms: 3)
+        feed(tap, clock, Array("late".utf8))
+        tap.noteDrawWillBegin(at: drawAt, isOnScreen: true)
+
+        let parsed = fields(try #require(lines.all.first))
+        #expect(parsed["oldestms"] == "0.000")
+        #expect(parsed["newestms"] == "0.000")
+    }
+
     @Test("a draw with no chunks waiting emits nothing — a caret blink is silent")
     func drawWithNoChunksIsSilent() {
         let (tap, clock, lines) = makeTap()
