@@ -45,6 +45,12 @@ with `<tbd_home>` resolved as `${TBD_HOME:-$HOME/tbd}`. The function:
 3. If the shell resolves no usable tmux, prints one warning line saying the app will
    ask to locate tmux, writes nothing, and returns success.
 
+Only runs started from a user's own shell seed: `scripts/restart.sh` and a manual
+`tbd update`. `scripts/update.sh --auto`, the automatic update the daemon launches, does
+not seed. Its `PATH` is the daemon's launch `PATH` plus `UpdateLauncher.pathFallbacks`
+(`/opt/homebrew/bin`, `/usr/local/bin`), so after a login relaunch a tmux found there
+would be a fixed-directory guess rather than a shell's resolution.
+
 The function never fails the install. A missing tmux is recoverable in the app, and
 refusing to install would block updates on a machine whose tmux is briefly broken, for
 example mid-upgrade.
@@ -77,8 +83,10 @@ beside the existing bundle helpers.
 
 ### Existing installations
 
-An installation gains a seeded fallback on its next `tbd update` or `scripts/restart.sh`.
-Until then, choosing tmux once in the Locate prompt writes the same file.
+An installation gains a seeded fallback on its next manual `tbd update` or
+`scripts/restart.sh`. Until then, choosing tmux once in the Locate prompt writes the same
+file. A machine that only updates automatically never seeds, so it needs one manual
+`tbd update` or one Locate choice.
 
 ### Durable resources
 
@@ -96,6 +104,10 @@ accumulate orphans, so no reconciler is needed.
   disappeared in place, so the user still meets the prompt.
 - **Fail the install when the shell has no tmux** – loud, but blocks updates for a
   condition the app already recovers from.
+- **Seed during automatic updates** – the daemon launches `update.sh --auto` with its
+  own launch `PATH` plus `UpdateLauncher.pathFallbacks`. After a login relaunch that
+  `PATH` finds tmux only through those fixed directories, so a seed would persist the
+  directory search this design and its predecessor reject.
 - **Seed from the daemon or app at startup** – they see only the launch `PATH`, so
   they cannot know the installer's tmux.
 
@@ -110,3 +122,6 @@ accumulate orphans, so no reconciler is needed.
 - warns, writes nothing and succeeds when the shell resolves no tmux;
 - treats a symlinked tmux whose target is a regular executable as valid, and writes the
   path as found on `PATH`.
+
+`scripts/update.test.sh` drives `update.sh`'s app stage directly and checks that a manual
+run seeds on both `--no-app` branches and that an `--auto` run does not.
