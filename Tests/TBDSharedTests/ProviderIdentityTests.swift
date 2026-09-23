@@ -244,6 +244,78 @@ struct ProviderIdentityTests {
         #expect(redacted == ["-v2", "-n4", "--port", "8080"])
     }
 
+    @Test("a glued flag outside the aliases whose argument names a secret redacts itself, not the next argument")
+    func gluedNonAliasSecretRedactsItselfNotTheNext() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+
+        #expect(ProviderIdentityRedaction.redactArguments(["-oMyApiToken123", "main"])
+            == ["-o\(placeholder)", "main"])
+        #expect(ProviderIdentityRedaction.redactArguments(["-AghSecretValue", "main"])
+            == ["-A\(placeholder)", "main"])
+    }
+
+    @Test("a glued flag with a plain value stays verbatim")
+    func gluedFlagWithPlainValueIsVerbatim() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["-ofile.txt", "main", "--use-http2-multiplexing"])
+
+        #expect(redacted == ["-ofile.txt", "main", "--use-http2-multiplexing"])
+    }
+
+    @Test("a glued flag carrying a secret-shaped value is redacted")
+    func gluedFlagWithSecretShapedValueIsRedacted() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["-Hghp_abcdef0123456789", "main"])
+
+        #expect(redacted == ["-H\(ProviderIdentityRedaction.redactedPlaceholder)", "main"])
+    }
+
+    /// `-token abc` is how Go's flag package spells a long flag, so an
+    /// all-lowercase secret-vocabulary name redacts both its own remainder
+    /// and the next argument.
+    @Test("a Go-style single-dash secret flag still redacts its next argument")
+    func goStyleSingleDashSecretFlagRedactsTheNext() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments(["-token", "abc", "-api-key", "xyz", "main"])
+
+        #expect(redacted == ["-t\(placeholder)", placeholder, "-a\(placeholder)", placeholder, "main"])
+    }
+
+    /// Every secret-bearing shape from the doc comment, checked both as the
+    /// first argument and right after one or more valueless secret flags.
+    /// No secret text may survive in any position, and the ordinary trailing
+    /// argument must always survive.
+    @Test("every secret shape is redacted first and after a secret flag")
+    func everySecretShapeInBothPositions() {
+        let secret = "hunter2"
+        let shapes: [[String]] = [
+            ["--token=\(secret)"],
+            ["--bearer=ghp_\(secret)abcdefghij"],
+            ["-t\(secret)"],
+            ["-u\(secret)"],
+            ["-oMyApiToken\(secret)"],
+            ["-Hghp_\(secret)abcdefghij"],
+            ["--token", secret],
+            ["--password", secret],
+            ["-t", secret],
+            ["-k", secret],
+            ["-token", secret],
+            ["sk-\(secret)"],
+            ["x9Kq2mVn8Lp4Rt6Wz1\(secret)"],
+        ]
+        let prefixes: [[String]] = [[], ["--token"], ["-t"], ["--api-key", "--password"]]
+        for shape in shapes {
+            for prefix in prefixes {
+                let input = prefix + shape + ["main"]
+                let redacted = ProviderIdentityRedaction.redactArguments(input)
+                #expect(
+                    !redacted.contains { $0.contains(secret) },
+                    "leaked \(secret) from \(input) as \(redacted)"
+                )
+                #expect(redacted.last == "main", "swallowed main in \(input) as \(redacted)")
+                #expect(redacted.count == input.count)
+            }
+        }
+    }
+
     /// The narrowness of the fix above: an ordinary short flag NOT in the
     /// reviewer-named set must not start swallowing its value. This is the
     /// regression guard against widening `shortSecretFlagAliases` too far.

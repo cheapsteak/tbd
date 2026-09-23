@@ -195,7 +195,7 @@ public enum ProviderIdentityRedaction {
     ///
     /// Four shapes carry a secret on a command line, and all are handled:
     /// `--token=abc` (the value rides the same argument as the flag),
-    /// `-tabc` (a short credential flag with its value glued on, as in curl's
+    /// `-tabc` (a short flag with its value glued on, as in curl's
     /// `-uuser:pass`), `--token abc` (the value is the NEXT argument), and a
     /// bare positional argument that looks like a secret (no preceding flag,
     /// but the argument itself has characteristics of a token or API key).
@@ -203,12 +203,25 @@ public enum ProviderIdentityRedaction {
     /// judged in the company of what precedes it and in its own
     /// characteristics.
     ///
-    /// The glued shape keys on the first letter alone, so an ordinary glued
-    /// value behind one of `shortSecretFlagAliases` is redacted too: `-p8080`
-    /// renders as `-p‹redacted›` whether the `8080` is a port or a password.
-    /// That over-redaction is deliberate. This is display text, so a hidden
-    /// port costs a line of context, while a shown password costs the
-    /// password.
+    /// Every single-dash argument longer than two characters with no `=` is
+    /// read as a glued short flag: `-X` followed by its value. `-X` is always
+    /// kept. The value is redacted when `X` is one of
+    /// `shortSecretFlagAliases`, when the value or the whole argument matches
+    /// the secret vocabulary, or when the value looks like a secret on its
+    /// own; otherwise the argument is shown verbatim (`-v2`, `-ofile.txt`).
+    /// A glued flag has consumed its value, so it does not redact the next
+    /// argument. The one exception is an all-lowercase name that matches the
+    /// secret vocabulary (`-token`, `-api-key`): that is also how Go-style
+    /// single-dash long flags are spelled, whose value is the NEXT argument,
+    /// so both the remainder and the next argument are redacted.
+    ///
+    /// These rules over-redact by design. An alias letter redacts any glued
+    /// value, so `-p8080` renders as `-p‹redacted›` whether the `8080` is a
+    /// port or a password. This is display text, so a hidden port costs a
+    /// line of context, while a shown password costs the password.
+    ///
+    /// Only a bare flag name redacts the next argument: `--name` with no
+    /// `=`, or exactly `-X`, judged on the flag name alone.
     ///
     /// For bare positional arguments, detection is heuristic: well-known secret
     /// prefixes (e.g. `sk-`, `github_pat_`, `AKIA`) are redacted immediately,
@@ -235,14 +248,19 @@ public enum ProviderIdentityRedaction {
                     continue
                 }
             }
-            // Glued short flag: `-tSECRET`, `-pMyPassword123`, `-uuser:pass`.
+            // Glued short flag: `-tSECRET`, `-oMyApiToken123`, `-uuser:pass`.
             // One argv element with no `=`, so neither the `=` shape nor the
             // arming check below can see the value inside it. Checked before
             // both, because the whole string can itself contain a secret word
-            // (`-pMyPassword123`) and would otherwise only arm the NEXT
-            // argument while this one went out verbatim.
-            if let flag = gluedShortSecretFlag(arg) {
-                out.append("-\(flag)\(redactedPlaceholder)")
+            // and would otherwise arm the NEXT argument while this one went
+            // out verbatim.
+            if let glued = gluedShortFlag(arg) {
+                if glued.redactValue {
+                    out.append("-\(glued.letter)\(redactedPlaceholder)")
+                } else {
+                    out.append(arg)
+                }
+                redactNext = glued.mayBeLongFlagName
                 continue
             }
             if let separator = arg.firstIndex(of: "="), arg.hasPrefix("-") {
@@ -266,12 +284,15 @@ public enum ProviderIdentityRedaction {
                 out.append(arg)
                 continue
             }
+            // Only a bare flag name reaches this point with a dash: `--name`
+            // or exactly `-X`. Judged on the name alone, it redacts the next
+            // argument.
             if arg.hasPrefix("-"), isSecretKey(arg) {
                 out.append(arg)
                 redactNext = true
                 continue
             }
-            // Third shape: a BARE POSITIONAL argument that looks like a
+            // Last shape: a BARE POSITIONAL argument that looks like a
             // secret — never one that starts with `-`. An argument this
             // point is reached for already failed the known-secret-flag
             // check above, so a dash-prefixed one here is an ordinary flag
@@ -288,15 +309,26 @@ public enum ProviderIdentityRedaction {
         return out
     }
 
-    /// The flag letter of a single-dash argument that is a short credential
-    /// alias with its value glued on (`-tabc` gives `t`), or nil. `--long`
-    /// flags and a bare `-t` (whose value is the next argument) are not this
-    /// shape.
-    private static func gluedShortSecretFlag(_ arg: String) -> Character? {
-        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
-        let letter = arg[arg.index(after: arg.startIndex)]
-        guard shortSecretFlagAliases.contains(letter.lowercased()) else { return nil }
-        return letter
+    /// A single-dash argument longer than two characters with no `=`, read
+    /// as `-X` plus a glued value, or nil for any other shape. `redactValue`
+    /// says whether the value must be hidden; `mayBeLongFlagName` marks an
+    /// all-lowercase secret-vocabulary name (`-token`), which may instead be
+    /// a Go-style long flag whose value is the next argument.
+    private static func gluedShortFlag(
+        _ arg: String
+    ) -> (letter: Character, redactValue: Bool, mayBeLongFlagName: Bool)? {
+        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--"),
+              !arg.contains("=") else { return nil }
+        let name = arg.dropFirst()
+        let letter = name[name.startIndex]
+        let value = String(name.dropFirst())
+        let mayBeLongFlagName = isSecretKey(String(name))
+            && name.allSatisfy { ("a"..."z").contains($0) || $0 == "-" || $0 == "_" }
+        let redactValue = shortSecretFlagAliases.contains(letter.lowercased())
+            || isSecretKey(value)
+            || isSecretKey(arg)
+            || looksLikeSecret(value)
+        return (letter, redactValue, mayBeLongFlagName)
     }
 
     /// Returns true if a bare positional argument has characteristics that

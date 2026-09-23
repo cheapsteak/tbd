@@ -119,25 +119,37 @@ shapes:
   secret vocabulary above. Otherwise the value is still judged on its own by
   the positional heuristic below, so a secret cannot slip through behind an
   unrecognized flag name such as `--bearer=`.
-- **Glued short flag** – a single-dash argument longer than two characters
-  whose letter is a short credential alias (`-tXk3…`, `-pMyPassword123`,
-  curl's `-uuser:pass`) keeps its flag letter and has the rest redacted. The
-  rule keys on the letter alone, so `-p8080` is redacted even when it is a
-  port. That is the accepted over-redaction.
-- **`--flag value`** – a flag matching the secret vocabulary, or a bare short
-  alias, redacts the next argument. A next argument that starts with `-` is a
-  flag, not the value: it is judged by these same rules in turn, so
+- **Glued short flag** – every single-dash argument longer than two
+  characters with no `=` is read as `-X` followed by its value, and `-X` is
+  always kept. The value is redacted when `X` is a short credential alias,
+  when the value or the whole argument matches the secret vocabulary, or when
+  the value passes the positional heuristic below; otherwise the argument is
+  shown verbatim (`-v2`, `-ofile.txt`). So `-uuser:pass`, `-oMyApiToken123`
+  and `-Hghp_…` all render as `-X‹redacted›`, and an alias letter redacts any
+  glued value, so `-p8080` is redacted even when it is a port. That is the
+  accepted over-redaction. A glued flag has consumed its value and does not
+  redact the next argument, with one exception: an all-lowercase name that
+  matches the secret vocabulary (`-token`, `-api-key`) is also how Go-style
+  single-dash long flags are written, with the value in the next argument, so
+  both are redacted.
+- **`--flag value`** – only a bare flag name redacts the next argument:
+  `--name` with no `=`, or exactly `-X`, judged on the name alone against the
+  secret vocabulary and the short aliases. A next argument that starts with
+  `-` is a flag, not the value: it is judged by these same rules in turn, so
   `--token --password hunter2` still redacts `hunter2`.
 - **Bare positional** – an argument with no dash is redacted when it looks
   like a secret, by the heuristic below. Dash-prefixed arguments that reach
-  this point are ordinary flags and pass through.
+  this point are ordinary flags such as `--use-http2-multiplexing` and pass
+  through.
 
 The short credential aliases are `t`, `p`, `k` and `u`: token, password, key,
 and curl's `user:password`. They are matched exactly, never as substrings,
 because a one-letter substring would match almost every flag. The vocabulary
 substrings cannot catch them, since a one-letter flag cannot contain a word.
 The set is short on purpose. Each extra letter redacts every glued use of it,
-and these four are the ones that conventionally carry a credential.
+and these four are the ones that conventionally carry a credential. A glued
+flag under any other letter is still caught by its value or its whole
+argument, so the set does not need to grow to close a leak.
 
 The positional heuristic checks, in order:
 
