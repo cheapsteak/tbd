@@ -693,6 +693,7 @@ extension AppState {
             }
             switchingAccountTerminals[terminalID] = SwitchingAccount(profileName: profileName)
         }
+        let attachEpochAtStart = terminalAttachEpochs[terminalID] ?? 0
         // Cleared on every exit. A failed swap leaves the row in whatever state
         // its failing half left it — awake on the old account, or parked on
         // either — and with the record gone the pane renders that state as it
@@ -712,7 +713,9 @@ extension AppState {
                 // nothing to add or re-select here — except the wake, whose
                 // delta travels on another socket and can land after this
                 // reply. See `applySwitchedTerminalWake`.
-                applySwitchedTerminalWake(resultTerminal)
+                if ownsSwitchingRecord {
+                    applySwitchedTerminalWake(resultTerminal, attachEpochAtStart: attachEpochAtStart)
+                }
                 return
             }
             mergeCreatedTerminalAndSelect(resultTerminal)
@@ -722,25 +725,42 @@ extension AppState {
         }
     }
 
-    /// Carry an in-place swap's wake onto the cached row when the swap's reply
-    /// outran the wake's hibernation delta.
+    /// Settle a successful in-place swap of a holder row: the row awake, and
+    /// the pane rebuilt exactly once during the switch.
     ///
-    /// The delta arrives over the subscription socket and the reply over the
-    /// request socket, so nothing orders them. A reply that wins would clear
-    /// the switching record over a row the cache still holds parked, and the
-    /// pane would rebuild into the hibernated placeholder, banner and all, only
-    /// to rebuild again when the delta caught up. Applying the un-park here,
-    /// while the record still stands, advances the attach epoch exactly as the
-    /// delta would have. The late delta then finds the row awake, so it does
-    /// not advance the epoch a second time; what else it writes — `keepWarm`,
-    /// the cleared park fields — restates the woken row, and a holder row's
-    /// empty tmux ids stay empty. A reply that describes a parked row — the cold path, or
-    /// a wake that failed — is left to the deltas.
-    func applySwitchedTerminalWake(_ result: Terminal) {
-        guard switchingAccountTerminals[result.id] != nil, !result.isParked,
-              let idx = terminals[result.worktreeID]?.firstIndex(where: { $0.id == result.id }),
-              terminals[result.worktreeID]?[idx].isParked == true else { return }
-        terminalAttachEpochs[result.id, default: 0] += 1
+    /// A holder row that a swap reports awake was parked and woken under a new
+    /// holder, so the attach the pane still holds is the dead holder's, and the
+    /// pane must rebuild however the cache learned of the wake. The usual route
+    /// is the wake's hibernation delta, which advances the attach epoch as it
+    /// un-parks the row. Two others carry the wake without advancing it: this
+    /// reply, which travels on the request socket while the delta travels on
+    /// the subscription socket, so nothing orders them; and a `terminal.list`
+    /// refresh that lands after the wake commits, whose snapshot un-parks the
+    /// row by replacing it. The epoch taken when the switch began is what tells
+    /// these apart: if it has not moved, nothing rebuilt the pane, and this
+    /// advances it; if it has, the delta already did and this does not advance
+    /// it again.
+    ///
+    /// The un-park is applied here too while the record still stands, so a
+    /// reply that beats the delta does not clear the record over a row the
+    /// cache holds parked, which would rebuild the pane into the hibernated
+    /// placeholder only for the delta to rebuild it again. The late delta then
+    /// finds the row awake and does not advance the epoch; what else it writes
+    /// — `keepWarm`, the cleared park fields — restates the woken row, and a
+    /// holder row's empty tmux ids stay empty.
+    ///
+    /// A tmux row is left alone: its arm respawns the agent inside the window
+    /// the pane is already attached to. So is a reply describing a parked row,
+    /// a wake that failed, which the deltas and the record's clearing render.
+    func applySwitchedTerminalWake(_ result: Terminal, attachEpochAtStart: Int) {
+        guard switchingAccountTerminals[result.id] != nil,
+              result.transport == .holder, !result.isParked,
+              let idx = terminals[result.worktreeID]?.firstIndex(where: { $0.id == result.id })
+        else { return }
+        if (terminalAttachEpochs[result.id] ?? 0) == attachEpochAtStart {
+            terminalAttachEpochs[result.id, default: 0] += 1
+        }
+        guard terminals[result.worktreeID]?[idx].isParked == true else { return }
         terminals[result.worktreeID]?[idx].hibernatedAt = nil
         terminals[result.worktreeID]?[idx].suspendedAt = nil
         terminals[result.worktreeID]?[idx].hibernateReason = nil

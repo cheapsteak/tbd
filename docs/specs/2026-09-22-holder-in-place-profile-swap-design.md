@@ -56,8 +56,10 @@ gains a holder arm beside the tmux one. In order:
    typed-input rail and the screen-trust rails, and skips the
    transcript-tail rail. It still reads the screen once, as a display capture
    only: a readable daemon-rendered frame becomes the row's
-   `suspendedSnapshot`, the tab's backdrop, as it does for every park, and an
-   unreadable one leaves the snapshot empty. Neither what the frame shows nor
+   `suspendedSnapshot`, the tab's backdrop, as it does for every park. An
+   unreadable one captures nothing: the park's delta carries no snapshot and
+   the row's column keeps whatever an earlier park stored, as every park does
+   when it has no capture. Neither what the frame shows nor
    whether it can be read refuses the park. Everything else is the park as it stands: park
    intent is written before the process is touched, then the ending ladder —
    polite `/exit`, poll, `SIGTERM` to the identity-verified child, abandon the
@@ -109,8 +111,14 @@ success or error. It is set only for a row the app holds awake: a parked row
 takes the cold path and has no park or wake to ride, and a second swap on a
 row already switching neither replaces nor clears the first's record. An ordinary pane's identity includes the row's parked state,
 so it rebuilds on each flip; a switching pane's identity leaves the parked
-state out, so it rebuilds once, when the record clears or the wake's fresh
-attach arrives, and not on the park. While switching, the placeholder shows
+state out, so it does not rebuild on the park. It rebuilds once: into the
+fresh attach when the switch succeeds, or into the parked placeholder when
+the record clears over a row a failed switch left parked. The rebuild into
+the fresh attach is keyed on a per-terminal attach epoch, advanced by the
+wake's delta, and by the success reply when nothing advanced it during the
+switch — the reply and the delta travel on different sockets, and a
+`terminal.list` refresh can carry the wake without advancing it, so the reply
+is what guarantees the pane leaves the dead holder's attach. While switching, the placeholder shows
 the park's snapshot under the "Switching account to <profile>…" caption, with
 no hibernation banner. When the swap fails the record clears and the row
 renders whatever state it was left in. The mid-turn warning on "Switch account"

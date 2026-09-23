@@ -2855,7 +2855,7 @@ struct HolderTmuxAssumptionGateTests {
     /// this daemon performs while leaving the swap's assertion green.
     ///
     /// The backdrop is asked of `holderSwapBackdrop` directly, for the reason
-    /// `transcriptTailIsSkippedForASwap` gives: this fixture's park stops at
+    /// `transcriptTailRailIsSkippedForASwap` gives: this fixture's park stops at
     /// the reader lookup, before the intent write that persists the snapshot,
     /// so the frame it would carry is only observable at the decision itself.
     /// The park's count is what proves the park asks that decision.

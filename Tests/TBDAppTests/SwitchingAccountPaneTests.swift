@@ -134,6 +134,49 @@ struct SwitchingAccountPaneTests {
         }
     }
 
+    /// A swap whose park succeeded and whose re-home or wake then failed:
+    /// the row is left parked, the RPC throws, and clearing the record is the
+    /// pane's one rebuild — into the ordinary parked placeholder, notice and
+    /// click-to-wake back, caption gone.
+    @Test("a swap that fails after its park rebuilds the pane once, into the parked placeholder")
+    func failureAfterTheParkRebuildsOnce() async {
+        struct WakeFailed: Error {}
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
+            let identity = { @MainActor () -> String in
+                let cached = state.terminals[row.worktreeID]!.first!
+                return TerminalPanePresentation.identity(
+                    for: cached, switching: state.switchingAccountTerminals[row.id],
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+            }
+            let before = identity()
+            var duringRPC: String?
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: row.id, worktreeID: row.worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                duringRPC = identity()
+                throw WakeFailed()
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            let after = identity()
+            let cached = state.terminals[row.worktreeID]!.first!
+            #expect(duringRPC == before, "the swap's park rebuilt the switching pane")
+            #expect(after != before, "the failed swap left the pane on its switching identity")
+            #expect(cached.isParked)
+            #expect(TerminalPanePresentation.switchingCaption(
+                for: cached, switching: state.switchingAccountTerminals[row.id]) == nil,
+                "the caption outlived the failed swap")
+            #expect(TerminalPanePresentation.parkedNoticeMessage(
+                for: cached, switching: state.switchingAccountTerminals[row.id]) != nil)
+            #expect(TerminalPanePresentation.showsWakeOverlay(
+                for: cached, switching: state.switchingAccountTerminals[row.id]))
+        }
+    }
+
     /// A second swap while the first is in flight: the daemon refuses it on
     /// the first's claim, and that refusal must not clear the first's record.
     @Test("a swap refused while another is in flight leaves the first's record in place")
@@ -255,6 +298,67 @@ struct SwitchingAccountPaneTests {
             await state.swapTerminalProfile(terminalID: failedWake.id, newProfileID: nil)
             #expect(state.terminalAttachEpochs[failedWake.id] == nil)
             #expect(state.terminals[worktreeID]?.last?.isParked == true)
+        }
+    }
+
+    /// A `terminal.list` refresh that lands after the wake commits un-parks
+    /// the row by replacing it, and advances nothing; the wake delta that
+    /// follows finds the row awake. The reply is what rebuilds the pane then —
+    /// without it the pane would stay on the dead holder's attach.
+    @Test("a refresh that un-parks the row mid-switch still gets the pane its one rebuild")
+    func refreshThatUnparksStillRebuildsOnce() async {
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            let worktreeID = row.worktreeID
+            state.terminals[worktreeID] = [row]
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: row.id, worktreeID: worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                state.adoptTerminalSnapshot([row], worktreeID: worktreeID)
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: row.id, worktreeID: worktreeID,
+                    hibernated: false, keepWarm: false))
+                #expect(state.terminalAttachEpochs[row.id] == nil,
+                        "precondition: the refresh carried the wake without advancing the epoch")
+                return row
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(state.terminalAttachEpochs[row.id] == 1)
+        }
+    }
+
+    /// No hibernation delta at all — a subscription that dropped for the
+    /// switch's length and came back with a refetch. The reply alone still
+    /// rebuilds the pane, once.
+    @Test("a swap whose deltas never arrive still rebuilds the pane once from the reply")
+    func replyAloneRebuildsOnce() async {
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in row }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(state.terminalAttachEpochs[row.id] == 1)
+        }
+    }
+
+    /// The tmux arm respawns the agent inside the window the pane is attached
+    /// to, so its reply rebuilds nothing.
+    @Test("an in-place swap of a tmux row does not advance the attach epoch")
+    func tmuxSwapDoesNotRebuild() async {
+        await withAppState { state in
+            let row = Terminal(
+                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1", transport: .tmux)
+            state.terminals[row.worktreeID] = [row]
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in row }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(state.terminalAttachEpochs[row.id] == nil)
         }
     }
 
