@@ -15,8 +15,10 @@ that non-goal and nothing else. The commit is still the identity; a download
 is another way to get that commit's binaries onto disk.
 
 The repository owner decided the design questions on 2026-09-23; section 8
-records them. The first scope in section 3, which publishes every product but
-the app, is pending his confirmation.
+records them. One question remains open: how the app gets its resource
+bundles on a machine that did not compile it. Section 3.1 states it and its
+options. The implementation that accompanies this spec is option C, and it is
+held until the repository owner records a choice.
 
 ## 1. What is wrong today
 
@@ -108,17 +110,35 @@ Non-goals:
     diff highlighter and `CodeHighlightService` all construct `Highlightr()`.
   - So a CI-built `TBDApp` would stop at its first resource lookup on any
     user's machine.
-- **The first scope therefore publishes five products and builds `TBDApp`
-  locally.** The asset carries `TBDDaemon`, `TBDCLI`, `TBDHolder`,
-  `TBDPeerHelper` and `TBDModelProxy` with their resource bundles. The update
-  compiles `TBDApp` alone (about 30% of a cold build, measured in
+- **So the app cannot simply join the asset.** Section 3.1 lists the ways
+  around that; the rest of this spec describes option C.
+
+### 3.1 The app-bundle choice (open)
+
+This choice is pending the repository owner. The planned sequence is C now and
+A next.
+
+- **A – relocatable `Bundle.module`.** A resolver that checks
+  `Bundle.main.resourceURL` before the generated accessor, used at TBDApp's
+  four `Bundle.module` sites, and the same change in a Highlightr fork,
+  following the SwiftTerm fork precedent. With it, `TBDApp` joins the asset
+  and an update compiles nothing. It touches compiled app code and adds a
+  forked dependency.
+- **B – build at a fixed shared path.** CI builds under a path that exists on
+  every Mac, such as `/Users/Shared`, and the installer links that path to the
+  download so the baked build path resolves. `/Users/Shared` is
+  world-writable, so another local user could plant that path, and the
+  approach assumes one TBD user per machine.
+- **C – ship every product but the app.** The asset carries `TBDDaemon`,
+  `TBDCLI`, `TBDHolder`, `TBDPeerHelper` and `TBDModelProxy` with their
+  resource bundles. The update compiles `TBDApp` alone (about 30% of a cold
+  build, measured in
   [`docs/research/2026-08-19-cold-build-split/findings.md`](../research/2026-08-19-cold-build-split/findings.md))
-  and adds it to the downloaded tree. A follow-up makes the app's resource
-  lookups relocatable: a resolver that checks `Bundle.main.resourceURL` for
-  TBDApp's own call sites, and the same change in a Highlightr fork, following
-  the SwiftTerm fork precedent. With that in place, `TBDApp` joins the asset
-  and the update compiles nothing. Rejected ways to ship the app sooner are in
-  section 5. **This scope is pending the owner's confirmation.**
+  and adds it to the downloaded tree. It needs no change to compiled app code,
+  and A later removes the remaining local compile without changing anything C
+  builds.
+- **D – patch the baked path in the binary.** An equal-length rewrite followed
+  by a local re-sign works mechanically, but it is fragile and opaque.
 
 ## 4. Design
 
@@ -309,14 +329,6 @@ would not have been retried until the next push.
 - **Ship a finished, signed `TBD.app`.** The bundle embeds the installing
   shell's `PATH`, and it must carry the installing machine's signing identity
   for TCC decisions to persist.
-- **Ship `TBDApp` now by building at a fixed shared path.** CI would build at
-  a path that exists on every Mac, such as under `/Users/Shared`, and the
-  installer would link that path to the download, so the baked build path
-  resolves. `/Users/Shared` is world-writable, so another local user could
-  plant that path, and the approach assumes one TBD user per machine.
-- **Ship `TBDApp` now by patching the baked path in the binary.** An
-  equal-length rewrite followed by a local re-sign works mechanically, but it
-  is fragile and opaque.
 - **Stage resource bundles at the app bundle's root.** `codesign` rejects
   unsealed contents in a bundle root.
 - **Workflow artifacts rather than release assets.** Downloading one needs an
