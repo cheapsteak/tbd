@@ -892,13 +892,15 @@ final class AppState {
     /// Keyed by terminal UUID. Cleared when suspend completes.
     var suspendingSnapshots: [UUID: NSImage] = [:]
     /// Terminals whose account "Switch account" is changing in place, keyed by
-    /// terminal id. Set by `swapTerminalProfile` before the RPC and cleared when
-    /// it returns, on success or error. While set, the pane rides the swap's
+    /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
+    /// cache holds awake and only by the first swap to claim it, and cleared
+    /// when that swap returns, on success or error. While set, the pane rides the swap's
     /// park and wake without reading them as a hibernation — see
     /// `SwitchingAccount` and `TerminalPanePresentation`.
     var switchingAccountTerminals: [UUID: SwitchingAccount] = [:]
-    /// Per-terminal part of a terminal view's SwiftUI identity, advanced when a
-    /// switching terminal's wake un-parks it. A switching pane's identity leaves
+    /// Per-terminal part of a terminal view's SwiftUI identity, advanced once
+    /// per successful switch: by the wake's delta when it un-parks a switching
+    /// row, or by the swap's reply when nothing did (`applySwitchedTerminalWake`). A switching pane's identity leaves
     /// out the parked state, so this is what rebuilds it into a fresh attach —
     /// once. Never reset: dropping back to zero when the record clears would
     /// rebuild the pane a second time. Absent reads as zero.

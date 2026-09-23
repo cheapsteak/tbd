@@ -50,9 +50,9 @@ extension HibernateEligibilityPolicy {
     /// still reads the screen once, for the display capture alone
     /// (`holderSwapBackdrop`): the frame is kept as the row's
     /// `suspendedSnapshot` like any other park's, and nothing it shows — nor
-    /// whether it can be read at all — refuses the park. The tmux leg's own typed-input rail, which
-    /// reads the pane through `capturePaneWithAnsi` before taking the server
-    /// lock, is **not** gated by this predicate and refuses under every
+    /// whether it can be read at all — refuses the park. The tmux leg's own
+    /// typed-input rail, which reads the pane through `capturePaneWithAnsi`
+    /// before taking the server lock, is **not** gated by this predicate and refuses under every
     /// policy. That is not an oversight left to fix: `.profileSwap` is
     /// holder-only today — `handleTerminalSwapProfile` branches on
     /// `transport == .holder` and no other caller passes the policy — so a

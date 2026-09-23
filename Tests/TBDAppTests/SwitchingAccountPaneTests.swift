@@ -348,16 +348,21 @@ struct SwitchingAccountPaneTests {
 
     /// The tmux arm respawns the agent inside the window the pane is attached
     /// to, so its reply rebuilds nothing.
-    @Test("an in-place swap of a tmux row does not advance the attach epoch")
+    @Test("an in-place swap of a tmux row sets no record and does not advance the attach epoch")
     func tmuxSwapDoesNotRebuild() async {
         await withAppState { state in
             let row = Terminal(
                 worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1", transport: .tmux)
             state.terminals[row.worktreeID] = [row]
-            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in row }
+            var seenDuringRPC: SwitchingAccount?
+            state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
+                seenDuringRPC = state.switchingAccountTerminals[terminalID]
+                return row
+            }
 
             await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
 
+            #expect(seenDuringRPC == nil, "a tmux swap recorded a switch it never parks for")
             #expect(state.terminalAttachEpochs[row.id] == nil)
         }
     }

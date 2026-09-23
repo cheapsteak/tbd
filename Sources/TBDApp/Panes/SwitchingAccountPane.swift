@@ -38,9 +38,11 @@ enum TerminalPanePresentation {
     /// wake. A switching pane leaves the parked state out and reads as awake,
     /// so neither setting the record nor the swap's park rebuilds it, and the
     /// view it already had keeps showing the session's last frame. What
-    /// rebuilds it is `attachEpoch`, which `AppState` advances when the swap's
-    /// wake un-parks the row — once, and it stays advanced after the record
-    /// clears so clearing it does not rebuild the pane a second time.
+    /// rebuilds it is `attachEpoch`, which `AppState` advances once per
+    /// successful switch — on the wake's delta, or on the swap's reply when
+    /// nothing advanced it first (see `applySwitchedTerminalWake`) — and which
+    /// stays advanced after the record clears, so clearing it does not rebuild
+    /// the pane a second time.
     static func identity(
         for terminal: Terminal, switching: SwitchingAccount?, attachEpoch: Int
     ) -> String {

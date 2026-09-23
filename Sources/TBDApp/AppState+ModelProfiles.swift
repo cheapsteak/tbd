@@ -669,8 +669,13 @@ extension AppState {
         newProfileID: UUID?,
         mode: TerminalSwapMode = .inPlace
     ) async {
-        // Recorded only for a row the cache holds awake, and only by the first
-        // swap to claim it.
+        // Recorded only for a holder row the cache holds awake, and only by the
+        // first swap to claim it.
+        //
+        // A tmux row's swap respawns the agent inside the window the pane is
+        // attached to and never parks it, so it has nothing to ride; a record
+        // there would only relabel an unrelated hibernation landing mid-swap
+        // as the switch.
         //
         // A row already parked takes the daemon's cold path: it is re-homed and
         // stays parked, so there is no park or wake to ride. Recording it would
@@ -683,10 +688,12 @@ extension AppState {
         // the first holds its claim, and clearing the record on the refusal
         // would drop the first switch's park and wake back to rendering as a
         // hibernation.
+        let cachedRow = terminals.values.lazy.flatMap { $0 }
+            .first(where: { $0.id == terminalID })
         let ownsSwitchingRecord = mode == .inPlace
             && switchingAccountTerminals[terminalID] == nil
-            && terminals.values.lazy.flatMap { $0 }
-                .first(where: { $0.id == terminalID })?.isParked == false
+            && cachedRow?.transport == .holder
+            && cachedRow?.isParked == false
         if ownsSwitchingRecord {
             let profileName = newProfileID.flatMap { id in
                 modelProfiles.first(where: { $0.profile.id == id })?.profile.name
