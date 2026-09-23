@@ -327,6 +327,28 @@ struct ProviderIdentityTests {
         ])
     }
 
+    /// A dash-less `KEY=value` is judged like `--flag=value`: a secret-named
+    /// key hides even a short value, and a plain key keeps a plain value.
+    @Test("a bare KEY=value positional is judged by its key and value")
+    func barePositionalKeyValueIsJudgedByKeyAndValue() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "TOKEN=abc123",
+            "API_KEY=hunter2",
+            "db_url=ghp_abcdef0123456789",
+            "MODE=fast",
+            "main",
+        ])
+
+        #expect(redacted == [
+            "TOKEN=\(placeholder)",
+            "API_KEY=\(placeholder)",
+            "db_url=\(placeholder)",
+            "MODE=fast",
+            "main",
+        ])
+    }
+
     /// Every secret-bearing shape from the doc comment, checked both as the
     /// first argument and right after one or more valueless secret flags.
     /// No secret text may survive in any position, and the ordinary trailing
@@ -356,6 +378,8 @@ struct ProviderIdentityTests {
             ["-t=\(secret)"],
             ["-Dapi.key=\(secret)"],
             ["-Dservice.password=\(secret)"],
+            ["TOKEN=\(secret)"],
+            ["API_KEY=\(secret)"],
             ["-Ddb.url=ghp_\(secret)abcdefghij"],
         ]
         let prefixes: [[String]] = [[], ["--token"], ["-t"], ["--api-key", "--password"]]

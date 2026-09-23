@@ -147,7 +147,10 @@ shapes:
   `-` is a flag, not the value: it is judged by these same rules in turn, so
   `--token --password hunter2` still redacts `hunter2`.
 - **Bare positional** – an argument with no dash is redacted when it looks
-  like a secret, by the heuristic below. Dash-prefixed arguments that reach
+  like a secret, by the heuristic below. A dash-less `KEY=value`, such as an
+  env-style `TOKEN=abc123`, is first judged like `--flag=value`: its value is
+  redacted when the key matches the secret vocabulary or the value passes the
+  heuristic, and the key is kept. Dash-prefixed arguments that reach
   this point are ordinary flags such as `--use-http2-multiplexing` and pass
   through.
 

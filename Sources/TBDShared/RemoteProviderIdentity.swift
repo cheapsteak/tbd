@@ -226,6 +226,9 @@ public enum ProviderIdentityRedaction {
     /// Only a bare flag name redacts the next argument: `--name` with no
     /// `=`, or exactly `-X`, judged on the flag name alone.
     ///
+    /// A dash-less `KEY=value` (`TOKEN=abc123`) is judged like `--flag=value`
+    /// first: a secret-named key or a secret-shaped value hides the value.
+    ///
     /// For bare positional arguments, detection is heuristic: well-known secret
     /// prefixes (e.g. `sk-`, `github_pat_`, `AKIA`) are redacted immediately,
     /// and other arguments are redacted if they are long and high-entropy
@@ -303,9 +306,24 @@ public enum ProviderIdentityRedaction {
             // is exactly this shape: long, has a digit, no reason to hide
             // it). Excluding it is what keeps this heuristic scoped to
             // values, matching its own doc comment.
-            if !arg.hasPrefix("-"), looksLikeSecret(arg) {
-                out.append(redactedPlaceholder)
-                continue
+            if !arg.hasPrefix("-") {
+                // A dash-less `KEY=value` (`TOKEN=abc123`, an env-style
+                // assignment) carries the same key-name signal as the
+                // `--flag=value` shape, so it is judged the same way: a
+                // secret-named key hides its value whatever the value's
+                // length, and otherwise the value is judged on its own.
+                if let separator = arg.firstIndex(of: "="), separator != arg.startIndex {
+                    let key = String(arg[arg.startIndex..<separator])
+                    let value = String(arg[arg.index(after: separator)...])
+                    if isSecretKey(key) || looksLikeSecret(value) {
+                        out.append("\(key)=\(redactedPlaceholder)")
+                        continue
+                    }
+                }
+                if looksLikeSecret(arg) {
+                    out.append(redactedPlaceholder)
+                    continue
+                }
             }
             out.append(arg)
         }
