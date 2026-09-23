@@ -519,6 +519,91 @@ test_helper_refuses_direct_execution() {
     fi
 }
 
+# seed_tmux_fallback cases. Each builds its own dir (with a space in the
+# name, on purpose) holding a fake tmux, and runs the function in a subshell
+# on a PATH of that dir plus /usr/bin:/bin, where no real tmux lives.
+seed_fixture() {
+    local d="$TEST_TMP/seed $1"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n' > "$d/bin/tmux"; chmod +x "$d/bin/tmux"
+    echo "$d"
+}
+
+test_seed_writes_when_missing() {
+    local d; d="$(seed_fixture missing)"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed writes the shell's tmux when no file exists" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path" 2>/dev/null)"
+}
+
+test_seed_creates_missing_tbd_home() {
+    local d; d="$(seed_fixture newhome)"; rm -rf "${d:?}/home"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_file "seed creates tbd_home" "$d/home/tmux-executable-path"
+}
+
+test_seed_rewrites_a_dead_saved_path() {
+    local d; d="$(seed_fixture dead)"
+    printf '%s\n' "$d/gone/tmux" > "$d/home/tmux-executable-path"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed replaces a saved path whose target is gone" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+}
+
+test_seed_rewrites_a_non_executable_or_directory_saved_path() {
+    local d; d="$(seed_fixture nonexec)"
+    printf 'x' > "$d/plain"; printf '%s' "$d/plain" > "$d/home/tmux-executable-path"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed replaces a non-executable saved path" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+    printf '%s' "$d/bin" > "$d/home/tmux-executable-path"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed replaces a directory saved path" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+    printf 'tmux\n' > "$d/home/tmux-executable-path"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed replaces a relative saved path" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+}
+
+test_seed_keeps_a_valid_saved_path() {
+    local d; d="$(seed_fixture keep)"
+    mkdir -p "$d/other"; printf '#!/bin/sh\n' > "$d/other/tmux"; chmod +x "$d/other/tmux"
+    # Surrounding whitespace and a trailing newline, as a hand edit leaves it.
+    printf '  %s\n' "$d/other/tmux" > "$d/home/tmux-executable-path"
+    local before; before="$(cat "$d/home/tmux-executable-path")"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed never overwrites a valid saved path" \
+        "$before" "$(cat "$d/home/tmux-executable-path")"
+}
+
+test_seed_warns_and_succeeds_without_tmux() {
+    local d; d="$(seed_fixture notmux)"; rm "$d/bin/tmux"
+    local err rc
+    err="$( ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>&1 >/dev/null )"; rc=$?
+    assert_eq "seed succeeds when the shell has no tmux" "0" "$rc"
+    assert_no_file "seed writes nothing without tmux" "$d/home/tmux-executable-path"
+    assert_eq "seed prints exactly one warning line" "1" "$(printf '%s\n' "$err" | grep -c .)"
+}
+
+test_seed_keeps_a_symlinked_tmux_path() {
+    local d; d="$(seed_fixture symlink)"
+    mkdir -p "$d/cellar"; mv "$d/bin/tmux" "$d/cellar/tmux"; ln -s ../cellar/tmux "$d/bin/tmux"
+    ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_eq "seed writes the PATH-visible symlink, not its target" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+}
+
+test_seed_ignores_a_non_absolute_command_v() {
+    local d; d="$(seed_fixture alias)"; rm "$d/bin/tmux"
+    ( PATH="$d/bin:/usr/bin:/bin"; tmux() { :; }; seed_tmux_fallback "$d/home" ) 2>/dev/null
+    assert_no_file "seed ignores a tmux shell function" "$d/home/tmux-executable-path"
+}
+
+test_seed_rejects_a_missing_argument() {
+    assert_fail "seed requires tbd_home" seed_tmux_fallback
+}
+
 test_build_identity_describes_the_tree
 test_build_identity_marks_a_dirty_tree
 test_build_identity_ignores_dirt_outside_the_build
@@ -541,6 +626,15 @@ test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
+test_seed_writes_when_missing
+test_seed_creates_missing_tbd_home
+test_seed_rewrites_a_dead_saved_path
+test_seed_rewrites_a_non_executable_or_directory_saved_path
+test_seed_keeps_a_valid_saved_path
+test_seed_warns_and_succeeds_without_tmux
+test_seed_keeps_a_symlinked_tmux_path
+test_seed_ignores_a_non_absolute_command_v
+test_seed_rejects_a_missing_argument
 
 if [ "$FAIL" -ne 0 ]; then
     echo "SOME RESTART BUNDLE TESTS FAILED"
