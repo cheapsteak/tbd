@@ -79,7 +79,10 @@ struct ProviderDisambiguationScenarioTests {
         #expect(RemoteProviderIdentityPresentation.kindSubtitle(staging) == "reports as agentbox")
     }
 
-    @Test("no credential ever reaches the identity block")
+    /// Scoped to credentials the redactor recognizes — a secret-named flag or
+    /// key, or a secret-shaped value. The positional heuristic's documented
+    /// limits are pinned in `ProviderIdentityTests`.
+    @Test("no credential the redactor recognizes reaches the identity block")
     func identityCarriesNoCredentials() {
         let leaky = provider(
             registryName: managementName,

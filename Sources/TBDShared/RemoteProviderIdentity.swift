@@ -372,8 +372,9 @@ public enum ProviderIdentityRedaction {
     /// so they are identified and skipped explicitly.
     ///
     /// Documented limits (see the spec's "Redacting the command line"): an
-    /// unprefixed secret that is all letters, under 20 characters, or over
-    /// 500 characters is not caught — words, branch names, and blobs or paths.
+    /// unprefixed secret that is all letters, all digits, under 20
+    /// characters, or over 500 characters is not caught — words, numbers,
+    /// branch names, and blobs or paths.
     private static func looksLikeSecret(_ arg: String) -> Bool {
         // Well-known secret prefixes (case-sensitive). These are strong signals
         // that an argument is a credential, regardless of length or composition.

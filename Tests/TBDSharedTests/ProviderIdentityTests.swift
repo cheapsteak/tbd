@@ -519,6 +519,31 @@ struct ProviderIdentityTests {
         ])
     }
 
+    /// The heuristic's documented limits, pinned both ways: an unprefixed
+    /// secret that is all letters, all digits, under 20 characters, or over
+    /// 500 characters shows verbatim behind an unrecognized flag or as a bare
+    /// positional, and the same value is still redacted behind a
+    /// secret-named flag. A change to either side of this boundary must be a
+    /// deliberate edit to this test and to the spec.
+    @Test("the positional heuristic's documented limits pass through unless a secret-named flag carries them")
+    func documentedHeuristicLimitsArePinned() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let longValue = String(repeating: "a1b2c3d4e5", count: 51)
+        let limits = [
+            "xJkLpQmZrTsWnYbHcVfDg",   // all letters, 21 characters
+            "4817290356128473",        // all digits
+            "k3yQ9zL",                 // under 20 characters
+            longValue,                 // over 500 characters
+        ]
+        #expect(longValue.count > 500)
+        for value in limits {
+            #expect(ProviderIdentityRedaction.redactArguments(["--webhook", value]) == ["--webhook", value])
+            #expect(ProviderIdentityRedaction.redactArguments([value]) == [value])
+            #expect(ProviderIdentityRedaction.redactArguments(["--token", value]) == ["--token", placeholder])
+            #expect(ProviderIdentityRedaction.redactArguments(["--api-key=\(value)"]) == ["--api-key=\(placeholder)"])
+        }
+    }
+
     @Test("arguments with excessive repetition are not redacted")
     func doesNotRedactExcessiveRepetition() {
         // Both fixtures clear the 20-character floor on their own (21 and 22

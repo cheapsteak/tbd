@@ -190,18 +190,22 @@ The positional heuristic checks, in order:
 
 Anything that survives all of these is redacted.
 
-These checks leave three documented limits. A secret with no known prefix is
+These checks leave four documented limits. A secret with no known prefix is
 shown when it matches none of the flag rules above and is:
 
 - **All letters** – letters-only strings are ordinary words and subcommands,
   and redacting them would hide most of a readable command line.
+- **All digits** – digits-only strings are ports, counts and ids, and
+  redacting them would hide those too.
 - **Under 20 characters** – below the floor, branch names, worktree names and
   other short args would be redacted too.
 - **Over 500 characters** – past the cap, pasted blobs and long paths would be
   redacted too.
 
 A credential of one of these shapes is caught only when a secret-named flag
-carries it.
+carries it, so the redactor keeps every credential it recognizes off the
+screen, not every credential. The tests pin these limits so they cannot widen
+unnoticed.
 
 Rendered identity values, though not command args, are cut at 96 characters.
 Identity values are account ids, region names and box handles, so anything
