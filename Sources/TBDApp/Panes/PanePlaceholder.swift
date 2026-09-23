@@ -440,6 +440,7 @@ struct PanePlaceholder: View {
                     .padding(8)
                 }
             } else {
+                let switching = appState.switchingAccountTerminals[terminal.id]
                 TerminalPanelView(
                     terminalID: terminalID,
                     tmuxServer: worktree.tmuxServer,
@@ -471,15 +472,18 @@ struct PanePlaceholder: View {
                     // frozen snapshot's last rows at feed time (in the
                     // terminal's own grid/font — see ParkedSnapshotComposer).
                     // nil for a live terminal so the wake/reconnect path
-                    // feeds the snapshot untouched.
-                    parkedNoticeMessage: terminal.isParked
-                        ? HibernatedBannerModel.message(for: terminal.hibernateReason)
-                        : nil,
+                    // feeds the snapshot untouched, and nil while an account
+                    // switch has the row parked — the caption overlay below
+                    // says what is happening instead.
+                    parkedNoticeMessage: TerminalPanePresentation.parkedNoticeMessage(
+                        for: terminal, switching: switching),
                     shouldSuppressEvents: { [overlayCoordinator] in
                         shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                     }
                 )
-                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.isParked)")
+                .id(TerminalPanePresentation.identity(
+                    for: terminal, switching: switching,
+                    attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0))
                 .overlay {
                     // Full-surface click-to-wake for a PARKED pane: the whole
                     // frozen snapshot is the resume affordance (the old
@@ -493,7 +497,8 @@ struct PanePlaceholder: View {
                     // so that overlay stays on top in hit-testing. Plain
                     // left-clicks reach it: TerminalPanelView's click monitor
                     // only consumes Cmd+clicks that resolve a file path.
-                    if ParkedPaneWakeModel.showsWakeOverlay(for: terminal) {
+                    if TerminalPanePresentation.showsWakeOverlay(
+                        for: terminal, switching: switching) {
                         Button {
                             Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminal.id, worktreeID: worktree.id) }
                         } label: {
@@ -506,6 +511,9 @@ struct PanePlaceholder: View {
                         }
                         .help("Click to resume session")
                     }
+                }
+                .overlay {
+                    SwitchingAccountCaptionOverlay(terminal: terminal, switching: switching)
                 }
                 .overlay {
                     if let frame = overlayCoordinator.current,

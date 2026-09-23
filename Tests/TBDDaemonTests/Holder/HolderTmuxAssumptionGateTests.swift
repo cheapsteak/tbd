@@ -2790,11 +2790,11 @@ struct HolderTmuxAssumptionGateTests {
 
     /// A screen oracle that counts how many times a park asked it.
     ///
-    /// "The swap's park does not read the screen at all" is the requirement,
-    /// and a refusal string cannot express it: a park that read the screen,
-    /// judged it clear, and then stopped at the reader lookup answers exactly
-    /// what a park that never read it answers. The count is what
-    /// discriminates.
+    /// "The swap's park reads the screen at most once, and only for its
+    /// backdrop" is the requirement, and a refusal string cannot express it: a
+    /// park that read the screen twice — once to judge, once to freeze — and
+    /// then stopped at the reader lookup answers exactly what a park that read
+    /// it once answers. The count is what discriminates.
     ///
     /// `withLock` rather than `lock()`/`unlock()`: the oracle it vends is
     /// `async`, where the unscoped pair is unavailable.
@@ -2831,12 +2831,35 @@ struct HolderTmuxAssumptionGateTests {
         return coord
     }
 
-    /// The typed-input rail, both branches of the policy, over one screen.
+    /// Every screen a swap's park cannot freeze, each named for the failure
+    /// message: a viewer holds the pty, the emulator was built over a running
+    /// child, the session has no screen at all, and a projection that threw.
+    private static func unreadableScreens() throws -> [(String, @Sendable () throws -> TerminalScreen?)] {
+        struct ProjectionRefused: Error {}
+        let viewer = try screen(lines: typedComposer, source: .viewer)
+        let unobserved = try screen(
+            lines: typedComposer, source: .daemon, contentObserved: false)
+        return [
+            ("a viewer holds the pty", { viewer }),
+            ("an unobserved re-adopted screen", { unobserved }),
+            ("no screen at all", { nil }),
+            ("a projection that threw", { throw ProjectionRefused() }),
+        ]
+    }
+
+    /// The typed-input rail, both branches of the policy, over one screen —
+    /// and the swap's single read, which keeps the frame as its backdrop.
     ///
     /// The manual leg is not ceremony: `honoursLiveRails` is a single
     /// comparison, and an inverted one would disable the rail for every park
     /// this daemon performs while leaving the swap's assertion green.
-    @Test("a profile swap's park bypasses the typed-input rail a manual park honours")
+    ///
+    /// The backdrop is asked of `holderSwapBackdrop` directly, for the reason
+    /// `transcriptTailRailIsSkippedForASwap` gives: this fixture's park stops at
+    /// the reader lookup, before the intent write that persists the snapshot,
+    /// so the frame it would carry is only observable at the decision itself.
+    /// The park's count is what proves the park asks that decision.
+    @Test("a profile swap's park reads the screen once for its backdrop and never refuses on it")
     func swapParkSkipsTheTypedInputRail() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -2857,17 +2880,52 @@ struct HolderTmuxAssumptionGateTests {
         let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
         #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
                 "the swap's park honoured a rail it must bypass: \(swapResult)")
-        #expect(swapOracle.count == 0,
-                "the swap's park read the screen \(swapOracle.count) time(s); it must not read it at all")
+        #expect(swapOracle.count == 1,
+                "the swap's park read the screen \(swapOracle.count) time(s); it must read it exactly once, for the backdrop")
+
+        let backdropOracle = CountingScreenOracle { typed }
+        let backdropCoordinator = await coordinatorCounting(
+            backdropOracle, db: db, terminal: terminal)
+        let backdrop = await backdropCoordinator.holderSwapBackdrop(
+            terminalID: terminal.id, registry: holderRegistry(listing: [terminal]))
+        #expect(backdrop == typed.output,
+                "a readable screen must be kept as the swap's backdrop, typed input and all")
+        #expect(backdropOracle.count == 1)
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(!after.isParked, "a park that refused at the reader still parked the row")
     }
 
+    /// The other branch of the backdrop: a screen the daemon cannot read costs
+    /// the swap its frame and nothing else. Each unreadable answer is one a
+    /// manual park refuses on, so a swap that stopped here would be a swap
+    /// that refuses exactly the re-adopted rows it exists to serve.
+    @Test("a profile swap's park over an unreadable screen freezes no backdrop and still proceeds")
+    func swapParkOverAnUnreadableScreenFreezesNothing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+
+        for (name, answer) in try Self.unreadableScreens() {
+            let swapOracle = CountingScreenOracle(answer)
+            let swap = await coordinatorCounting(swapOracle, db: db, terminal: terminal)
+            let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
+            #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                    "\(name): the swap's park refused on a screen it must not judge: \(swapResult)")
+            #expect(swapOracle.count == 1,
+                    "\(name): the swap's park read the screen \(swapOracle.count) time(s); it must read it exactly once, for the backdrop")
+
+            let backdrop = await swap.holderSwapBackdrop(
+                terminalID: terminal.id, registry: holderRegistry(listing: [terminal]))
+            #expect(backdrop == nil, "\(name): an unreadable screen was frozen as a backdrop")
+        }
+    }
+
     /// The re-adopted screen: the case the spec names as the one a user
     /// reaching for "Switch account" after a daemon restart is most likely to
-    /// be in, and the reason the swap bypasses the screen rather than trusting
-    /// it.
+    /// be in, and the reason the swap does not judge the screen.
     @Test("a profile swap's park bypasses the re-adopted-screen rail a manual park honours")
     func swapParkSkipsTheUnobservedScreenRail() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -2891,7 +2949,8 @@ struct HolderTmuxAssumptionGateTests {
         let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
         #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
                 "the swap's park honoured a rail it must bypass: \(swapResult)")
-        #expect(swapOracle.count == 0, "the swap's park read the screen it must not read")
+        #expect(swapOracle.count == 1,
+                "the swap's park read the screen \(swapOracle.count) time(s); it must read it exactly once, for the backdrop")
     }
 
     /// The transcript-tail rail, asked of the shipped decision directly.

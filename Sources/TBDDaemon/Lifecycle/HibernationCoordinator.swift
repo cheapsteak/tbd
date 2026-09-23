@@ -43,12 +43,16 @@ extension HibernateEligibilityPolicy {
     /// One predicate, named once, so the rails that do answer to it cannot
     /// come to disagree about which policies they answer to.
     ///
-    /// **What it reaches.** Three rails consult it: the holder park's screen
-    /// reading and its typed-input check (`HibernationCoordinator+Holder`),
-    /// and the transcript-tail rail both transports share
-    /// (`transcriptTailRefusal`). The tmux leg's own typed-input rail, which
-    /// reads the pane through `capturePaneWithAnsi` before taking the server
-    /// lock, is **not** gated by this predicate and refuses under every
+    /// **What it reaches.** Three rails consult it: the holder park's
+    /// fail-closed screen reading and its typed-input check
+    /// (`HibernationCoordinator+Holder`), and the transcript-tail rail both
+    /// transports share (`transcriptTailRefusal`). A park it answers false for
+    /// still reads the screen once, for the display capture alone
+    /// (`holderSwapBackdrop`): the frame is kept as the row's
+    /// `suspendedSnapshot` like any other park's, and nothing it shows — nor
+    /// whether it can be read at all — refuses the park. The tmux leg's own
+    /// typed-input rail, which reads the pane through `capturePaneWithAnsi`
+    /// before taking the server lock, is **not** gated by this predicate and refuses under every
     /// policy. That is not an oversight left to fix: `.profileSwap` is
     /// holder-only today — `handleTerminalSwapProfile` branches on
     /// `transport == .holder` and no other caller passes the policy — so a

@@ -891,6 +891,20 @@ final class AppState {
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     var suspendingSnapshots: [UUID: NSImage] = [:]
+    /// Terminals whose account "Switch account" is changing in place, keyed by
+    /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
+    /// cache holds awake and only by the first swap to claim it, and cleared
+    /// when that swap returns, on success or error. While set, the pane rides the swap's
+    /// park and wake without reading them as a hibernation — see
+    /// `SwitchingAccount` and `TerminalPanePresentation`.
+    var switchingAccountTerminals: [UUID: SwitchingAccount] = [:]
+    /// Per-terminal part of a terminal view's SwiftUI identity, advanced once
+    /// per successful switch: by the wake's delta when it un-parks a switching
+    /// row, or by the swap's reply when nothing did (`applySwitchedTerminalWake`). A switching pane's identity leaves
+    /// out the parked state, so this is what rebuilds it into a fresh attach —
+    /// once. Never reset: dropping back to zero when the record clears would
+    /// rebuild the pane a second time. Absent reads as zero.
+    var terminalAttachEpochs: [UUID: Int] = [:]
 
     func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
         suspendingSnapshots[id] = image
@@ -1789,6 +1803,17 @@ final class AppState {
             try await daemonClient.terminalWake(
                 terminalID: terminalID, cols: cols, rows: rows,
                 fallbackToDefaultProfile: fallback, prompt: prompt)
+        }
+    /// How `swapTerminalProfile` reaches the daemon — injectable for the same
+    /// reason as `controlModeSetter`, so the switching record's lifetime is
+    /// testable across both the reply and the error without a running daemon.
+    @ObservationIgnored
+    lazy var terminalProfileSwapper:
+        @MainActor (UUID, UUID?, TerminalSwapMode, Int?, Int?) async throws -> Terminal =
+        { [daemonClient] terminalID, newProfileID, mode, cols, rows in
+            try await daemonClient.swapTerminalProfile(
+                terminalID: terminalID, newProfileID: newProfileID,
+                mode: mode, cols: cols, rows: rows)
         }
     /// How the composer's wake reaches the daemon — the result-returning sibling
     /// of `terminalWakeSender`, injectable for the same reason, so the wake's
@@ -3061,6 +3086,16 @@ final class AppState {
         }
         if let paneID = delta.tmuxPaneID {
             terminals[delta.worktreeID]?[idx].tmuxPaneID = paneID
+        }
+        // The in-place account switch's wake: the one flip a switching pane
+        // rebuilds on, since its identity ignores the parked state. Only a
+        // real un-park counts — a wake delta for a row the cache already holds
+        // awake is not the swap's, and rebuilding on it would tear down a live
+        // attach for nothing.
+        if !delta.hibernated,
+           switchingAccountTerminals[delta.terminalID] != nil,
+           terminals[delta.worktreeID]?[idx].isParked == true {
+            terminalAttachEpochs[delta.terminalID, default: 0] += 1
         }
         terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
         terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
