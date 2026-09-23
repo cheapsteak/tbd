@@ -132,7 +132,11 @@ shapes:
   `-` and `_` that matches the secret vocabulary, in any case (`-token`,
   `-api-key`, `-Token`, `-API-KEY`), is also how Go-style single-dash long
   flags are written, with the value in the next argument, so both are
-  redacted. Case is ignored here as it is for the vocabulary match itself. An alias letter keeps this shape even when an `=`
+  redacted. Case is ignored here as it is for the vocabulary match itself.
+  Because a single-dash name read as a Go-style long flag also redacts the
+  next argument, a glued secret after a capital letter (`-AghSecretValue`)
+  can over-redact its neighbour; that is deliberate, since over-redaction
+  costs context and never leaks. An alias letter keeps this shape even when an `=`
   follows, and everything after `-X` is redacted, so `-pfoo=bar` renders as
   `-p‹redacted›`. Any other single-dash argument with an `=`, such as a JVM
   `-Dkey=value`, is the `--flag=value` shape instead: its key and value are

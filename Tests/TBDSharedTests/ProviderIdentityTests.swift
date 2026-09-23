@@ -244,14 +244,18 @@ struct ProviderIdentityTests {
         #expect(redacted == ["-v2", "-n4", "--port", "8080"])
     }
 
-    @Test("a glued flag outside the aliases whose argument names a secret redacts itself, not the next argument")
-    func gluedNonAliasSecretRedactsItselfNotTheNext() {
+    /// `-AghSecretValue` is letters only and names a secret, so it is also
+    /// read as a Go-style long flag (`-Token value`) and redacts the next
+    /// argument too — a deliberate over-redaction. `-oMyApiToken123` has a
+    /// digit, so it is only a glued flag and leaves the next argument alone.
+    @Test("a glued flag outside the aliases whose argument names a secret redacts itself and may redact the next argument")
+    func gluedNonAliasSecretRedactsItselfAndMayRedactTheNext() {
         let placeholder = ProviderIdentityRedaction.redactedPlaceholder
 
         #expect(ProviderIdentityRedaction.redactArguments(["-oMyApiToken123", "main"])
             == ["-o\(placeholder)", "main"])
         #expect(ProviderIdentityRedaction.redactArguments(["-AghSecretValue", "main"])
-            == ["-A\(placeholder)", "main"])
+            == ["-A\(placeholder)", placeholder])
     }
 
     @Test("a glued flag with a plain value stays verbatim")
