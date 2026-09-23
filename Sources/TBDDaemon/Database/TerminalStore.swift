@@ -1837,11 +1837,17 @@ public struct TerminalStore: Sendable {
     /// hook. Returns whether the row actually changed.
     ///
     /// **Deliberately narrower than `setHibernated`.** That writer mints a new
-    /// session incarnation, cancels pending scheduled resumes and rewrites the
-    /// activity triple, because it describes a park TBD performed and a process
-    /// TBD is about to replace. A hook only *reports* that the process is gone:
-    /// nothing was replaced, nothing was interrupted, and the resume this row
-    /// already points at is still the right one. So exactly two columns move.
+    /// session incarnation and cancels pending scheduled resumes, because it
+    /// describes a park TBD performed and a process TBD is about to replace. A
+    /// hook only *reports* that the process is gone: nothing was replaced, and
+    /// the session id, incarnation, and resume this row already points at are
+    /// still the right ones — none of those move here.
+    ///
+    /// `activityState` DOES move, to `.idle`, alongside `hibernatedAt` and
+    /// `hibernateReason`: whatever it last reported (plausibly `.working`,
+    /// mid-turn) stopped being true the moment the process that was reporting it
+    /// left, and nothing else will ever retract a stale `.working` for a process
+    /// that no longer exists to finish that turn.
     ///
     /// It refuses on an already-parked row for the same reason the awaiting-input
     /// rail refuses an uninformative overwrite: `hibernateReason` is the record of
@@ -1884,6 +1890,17 @@ public struct TerminalStore: Sendable {
             }
             record.hibernatedAt = date
             record.hibernateReason = HibernateReason.exited.rawValue
+            // The process that was reporting `activityState` just left, so
+            // whatever it last reported (plausibly `.working`, mid-turn) is no
+            // longer true of anything: there is no process left to finish that
+            // turn. Written as the same provenance triple every other writer of
+            // this column uses (state + source + both timestamps together) so a
+            // later observation's ordering check compares against a source that
+            // actually explains the stored value.
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.hookEvent("SessionEnd"))
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             try record.update(db)
             return true
         }

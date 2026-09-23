@@ -341,7 +341,8 @@ struct HibernationCoordinatorTests {
 
         let liveTmux = TmuxManager(
             dryRun: true,
-            dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -2402,9 +2403,13 @@ struct HibernationCoordinatorTests {
         let parked = try #require(try await db.terminals.get(id: terminalID))
         #expect(parked.hibernatedAt != nil)
 
-        // Pane still runs claude (reported as its version string) → the parked
-        // state is stale and must be cleared.
-        let tmux = TmuxManager(dryRun: true, dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        // Pane still runs claude (reported as its version string) and answers
+        // with this row's own id → the parked state is stale and must be
+        // cleared.
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2431,7 +2436,10 @@ struct HibernationCoordinatorTests {
         #expect(staged.isParked)
         #expect(staged.sessionIncarnationID == replacementToken)
 
-        let tmux = TmuxManager(dryRun: true, dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -2474,6 +2482,120 @@ struct HibernationCoordinatorTests {
 
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
                 "a genuinely parked row (shell in pane) must stay parked")
+    }
+
+    /// A tmux server restart can hand this row's window/pane coordinate to a
+    /// DIFFERENT terminal's pane, which also happens to be running claude. The
+    /// window-alive and process-alive checks alone cannot see that — only the
+    /// pane's own `@tbd_terminal_id` answer can. A false park is recoverable
+    /// by `wake`; a false un-park is not, so a mismatched id must leave the
+    /// row parked.
+    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneAnswersWithAStrangersID() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a pane answering with a different terminal's id must stay parked")
+    }
+
+    /// The mirror case: the pane carries no identity to compare at all — a
+    /// pane spawned before TBD stamped `@tbd_terminal_id` onto it. That stamp
+    /// is deliberately never backfilled onto existing panes, so refusing here
+    /// too (treating "no answer" the same as "wrong answer") would leave every
+    /// pre-existing session parked after every daemon restart forever —
+    /// exactly the "sessions keep falling asleep" symptom this pass exists to
+    /// prevent. So the row falls back to today's behavior instead: un-park on
+    /// the window/process checks alone.
+    @Test func reconcileOnStartupUnparksARowWhosePaneCarriesNoIDToCompare() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
+                "a pane with no identity to compare must fall back to un-parking, not stay parked")
+    }
+
+    /// The race the joint `.live`/`.dead` match exists to catch: between the
+    /// `paneCurrentCommand` liveness check above and this identity probe (two
+    /// separate tmux round trips), the STRANGER pane's process exits. A guard
+    /// matching only `.live` would see no case match at all here and silently
+    /// fall through to un-parking onto the stranger's pane; matching `.dead`
+    /// too must still catch the mismatch.
+    @Test func reconcileOnStartupLeavesAParkedRowWhoseStrangerPaneWentDeadBetweenProbes() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .dead(terminalID: UUID().uuidString) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a dead stranger pane must still be caught as a mismatch, not slip through unmatched")
+    }
+
+    /// The pane the earlier liveness checks just confirmed vanishes entirely by
+    /// the time of this probe. That is a race, not evidence of anything — stay
+    /// parked rather than guess.
+    @Test func reconcileOnStartupLeavesAParkedRowWhosePaneWentMissingBetweenProbes() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in .missing })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a pane that went missing mid-probe must stay parked")
+    }
+
+    /// An unreadable probe (a wedged server timing out the subprocess) is not
+    /// the same fact as "no id to compare" — it is no evidence at all, so it
+    /// must NOT fall through to un-parking. Mirrors the sibling reconciler's
+    /// "an unreadable identity is not evidence of staleness."
+    @Test func reconcileOnStartupLeavesAParkedRowWhoseProbeThrows() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
+            dryRunPaneSendTarget: { _, _ in
+                throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(5))
+            })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.reconcileOnStartup()
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil,
+                "a probe that throws must leave the row parked, not un-park it")
     }
 
     // MARK: - Keep-warm

@@ -105,15 +105,18 @@ struct TerminalList: AsyncParsableCommand {
                 print("No terminals found.")
                 return
             }
-            let header = tableRow([("ID", 36), ("WINDOW", 10), ("PANE", 10), ("LABEL", 0)])
+            let header = tableRow([
+                ("ID", 36), ("WINDOW", 10), ("PANE", 10), ("LABEL", 20), ("STATE", 0)
+            ])
             print(header)
-            print(String(repeating: "-", count: 80))
+            print(String(repeating: "-", count: 96))
             for term in terminals {
                 let line = tableRow([
                     (term.id.uuidString, 36),
                     (term.tmuxWindowID, 10),
                     (term.tmuxPaneID, 10),
-                    (term.label ?? "-", 0)
+                    (term.label ?? "-", 20),
+                    (parkedStateMarker(for: term), 0)
                 ])
                 print(line)
             }

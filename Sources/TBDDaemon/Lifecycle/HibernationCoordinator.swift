@@ -1845,6 +1845,11 @@ public actor HibernationCoordinator {
     /// checks BOTH the authoritative `hibernatedAt` and the legacy `suspendedAt`
     /// so a row parked by either path is reconciled, and `clearHibernated` nils
     /// both. Called once on daemon startup.
+    ///
+    /// The window and process checks are joined by one more: if the pane's own
+    /// `@tbd_terminal_id` names a DIFFERENT terminal, the row stays parked even
+    /// though the liveness checks passed — see the guard below for why that is
+    /// the only identity signal strong enough to override them.
     public func reconcileOnStartup() async {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
@@ -1869,7 +1874,54 @@ public actor HibernationCoordinator {
                 continue
             }
 
-            // Window and process are alive — clear the parked state
+            // Refuse ONLY on a positive identity mismatch: the pane carries
+            // `@tbd_terminal_id` (every spawn stamps it — `createWindow` and
+            // `respawnWindow`) and it names a DIFFERENT terminal. A tmux
+            // server restart can reuse pane ids, and the window/process
+            // checks above alone cannot tell this terminal's own pane from a
+            // stranger's that happens to sit at the same coordinate and also
+            // runs `claude`. A false park is recoverable by `wake`; a false
+            // un-park is not.
+            //
+            // Matched jointly against `.live` AND `.dead` — mirroring the
+            // sibling reconciler's identical check in
+            // `WorktreeLifecycle+Reconcile.swift` — because `.dead`'s own doc
+            // comment exists precisely so a stranger pane whose process exited
+            // in the gap between this probe and the `paneCurrentCommand` check
+            // above still reads as a mismatch instead of silently slipping
+            // through unmatched.
+            //
+            // When the option is ABSENT — a pane spawned before this stamp
+            // existed — fall back to today's behavior (the window/process
+            // checks above) rather than refusing: the stamp is deliberately
+            // not backfilled onto existing panes (`stampTerminalID`'s doc
+            // comment), so treating "no answer" the same as "wrong answer"
+            // would leave every pre-existing session parked after every
+            // daemon restart — reproducing the "sessions keep falling asleep"
+            // symptom this reconcile pass exists to prevent. `.missing` (the
+            // pane vanished between the liveness checks above and this probe)
+            // and a thrown probe error are each their own kind of
+            // inconclusive and, unlike an absent id, are not evidence the row
+            // is safe to un-park — mirroring the sibling reconciler's "an
+            // unreadable identity is not evidence of staleness," they leave
+            // the row parked for a later sweep to retry rather than guessing.
+            do {
+                switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
+                case .live(let paneTerminalID), .dead(let paneTerminalID):
+                    if let paneTerminalID,
+                       paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                        continue
+                    }
+                case .missing:
+                    continue
+                }
+            } catch {
+                logger.warning("startup: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public) — leaving it parked")
+                continue
+            }
+
+            // Window and process are alive, and the pane raised no identity
+            // objection — clear the parked state
             do {
                 try await db.terminals.clearHibernated(id: terminal.id)
                 logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")
