@@ -1,5 +1,8 @@
 import SwiftUI
 import TBDShared
+import os
+
+private let detailLogger = Logger(subsystem: "com.tbd.app", category: "remoteDetail")
 
 /// Pure copy decisions for the two independent remote-session state axes.
 /// Shared by the detail pane's warning strip, the provider desk and the
@@ -32,6 +35,16 @@ enum RemoteSessionStatePresentation {
         return "Agent activity is unavailable; terminal liveness alone does not confirm agent health."
     }
 
+    /// The detached prompt's line about the remote session's fate. It reads
+    /// the provider's own reported state — `list`/`events` are authoritative
+    /// about the session, never the local viewer process exiting — so an
+    /// exited session is not described as still running.
+    static func detachedFateLine(terminalState: RemoteProcessState?) -> String {
+        terminalState == .exited
+            ? "The remote session has exited."
+            : "The session keeps running remotely."
+    }
+
     static func sidebarCaption(
         terminalState: RemoteProcessState,
         agentState: RemoteAgentState,
@@ -62,6 +75,15 @@ enum RemoteSessionStatePresentation {
     }
 }
 
+/// Constructs the raw terminal input for the send footer. A terminal's Enter
+/// key is carriage return, not line feed; the provider receives these bytes
+/// verbatim.
+enum RemoteSessionSendPayload {
+    static func submitting(_ text: String) -> String {
+        text + "\r"
+    }
+}
+
 /// Detail pane shown when a remote-session sidebar row is selected
 /// (`AppState.selectedRemoteSession`), hosted (via `RemoteSessionHostSlot`)
 /// inside `DetailSectionHostPager`'s `.remote` tab — mounted continuously
@@ -74,7 +96,9 @@ enum RemoteSessionStatePresentation {
 /// Laid out like a local session: the terminal fills the pane, and the
 /// session's name and its Reconnect / Stop actions live in the window
 /// toolbar (`ContentView`). The only chrome here is a compact warning strip,
-/// rendered only while a warning actually applies.
+/// rendered only while a warning actually applies, and — only for a session
+/// that cannot be attached to — a send footer (see
+/// `RemoteSessionDetailGates.showsSendFooter`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
 /// this view hosts `RemoteAttachPager`, which keeps recently-viewed
@@ -87,6 +111,11 @@ enum RemoteSessionStatePresentation {
 struct RemoteSessionDetailView: View {
     let selection: RemoteSessionSelection
     @Environment(AppState.self) var appState
+    /// Behavior seam for `performSend`'s post-send delay (CLAUDE.md "New
+    /// delays and timers take an injected clock"). Last property with a
+    /// default so the synthesized memberwise init needs no call-site
+    /// changes.
+    var clock: any Clock<Duration> = ContinuousClock()
 
     /// Non-nil while the provider's remediation command is running in its
     /// own PTY sheet. Cleared on selection change — see `body`.
@@ -132,6 +161,10 @@ struct RemoteSessionDetailView: View {
                 Divider()
             }
             contentArea
+            if showsSendFooter {
+                Divider()
+                sendFooter
+            }
         }
         // Attached to the view's ROOT, deliberately — never inside
         // `authPrompt`/`contentArea`. That subtree is conditional on
@@ -156,7 +189,11 @@ struct RemoteSessionDetailView: View {
         // re-present itself with no user gesture — and, on a session
         // belonging to a DIFFERENT provider, run the previous provider's
         // command under a label the user never asked for.
-        .onChange(of: selection) { _, _ in runningRemediation = nil }
+        .onChange(of: selection) { _, _ in
+            runningRemediation = nil
+            sendText = ""
+            isSending = false
+        }
     }
 
     /// Whether `selection`'s attach terminal currently has a live PTY
@@ -223,7 +260,7 @@ struct RemoteSessionDetailView: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
                 if providerStatus?.hasStaleSnapshot == true {
-                    Text("Attach and logs remain available; changes are paused until inventory refresh recovers.")
+                    Text("Attach remains available; changes are paused until inventory refresh recovers.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -279,7 +316,8 @@ struct RemoteSessionDetailView: View {
                     }
                 }
             case .log:
-                RemoteLogView(provider: selection.provider, sessionID: selection.sessionID)
+                RemoteLogView(
+                    provider: selection.provider, sessionID: selection.sessionID, refreshToken: logRefreshToken)
                     .id(AppState.remoteSessionKey(provider: selection.provider, sessionID: selection.sessionID))
             case .unsupported:
                 Text("This provider doesn't support attach or a log view for this session.")
@@ -355,10 +393,9 @@ struct RemoteSessionDetailView: View {
                 .foregroundStyle(.secondary)
             Text(isUnexpectedDetach ? "Attach ended unexpectedly" : "Detached")
                 .font(.headline)
-            // Contract-correct framing kept regardless of exit code: only
-            // `list`/`events` are authoritative about the remote session's
-            // fate, never this local viewer process exiting.
-            Text("The session keeps running remotely.")
+            // Read from the provider's reported state, never from this local
+            // viewer's exit code — see `detachedFateLine`.
+            Text(RemoteSessionStatePresentation.detachedFateLine(terminalState: session?.payload.state))
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if let exitCode = detachInfo?.exitCode {
@@ -373,11 +410,58 @@ struct RemoteSessionDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
+
+    // MARK: - Send
+
+    @State private var sendText: String = ""
+    @State private var isSending = false
+    @State private var logRefreshToken = 0
+
+    private var showsSendFooter: Bool {
+        RemoteSessionDetailGates.showsSendFooter(
+            capabilities: capabilities, gone: isGone,
+            snapshotFresh: providerStatus?.hasStaleSnapshot != true)
+    }
+
+    private var sendFooter: some View {
+        HStack(spacing: 8) {
+            TextField("Send text to session…", text: $sendText, onCommit: performSend)
+                .textFieldStyle(.roundedBorder)
+            Button("Send") { performSend() }
+                .disabled(sendText.isEmpty || isSending)
+        }
+        .padding(10)
+    }
+
+    private func performSend() {
+        guard !sendText.isEmpty else { return }
+        let text = RemoteSessionSendPayload.submitting(sendText)
+        let target = selection
+        sendText = ""
+        isSending = true
+        Task {
+            defer { isSending = false }
+            do {
+                try await appState.daemonClient.remoteSend(
+                    provider: target.provider, sessionID: target.sessionID, text: text)
+                // Give the remote side a moment to act before re-pulling
+                // scrollback — `send`'s exit 0 only means the bytes reached
+                // the transport, not that the agent has acted on them yet
+                // (docs/remote-provider-contract.md § `send`).
+                try? await clock.sleep(for: .seconds(1))
+                logRefreshToken += 1
+            } catch {
+                detailLogger.error(
+                    "remoteSend failed for \(target.provider, privacy: .public)/\(target.sessionID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+    }
 }
 
 /// Read-only scrollback — the fallback that fills the pane only when the
-/// session can't be attached to. Fetches `remote.log` on appear, plus a
-/// manual Refresh button. Renders the returned text completely as-is — no
+/// session can't be attached to. Fetches `remote.log` on appear and whenever
+/// `refreshToken` changes (driven by the parent after a send), plus a manual
+/// Refresh button. Renders the returned text completely as-is — no
 /// parsing, no sanitizing, no ANSI stripping (raw provider bytes, ANSI
 /// passthrough intended per the contract) — and never infers session state
 /// from it (screen-scraping state out of rendered/log text is prohibited in
@@ -385,6 +469,7 @@ struct RemoteSessionDetailView: View {
 private struct RemoteLogView: View {
     let provider: String
     let sessionID: String
+    var refreshToken: Int
 
     @Environment(AppState.self) var appState
     @State private var text = ""
@@ -419,6 +504,7 @@ private struct RemoteLogView: View {
             }
         }
         .onAppear { Task { await fetch() } }
+        .onChange(of: refreshToken) { _, _ in Task { await fetch() } }
     }
 
     private func fetch() async {

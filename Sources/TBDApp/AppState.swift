@@ -833,8 +833,8 @@ final class AppState {
     /// because a remote pane has no terminal id.
     @ObservationIgnored var remoteTerminalFocusTargets: [RemoteSessionSelection: TerminalFocusTarget] = [:]
     /// The remote selection whose attach slot `RemoteSessionDetailView` is
-    /// currently showing, or nil when it shows the Log tab, a detached or auth
-    /// prompt, or nothing. The pager stays in its window at zero opacity in
+    /// currently showing, or nil when it shows the log fallback, a detached or
+    /// auth prompt, or nothing. The pager stays in its window at zero opacity in
     /// all of those, so window membership alone cannot tell a visible pane
     /// from a hidden one; this is what keeps a focus claim out of a pane the
     /// user cannot see. Written by the view (`setRemoteAttachSlotShown`).

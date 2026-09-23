@@ -352,11 +352,19 @@ struct ContentView: View {
             presenting: remoteStopConfirm
         ) { selection in
             Button("Stop", role: .destructive) {
+                // Re-checked at confirm time: the session may have gone, or
+                // the inventory turned stale, while the dialog was open.
+                guard appState.remoteSessionShowsStop(selection) else { return }
                 Task { await appState.stopRemoteSession(selection) }
             }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("This asks the provider to terminate the remote session.")
+        }
+        // Withdraws the dialog once Stop stops being offered for the session
+        // it was raised for, rather than leaving a confirm that can't act.
+        .onChange(of: remoteStopConfirm.map { appState.remoteSessionShowsStop($0) }) { _, stillOffered in
+            if stillOffered == false { remoteStopConfirm = nil }
         }
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             overlayCoordinator.close()

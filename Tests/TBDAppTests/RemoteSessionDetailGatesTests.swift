@@ -1,9 +1,11 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDShared
 
 /// Pure capability gates behind `RemoteSessionDetailView` and the window
-/// toolbar's remote-session buttons — `canAttach`, `content`, `showsStop`.
+/// toolbar's remote-session buttons — `canAttach`, `content`,
+/// `showsSendFooter`, `showsStop`.
 /// One test per gate direction, per repo policy for behavior-gating
 /// conditionals, including the `log`-only shape that once rendered a
 /// permanently blank pane.
@@ -51,6 +53,37 @@ struct RemoteSessionDetailGatesTests {
         #expect(RemoteSessionDetailGates.content(capabilities: ["attach"], gone: true) == .unsupported)
     }
 
+    // MARK: - showsSendFooter(capabilities:gone:snapshotFresh:)
+
+    @Test func sendFooterShownWhenSendIsDeclaredWithoutAttach() {
+        #expect(RemoteSessionDetailGates.showsSendFooter(capabilities: ["send"], gone: false, snapshotFresh: true))
+        #expect(RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["log", "send"], gone: false, snapshotFresh: true))
+    }
+
+    @Test func sendFooterHiddenWhenTheTerminalCanTakeInput() {
+        // The attached terminal takes typing directly.
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "send"], gone: false, snapshotFresh: true))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "log", "send"], gone: false, snapshotFresh: true))
+    }
+
+    @Test func sendFooterHiddenWithoutTheSendCapability() {
+        #expect(!RemoteSessionDetailGates.showsSendFooter(capabilities: ["log"], gone: false, snapshotFresh: true))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(capabilities: [], gone: false, snapshotFresh: true))
+    }
+
+    @Test func sendFooterHiddenWhenGoneOrStale() {
+        // A gone session has fallen back to the log even with attach
+        // declared, but the provider no longer reports it; a stale snapshot
+        // makes mutating a session unsafe.
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "log", "send"], gone: true, snapshotFresh: true))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["log", "send"], gone: false, snapshotFresh: false))
+    }
+
     // MARK: - showsStop(sessionExists:gone:snapshotFresh:)
 
     @Test func showsStopForAPresentLiveSessionWithAFreshSnapshot() {
@@ -91,6 +124,15 @@ struct RemoteSessionStatePresentationTests {
         #expect(RemoteSessionStatePresentation.terminalLabel(.starting) == "Terminal: Starting")
         #expect(RemoteSessionStatePresentation.terminalLabel(.exited) == "Terminal: Exited")
         #expect(RemoteSessionStatePresentation.terminalLabel(.unknown) == "Terminal: State unavailable")
+    }
+
+    @Test func detachedFateLineSaysExitedOnlyForAnExitedSession() {
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: .exited)
+            == "The remote session has exited.")
+        let running = "The session keeps running remotely."
+        for state: RemoteProcessState? in [.running, .starting, .unknown, nil] {
+            #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: state) == running)
+        }
     }
 
     @Test func warningAppearsOnlyForPresentTerminalWithUnknownAgentState() {

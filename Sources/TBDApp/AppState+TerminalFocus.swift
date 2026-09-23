@@ -116,13 +116,14 @@ extension AppState {
     }
 
     /// Called by `RemoteSessionDetailView` whenever the selection whose
-    /// attach slot it shows changes — including a switch from the Log tab
-    /// back to Attach, which moves nothing in or out of a window and so never
-    /// reaches `onMovedToWindow`.
+    /// attach slot it shows changes — including a change in what fills the
+    /// pane (the session going gone and falling back to the log view, say),
+    /// which moves nothing in or out of a window and so never reaches
+    /// `onMovedToWindow`.
     ///
     /// Hiding the slot also takes focus back from a pane that holds it: the
-    /// Log tab keeps the pane in its window at zero opacity, so focus left
-    /// there would send typing to the remote session unseen. A pane that
+    /// log fallback keeps the pane in its window at zero opacity, so focus
+    /// left there would send typing to the remote session unseen. A pane that
     /// leaves its window (a switch to another session) resigns on its own.
     func setRemoteAttachSlotShown(_ selection: RemoteSessionSelection?) {
         if let previous = remoteAttachSlotShownSelection, previous != selection,

@@ -745,8 +745,8 @@ struct RemoteSessionRowView: View {
             appState.reconnectRemoteSession(
                 RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
         case .sendText:
-            // Input goes straight into the attached terminal, so this just
-            // selects the session and lets its pane take focus.
+            // Offered only when the session can't be attached to; selecting
+            // it brings up the pane whose send footer takes the text.
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         case .copySessionID:
             NSPasteboard.general.clearContents()

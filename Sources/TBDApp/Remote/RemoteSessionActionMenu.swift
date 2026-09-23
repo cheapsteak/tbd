@@ -95,7 +95,6 @@ enum RemoteSessionActionMenu {
     /// optional verb — kept as named constants (not re-typed at each call
     /// site) so a typo can't silently make a capability gate always false.
     private static let attachCapability = "attach"
-    private static let sendCapability = "send"
     private static let deleteCapability = "delete"
 
     // MARK: - Composition
@@ -109,10 +108,11 @@ enum RemoteSessionActionMenu {
     /// reports, and renaming/stopping a row that's already a caller-side
     /// tombstone isn't meaningful.
     ///
-    /// For a live row: Rename…, then Attach/Send Text… gated on
-    /// their respective capabilities — with Reconnect right after Attach
-    /// when `isAttached` (this app currently holds a live attach pane for the
-    /// session), then Copy Session ID (always
+    /// For a live row: Rename…, then Attach gated on its capability — with
+    /// Reconnect right after it when `isAttached` (this app currently holds a
+    /// live attach pane for the session) — or, for a provider that declares
+    /// `send` but not `attach`, Send Text…, which selects the session so its
+    /// pane's send footer is at hand; then Copy Session ID (always
     /// available — the id is known locally, no provider call needed), then
     /// the pin toggle, then a divider, then Stop as the last, destructive
     /// item.
@@ -178,7 +178,10 @@ enum RemoteSessionActionMenu {
                 actions.append(Action(kind: .reconnect, title: reconnectLabel))
             }
         }
-        if snapshotFresh, capabilities.contains(sendCapability) {
+        // Only where the pane shows a send footer: with attach available,
+        // typing goes straight into the terminal and needs no menu item.
+        if RemoteSessionDetailGates.showsSendFooter(
+            capabilities: capabilities, gone: false, snapshotFresh: snapshotFresh) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))

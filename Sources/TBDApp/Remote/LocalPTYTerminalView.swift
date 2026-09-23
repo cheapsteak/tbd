@@ -52,7 +52,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     var onViewDismantled: ((TBDTerminalView) -> Void)?
     /// Replaces the spawn-time focus claim. The attach pane routes it through
     /// `AppState.focusRemoteTerminalAfterSelectionChange`, because a pane can
-    /// spawn while its detail view keeps it transparent (the Log tab, a
+    /// spawn while its detail view keeps it transparent (the log fallback, a
     /// detached or sign-in prompt), and an ungated claim there would send
     /// typing to the remote session unseen. Nil — the remediation sheet, which
     /// is always visible while it runs — claims unconditionally.

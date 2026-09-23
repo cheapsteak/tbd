@@ -73,6 +73,20 @@ struct RemoteSessionActionMenuTests {
         #expect(kinds(items) == [.rename, .sendText, .copySessionID, .pin, nil, .stop])
     }
 
+    /// Send Text… lives only where the pane has a send footer. With attach
+    /// declared, typing goes straight into the terminal, so the item would
+    /// only duplicate it.
+    @Test func sendTextOmittedWhenAttachIsDeclared() {
+        let items = RemoteSessionActionMenu.items(capabilities: ["attach", "send"], gone: false, isPinned: false)
+        #expect(!kinds(items).contains(.sendText))
+        #expect(kinds(items) == [.rename, .attach, .copySessionID, .pin, nil, .stop])
+    }
+
+    @Test func sendTextOfferedAlongsideTheLogFallback() {
+        let items = RemoteSessionActionMenu.items(capabilities: ["log", "send"], gone: false, isPinned: false)
+        #expect(kinds(items) == [.rename, .sendText, .copySessionID, .pin, nil, .stop])
+    }
+
     @Test func sendCapabilityAbsentOmitsSendTextItem() {
         let items = RemoteSessionActionMenu.items(capabilities: [], gone: false, isPinned: false)
         #expect(!kinds(items).contains(.sendText))
@@ -120,7 +134,7 @@ struct RemoteSessionActionMenuTests {
 
     @Test func allCapabilitiesProduceTheFullOrderedMenu() {
         let items = RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false)
-        #expect(kinds(items) == [.rename, .attach, .sendText, .copySessionID, .pin, nil, .stop])
+        #expect(kinds(items) == [.rename, .attach, .copySessionID, .pin, nil, .stop])
     }
 
     @Test func staleSnapshotKeepsInspectionAndDropsStateChangingActions() {
@@ -141,7 +155,7 @@ struct RemoteSessionActionMenuTests {
     /// visibility in the view" regression.
     @Test func itemCountMatchesExactlyTheDeclaredCapabilities() {
         #expect(RemoteSessionActionMenu.items(capabilities: [], gone: false, isPinned: false).count == 5) // rename, copy, pin, divider, stop
-        #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 7)
+        #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 6)
     }
 
     // MARK: - Dismiss: offered for gone OR exited, never for a live running row
@@ -186,7 +200,7 @@ struct RemoteSessionActionMenuTests {
         let items = RemoteSessionActionMenu.items(
             capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: true)
         #expect(kinds(items) == [
-            .rename, .attach, .sendText, .copySessionID, .pin, .dismiss, nil, .stop,
+            .rename, .attach, .copySessionID, .pin, .dismiss, nil, .stop,
         ])
         #expect(items.last == .action(RemoteSessionActionMenu.Action(
             kind: .stop, title: RemoteSessionActionMenu.stopLabel, role: .destructive)))

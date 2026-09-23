@@ -30,6 +30,7 @@ enum RemoteSessionDetailGates {
     /// always false.
     private static let attachCapability = "attach"
     private static let logCapability = "log"
+    private static let sendCapability = "send"
 
     /// Whether a live attach terminal can be offered for the session.
     ///
@@ -49,6 +50,20 @@ enum RemoteSessionDetailGates {
         if canAttach(capabilities: capabilities, gone: gone) { return .attach }
         if capabilities.contains(logCapability) { return .log }
         return .unsupported
+    }
+
+    /// Whether the pane carries a send-text footer. Only when the session
+    /// cannot be attached to: an attached terminal takes typing directly, so
+    /// a separate field would be a second, redundant input path. A provider
+    /// that declares `send` without `attach` (or a pane showing the log
+    /// fallback) keeps this as its only way to send input. Withheld for a
+    /// `gone` session, which the provider no longer reports, and on a stale
+    /// snapshot, where mutating a session is unsafe — the same conditions
+    /// under which the context menu withholds Send Text….
+    static func showsSendFooter(capabilities: [String], gone: Bool, snapshotFresh: Bool) -> Bool {
+        snapshotFresh && !gone
+            && !canAttach(capabilities: capabilities, gone: gone)
+            && capabilities.contains(sendCapability)
     }
 
     /// Whether the toolbar offers Stop. Needs a session actually present in
