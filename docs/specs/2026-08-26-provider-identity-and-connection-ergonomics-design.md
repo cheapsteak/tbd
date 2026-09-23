@@ -128,10 +128,11 @@ shapes:
   and `-Hghp_…` all render as `-X‹redacted›`, and an alias letter redacts any
   glued value, so `-p8080` is redacted even when it is a port. That is the
   accepted over-redaction. A glued flag has consumed its value and does not
-  redact the next argument, with one exception: an all-lowercase name that
-  matches the secret vocabulary (`-token`, `-api-key`) is also how Go-style
-  single-dash long flags are written, with the value in the next argument, so
-  both are redacted. An alias letter keeps this shape even when an `=`
+  redact the next argument, with one exception: a name made only of letters,
+  `-` and `_` that matches the secret vocabulary, in any case (`-token`,
+  `-api-key`, `-Token`, `-API-KEY`), is also how Go-style single-dash long
+  flags are written, with the value in the next argument, so both are
+  redacted. Case is ignored here as it is for the vocabulary match itself. An alias letter keeps this shape even when an `=`
   follows, and everything after `-X` is redacted, so `-pfoo=bar` renders as
   `-p‹redacted›`. Any other single-dash argument with an `=`, such as a JVM
   `-Dkey=value`, is the `--flag=value` shape instead: its key and value are
@@ -181,6 +182,19 @@ The positional heuristic checks, in order:
   just as dotted and must still be redacted.
 
 Anything that survives all of these is redacted.
+
+These checks leave three documented limits. A secret with no known prefix is
+shown when it matches none of the flag rules above and is:
+
+- **All letters** – letters-only strings are ordinary words and subcommands,
+  and redacting them would hide most of a readable command line.
+- **Under 20 characters** – below the floor, branch names, worktree names and
+  other short args would be redacted too.
+- **Over 500 characters** – past the cap, pasted blobs and long paths would be
+  redacted too.
+
+A credential of one of these shapes is caught only when a secret-named flag
+carries it.
 
 Rendered identity values, though not command args, are cut at 96 characters.
 Identity values are account ids, region names and box handles, so anything

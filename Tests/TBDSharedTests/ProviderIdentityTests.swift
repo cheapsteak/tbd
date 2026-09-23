@@ -295,7 +295,7 @@ struct ProviderIdentityTests {
     }
 
     /// `-token abc` is how Go's flag package spells a long flag, so an
-    /// all-lowercase secret-vocabulary name redacts both its own remainder
+    /// letters-only secret-vocabulary name redacts both its own remainder
     /// and the next argument.
     @Test("a Go-style single-dash secret flag still redacts its next argument")
     func goStyleSingleDashSecretFlagRedactsTheNext() {
@@ -303,6 +303,24 @@ struct ProviderIdentityTests {
         let redacted = ProviderIdentityRedaction.redactArguments(["-token", "abc", "-api-key", "xyz", "main"])
 
         #expect(redacted == ["-t\(placeholder)", placeholder, "-a\(placeholder)", placeholder, "main"])
+    }
+
+    /// The Go-style reading ignores case, as `isSecretKey` does: a
+    /// capitalised single-dash secret flag must still redact the argument
+    /// after it, not only its own remainder.
+    @Test("a capitalised Go-style single-dash secret flag still redacts its next argument")
+    func capitalisedGoStyleSingleDashSecretFlagRedactsTheNext() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "-Token", "abc", "-API-KEY", "xyz", "-Api_Key", "qrs", "main",
+        ])
+
+        #expect(redacted == [
+            "-T\(placeholder)", placeholder,
+            "-A\(placeholder)", placeholder,
+            "-A\(placeholder)", placeholder,
+            "main",
+        ])
     }
 
     /// Every secret-bearing shape from the doc comment, checked both as the
@@ -324,6 +342,9 @@ struct ProviderIdentityTests {
             ["-t", secret],
             ["-k", secret],
             ["-token", secret],
+            ["-Token", secret],
+            ["-API-KEY", secret],
+            ["-Api_Key", secret],
             ["sk-\(secret)"],
             ["x9Kq2mVn8Lp4Rt6Wz1\(secret)"],
             ["-p\(secret)=x"],

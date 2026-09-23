@@ -213,8 +213,8 @@ public enum ProviderIdentityRedaction {
     /// the secret vocabulary, or when the value looks like a secret on its
     /// own; otherwise the argument is shown verbatim (`-v2`, `-ofile.txt`).
     /// A glued flag has consumed its value, so it does not redact the next
-    /// argument. The one exception is an all-lowercase name that matches the
-    /// secret vocabulary (`-token`, `-api-key`): that is also how Go-style
+    /// argument. The one exception is a letters-only name, in any case, that
+    /// matches the secret vocabulary (`-token`, `-API-KEY`): that is also how Go-style
     /// single-dash long flags are spelled, whose value is the NEXT argument,
     /// so both the remainder and the next argument are redacted.
     ///
@@ -315,9 +315,10 @@ public enum ProviderIdentityRedaction {
     /// A single-dash argument longer than two characters, read as `-X` plus a
     /// glued value, or nil for any other shape. With an `=` it is this shape
     /// only when `X` is an alias; otherwise it belongs to the `=` shape. `redactValue`
-    /// says whether the value must be hidden; `mayBeLongFlagName` marks an
-    /// all-lowercase secret-vocabulary name (`-token`), which may instead be
-    /// a Go-style long flag whose value is the next argument.
+    /// says whether the value must be hidden; `mayBeLongFlagName` marks a
+    /// secret-vocabulary name made only of letters, `-` and `_` (`-token`,
+    /// `-Token`, `-API-KEY`), which may instead be a Go-style long flag whose
+    /// value is the next argument. Case is ignored, as `isSecretKey` ignores it.
     private static func gluedShortFlag(
         _ arg: String
     ) -> (letter: Character, redactValue: Bool, mayBeLongFlagName: Bool)? {
@@ -331,7 +332,7 @@ public enum ProviderIdentityRedaction {
         if arg.contains("="), !isAlias { return nil }
         let value = String(name.dropFirst())
         let mayBeLongFlagName = isSecretKey(String(name))
-            && name.allSatisfy { ("a"..."z").contains($0) || $0 == "-" || $0 == "_" }
+            && name.lowercased().allSatisfy { ("a"..."z").contains($0) || $0 == "-" || $0 == "_" }
         let redactValue = isAlias
             || isSecretKey(value)
             || isSecretKey(arg)
@@ -351,6 +352,10 @@ public enum ProviderIdentityRedaction {
     /// lowercase alphabetic strings under ~20 characters, plain numbers,
     /// semver-looking strings, or UUIDs. UUIDs are not credentials by nature,
     /// so they are identified and skipped explicitly.
+    ///
+    /// Documented limits (see the spec's "Redacting the command line"): an
+    /// unprefixed secret that is all letters, under 20 characters, or over
+    /// 500 characters is not caught — words, branch names, and blobs or paths.
     private static func looksLikeSecret(_ arg: String) -> Bool {
         // Well-known secret prefixes (case-sensitive). These are strong signals
         // that an argument is a credential, regardless of length or composition.
