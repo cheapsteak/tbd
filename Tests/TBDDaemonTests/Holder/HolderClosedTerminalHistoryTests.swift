@@ -131,21 +131,43 @@ import Testing
                 "a screen frozen at attach time was stored as the final screen")
     }
 
-    @Test("an entry without a capture removes an earlier close's content file")
-    func captureLessEntryRemovesStaleContentFile() async throws {
+    @Test("a retried capture-less close keeps the first close's capture")
+    func retriedCaptureLessCloseKeepsEarlierCapture() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
         await fx.db.terminalHistory.recordOnClose(
-            terminal: fx.terminal, capture: "an earlier capture\n")
-        #expect(FileManager.default.fileExists(atPath: fx.contentPath()))
+            terminal: fx.terminal, capture: "an earlier capture\nsecond line\n")
+        let first = try #require(
+            try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID).first)
+
+        // The retry: the holder was disposed by the first close, so there is
+        // no reader left to capture from.
+        await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: nil)
+
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
+        #expect(entries == [first], "the retry overwrote the first close's entry")
+        #expect(try String(contentsOfFile: fx.contentPath(), encoding: .utf8)
+                == "an earlier capture\nsecond line\n",
+                "the retry threw away the first close's capture")
+    }
+
+    @Test("a capture-less entry removes a stray content file at its path")
+    func captureLessEntryRemovesStrayContentFile() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        let path = fx.contentPath()
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try "stray".write(toFile: path, atomically: true, encoding: .utf8)
 
         await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: nil)
 
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
         #expect(entries.map(\.id) == [fx.terminal.id])
         #expect(entries.first?.lineCount == 0)
-        #expect(!FileManager.default.fileExists(atPath: fx.contentPath()),
-                "the row says no capture while the viewer and revive still read the old file")
+        #expect(!FileManager.default.fileExists(atPath: path),
+                "the row says no capture while the viewer and revive would read the file")
     }
 
     @Test("a blank capture writes the entry without a content file")

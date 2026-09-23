@@ -115,7 +115,24 @@ public struct TerminalHistoryStore: Sendable {
     /// is still what lets a Claude session be revived by its session id.
     /// Revive already handles a missing file (the shell path skips the `cat`),
     /// and the viewer reads a missing file as empty.
+    ///
+    /// A capture-less close of a terminal that already has an entry leaves
+    /// that entry alone. A second close of one terminal is a retried teardown
+    /// (the rows survived a failed delete or an unrecorded reconcile kill), and
+    /// by then the first close has disposed the holder, so the retry can only
+    /// answer "no capture": overwriting would throw away the first close's
+    /// capture, as the tmux path never does when its capture fails.
     public func recordOnClose(terminal: Terminal, capture: String?) async {
+        if Self.nonBlank(capture) == nil {
+            do {
+                let existing = try await writer.read { db in
+                    try TerminalHistoryRecord.exists(db, key: terminal.id.uuidString)
+                }
+                if existing { return }
+            } catch {
+                logger.warning("failed to read closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
         await persist(terminal: terminal, text: capture, closedAt: Date())
     }
 
@@ -134,8 +151,8 @@ public struct TerminalHistoryStore: Sendable {
 
     /// Writes the content file (when there is non-blank text), the metadata
     /// row, and prunes. Without text it writes the row alone and removes any
-    /// content file an earlier close of the same terminal left, so the row's
-    /// `lineCount` 0 and the file the viewer and revive read cannot disagree.
+    /// stray content file at the terminal's path, so the row's `lineCount` 0
+    /// and the file the viewer and revive read cannot disagree.
     private func persist(terminal: Terminal, text rawText: String?, closedAt: Date) async {
         let text = Self.nonBlank(rawText)
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
