@@ -98,7 +98,11 @@ extension RPCRouter {
     /// Deliberately writes no row: both callers record one worktree-named row of
     /// their own before calling this, and a row here would double-count every
     /// teardown (the same reason `captureThenKillWindow` stays silent).
-    private func closeScratchTerminals(_ wt: Worktree) async throws {
+    ///
+    /// `keepsHistory` is true for archive, which leaves the worktree's Closed
+    /// Terminals history in place, and false for delete, which hard-deletes it
+    /// right afterwards — an entry written there would be wiped unread.
+    func closeScratchTerminals(_ wt: Worktree, keepsHistory: Bool) async throws {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         for t in terminals {
             // The rows go away below either way, so a holder row must be
@@ -106,8 +110,15 @@ extension RPCRouter {
             // string by construction, so the kill in the else-branch addresses
             // nothing while the holder, its job and its rendezvous files outlive
             // the row that was their only record. Same branch, same reason, as
-            // `handleTerminalDelete`.
+            // `handleTerminalDelete`. On archive its Closed Terminals entry is
+            // written first, because the disposal releases the reader the
+            // capture is read from — the same order the repo-worktree archive
+            // uses.
             if t.transport == .holder {
+                if keepsHistory {
+                    await WorktreeLifecycle.recordHolderClosedTerminal(
+                        t, registry: holderRegistry, history: db.terminalHistory)
+                }
                 if let failure = await disposeHolder(for: t) {
                     scratchLogger.warning(
                         "scratch teardown left a holder running: \(failure, privacy: .public)")
@@ -144,7 +155,9 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .scratchDelete, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) { try await closeScratchTerminals(wt.worktree) }
+        try await actuating(actuationID) {
+            try await closeScratchTerminals(wt.worktree, keepsHistory: false)
+        }
         await finishActuation(actuationID, .dispatched)
 
         // Move the folder to Trash — never rm -rf. Promoted rows already had
@@ -276,7 +289,9 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             surface, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) { try await closeScratchTerminals(wt.worktree) }
+        try await actuating(actuationID) {
+            try await closeScratchTerminals(wt.worktree, keepsHistory: true)
+        }
         await finishActuation(actuationID, .dispatched)
         try await db.worktrees.archive(id: wt.id)
 

@@ -2101,6 +2101,126 @@ struct HolderTmuxAssumptionGateTests {
                 "the tmux leg must still kill its own window: \(argv)")
     }
 
+    // MARK: - Closed Terminals history on holder dispose
+
+    /// The entry a history-keeping teardown writes for a holder row. The armed
+    /// registry has no adopted reader — nothing answers at the rendezvous — so
+    /// there is no live screen and the entry must carry no capture; what it
+    /// must carry is the Claude session id revive resumes by.
+    private func expectHolderEntryWithoutCapture(
+        _ db: TBDDatabase, terminal: Terminal, path: String
+    ) async throws {
+        let entries = try await db.terminalHistory.list(worktreeID: terminal.worktreeID)
+        #expect(entries.map(\.id) == [terminal.id],
+                "\(path) disposed a holder row without writing its Closed Terminals entry")
+        #expect(entries.first?.kind == .claude)
+        #expect(entries.first?.claudeSessionID == "sess-holdergate")
+        #expect(entries.first?.lineCount == 0)
+        #expect(!FileManager.default.fileExists(atPath: db.terminalHistory.contentPath(
+            worktreeID: terminal.worktreeID, terminalID: terminal.id)))
+    }
+
+    @Test("delete writes a Closed Terminals entry for a holder row")
+    func deleteWritesHolderHistoryEntry() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // `childPID: 0`: see `deleteDisposesHolderInsteadOfKillingAWindow`.
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = registry
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        try await expectHolderEntryWithoutCapture(db, terminal: terminal, path: "delete")
+    }
+
+    @Test("archive writes a Closed Terminals entry for a holder row")
+    func archiveWritesHolderHistoryEntry() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        _ = try await lifecycle(db, tmux: tmux, registry: registry)
+            .beginArchiveWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        try await expectHolderEntryWithoutCapture(db, terminal: terminal, path: "archive")
+    }
+
+    @Test("reconcile auto-archive disposes a holder row and writes its Closed Terminals entry")
+    func reconcileAutoArchiveWritesHolderHistoryEntry() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        // A real repo with no extra worktrees, so a row pointing at a path git
+        // does not list is the "checkout vanished" case reconcile archives.
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "gone", branch: "gone-branch",
+            path: tempDir.appendingPathComponent("vanished").path,
+            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        try await lifecycle(db, tmux: tmux, registry: registry).reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: false)
+
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "reconcile deleted a holder row without disposing of its holder")
+        #expect(!recorded.snapshot().contains { $0.contains("capture-pane") || $0.contains("kill-window") },
+                "reconcile reached tmux for a holder row: \(recorded.snapshot())")
+        try await expectHolderEntryWithoutCapture(db, terminal: terminal, path: "reconcile")
+    }
+
+    @Test("delete writes no Closed Terminals entry for a holder row outside a local worktree")
+    func deleteSkipsHolderHistoryEntryWithoutLocalWorktree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-holdergate-remote-\(UUID().uuidString)",
+            displayName: "acme", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "remote", branch: "main", path: "",
+            tmuxServer: "", location: .remote(provider: "acme-box", sessionID: "s-1"))
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = registry
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        #expect(try await db.terminalHistory.list(worktreeID: wt.id).isEmpty,
+                "an entry was written under a worktree no local history view lists")
+    }
+
     @Test("forgetting a worktree disposes its holder instead of killing a window")
     func forgetDisposesHolder() async throws {
         let db = try TBDDatabase(inMemory: true)

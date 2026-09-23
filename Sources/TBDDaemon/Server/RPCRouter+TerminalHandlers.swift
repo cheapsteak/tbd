@@ -990,10 +990,18 @@ extension RPCRouter {
             // nothing while the holder process, the job it forked, and the
             // socket and lock files at its rendezvous all outlive the row. The
             // row was the only record of those pids, so this is the last moment
-            // anything can reclaim them. Nothing is captured for Session
-            // History: the holder's screen lives in the daemon's own emulator,
-            // not in a tmux pane, and asking tmux for pane "" never produced a
-            // history entry for a holder row anyway.
+            // anything can reclaim them.
+            //
+            // The Closed Terminals entry is written first, from the daemon's
+            // own emulator rather than a tmux pane: disposal releases the
+            // reader the capture is read from. Only for a local worktree, as
+            // on the tmux branch: an entry under a worktree this daemon has no
+            // row for is one no history view lists and no worktree delete
+            // reclaims.
+            if worktree != nil {
+                await WorktreeLifecycle.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
+            }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
             await db.terminalHistory.captureOnClose(terminal: terminal) {

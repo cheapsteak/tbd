@@ -783,9 +783,14 @@ public actor DeskSessionManager: DeskSessionManaging {
             // `tmuxWindowID` is the empty string by construction, so this kill
             // addresses nothing while the holder and the `claude` it forked
             // outlive the only record of their pids. Same branch, same reason,
-            // as `handleTerminalDelete` and `closeScratchTerminals`.
+            // as `handleTerminalDelete` and `closeScratchTerminals`. The desk
+            // is archived rather than deleted, so its history stays, and a
+            // holder row's Closed Terminals entry is written first — the
+            // disposal releases the reader the capture is read from.
             for t in terminals {
                 if t.transport == .holder {
+                    await WorktreeLifecycle.recordHolderClosedTerminal(
+                        t, registry: lifecycle.holderRegistry, history: db.terminalHistory)
                     if let failure = await lifecycle.disposeHolder(for: t) {
                         logger.warning(
                             "Watch Desk close left a holder running: \(failure, privacy: .public)")

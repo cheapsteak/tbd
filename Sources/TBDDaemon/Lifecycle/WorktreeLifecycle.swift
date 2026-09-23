@@ -328,9 +328,9 @@ public struct WorktreeLifecycle: Sendable {
     /// (`RowlessHolderCollector`). The holder inventory in
     /// `WorktreeLifecycle+Reconcile` does not help here: it judges rows that
     /// still exist, and `AgentReaper`'s holder leg reads the same rows.
-    /// Nothing is captured for Closed Terminals
-    /// either: a holder's screen lives in the daemon's own emulator, not in a
-    /// tmux pane, so there was never a capture to preserve.
+    /// It writes no Closed Terminals entry itself: the teardowns that keep
+    /// history call `recordHolderClosedTerminal` first, because the capture
+    /// reads the daemon's reader and this disposal releases it.
     func disposeHolder(for terminal: Terminal) async -> String? {
         await Self.disposeHolder(
             for: terminal, registry: holderRegistry, config: db.config,
@@ -370,5 +370,45 @@ public struct WorktreeLifecycle: Sendable {
                 + "no holder registry, so its holder and job were left running"
         }
         return await registry.abandon(terminal: terminal)
+    }
+
+    /// The holder half of `captureThenKillWindow`'s capture: write a holder
+    /// row's Closed Terminals entry. The one place every history-keeping holder
+    /// teardown goes through — `terminal.delete`, worktree archive, reconcile's
+    /// auto-archive, the hook-tab close, scratch archive, and the Watch Desk
+    /// close — and never the hard-delete paths (forget, recovery, scratch
+    /// delete), which wipe the worktree's history right after.
+    ///
+    /// **Must run before the holder is disposed**: the capture is read from the
+    /// daemon's reader, and disposal releases it. Never throws and never
+    /// blocks the teardown — a failed write is logged inside the store.
+    ///
+    /// Live versus suspended is the reader's own answer
+    /// (`HolderReader.closedTerminalCapture`), read from its drain state:
+    ///
+    /// - **Draining** — the daemon's emulator is the live store, so the entry
+    ///   carries its retained scrollback plus viewport.
+    /// - **Suspended** (a viewer holds the pty), mid-transition, released, or
+    ///   no registry — the entry is written without a capture. A screen frozen
+    ///   at attach time must never be presented as the final screen. The
+    ///   viewed-tab capture waits on the viewer-answered screen pull (#851).
+    ///
+    /// Either way the entry carries the row's Claude session id, which is all
+    /// `terminalHistory.revive` needs to resume a Claude tab.
+    static func recordHolderClosedTerminal(
+        _ terminal: Terminal, registry: HolderRegistry?, history: TerminalHistoryStore
+    ) async {
+        let reader = await registry?.reader(for: terminal.id)
+        await recordHolderClosedTerminal(terminal, reader: reader, history: history)
+    }
+
+    /// The same, given the reader directly — the seam the two branches are
+    /// tested through, since a registry publishes a reader only for a real
+    /// holder.
+    static func recordHolderClosedTerminal(
+        _ terminal: Terminal, reader: HolderReader?, history: TerminalHistoryStore
+    ) async {
+        let capture = await reader?.closedTerminalCapture()
+        await history.recordOnClose(terminal: terminal, capture: capture)
     }
 }
