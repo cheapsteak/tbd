@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/update.sh — run: bash scripts/update.test.sh
+# Tests for scripts/update.sh — run: /bin/bash scripts/update.test.sh (macOS bash 3.2; any bash works)
 #
 # Nothing here builds, installs, signals a daemon, or touches a real ~/tbd.
 # HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
@@ -24,6 +24,15 @@ fi
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
+
+# Every nested `bash` — the cases' `bash "$SCRIPT"`, update.sh's own re-exec,
+# and `#!/usr/bin/env bash` stubs — runs the same interpreter as this harness,
+# so `/bin/bash scripts/update.test.sh` exercises macOS's bash 3.2 all the way
+# down rather than whichever bash comes first on PATH.
+mkdir -p "$TEST_TMP/bash-pin"
+ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
+PATH="$TEST_TMP/bash-pin:$PATH"
+export PATH
 
 # Source the script for the pure-function cases. Sourcing defines functions and
 # runs nothing: main is guarded on BASH_SOURCE. TBD_HOME is set first because
@@ -126,6 +135,7 @@ mkremote() {
     fi
     cp "$HERE/restart-bundle-lib.sh" "$d/scripts/restart-bundle-lib.sh"
     cp "$HERE/restart-environment-lib.sh" "$d/scripts/restart-environment-lib.sh"
+    cp "$HERE/restart-build-lib.sh" "$d/scripts/restart-build-lib.sh"
     cat > "$d/scripts/swift-safe" << 'EOF'
 #!/bin/sh
 # Fake build: create the outputs the installer looks for and record the call.
@@ -142,6 +152,10 @@ mkdir -p ".build/$config"
 printf '#!/bin/sh\nexit 0\n' > ".build/$config/$product"
 chmod +x ".build/$config/$product"
 printf '%s\n' "built $product $config" >> "${FAKE_BUILD_LOG:-/dev/null}"
+# What the compiler would have inherited, for the environment-scrub cases.
+printf 'SDKROOT=%s DEVELOPER_DIR=%s IN_NIX_SHELL=%s CPATH=%s NIX_LDFLAGS=%s TOOLCHAINS=%s\n' \
+    "${SDKROOT-unset}" "${DEVELOPER_DIR-unset}" "${IN_NIX_SHELL-unset}" "${CPATH-unset}" \
+    "${NIX_LDFLAGS-unset}" "${TOOLCHAINS-unset}" >> "${FAKE_ENV_LOG:-/dev/null}"
 echo "Build complete! ($product)"
 EOF
     chmod +x "$d/scripts/swift-safe"
@@ -234,6 +248,7 @@ run_update() {
         TBD_HOME="$case_dir/home/tbd" \
         FAKE_TBD_STATE="$case_dir/state" \
         FAKE_BUILD_LOG="$case_dir/build.log" \
+        FAKE_ENV_LOG="$case_dir/build-env.log" \
         FAKE_OPEN_LOG="$case_dir/open.log" \
         PATH="$case_dir/bin:$PATH" \
         bash "$SCRIPT" "$@" 2>&1
@@ -381,6 +396,50 @@ test_update_refuses_while_another_run_holds_the_lock() {
     fi
     assert_contains "a live lock is explained" "another update is already running" "$out"
     assert_not_contains "a live lock stops the run before it fetches" "fetching origin/main" "$out"
+}
+
+# THE REGRESSION: run from inside another project's dev shell, the build
+# inherited its SDKROOT and failed in a dependency ("'sqlite3.h' file not
+# found"). The compiler must not see those variables; a deliberate toolchain
+# selection must survive; and the caller must be told what was ignored.
+test_the_build_ignores_an_inherited_dev_shell_sdk() {
+    local case_dir out seen
+    case_dir="$(mkcase sdk-scrub-case)"
+    out="$(SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk \
+        DEVELOPER_DIR=/nix/store/acme-apple-sdk \
+        IN_NIX_SHELL=impure CPATH=/nix/store/acme/include \
+        NIX_LDFLAGS=-L/nix/store/acme/lib TOOLCHAINS=org.acme.swift \
+        run_update "$case_dir" --dry-run --no-wake)"
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "the compiler sees no dev-shell SDKROOT" \
+        "SDKROOT=unset DEVELOPER_DIR=unset IN_NIX_SHELL=unset CPATH=unset NIX_LDFLAGS=unset" "$seen"
+    assert_contains "a deliberate TOOLCHAINS selection is left alone" "TOOLCHAINS=org.acme.swift" "$seen"
+    assert_contains "the update says what it ignored" "ignoring inherited compiler-environment variables" "$out"
+    assert_contains "and names the variable" "SDKROOT" "$out"
+}
+
+test_an_xcode_sdk_selection_is_kept() {
+    local case_dir seen
+    case_dir="$(mkcase sdk-keep-case)"
+    SDKROOT=/Applications/Xcode-beta.app/Contents/Developer/SDKs/MacOSX.sdk \
+        DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+        run_update "$case_dir" --dry-run --no-wake >/dev/null
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "an Xcode SDKROOT reaches the compiler" \
+        "SDKROOT=/Applications/Xcode-beta.app/Contents/Developer/SDKs/MacOSX.sdk" "$seen"
+    assert_contains "a Command Line Tools DEVELOPER_DIR reaches the compiler" \
+        "DEVELOPER_DIR=/Library/Developer/CommandLineTools" "$seen"
+}
+
+test_keep_build_env_switch_turns_the_scrub_off() {
+    local case_dir out seen
+    case_dir="$(mkcase sdk-optout-case)"
+    out="$(SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk TBD_KEEP_BUILD_ENV=1 \
+        run_update "$case_dir" --dry-run --no-wake)"
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "TBD_KEEP_BUILD_ENV=1 passes SDKROOT through" \
+        "SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk" "$seen"
+    assert_not_contains "and nothing is reported as ignored" "ignoring inherited" "$out"
 }
 
 test_a_stale_lock_is_taken_over() {
@@ -1720,6 +1779,9 @@ test_dry_run_builds_but_installs_nothing
 test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
 test_a_failed_build_leaves_the_previous_stamp_alone
+test_the_build_ignores_an_inherited_dev_shell_sdk
+test_an_xcode_sdk_selection_is_kept
+test_keep_build_env_switch_turns_the_scrub_off
 test_auto_logs_without_printing
 test_no_wake_skips_the_stage
 test_no_app_skips_the_relaunch
