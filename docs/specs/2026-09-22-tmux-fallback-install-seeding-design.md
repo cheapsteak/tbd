@@ -42,6 +42,7 @@ with `<tbd_home>` resolved as `${TBD_HOME:-$HOME/tbd}`. The function:
    the result is an absolute path that resolves to a regular executable file, it
    writes that path — the path as found on `PATH`, not the symlink target — to the
    fallback file, creating `<tbd_home>` if needed and replacing the file atomically.
+   If that write fails, it prints one warning line and returns success.
 3. If the shell resolves no usable tmux, prints one warning line saying the app will
    ask to locate tmux, writes nothing, and returns success.
 

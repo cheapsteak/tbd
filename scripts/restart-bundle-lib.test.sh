@@ -579,6 +579,17 @@ test_seed_survives_an_unreadable_saved_file_under_set_e() {
         "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
 }
 
+test_seed_warns_when_the_file_path_is_a_directory() {
+    local d; d="$(seed_fixture dirfile)"
+    mkdir -p "$d/home/tmux-executable-path"
+    local err rc
+    err="$( ( PATH="$d/bin:/usr/bin:/bin" seed_tmux_fallback "$d/home" ) 2>&1 >/dev/null )"; rc=$?
+    assert_eq "seed succeeds when the file path is a directory" "0" "$rc"
+    assert_eq "seed leaves a directory at the file path empty" "" \
+        "$(ls -A "$d/home/tmux-executable-path")"
+    assert_eq "seed warns once when it cannot save" "1" "$(printf '%s\n' "$err" | grep -c .)"
+}
+
 test_seed_keeps_a_valid_saved_path() {
     local d; d="$(seed_fixture keep)"
     mkdir -p "$d/other"; printf '#!/bin/sh\n' > "$d/other/tmux"; chmod +x "$d/other/tmux"
@@ -644,6 +655,7 @@ test_seed_creates_missing_tbd_home
 test_seed_rewrites_a_dead_saved_path
 test_seed_rewrites_a_non_executable_or_directory_saved_path
 test_seed_keeps_a_valid_saved_path
+test_seed_warns_when_the_file_path_is_a_directory
 test_seed_survives_an_unreadable_saved_file_under_set_e
 test_seed_warns_and_succeeds_without_tmux
 test_seed_keeps_a_symlinked_tmux_path

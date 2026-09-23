@@ -62,7 +62,7 @@ these steps in order.
   is the quickest way to return to the build you were on.
 - **Hands the daemon over.** See below.
 - **Seeds the saved tmux fallback** on a manual run, with or without
-  `--no-app`; an `--auto` run skips this step (see below). When
+  `--no-app`; an `--auto` run skips this step. When
   `~/tbd/tmux-executable-path` is missing or names no usable executable, the
   update writes the tmux its shell finds on `PATH` there. A login relaunch
   ignores the bundle's recorded `PATH`, and this file is how that launch still

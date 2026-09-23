@@ -462,13 +462,22 @@ seed_tmux_fallback() {
         echo "warning: tmux not found on PATH; TBD will ask you to locate it" >&2
         return 0
     fi
-    mkdir -p "$tbd_home" 2>/dev/null || return 0
+    local unsaved="warning: could not save $found to $file; TBD may ask you to locate tmux"
+    # A directory at the file's path would swallow the mv below.
+    if [ -d "$file" ] || ! mkdir -p "$tbd_home" 2>/dev/null; then
+        echo "$unsaved" >&2
+        return 0
+    fi
     local tmp
-    tmp="$(mktemp "$file.tmp.XXXXXX" 2>/dev/null)" || return 0
+    if ! tmp="$(mktemp "$file.tmp.XXXXXX" 2>/dev/null)"; then
+        echo "$unsaved" >&2
+        return 0
+    fi
     if printf '%s' "$found" > "$tmp" && mv -f "$tmp" "$file"; then
         return 0
     fi
     rm -f "$tmp"
+    echo "$unsaved" >&2
     return 0
 }
 
