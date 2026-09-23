@@ -140,16 +140,18 @@ every peer TBD can see, with the worktree, terminal or remote session behind
 it, and names the terminal by the first eight characters of its id — a prefix
 of the id `tbd terminal list <worktree-id>` prints. `tbd worktree list --json` is where
 the worktree id and the directory slug come from. The name `tbd peer list`
-shows for the terminal you meant is the one to look up in `ListAgents`. A TBD
-session seen from another machine is named
-`<machine>:<worktree> <terminal id prefix>` for the same reason.
+shows for the terminal you meant is the one to look up in `ListAgents`. When
+remote peer messaging is on, a TBD session announced to another machine is named
+`<machine>:<worktree> <terminal id prefix>`, the same terminal id prefix.
 A tmux pane is not an identity: in `ListAgents` a session on the tmux transport also prints
 the legacy coordinate `tmux <server>:<window>.<pane>` (`tbd peer list` shows it
 as `tmux %<pane>`), which still tells same-named tmux rows apart, but a session
 on the pty-holder transport has no pane at all. When several holder sessions in
 one worktree share a name, `ListAgents` offers nothing that says which is which
 — status and start time narrow the field but do not identify a row — so ask the
-user, or use `tbd terminal send` with the terminal id, rather than guess a ref.
+user, or use `tbd terminal send --terminal <full id>` (the full id is in
+`tbd peer list --json` or `tbd terminal list`; the eight-character prefix is not
+accepted) rather than guess a ref.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when

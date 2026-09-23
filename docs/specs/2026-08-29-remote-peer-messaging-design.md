@@ -268,8 +268,9 @@ The discriminator is the first eight characters of the terminal row's id, as
 terminal a name refers to can be found on the origin machine by reading that
 listing; no command takes the short form as an argument. It is deliberately not
 a transport coordinate: a holder-backed terminal has no tmux pane, and a name
-built from one would collide across every holder tab in a worktree and change
-whenever a terminal moved between transports. Eight hex characters are 32 bits
+built from one would collide across every holder tab in a worktree, and would
+change whenever a tmux terminal is woken from a park, since the wake gives it a
+new pane. Eight hex characters are 32 bits
 of a random UUID, and two names collide only when that prefix matches between
 terminals that also share an origin and a display name, so the prefix is kept
 short enough to read aloud rather than widened against a collision that

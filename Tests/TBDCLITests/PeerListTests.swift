@@ -216,9 +216,9 @@ struct PeerListTests {
         #expect(peerBehindColumn(row) == "lane-a · terminal 5A1B2C3D")
     }
 
-    /// The pane join is the one the docs teach, and it has to keep working for
-    /// a session whose `SessionStart` hook never fired — that is the case the
-    /// session id cannot cover.
+    /// The cwd-and-pane fallback join has to keep working for a tmux session
+    /// whose `SessionStart` hook never fired — that is the case the session id
+    /// cannot cover.
     @Test func localRowJoinsOnCwdAndPaneWhenNoSessionIDWasCaptured() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
         let terminal = Self.terminal(worktreeID: worktree.id, pane: "%77")

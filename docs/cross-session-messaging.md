@@ -191,7 +191,9 @@ tmux transport can still be matched by its pane, which `ListAgents`,
 session prints no pane, so among same-named holder rows only status and
 start time are left, and they narrow the field without identifying a row.
 Rather than guess a ref there, reach the session through `tbd terminal
-send` with its full terminal id, which names it exactly.
+send --terminal <id>` with its full terminal id — from `tbd peer list
+--json` or `tbd terminal list`; the eight-character prefix is not
+accepted — which names it exactly.
 
 Pull a fresh listing rather than reusing one from earlier in a long
 conversation — refs belong to live sessions, and the pool changes as

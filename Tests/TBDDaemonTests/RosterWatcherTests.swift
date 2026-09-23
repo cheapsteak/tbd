@@ -1283,10 +1283,10 @@ struct DatabaseLocalSessionDirectoryTests {
 ///
 /// A holder-backed terminal has no tmux pane — its row carries an empty
 /// `tmuxPaneID` — so a pane discriminator gave every holder tab in a worktree
-/// the same name (`… %`), and a terminal that moved between transports was
-/// renamed under its peers. Every fixture here goes through the stores'
-/// creation paths and the production `DatabaseLocalSessionDirectory`, so the
-/// terminal ids and the empty pane are the ones a real row carries.
+/// the same name (`… %`), and a tmux terminal woken from a park, which gets a
+/// new pane, was renamed under its peers. Every fixture here goes through the
+/// stores' creation paths and the production `DatabaseLocalSessionDirectory`,
+/// so the terminal ids and the empty pane are the ones a real row carries.
 @Suite("Roster watcher — the announced name")
 struct RosterWatcherAnnouncedNameTests {
     private static let holderSessionID = "4E12DD65-92B8-4D8E-9920-214C6553FC63"
@@ -1366,7 +1366,7 @@ struct RosterWatcherAnnouncedNameTests {
     }
 
     /// A tmux row carries the same kind of discriminator, not its pane, so a
-    /// terminal keeps its name if it moves between transports.
+    /// terminal keeps its name when a wake gives it a new pane.
     @Test func aTmuxRowIsAnnouncedUnderItsTerminalShortIDNotItsPane() async throws {
         try await withRegistry { directory in
             let made = try await announceThreeTerminalsInOneWorktree(directory)
