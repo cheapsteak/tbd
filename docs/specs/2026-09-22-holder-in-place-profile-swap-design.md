@@ -64,6 +64,11 @@ gains a holder arm beside the tmux one. In order:
 2. **Re-home**, which is the existing cold-swap block: set the parked row's
    `profile_id` to the destination profile and broadcast
    `terminalProfileChanged`. The transcript carry already happened upstream.
+   On a fresh plan the row must also name the new conversation, and that id
+   and its transcript path are written in the **same guarded statement** as
+   the profile, under the same compare-and-set — the commitment the tmux arm
+   makes through `prepareProfileAgentRespawn`. One write, so there is no
+   second one left to fail after the profile has moved.
 3. **Wake**, through `wakeHolderSection` with the swap's own spawn command and
    a model-proxy route minted the way `HibernationCoordinator.wake` mints
    one. The section rather than the public `wake` entry, because `wake`
@@ -102,9 +107,15 @@ Each half fails into a named state, and the RPC error names the half:
   whichever way the ladder went — a row it parked takes the cold path, and a
   row it rolled back is parked by the retry itself.
 - **Re-home failed** (a database write after a successful park). The row is
-  parked on the old profile. The error says so and that the next focus wakes
-  it there; a retry of "Switch account" takes the cold path and succeeds with
-  no process to interrupt.
+  parked on the old profile, on the session id and transcript it already had:
+  the profile and, on a fresh plan, the fresh session id are one guarded
+  write, so a re-home that fails leaves both as they were. The error says so
+  and that the next focus wakes it there; a retry of "Switch account" takes
+  the cold path and succeeds with no process to interrupt. The single write is
+  what makes that promise true for a blank session too — a fresh id recorded
+  against a re-home that never landed would leave the row naming a
+  conversation whose transcript was never carried to the destination profile,
+  which is the "no conversation found" the swap exists to avoid.
 - **Wake failed** (no holder registry, the `TBDHolder` helper missing beside
   the daemon, a spawn that threw, pids that could not be recorded). The row is
   parked on the new profile, so the swap has taken effect at the account
@@ -176,7 +187,13 @@ the instant between the successful park and the re-home, and a test moves the
 worktree out of the status the handler captured at entry so the re-home's lock
 refuses before any write. The row is then parked on the old profile with no
 replacement process, the actuation reads `transportFailed`, and a retry with
-the status restored takes the cold path and re-homes without waking.
+the status restored takes the cold path and re-homes without waking. A
+blank-session variant drives the same seam for the plan that mints a new id:
+the row keeps the blank conversation it had, the retry re-homes that
+conversation as it stands, and a wake then resumes it on the destination
+account. What guards that pairing itself is a fast-pass test on the store
+write — both fields land together under a matching snapshot, and a snapshot
+that no longer matches writes neither.
 
 A fourth pins the wake failure, whose response is the odd one of the three:
 success-shaped, carrying the re-homed row, with the failure stated only in the

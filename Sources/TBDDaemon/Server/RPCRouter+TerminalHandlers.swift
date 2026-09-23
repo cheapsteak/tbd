@@ -2580,12 +2580,26 @@ extension RPCRouter {
     /// this write alone and never held across the park, which polls for a
     /// process to exit.
     ///
+    /// - Parameter freshSessionID: the conversation the row is to hold once it
+    ///   is re-homed, for the holder arm's `.fresh` plan — a blank session is
+    ///   spawned under a NEW id rather than resumed, and the row has to name
+    ///   it. It rides in the same guarded write as the profile rather than in
+    ///   one of its own, so a failure cannot land between them and leave the
+    ///   row on the destination account naming a conversation whose transcript
+    ///   was never carried there. nil — the cold path, and every resume, where
+    ///   the id the row already holds is the whole point of `.inPlace`.
+    /// - Parameter freshTranscriptPath: the file that conversation is written
+    ///   to, written only alongside `freshSessionID`. The fresh spawn's own
+    ///   file is named by its `SessionStart` hook, so the arm passes the path
+    ///   the row already carries and this write moves it nowhere.
     /// - Throws: `StaleTerminalReplacementError` when the row changed under
     ///   the caller, and whatever the database throws.
     private func reHomeParkedRow(
         terminal: Terminal,
         worktree: LocalWorktree,
-        destProfileID: UUID?
+        destProfileID: UUID?,
+        freshSessionID: String? = nil,
+        freshTranscriptPath: String? = nil
     ) async throws -> Terminal {
         let expected = TerminalReplacementSnapshot(terminal: terminal)
         let updated = try await tmux.withWorktreeServerLock(
@@ -2594,7 +2608,9 @@ extension RPCRouter {
             guard let updated = try await self.db.terminals.setParkedProfileID(
                 id: terminal.id,
                 expectedState: expected,
-                profileID: destProfileID) else {
+                profileID: destProfileID,
+                sessionID: freshSessionID,
+                transcriptPath: freshTranscriptPath) else {
                 throw StaleTerminalReplacementError()
             }
             return updated
@@ -2604,6 +2620,19 @@ extension RPCRouter {
             worktreeID: updated.worktreeID,
             newProfileID: destProfileID
         )))
+        // Only when this write named a new conversation. `.inPlace` keeps the
+        // tab, so `swapTerminalProfile` discards the RPC's result entirely and
+        // reconciles its cached row from the deltas — without this one the row
+        // would keep pointing at the conversation the fresh spawn replaced.
+        if freshSessionID != nil, let sessionID = updated.claudeSessionID {
+            subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+                terminalID: updated.id,
+                worktreeID: updated.worktreeID,
+                sessionID: sessionID,
+                transcriptPath: updated.transcriptPath,
+                sessionOrderObservedAt: updated.sessionOrderObservedAt
+            )))
+        }
         logger.info("swap: re-homed parked terminal \(terminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public)")
         return updated
     }
@@ -2726,8 +2755,12 @@ extension RPCRouter {
     ///   top of `handleTerminalSwapProfile` and re-homes a parked row with no
     ///   process to interrupt, or it rolled back, in which case the retry
     ///   parks the row itself.
-    /// - **Re-home failed.** The row is parked on the old profile; the message
-    ///   says so, and that a retry now takes the cold path.
+    /// - **Re-home failed.** The row is parked on the old profile, on the
+    ///   conversation it already had; the message says so, and that a retry
+    ///   now takes the cold path. Both facts hold because the re-home is ONE
+    ///   guarded write: on the plan that mints a fresh session id, that id is
+    ///   committed in the same statement as the profile, so a failure leaves
+    ///   neither behind.
     /// - **Wake failed.** The row is parked on the NEW profile, so the switch
     ///   has taken effect at the account level and the next focus-wake or menu
     ///   wake retries the resume. The response is the updated row and the
@@ -2809,53 +2842,30 @@ extension RPCRouter {
                 storedTranscriptPath: oldTerminal.transcriptPath)
         }
 
-        // 2. RE-HOME, the same write the cold path makes. The transcript was
-        //    carried into the destination config dir upstream, and re-taken
-        //    just above now that the park has flushed the conversation's tail.
-        let rehomed: Terminal
+        // 2. RE-HOME, the same write the cold path makes — and, on the plan
+        //    that mints a new session id, the conversation the row is to hold,
+        //    in that same guarded statement. A blank session is spawned fresh
+        //    rather than resumed (resuming one shows "no conversation found"),
+        //    so the row has to name the new conversation; committing it beside
+        //    the profile is what the tmux arm does through
+        //    `prepareProfileAgentRespawn`, and it means there is no write left
+        //    that could fail after the re-home and leave the row on the new
+        //    account pointing at a conversation with no transcript there. A
+        //    resume names nothing here and keeps the id it has, which is the
+        //    whole point of `.inPlace`. The transcript was carried into the
+        //    destination config dir upstream, and re-taken just above now that
+        //    the park has flushed the conversation's tail.
+        let freshSessionID = storedSessionID == parkedRow.claudeSessionID ? nil : storedSessionID
+        let target: Terminal
         do {
-            rehomed = try await reHomeParkedRow(
-                terminal: parkedRow, worktree: worktree, destProfileID: resolved?.profileID)
+            target = try await reHomeParkedRow(
+                terminal: parkedRow, worktree: worktree, destProfileID: resolved?.profileID,
+                freshSessionID: freshSessionID,
+                freshTranscriptPath: parkedRow.transcriptPath)
         } catch {
             logger.error("inPlace swap: re-home failed for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            let reason = "This session was paused for the account switch, but its account could not be updated (\(error)). It is parked on its previous account — the next focus wakes it there, and switching again now takes the path that has no process to interrupt."
+            let reason = "This session was paused for the account switch, but the switch could not be recorded (\(error)). It is parked on its previous account, on the conversation it already had — the next focus wakes it there, and switching again now takes the path that has no process to interrupt."
             return (RPCResponse(error: reason), reason)
-        }
-
-        // A blank session is spawned fresh rather than resumed (resuming one
-        // shows "no conversation found"), and the row has to name the new
-        // conversation before the wake starts it — the same fact the tmux arm
-        // commits through `prepareProfileAgentRespawn`. A resume keeps the id
-        // it has, which is the whole point of `.inPlace`.
-        var target = rehomed
-        if storedSessionID != rehomed.claudeSessionID {
-            do {
-                try await db.terminals.updateSession(
-                    id: rehomed.id,
-                    sessionID: storedSessionID,
-                    transcriptPath: rehomed.transcriptPath)
-                target = try await db.terminals.get(id: rehomed.id) ?? rehomed
-                // Tell the app, in the shape the tmux arm uses. `.inPlace`
-                // keeps the tab, so `swapTerminalProfile` discards the RPC's
-                // result entirely and reconciles its cached row from the
-                // `terminalProfileChanged` + `terminalSessionUpdated` pair —
-                // `reHomeParkedRow` sent the first, and without this one the
-                // row would keep pointing at the conversation the fresh spawn
-                // just replaced.
-                if let freshSessionID = target.claudeSessionID {
-                    subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
-                        terminalID: target.id,
-                        worktreeID: target.worktreeID,
-                        sessionID: freshSessionID,
-                        transcriptPath: target.transcriptPath,
-                        sessionOrderObservedAt: target.sessionOrderObservedAt
-                    )))
-                }
-            } catch {
-                logger.error("inPlace swap: could not record the fresh session id for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                let reason = "This session moved to the new account but its new conversation could not be recorded (\(error)). It is parked on the new account; the next focus wakes the previous conversation there."
-                return (RPCResponse(error: reason), reason)
-            }
         }
 
         // 3. WAKE. The routing decision first, because the builder re-exports

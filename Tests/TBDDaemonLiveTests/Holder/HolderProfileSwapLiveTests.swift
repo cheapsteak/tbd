@@ -154,6 +154,23 @@ struct HolderProfileSwapLiveTests {
         let sessions = deltas.terminalSessions()
         #expect(sessions.contains { $0.terminalID == terminal.id && $0.sessionID == freshID },
                 "the swap never told the app its fresh session id: \(sessions.map(\.sessionID))")
+        // The pair the app reconciles from has to agree with the row. The
+        // fresh id and the row's transcript path are written by the SAME
+        // guarded statement as the profile — one write, so no failure can land
+        // the row on the new account still naming the conversation the fresh
+        // spawn replaced — and the announcement carries what that write left.
+        // Atomicity itself is not observable from out here (the arm makes one
+        // store call and either it commits or nothing does); what is
+        // observable is that the three facts never disagree.
+        let announced = try #require(
+            sessions.last { $0.terminalID == terminal.id },
+            "no session delta named the swapped row")
+        #expect(announced.sessionID == freshID,
+                "the app was told a different conversation than the row holds")
+        #expect(announced.transcriptPath == after.transcriptPath,
+                "the announcement names a transcript the row does not")
+        #expect(after.transcriptPath == nil,
+                "the fresh conversation inherited the blank session's transcript file")
 
         let launched = await pollUntil("the swapped session to reach its claude stub") {
             (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
@@ -170,6 +187,115 @@ struct HolderProfileSwapLiveTests {
             #expect(argv[idIndex + 1] == freshID,
                     "the row and the spawn disagree about the new session: \(argv)")
         }
+    }
+
+    /// The same second failure outcome, for the plan that mints a NEW session
+    /// id: a blank session, which is spawned fresh rather than resumed.
+    ///
+    /// It gets a test of its own because a blank session is the one shape for
+    /// which a half-finished swap could cost the user more than the account
+    /// switch. The fresh id is written by the same guarded statement as the
+    /// profile, so a re-home that fails writes neither: the row keeps the
+    /// conversation it had, on the account it had, and the next wake resumes
+    /// something that exists. A fresh id recorded against a re-home that never
+    /// landed would leave the row naming a conversation with no transcript
+    /// anywhere — the "no conversation found" the swap exists to avoid.
+    @Test func inPlaceSwapOfABlankSessionWhoseReHomeFailsKeepsTheBlankConversation() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(blank: true)
+        let oldChild = try #require(terminal.childPID)
+        let oldHolder = try #require(terminal.holderPID)
+        let originalTranscriptPath = terminal.transcriptPath
+
+        let db = fixture.db
+        let worktreeID = fixture.worktree.id
+        fixture.router.holderSwapBetweenParkAndReHome = { _ in
+            // Archived is outside `[worktree.status]` — the handler captured
+            // `.main` at entry — so the lock refuses before any write runs.
+            try? await db.worktrees.updateStatus(id: worktreeID, status: .archived)
+        }
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+
+        #expect(!response.success, "a swap whose re-home could not run reported success")
+        let error = response.error ?? "success"
+        #expect(error.contains("It is parked on its previous account"),
+                "the failure does not say where the row was left: \(error)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a failed re-home left the row awake")
+        #expect(after.profileID == nil,
+                "a re-home that threw still moved the row to the new account")
+        #expect(after.claudeSessionID == Self.sessionID,
+                "a failed re-home renamed the conversation it did not move")
+        #expect(after.transcriptPath == originalTranscriptPath,
+                "a failed re-home changed the transcript the row names")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "a failed re-home left a replacement process on the row")
+        let goneSignal = kill(oldChild, 0)
+        let goneErrno = errno
+        #expect(goneSignal == -1 && goneErrno == ESRCH,
+                "the park did not end the old job (kill returned \(goneSignal), errno \(goneErrno))")
+        // Bounded for the reason the resume test spells out: an unreaped holder
+        // is a zombie, and `kill(pid, 0)` cannot tell one from a running
+        // process.
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
+
+        let rows = try fixture.actuationRows()
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "a failed re-home was recorded as something other than transport-failed: \(rows)")
+
+        // The retry the message promises. The row is parked, so the swap takes
+        // the cold path: re-home, no park, no wake, no process to interrupt —
+        // and the cold path re-homes the row AS IT STANDS, so the blank
+        // conversation goes with it rather than being replaced.
+        fixture.router.holderSwapBetweenParkAndReHome = nil
+        try await fixture.db.worktrees.updateStatus(id: worktreeID, status: .main)
+
+        let retry = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+        #expect(retry.success, "the retry the failure message promises failed: \(retry.error ?? "")")
+
+        let retried = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(retried.profileID == fixture.destProfileID,
+                "the retry did not re-home the row to the new account")
+        #expect(retried.isParked, "the cold path woke a row it must only have re-homed")
+        #expect(retried.holderPID == nil && retried.childPID == nil,
+                "the cold path started a process for a parked row")
+        #expect(retried.claudeSessionID == Self.sessionID,
+                "the cold path renamed the conversation it re-homed")
+
+        // And what a wake of that re-homed row then does. Recorded rather than
+        // designed: the cold path re-homes a parked row without touching its
+        // session, so the row still names the blank conversation and an
+        // ordinary wake resumes THAT id on the new account — the same thing a
+        // wake does for any parked row. The assertions are held to what that
+        // guarantees: the row wakes, on the destination account, under the id
+        // it was re-homed with.
+        let woken = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id)))
+        #expect(woken.success, "the re-homed blank row would not wake: \(woken.error ?? "")")
+
+        let awake = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!awake.isParked, "the wake left the row parked")
+        #expect(awake.profileID == fixture.destProfileID,
+                "the wake moved the row off the account the retry re-homed it to")
+        #expect(awake.claudeSessionID == Self.sessionID,
+                "the wake changed the session id the cold path preserved")
+        let newHolder = try #require(awake.holderPID, "the woken row records no holder")
+        let newChild = try #require(awake.childPID, "the woken row records no child")
+        fixture.remember(holderPID: newHolder, childPID: newChild)
     }
 
     /// The spec's second failure outcome: a re-home that fails after the park
