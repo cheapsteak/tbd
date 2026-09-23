@@ -38,31 +38,38 @@ enum RemoteSessionDetailGates {
     /// consistent with `RemoteSessionActionMenu.items(gone:)`, which
     /// collapses a tombstone row's context menu to Copy Session ID + Dismiss:
     /// starting a new interactive attach against a session the provider no
-    /// longer reports isn't meaningful.
-    static func canAttach(capabilities: [String], gone: Bool) -> Bool {
-        !gone && capabilities.contains(attachCapability)
+    /// longer reports isn't meaningful. `exited` blocks it for the same
+    /// reason: the provider reports the session's process as finished, so a
+    /// fresh `attach` has nothing to connect to and a Reattach button could
+    /// only fail. A session that exits while attached therefore drops out of
+    /// attach eligibility and its pane falls back to the log; nothing tries
+    /// to re-attach it.
+    static func canAttach(capabilities: [String], gone: Bool, exited: Bool) -> Bool {
+        !gone && !exited && capabilities.contains(attachCapability)
     }
 
     /// What fills the detail pane. Attach whenever it is possible; otherwise
-    /// the log, which stays readable for a `gone` session — its last
-    /// scrollback is still useful; otherwise the unsupported message.
-    static func content(capabilities: [String], gone: Bool) -> RemoteSessionDetailContent {
-        if canAttach(capabilities: capabilities, gone: gone) { return .attach }
+    /// the log, which stays readable for a `gone` or exited session — its
+    /// last scrollback is still useful; otherwise the unsupported message.
+    static func content(capabilities: [String], gone: Bool, exited: Bool) -> RemoteSessionDetailContent {
+        if canAttach(capabilities: capabilities, gone: gone, exited: exited) { return .attach }
         if capabilities.contains(logCapability) { return .log }
         return .unsupported
     }
 
-    /// Whether the pane carries a send-text footer. Only when the session
-    /// cannot be attached to: an attached terminal takes typing directly, so
-    /// a separate field would be a second, redundant input path. A provider
-    /// that declares `send` without `attach` (or a pane showing the log
-    /// fallback) keeps this as its only way to send input. Withheld for a
-    /// `gone` session, which the provider no longer reports, and on a stale
-    /// snapshot, where mutating a session is unsafe — the same conditions
-    /// under which the context menu withholds Send Text….
-    static func showsSendFooter(capabilities: [String], gone: Bool, snapshotFresh: Bool) -> Bool {
-        snapshotFresh && !gone
-            && !canAttach(capabilities: capabilities, gone: gone)
+    /// Whether the pane carries a send-text footer. Only while no live
+    /// attached terminal is showing: an attached terminal takes typing
+    /// directly, so a separate field would be a second, redundant input
+    /// path. Whenever the pane shows anything else — the log fallback, the
+    /// Detached prompt, the provider-authentication prompt — the footer is
+    /// the only way to send input. Withheld for a `gone` session, which the
+    /// provider no longer reports, and on a stale snapshot, where mutating a
+    /// session is unsafe — the same conditions under which the context menu
+    /// withholds Send Text….
+    static func showsSendFooter(
+        capabilities: [String], gone: Bool, snapshotFresh: Bool, hasLiveAttachedPane: Bool
+    ) -> Bool {
+        snapshotFresh && !gone && !hasLiveAttachedPane
             && capabilities.contains(sendCapability)
     }
 

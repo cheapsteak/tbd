@@ -110,9 +110,12 @@ enum RemoteSessionActionMenu {
     ///
     /// For a live row: Rename…, then Attach gated on its capability — with
     /// Reconnect right after it when `isAttached` (this app currently holds a
-    /// live attach pane for the session) — or, for a provider that declares
-    /// `send` but not `attach`, Send Text…, which selects the session so its
-    /// pane's send footer is at hand; then Copy Session ID (always
+    /// live attach pane for the session) — then Send Text… when the session's
+    /// pane, once selected, shows no live attached terminal: the provider
+    /// lacks `attach`, or `liveAttachUnavailable` says selecting it would not
+    /// attach (the session is detached, exited, or its provider needs
+    /// authentication). The item selects the session so its pane's send
+    /// footer is at hand. Then Copy Session ID (always
     /// available — the id is known locally, no provider call needed), then
     /// the pin toggle, then a divider, then Stop as the last, destructive
     /// item.
@@ -151,7 +154,7 @@ enum RemoteSessionActionMenu {
     static func items(
         capabilities: [String], gone: Bool, snapshotFresh: Bool = true,
         isPinned: Bool, exited: Bool = false, deleteEnabled: Bool = false,
-        isAttached: Bool = false
+        isAttached: Bool = false, liveAttachUnavailable: Bool = false
     ) -> [Item] {
         let pinAction = isPinned
             ? Action(kind: .unpin, title: unpinLabel)
@@ -178,10 +181,11 @@ enum RemoteSessionActionMenu {
                 actions.append(Action(kind: .reconnect, title: reconnectLabel))
             }
         }
-        // Only where the pane shows a send footer: with attach available,
-        // typing goes straight into the terminal and needs no menu item.
+        // Only where the pane shows a send footer: with a live attached
+        // terminal, typing goes straight into it and needs no menu item.
         if RemoteSessionDetailGates.showsSendFooter(
-            capabilities: capabilities, gone: false, snapshotFresh: snapshotFresh) {
+            capabilities: capabilities, gone: false, snapshotFresh: snapshotFresh,
+            hasLiveAttachedPane: capabilities.contains(attachCapability) && !liveAttachUnavailable) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))

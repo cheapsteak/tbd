@@ -707,6 +707,8 @@ struct RemoteSessionRowView: View {
                 exited: session.payload.state == .exited,
                 deleteEnabled: appState.remoteDeleteEnabled,
                 isAttached: appState.attachedRemoteSelections.contains(
+                    RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)),
+                liveAttachUnavailable: !appState.remoteSessionAttachesWhenSelected(
                     RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
             )
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -745,8 +747,9 @@ struct RemoteSessionRowView: View {
             appState.reconnectRemoteSession(
                 RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
         case .sendText:
-            // Offered only when the session can't be attached to; selecting
-            // it brings up the pane whose send footer takes the text.
+            // Offered only when the session's pane shows no live attached
+            // terminal; selecting it brings up the pane whose send footer
+            // takes the text.
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         case .copySessionID:
             NSPasteboard.general.clearContents()

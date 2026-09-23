@@ -5,7 +5,7 @@ import os
 private let detailLogger = Logger(subsystem: "com.tbd.app", category: "remoteDetail")
 
 /// Pure copy decisions for the two independent remote-session state axes.
-/// Shared by the detail pane's warning strip, the provider desk and the
+/// Shared by the detail pane's prompts, the provider desk and the
 /// sidebar so none can present terminal liveness as evidence of agent
 /// activity.
 enum RemoteSessionStatePresentation {
@@ -28,21 +28,21 @@ enum RemoteSessionStatePresentation {
         }
     }
 
-    static func activityUnavailableWarning(
-        terminalState: RemoteProcessState, agentState: RemoteAgentState, gone: Bool
-    ) -> String? {
-        guard !gone, terminalState == .running, agentState == .unknown else { return nil }
-        return "Agent activity is unavailable; terminal liveness alone does not confirm agent health."
-    }
-
-    /// The detached prompt's line about the remote session's fate. It reads
-    /// the provider's own reported state — `list`/`events` are authoritative
-    /// about the session, never the local viewer process exiting — so an
-    /// exited session is not described as still running.
+    /// The line about the remote session's fate on the detached and
+    /// provider-authentication prompts. It reads the provider's own reported
+    /// state — `list`/`events` are authoritative about the session, never the
+    /// local viewer process exiting — so it claims the session keeps running
+    /// only when the provider says it is running or starting, and says
+    /// nothing about liveness when the state is unknown or not yet mirrored.
     static func detachedFateLine(terminalState: RemoteProcessState?) -> String {
-        terminalState == .exited
-            ? "The remote session has exited."
-            : "The session keeps running remotely."
+        switch terminalState {
+        case .running, .starting:
+            return "The session keeps running remotely."
+        case .exited:
+            return "The remote session has exited."
+        case .unknown, nil:
+            return "The remote session is unaffected by detaching."
+        }
     }
 
     static func sidebarCaption(
@@ -96,8 +96,8 @@ enum RemoteSessionSendPayload {
 /// Laid out like a local session: the terminal fills the pane, and the
 /// session's name and its Reconnect / Stop actions live in the window
 /// toolbar (`ContentView`). The only chrome here is a compact warning strip,
-/// rendered only while a warning actually applies, and — only for a session
-/// that cannot be attached to — a send footer (see
+/// rendered only while a warning actually applies, and — only while no live
+/// attached terminal is showing — a send footer (see
 /// `RemoteSessionDetailGates.showsSendFooter`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
@@ -151,7 +151,8 @@ struct RemoteSessionDetailView: View {
     /// Derived on every `body` evaluation — never cached in `@State` — so no
     /// `onAppear`/`onChange` timing can leave the pane blank.
     private var content: RemoteSessionDetailContent {
-        RemoteSessionDetailGates.content(capabilities: capabilities, gone: isGone)
+        RemoteSessionDetailGates.content(
+            capabilities: capabilities, gone: isGone, exited: session?.payload.state == .exited)
     }
 
     var body: some View {
@@ -193,6 +194,7 @@ struct RemoteSessionDetailView: View {
             runningRemediation = nil
             sendText = ""
             isSending = false
+            selectionEpoch += 1
         }
     }
 
@@ -228,21 +230,12 @@ struct RemoteSessionDetailView: View {
         providerStatus.flatMap { RemoteProviderStatusPresentation.issueSummary($0) }
     }
 
-    private var activityWarning: String? {
-        guard let session else { return nil }
-        return RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: session.payload.state,
-            agentState: session.payload.agentState,
-            gone: session.gone
-        )
-    }
-
     /// Only actionable warnings earn space above the terminal: the session
-    /// is gone or missing from the mirror, the provider reports a problem,
-    /// or agent activity can't be confirmed. Routine state lives in the
-    /// sidebar, as it does for local sessions.
+    /// is gone or missing from the mirror, or the provider reports a
+    /// problem. Routine state — including agent activity a provider doesn't
+    /// report — lives in the sidebar, as it does for local sessions.
     private var hasWarnings: Bool {
-        session == nil || isGone || providerIssue != nil || activityWarning != nil
+        session == nil || isGone || providerIssue != nil
     }
 
     private var warningStrip: some View {
@@ -260,14 +253,10 @@ struct RemoteSessionDetailView: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
                 if providerStatus?.hasStaleSnapshot == true {
-                    Text("Attach remains available; changes are paused until inventory refresh recovers.")
+                    Text(Self.staleSnapshotNote(
+                        attachAvailable: appState.attachEligibleRemoteSelections.contains(selection)))
                         .foregroundStyle(.secondary)
                 }
-            }
-
-            if let activityWarning {
-                Label(activityWarning, systemImage: "questionmark.circle")
-                    .foregroundStyle(.orange)
             }
         }
         .font(.caption)
@@ -275,6 +264,14 @@ struct RemoteSessionDetailView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.08))
+    }
+
+    /// The note under a stale-inventory issue. It mentions attach only when
+    /// this session can actually be attached to.
+    static func staleSnapshotNote(attachAvailable: Bool) -> String {
+        attachAvailable
+            ? "Attach remains available; changes are paused until inventory refresh recovers."
+            : "Changes are paused until inventory refresh recovers."
     }
 
     // MARK: - Content
@@ -362,15 +359,16 @@ struct RemoteSessionDetailView: View {
 
     /// Shown in place of `detachedPrompt` while the provider can't
     /// authenticate. Explains that the PROVIDER (not this session) is what
-    /// needs attention, keeps the contract's "the session keeps running
-    /// remotely" framing, and offers the provider's own remediation as the
-    /// primary action.
+    /// needs attention, states the session's fate from the provider's
+    /// reported state (`detachedFateLine`), and offers the provider's own
+    /// remediation as the primary action.
     private func authPrompt(_ presentation: RemoteProviderAuthPresentation) -> some View {
         VStack {
             Spacer()
             RemoteProviderAuthCTAView(
                 presentation: presentation,
-                showsSessionReassurance: true,
+                sessionFateLine: RemoteSessionStatePresentation.detachedFateLine(
+                    terminalState: session?.payload.state),
                 onRun: { runningRemediation = RemoteRemediationRun(presentation) }
             )
             Spacer()
@@ -416,11 +414,15 @@ struct RemoteSessionDetailView: View {
     @State private var sendText: String = ""
     @State private var isSending = false
     @State private var logRefreshToken = 0
+    /// Bumped on every selection change so an in-flight send can tell that
+    /// the pane has moved on — see `performSend`.
+    @State private var selectionEpoch = 0
 
     private var showsSendFooter: Bool {
         RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: isGone,
-            snapshotFresh: providerStatus?.hasStaleSnapshot != true)
+            snapshotFresh: providerStatus?.hasStaleSnapshot != true,
+            hasLiveAttachedPane: showsAttachSlot)
     }
 
     private var sendFooter: some View {
@@ -437,10 +439,16 @@ struct RemoteSessionDetailView: View {
         guard !sendText.isEmpty else { return }
         let text = RemoteSessionSendPayload.submitting(sendText)
         let target = selection
+        // This view is reused across selections (see the type's doc
+        // comment), so a send that completes after the user moved to another
+        // session must not touch that session's state. The Task captures a
+        // copy of this struct, whose `selection` never changes; the epoch is
+        // `@State`, so the Task reads its live value.
+        let epoch = selectionEpoch
         sendText = ""
         isSending = true
         Task {
-            defer { isSending = false }
+            defer { if selectionEpoch == epoch { isSending = false } }
             do {
                 try await appState.daemonClient.remoteSend(
                     provider: target.provider, sessionID: target.sessionID, text: text)
@@ -449,7 +457,7 @@ struct RemoteSessionDetailView: View {
                 // the transport, not that the agent has acted on them yet
                 // (docs/remote-provider-contract.md § `send`).
                 try? await clock.sleep(for: .seconds(1))
-                logRefreshToken += 1
+                if selectionEpoch == epoch { logRefreshToken += 1 }
             } catch {
                 detailLogger.error(
                     "remoteSend failed for \(target.provider, privacy: .public)/\(target.sessionID, privacy: .public): \(error, privacy: .public)")

@@ -73,13 +73,26 @@ struct RemoteSessionActionMenuTests {
         #expect(kinds(items) == [.rename, .sendText, .copySessionID, .pin, nil, .stop])
     }
 
-    /// Send Text… lives only where the pane has a send footer. With attach
-    /// declared, typing goes straight into the terminal, so the item would
+    /// Send Text… lives only where the pane has a send footer. With a live
+    /// attached terminal, typing goes straight into it, so the item would
     /// only duplicate it.
     @Test func sendTextOmittedWhenAttachIsDeclared() {
         let items = RemoteSessionActionMenu.items(capabilities: ["attach", "send"], gone: false, isPinned: false)
         #expect(!kinds(items).contains(.sendText))
         #expect(kinds(items) == [.rename, .attach, .copySessionID, .pin, nil, .stop])
+    }
+
+    /// When selecting the session would not attach — detached, exited, or
+    /// its provider needs authentication — the pane shows a send footer, so
+    /// the item comes back even though `attach` is declared.
+    @Test func sendTextOfferedWhenLiveAttachIsUnavailable() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "send"], gone: false, isPinned: false, liveAttachUnavailable: true)
+        #expect(kinds(items) == [.rename, .attach, .sendText, .copySessionID, .pin, nil, .stop])
+        // Still withheld on a stale snapshot.
+        #expect(!kinds(RemoteSessionActionMenu.items(
+            capabilities: ["attach", "send"], gone: false, snapshotFresh: false,
+            isPinned: false, liveAttachUnavailable: true)).contains(.sendText))
     }
 
     @Test func sendTextOfferedAlongsideTheLogFallback() {
