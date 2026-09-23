@@ -62,20 +62,28 @@ struct PtyHolderSettingsTests {
         }
     }
 
-    @Test func setterSurfacesAFailureAndLeavesCapabilitiesAlone() async {
+    /// A refused write (the daemon's pty-holder/watch-mode gate, or any other
+    /// failure) surfaces the error and re-fetches capabilities, so the toggle
+    /// snaps back to the daemon's persisted value instead of holding the
+    /// optimistic flip.
+    @Test func setterSurfacesAFailureAndRefetchesCapabilities() async {
         struct Boom: Error {}
         await withAppState { state in
             var refreshes = 0
+            state.daemonCapabilities = DaemonCapabilitiesResult(
+                controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
             state.ptyHolderFlagSetter = { @MainActor _ in throw Boom() }
             state.daemonCapabilitiesFetcher = { @MainActor in
                 refreshes += 1
-                return nil
+                return DaemonCapabilitiesResult(
+                    controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
             }
 
             await state.setPtyHolderEnabled(true)
 
-            #expect(refreshes == 0, "a failed write must not be followed by a refresh")
-            #expect(state.alertMessage != nil)
+            #expect(refreshes == 1, "a refused write must re-fetch so the toggle snaps back")
+            #expect(state.daemonCapabilities?.ptyHolderEnabled == false)
+            #expect(state.alertMessage?.contains("Failed to set the session transport") == true)
         }
     }
 

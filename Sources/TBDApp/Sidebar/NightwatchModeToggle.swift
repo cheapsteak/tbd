@@ -53,6 +53,21 @@ enum NightwatchModePresentation {
     static func isActive(segment: NightwatchMode, current: NightwatchMode) -> Bool {
         segment == current
     }
+
+    /// Whether `mode` can be selected. With the pty-holder transport on, the
+    /// watch modes are refused (the daemon rejects them too); `.off` never is.
+    static func isEnabled(_ mode: NightwatchMode, holderOn: Bool) -> Bool {
+        !NightwatchHolderGate.refusesMode(mode, holderEnabled: holderOn)
+    }
+
+    /// Tooltip for a disabled segment: the daemon's refusal text, verbatim.
+    static let disabledHelp: String = NightwatchHolderGate.modeRefusal
+
+    /// The tooltip a control should carry: the refusal when the mode is
+    /// disabled, otherwise the mode's own help.
+    static func effectiveHelp(_ mode: NightwatchMode, holderOn: Bool) -> String {
+        isEnabled(mode, holderOn: holderOn) ? help(mode) : disabledHelp
+    }
 }
 
 /// Compact three-state Nightwatch mode control pinned in the sidebar footer.
@@ -89,6 +104,8 @@ struct NightwatchModeToggle: View {
     private func segment(_ mode: NightwatchMode) -> some View {
         let isActive = NightwatchModePresentation.isActive(
             segment: mode, current: appState.nightwatchMode)
+        let holderOn = appState.nightwatchHolderOn
+        let enabled = NightwatchModePresentation.isEnabled(mode, holderOn: holderOn)
         Button {
             Task { @MainActor in
                 await appState.setNightwatchMode(mode)
@@ -108,7 +125,9 @@ struct NightwatchModeToggle: View {
                 )
         }
         .buttonStyle(.plain)
-        .help(NightwatchModePresentation.help(mode))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .help(NightwatchModePresentation.effectiveHelp(mode, holderOn: holderOn))
         .accessibilityLabel(NightwatchModePresentation.glyphLabel(mode))
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }

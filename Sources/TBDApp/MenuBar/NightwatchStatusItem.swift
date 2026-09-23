@@ -64,5 +64,7 @@ private struct NightwatchStatusContent: View {
                 Text(label)
             }
         }
+        .disabled(!NightwatchModePresentation.isEnabled(mode, holderOn: appState.nightwatchHolderOn))
+        .help(NightwatchModePresentation.effectiveHelp(mode, holderOn: appState.nightwatchHolderOn))
     }
 }
