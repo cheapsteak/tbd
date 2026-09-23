@@ -172,12 +172,12 @@ struct HolderProfileSwapLiveTests {
         let newChild = try #require(after.childPID, "the swapped row records no child")
         let newHolder = try #require(after.holderPID, "the swapped row records no holder")
         fixture.remember(holderPID: newHolder, childPID: newChild)
-        #expect(newChild != oldChild && newHolder != oldHolder,
-                "the swap re-used the pids of the session it just ended")
-        #expect(holderProcessIsAlive(newChild), "the swapped row's job is not running")
         // Exactly one holder ran under this row at the end of it: a wake that
         // had been let through would have spawned a second generation the row
         // no longer names, which no reconciler here could reach.
+        #expect(newChild != oldChild && newHolder != oldHolder,
+                "the swap re-used the pids of the session it just ended")
+        #expect(holderProcessIsAlive(newChild), "the swapped row's job is not running")
         #expect(await coordinator.isSwapInFlight(terminalID: terminal.id) == false,
                 "the swap did not release its claim on the row")
     }

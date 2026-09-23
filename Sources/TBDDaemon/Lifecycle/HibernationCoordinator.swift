@@ -919,10 +919,13 @@ public actor HibernationCoordinator {
             // The one refusal this policy keeps. The swap handler routes an
             // already-parked row down the cold path before it ever asks for a
             // park, so reaching here means the row parked between that read
-            // and this call — a focus-wake, or the idle sweep. The swap's
-            // holder arm reads this answer as "the row is parked now" and
-            // carries on to the re-home, which is what the cold path would
-            // have done with it. Every other rail is deliberately absent: the
+            // and this call — a focus-wake, or the idle sweep, either mid-ladder
+            // or freshly complete. This is a refusal to the swap, not a signal
+            // to proceed: `holderInPlaceSwapUnderClaim` treats `.alreadyHibernated`
+            // as a hard error, records nothing, and never calls
+            // `reHomeParkedRow` — it tells the caller to retry, and a retry
+            // against a row whose park has by then completed takes the cold
+            // path instead. Every other rail is deliberately absent: the
             // handler has already established that this is a resumable Claude
             // session, and refusing a *working* session is precisely what this
             // policy exists not to do.

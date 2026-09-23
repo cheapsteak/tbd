@@ -271,7 +271,7 @@ struct HolderInPlaceSwapTests {
         #expect(!response.success)
         let error = response.error ?? "success"
         #expect(error.contains("another pause, wake or account switch of this session is in flight"),
-                "the refusal does not name the in-flight park: \(error)")
+                "the refusal does not name the swap claim: \(error)")
 
         let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(after.profileID == nil,
