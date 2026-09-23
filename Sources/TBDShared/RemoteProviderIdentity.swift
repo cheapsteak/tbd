@@ -217,12 +217,13 @@ public enum ProviderIdentityRedaction {
                 redactNext = false
                 // A flag never counts as the previous flag's value: `--token
                 // --verbose` means the token was simply not supplied here.
-                if arg.hasPrefix("-") {
-                    out.append(arg)
+                // Such a flag is then judged like any other argument, so the
+                // checks below still catch `--token --password hunter2` and
+                // `--token --secret=…`.
+                if !arg.hasPrefix("-") {
+                    out.append(redactedPlaceholder)
                     continue
                 }
-                out.append(redactedPlaceholder)
-                continue
             }
             if let separator = arg.firstIndex(of: "="), arg.hasPrefix("-") {
                 let flag = String(arg[arg.startIndex..<separator])

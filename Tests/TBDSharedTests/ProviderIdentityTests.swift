@@ -155,6 +155,36 @@ struct ProviderIdentityTests {
         #expect(redacted == ["--token", "--staging"])
     }
 
+    /// A secret flag that directly follows another secret flag must still arm
+    /// redaction for its own value; skipping the checks for it leaked
+    /// `hunter2` here.
+    @Test("a secret flag following a secret flag still redacts its own value")
+    func secretFlagAfterSecretFlagRedactsItsValue() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["--token", "--password", "hunter2"])
+
+        #expect(redacted == ["--token", "--password", ProviderIdentityRedaction.redactedPlaceholder])
+    }
+
+    @Test("an = secret flag following a secret flag is still redacted")
+    func equalsSecretFlagAfterSecretFlagIsRedacted() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "--token", "--secret=eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        ])
+
+        #expect(redacted == ["--token", "--secret=\(ProviderIdentityRedaction.redactedPlaceholder)"])
+    }
+
+    @Test("a chain of valueless secret flags redacts the value that finally follows")
+    func chainOfSecretFlagsRedactsTheFinalValue() {
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "--token", "--api-key", "--password", "pw",
+        ])
+
+        #expect(redacted == [
+            "--token", "--api-key", "--password", ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
     /// Review catch: `isSecretKey`'s substring table can never match a
     /// single-letter flag — `t`/`p`/`k` alone can't contain a five-letter
     /// word like `token`. Before this fix, a short-flag secret like
