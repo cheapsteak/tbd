@@ -151,6 +151,11 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+# A product named in FAKE_BUILD_FAILS_PRODUCT fails to compile.
+if [ -n "${FAKE_BUILD_FAILS_PRODUCT-}" ] && [ "$product" = "$FAKE_BUILD_FAILS_PRODUCT" ]; then
+    echo "error: fake compile failure ($product)"
+    exit 1
+fi
 # Like SwiftPM: outputs go to the triple directory, and .build/<config> is a
 # link to it, re-pointed on every build.
 mkdir -p ".build/arm64-apple-macosx/$config"
@@ -1949,27 +1954,116 @@ test_release_non_arm64_builds_locally() {
 }
 
 test_release_failed_handover_restores_the_link() {
-    local case_dir out head previous
-    case_dir="$(mkcase_release release-handover-fails)"
-    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
-    mkrelease "$case_dir" "$head"
+    local case_dir out previous
+    case_dir="$(mkcase_release_live release-handover-fails)"
     previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
-    mkdir -p "$previous" "$case_dir/home/tbd/updates/src/.build"
     out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_HANDOVER_FAILS=1 \
         run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run reaches the handover" "handover-daemon" "$out"
     assert_contains "a failed handover fails the run" "rc=1" "$out"
-    # The clone did not exist before the run, so its link could not predate it;
-    # plant one and run again to see the restore.
-    ln -sfn "$previous" "$case_dir/home/tbd/updates/src/.build/release"
-    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_HANDOVER_FAILS=1 \
-        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
     assert_eq "a failed handover points the link back at the running build" "$previous" \
         "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
     if [ -d "$previous" ]; then
-        pass "a failed handover prunes nothing"
+        pass "a failed handover keeps the live tree"
     else
-        fail "a failed handover prunes nothing"
+        fail "a failed handover keeps the live tree"
     fi
+    assert_eq "a failed handover leaves no new tree" "1111111111111111111111111111111111111111" \
+        "$(prebuilt_entries "$case_dir")"
+}
+
+# The trees under <case>/home/tbd/updates/prebuilt, by name, space-separated
+# and sorted. Dotfiles (the rollback record) are not trees.
+prebuilt_entries() {
+    local dir="$1/home/tbd/updates/prebuilt"
+    [ -d "$dir" ] || return 0
+    find "$dir" -mindepth 1 -maxdepth 1 ! -name '.*' -exec basename {} \; | sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# A release case whose clone exists and whose .build/release points at a
+# planted live tree 1111…. Echoes the case directory.
+mkcase_release_live() {
+    local case_dir head live
+    case_dir="$(mkcase_release "$1")"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    # A first run creates the clone; a dry run installs nothing.
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run >/dev/null
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    mkdir -p "$live"
+    ln -sfn "$live" "$case_dir/home/tbd/updates/src/.build/release"
+    printf '%s\n' "$case_dir"
+}
+
+test_release_dry_run_keeps_nothing_it_downloaded() {
+    local case_dir out
+    case_dir="$(mkcase_release release-dry-run-prune)"
+    mkrelease "$case_dir" "$(git -C "$case_dir/remote" rev-parse HEAD)"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run)"
+    assert_contains "a first release dry run downloads" "installing nothing" "$out"
+    assert_eq "a release dry run with nothing live leaves no tree" "" "$(prebuilt_entries "$case_dir")"
+
+    case_dir="$(mkcase_release_live release-dry-run-prune-live)"
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run >/dev/null
+    assert_eq "a release dry run leaves no new tree beside the live one" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+}
+
+test_release_failed_app_build_leaves_no_new_tree() {
+    local case_dir out
+    case_dir="$(mkcase_release_live release-app-build-fails)"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_BUILD_FAILS_PRODUCT=TBDApp \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "a failed app build fails the run" "rc=1" "$out"
+    assert_eq "a failed app build leaves no new tree" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+    assert_eq "a failed app build leaves the link on the live tree" \
+        "$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+}
+
+test_release_failed_runs_never_grow_the_prebuilt_home() {
+    local case_dir home i ok=true
+    case_dir="$(mkcase_release_live release-failed-runs)"
+    home="$case_dir/home/tbd/updates/prebuilt"
+    # A rollback tree on record, and a stray older tree nothing names.
+    mkdir -p "$home/2222222222222222222222222222222222222222" \
+        "$home/0000000000000000000000000000000000000000" "$home/download.partial"
+    printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
+    for i in 1 2 3 4; do
+        case "$i" in
+            1|3) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_HANDOVER_FAILS=1 \
+                    run_update_release "$case_dir" --from-release >/dev/null ;;
+            2) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_BUILD_FAILS_PRODUCT=TBDApp \
+                    run_update_release "$case_dir" --from-release >/dev/null ;;
+            4) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+                    run_update_release "$case_dir" --from-release --dry-run >/dev/null ;;
+        esac
+        if [ "$(prebuilt_entries "$case_dir")" != \
+            "1111111111111111111111111111111111111111 2222222222222222222222222222222222222222" ]; then
+            ok=false
+        fi
+    done
+    if [ "$ok" = true ]; then
+        pass "successive failed runs keep exactly the live tree and one rollback"
+    else
+        fail "successive failed runs keep exactly the live tree and one rollback (got: $(prebuilt_entries "$case_dir"))"
+    fi
+}
+
+test_release_completed_install_keeps_the_replaced_tree_as_rollback() {
+    local case_dir head home
+    case_dir="$(mkcase_release_live release-rollback)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    home="$case_dir/home/tbd/updates/prebuilt"
+    mkdir -p "$home/2222222222222222222222222222222222222222"
+    printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    assert_eq "a completed install keeps the new tree and the one it replaced" \
+        "$(printf '%s\n' 1111111111111111111111111111111111111111 "$head" | sort | tr '\n' ' ' | sed 's/ $//')" \
+        "$(prebuilt_entries "$case_dir")"
+    assert_eq "the replaced tree is recorded as the rollback" \
+        "$home/1111111111111111111111111111111111111111" "$(cat "$home/.previous" 2>/dev/null)"
 }
 
 test_local_build_takes_the_link_back_from_a_download() {
@@ -2285,6 +2379,10 @@ test_release_no_asset_auto_skips
 test_release_no_asset_manual_builds_locally
 test_release_non_arm64_builds_locally
 test_release_failed_handover_restores_the_link
+test_release_dry_run_keeps_nothing_it_downloaded
+test_release_failed_app_build_leaves_no_new_tree
+test_release_failed_runs_never_grow_the_prebuilt_home
+test_release_completed_install_keeps_the_replaced_tree_as_rollback
 test_local_build_takes_the_link_back_from_a_download
 
 if [ "$FAIL" -ne 0 ]; then

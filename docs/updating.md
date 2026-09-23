@@ -186,7 +186,9 @@ A release install does this:
   this is the same as after a local build. The build identity records
   `provenance: release` and the CI run it came from.
 - **Keeps two trees**: the one now running and the one it replaced, which is
-  what `~/tbd/updates/previous/TBD.app` pairs with. Older trees are deleted.
+  what `~/tbd/updates/previous/TBD.app` pairs with. Every run reconciles
+  `~/tbd/updates/prebuilt/` at its start and on every exit, so a dry run or a
+  failed run keeps nothing it downloaded and older trees are deleted.
 
 When nothing is published, a manual run builds locally as it always has, and
 an `--auto` run logs it and waits for the next check. A machine that is not

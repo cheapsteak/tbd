@@ -30,6 +30,9 @@ commit="${2:?commit}"
 # The tag and prerelease every published build lives under. Must match
 # RELEASE_TAG in scripts/update.sh.
 tag="${RELEASE_TAG_NAME:-main-builds}"
+# How many commits' assets to keep. Must stay above RELEASE_WALKBACK in
+# scripts/update.sh, so every commit an update can walk back to still has its
+# asset.
 keep="${RELEASE_KEEP:-20}"
 
 asset="$(release_asset_name "$commit")"

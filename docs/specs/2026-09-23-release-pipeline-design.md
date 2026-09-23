@@ -189,8 +189,8 @@ workflow's triggers, cache policy and concurrency stay untouched.
   - It then moves the `main-builds` tag to the commit, only forward along
     `main`, and only after the upload. The tag therefore always names a
     published commit, and a backfill of an older commit never moves it back.
-  - Finally it prunes every asset beyond the newest 20 commits', always
-    keeping the tagged one.
+  - Finally it prunes every asset beyond the newest 20 commits'
+    (`RELEASE_KEEP`), always keeping the tagged one.
 
 ### 4.2 Asset naming and keying
 
@@ -224,7 +224,11 @@ the fetch and detach of `~/tbd/updates/src` run as before, and then
 2. **Find the target.** Walk `main`'s first-parent history from the head,
    at most `RELEASE_WALKBACK` (10) commits. The target is the first commit
    whose `.sha256` downloads. When the running commit is the target or a
-   descendant of it, there is nothing to install.
+   descendant of it, there is nothing to install. The walk stays below
+   `RELEASE_KEEP` (20), so every commit it can reach still has its asset. At
+   roughly 140 pushes to `main` a month, ten commits is about two days of
+   `main`; a machine further behind than that is better served by a local
+   build of the head than by an older binary.
 3. **Download** into `~/tbd/updates/prebuilt/download.partial/`.
 4. **Verify**, before anything is unpacked into place.
    - The archive's SHA-256 must equal the published checksum.
@@ -260,8 +264,10 @@ the fetch and detach of `~/tbd/updates/src` run as before, and then
    the downloaded binary.
 5. **On a failed handover**, the previous app bundle is restored as before,
    and the link is pointed back at the tree still running.
-6. **On success**, prune `~/tbd/updates/prebuilt/` to the running tree and the
-   one it replaced.
+6. **On success**, record the tree that was live when the run started as the
+   rollback tree (`~/tbd/updates/prebuilt/.previous`).
+7. **On every exit**, whichever branch the run leaves by, reconcile
+   `~/tbd/updates/prebuilt/` (section 4.6).
 
 When nothing is published for the last ten commits, what happens depends on
 who is running the update. A manual run logs it and builds locally, as today.
@@ -311,15 +317,23 @@ would not have been retried until the next push.
 
 ### 4.6 Reclaiming what this creates
 
-- **Local prebuilt trees** under `~/tbd/updates/prebuilt/`. The script that
-  creates them reclaims them:
-  - `prune_prebuilt` runs after every successful release install, keeping the
-    running tree and the one it replaced;
-  - `sweep_partial_downloads` removes a `.partial` left by a killed run at the
-    start of the next release run, under the update lock.
+- **Local prebuilt trees** under `~/tbd/updates/prebuilt/`. `update.sh` is
+  their reconciler. Under the update lock it runs `reconcile_prebuilt` at the
+  start of every run, before anything is downloaded, and again from its exit
+  trap, so a dry run, a failed app build, a failed verification, a failed
+  handover and a completed install all leave by the same reconcile. The
+  keep-set is:
+  - the tree `.build/release` points at, which is the live install;
+  - the one rollback tree recorded after the last completed install;
+  - the tree that was live when the run started, which is still the running
+    daemon's when the run did not complete an install.
 
-  An entry is never created without its predecessors being pruned, which is
-  the same reasoning as `previous/TBD.app`.
+  Everything else goes, half-done `.partial` downloads included. A tree the
+  run downloaded survives only by being what `.build/release` points at,
+  which happens only once it is installed, so a dry run or a failed run keeps
+  nothing it downloaded, and the directory never holds more than the live
+  tree and one rollback. A run killed outright leaves its download for the
+  next run's start-of-run reconcile.
 - **Remote assets.** `publish-release.sh` prunes to the newest 20 commits on
   every publish. A missed prune leaves extra assets, and the next publish
   removes them.
@@ -382,7 +396,12 @@ would not have been retried until the next push.
   - a checksum mismatch and a manifest naming another commit (aborted);
   - nothing published: `auto` skips, a manual run builds locally;
   - a non-arm64 machine (builds locally, downloads nothing);
-  - a dry run (leaves the running link);
+  - a dry run (leaves the running link and no new tree);
+  - a failed app build and a failed handover (no new tree; the live tree
+    survives);
+  - successive failed runs (the directory never grows past the live tree and
+    one rollback), and a completed install (keeps the replaced tree as the
+    rollback);
   - a failed handover (the link goes back);
   - the link handed back to SwiftPM before a local build;
   - the source precedence and the check-ref file.

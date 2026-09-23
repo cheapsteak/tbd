@@ -323,10 +323,8 @@ restore_release_link() {
     return 0
 }
 
-# Delete every prebuilt tree except the ones named. The reconciler for
-# ~/tbd/updates/prebuilt: the same script that creates an entry prunes the
-# rest, so the directory holds at most the running build and the one it
-# replaced.
+# Delete every prebuilt tree except the ones named. Dotfiles (the rollback
+# record below) are not trees and are never matched.
 prune_prebuilt() {
     local home="${1-}"
     shift
@@ -340,6 +338,63 @@ prune_prebuilt() {
         done
         [ "$keep_it" = true ] || rm -rf "$entry"
     done
+}
+
+# The rollback record: the one earlier tree kept so a reboot or a manual
+# rollback can reach the build a completed install replaced. It pairs with
+# ~/tbd/updates/previous/TBD.app.
+prebuilt_rollback_file() {
+    printf '%s/.previous\n' "${1-}"
+}
+
+# Record <tree> as the rollback tree after a completed install. A <tree>
+# outside the prebuilt home (SwiftPM's own directory, or nothing) clears the
+# record: there is no prebuilt tree to roll back to.
+record_prebuilt_rollback() {
+    local home="${1-}" tree="${2-}" file
+    file="$(prebuilt_rollback_file "$home")"
+    case "$tree" in
+        "$home"/?*)
+            mkdir -p "$home" && printf '%s\n' "$tree" > "$file"
+            ;;
+        *)
+            rm -f "$file"
+            ;;
+    esac
+    return 0
+}
+
+# The reconciler for ~/tbd/updates/prebuilt. update.sh runs it under the update
+# lock at the start of every run, before anything is downloaded, and again on
+# every exit, so no path out of a run can leave a tree behind. It keeps:
+#
+#   - the tree <link> (the clone's .build/release) points at: the live install;
+#   - the rollback tree record_prebuilt_rollback named, if it still exists;
+#   - any tree named as an extra argument: update.sh passes the tree that was
+#     live when the run started, which is still the running daemon's when the
+#     run did not complete an install.
+#
+# Everything else goes, half-done downloads included. A tree this run
+# downloaded survives only by being what <link> points at, which happens only
+# once it is installed; a dry run or a failed run therefore keeps nothing it
+# downloaded.
+reconcile_prebuilt() {
+    local home="${1-}" link="${2-}"
+    shift 2
+    local live="" previous="" file
+    [ -d "$home" ] || return 0
+    live="$(link_target "$link" || true)"
+    case "$live" in "$home"/?*) ;; *) live="" ;; esac
+    file="$(prebuilt_rollback_file "$home")"
+    if [ -f "$file" ]; then
+        previous="$(head -n 1 "$file" 2>/dev/null || true)"
+        case "$previous" in "$home"/?*) ;; *) previous="" ;; esac
+        if [ -z "$previous" ] || [ ! -d "$previous" ] || [ "$previous" = "$live" ]; then
+            rm -f "$file"
+            previous=""
+        fi
+    fi
+    prune_prebuilt "$home" "$live" "$previous" "$@"
 }
 
 # Remove downloads a killed run left half-done. Called under the update lock,

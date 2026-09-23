@@ -73,7 +73,12 @@ RELEASE_TAG=main-builds
 
 # How many commits back along main's first-parent history to look for a
 # published build when the head has none yet — a push whose build is still
-# running, or one CI cancelled because a newer push superseded it.
+# running, or one CI cancelled because a newer push superseded it. It must
+# stay below the number of commits the release keeps assets for (RELEASE_KEEP,
+# 20, in scripts/ci/publish-release.sh), so every commit the walk can reach
+# still has its asset. At roughly 140 pushes to main a month, 10 commits is
+# about two days of main; a machine further behind than that is better served
+# by a local build of the head than by an older binary.
 # shellcheck disable=SC2034 # read by scripts/update-release-lib.sh
 RELEASE_WALKBACK=10
 
@@ -374,6 +379,23 @@ release_lock() {
         rm -f "$UPDATE_LOCK"
         UPDATE_LOCK_HELD=false
     fi
+}
+
+# Set once main knows where the clone's .build/release is; the exit trap
+# reconciles ~/tbd/updates/prebuilt only after that point, under the lock.
+PREBUILT_RECONCILE_LINK=""
+PREBUILT_START_LIVE=""
+
+# Every exit from a run that took the lock: reconcile the prebuilt trees, then
+# drop the lock. Whatever branch the run left by — a dry run, a failed build, a
+# failed handover, a verification failure, a completed install — nothing it
+# downloaded outlives it unless it is now what .build/release points at.
+on_update_exit() {
+    if [ -n "$PREBUILT_RECONCILE_LINK" ]; then
+        reconcile_prebuilt "$PREBUILT_HOME" "$PREBUILT_RECONCILE_LINK" "$PREBUILT_START_LIVE" \
+            || log "WARNING: could not reconcile $PREBUILT_HOME"
+    fi
+    release_lock
 }
 
 # MARK: - Reading the running daemon
@@ -1216,7 +1238,7 @@ main() {
     fi
 
     acquire_lock || return 1
-    trap release_lock EXIT
+    trap on_update_exit EXIT
 
     local status_json source_worktree old_commit
     status_json="$(daemon_status_json)"
@@ -1248,6 +1270,14 @@ main() {
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
     release_link="$UPDATE_SRC/.build/release"
+
+    # Reconcile the prebuilt trees before anything is downloaded, and arm the
+    # same reconcile for every exit (on_update_exit). The tree live now is
+    # kept on the way out even when the link no longer names it, because
+    # until an install completes it is still what the daemon runs from.
+    PREBUILT_START_LIVE="$(link_target "$release_link" || true)"
+    PREBUILT_RECONCILE_LINK="$release_link"
+    reconcile_prebuilt "$PREBUILT_HOME" "$release_link"
 
     update_source="$(resolve_update_source)"
     sync_check_ref
@@ -1397,11 +1427,10 @@ main() {
         return 1
     fi
 
-    if [ "$use_release" = true ]; then
-        # Keep the tree now running and the one it replaced, which is what
-        # ~/tbd/updates/previous/TBD.app pairs with. Everything older goes.
-        prune_prebuilt "$PREBUILT_HOME" "$RELEASE_TREE" "$previous_release_target"
-    fi
+    # The install completed. The tree that was live when this run started is
+    # now the rollback, paired with ~/tbd/updates/previous/TBD.app; the exit
+    # reconcile keeps it and the new live tree and removes everything older.
+    record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
 
     refresh_installed_cli "$build_dir/TBDCLI"
 
