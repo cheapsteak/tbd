@@ -391,9 +391,20 @@ extension RPCRouter {
     ///
     /// The column is written on every call, because writing either value is the
     /// explicit gesture that lifts it out of NULL forever after.
+    ///
+    /// Turning the flag on while a Nightwatch watch mode is active is refused
+    /// rather than accepted: a watch mode and the pty-holder transport are
+    /// never both on
+    /// (docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md).
+    /// The refusal writes nothing and broadcasts nothing; turning the flag
+    /// off is never refused.
     func handleConfigSetPtyHolderEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetPtyHolderEnabledParams.self, from: paramsData)
+        let config = try await db.config.get()
+        if NightwatchHolderGate.refusesHolder(enabling: params.enabled, currentMode: config.nightwatchMode) {
+            return RPCResponse(error: NightwatchHolderGate.holderRefusal)
+        }
         try await db.config.setPtyHolderEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)

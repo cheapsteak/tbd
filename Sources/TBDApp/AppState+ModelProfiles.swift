@@ -442,6 +442,9 @@ extension AppState {
             logger.error("Failed to set pty holder transport: \(error, privacy: .public)")
             showAlert(
                 "Failed to set the session transport: \(error.localizedDescription)", isError: true)
+            // A refusal (e.g. a watch mode is active) leaves the daemon's value
+            // unchanged; re-fetch so the toggle snaps back to it.
+            await refreshDaemonCapabilities()
         }
     }
 
@@ -946,6 +949,30 @@ extension AppState {
     }
 
     // MARK: - Nightwatch Mode
+
+    /// The daemon's effective pty-holder flag, as the watch-mode controls read
+    /// it. Unfetched capabilities read as off, so the controls are not
+    /// disabled on a claim the daemon has not made.
+    var nightwatchHolderOn: Bool {
+        daemonCapabilities?.ptyHolderEnabled ?? false
+    }
+
+    /// Help text for the Settings "Nightwatch / Daywatch" toggle. A stored
+    /// constant so it is assertable; it ends with the deprecation sentence,
+    /// shown regardless of the holder flag.
+    static let nightwatchSettingsHelp = """
+        An autonomous fleet babysitter. It sweeps your \
+        worktrees, keeps stuck agents unblocked, and gates open PRs, using \
+        cheap local scripts and only paging a model for genuine judgment \
+        calls. Daywatch (◐) is a lighter pass for when you're at the \
+        keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
+        you're away. It acts on your live fleet — nudging stuck \
+        sessions and dispatching work — and its behavior and safety \
+        rules are still changing. Turning this \
+        on reveals the mode controls (sidebar footer and menu bar); \
+        off hides both. You still merge PRs and make prod/access \
+        calls yourself.
+        """ + " " + NightwatchHolderGate.deprecationNotice
 
     /// Set the nightwatch mode (off, daywatch, or nightwatch).
     func setNightwatchMode(_ mode: NightwatchMode) async {

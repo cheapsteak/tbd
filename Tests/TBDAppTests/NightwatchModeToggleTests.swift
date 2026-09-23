@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import TBDApp
@@ -46,5 +47,54 @@ struct NightwatchModePresentationTests {
             NightwatchModePresentation.isActive(segment: $0, current: current)
         }
         #expect(active == [current])
+    }
+
+    // MARK: - The pty-holder gate
+
+    /// With the holder on, only the watch modes are refused; `.off` stays
+    /// reachable so a user can always leave a mode.
+    @Test func holderOnDisablesOnlyTheWatchModes() {
+        #expect(NightwatchModePresentation.isEnabled(.off, holderOn: true))
+        #expect(!NightwatchModePresentation.isEnabled(.daywatch, holderOn: true))
+        #expect(!NightwatchModePresentation.isEnabled(.nightwatch, holderOn: true))
+    }
+
+    @Test(arguments: NightwatchMode.allCases)
+    func holderOffEnablesEveryMode(mode: NightwatchMode) {
+        #expect(NightwatchModePresentation.isEnabled(mode, holderOn: false))
+    }
+
+    @Test func disabledHelpIsTheSharedRefusal() {
+        #expect(NightwatchModePresentation.disabledHelp == NightwatchHolderGate.modeRefusal)
+        #expect(NightwatchModePresentation.effectiveHelp(.nightwatch, holderOn: true) == NightwatchHolderGate.modeRefusal)
+        #expect(NightwatchModePresentation.effectiveHelp(.nightwatch, holderOn: false) == NightwatchModePresentation.help(.nightwatch))
+        #expect(NightwatchModePresentation.effectiveHelp(.off, holderOn: true) == NightwatchModePresentation.help(.off))
+    }
+
+    /// The controls read the daemon's effective holder flag; unfetched
+    /// capabilities read as holder off rather than disabling the modes.
+    @MainActor
+    @Test func nightwatchHolderOnFollowsDaemonCapabilities() {
+        let name = "tbd-nightwatch-holder-gate-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let state = AppState(userDefaults: defaults)
+
+        #expect(state.daemonCapabilities == nil)
+        #expect(!state.nightwatchHolderOn)
+        state.daemonCapabilities = DaemonCapabilitiesResult(
+            controlModeEnabled: false, ptyHolderEnabled: true, ptyHolderSupported: true)
+        #expect(state.nightwatchHolderOn)
+        state.daemonCapabilities = DaemonCapabilitiesResult(
+            controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
+        #expect(!state.nightwatchHolderOn)
+    }
+
+    /// The Settings help carries the deprecation sentence regardless of the
+    /// holder flag.
+    @MainActor
+    @Test func settingsHelpCarriesTheDeprecationNotice() {
+        #expect(AppState.nightwatchSettingsHelp.hasSuffix(NightwatchHolderGate.deprecationNotice))
+        #expect(AppState.nightwatchSettingsHelp.hasPrefix("An autonomous fleet babysitter."))
     }
 }
