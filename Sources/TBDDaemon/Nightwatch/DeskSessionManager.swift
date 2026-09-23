@@ -159,7 +159,10 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// most four sessions in the worst case, and then says so out loud. The first
     /// spawn is not counted because it is the desk's normal start, not a recovery.
     ///
-    /// The repository owner confirmed the cap of three on 2026-09-23.
+    /// Three is the design's own choice rather than a measured optimum: enough
+    /// replacements to ride out a transient failure, few enough that a wedged
+    /// desk cannot spawn sessions indefinitely, and after the third a human is
+    /// notified instead.
     ///
     /// The bound's design, the alternatives weighed against it, and why the
     /// threshold stays compiled for now:

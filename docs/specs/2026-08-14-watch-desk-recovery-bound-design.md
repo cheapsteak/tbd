@@ -94,8 +94,10 @@ Three sits between them: two retries after the first failure, spanning roughly
 forty-five minutes at the desk's tick, and at most three replacements after the desk's
 first spawn (so at most four sessions in the worst case) before the rail stops and says so.
 
-**Who chose it.** The repository owner confirmed the cap of three on 2026-09-23,
-with the reasoning above and the rejected alternatives below in front of them.
+Three is this design's choice, not a measured optimum: it is enough replacements to ride
+out a transient failure, few enough that a wedged desk cannot spawn sessions
+indefinitely, and after the third the rail stops and notifies a human rather than
+guessing further.
 
 ## Rejected alternatives
 
