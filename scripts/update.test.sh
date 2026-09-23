@@ -1116,6 +1116,47 @@ test_no_app_skips_the_relaunch() {
         "$(cat "$TEST_TMP/app-kill.log" 2>/dev/null)"
 }
 
+# A manual app stage seeds the saved tmux fallback on both branches of
+# --no-app: the next login relaunch needs it whether or not this run
+# relaunched. An --auto stage does not: its PATH carries fixed-directory
+# guesses rather than the user's shell.
+test_app_stage_seeds_the_tmux_fallback() {
+    local bin tmuxbin opt
+    bin="$TEST_TMP/seed-stage-bin"
+    tmuxbin="$TEST_TMP/seed-stage-tmux"
+    mkstub_tbd "$bin"
+    mkdir -p "$tmuxbin"
+    printf '#!/bin/sh\n' > "$tmuxbin/tmux"; chmod +x "$tmuxbin/tmux"
+
+    for opt in true false; do
+        rm -f "$TBD_HOME_DIR/tmux-executable-path"
+        (
+            export PATH="$tmuxbin:$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/seed-open.log" \
+                FAKE_KILL_LOG="$TEST_TMP/seed-kill.log"
+            OPT_AUTO=false
+            OPT_NO_APP="$opt"
+            run_app_stage
+        ) >/dev/null 2>&1
+        assert_eq "the app stage seeds the tmux fallback (--no-app=$opt)" \
+            "$tmuxbin/tmux" "$(cat "$TBD_HOME_DIR/tmux-executable-path" 2>/dev/null)"
+    done
+
+    rm -f "$TBD_HOME_DIR/tmux-executable-path"
+    (
+        export PATH="$tmuxbin:$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/seed-open.log" \
+            FAKE_KILL_LOG="$TEST_TMP/seed-kill.log"
+        OPT_AUTO=true
+        OPT_NO_APP=true
+        run_app_stage
+    ) >/dev/null 2>&1
+    if [ -f "$TBD_HOME_DIR/tmux-executable-path" ]; then
+        fail "an --auto app stage does not seed the tmux fallback"
+    else
+        pass "an --auto app stage does not seed the tmux fallback"
+    fi
+    rm -f "$TBD_HOME_DIR/tmux-executable-path"
+}
+
 test_no_wake_skips_the_stage() {
     local state out
     state="$TEST_TMP/no-wake-state"
@@ -1682,6 +1723,7 @@ test_a_failed_build_leaves_the_previous_stamp_alone
 test_auto_logs_without_printing
 test_no_wake_skips_the_stage
 test_no_app_skips_the_relaunch
+test_app_stage_seeds_the_tmux_fallback
 test_wake_candidate_filter
 test_wake_batches_and_paces
 test_wake_counts_failures

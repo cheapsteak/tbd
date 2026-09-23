@@ -427,6 +427,67 @@ launch_app_bundle() {
     open --env "PATH=$launch_path" "$bundle_dir" --stdout "$log_path" --stderr "$log_path"
 }
 
+# Seed the saved tmux fallback with the installing shell's tmux.
+#
+#   seed_tmux_fallback <tbd_home>
+#
+# LaunchServices ignores LSEnvironment.PATH on a login relaunch, so a
+# package-manager tmux is invisible to that launch. The saved fallback is what
+# the resolver consults next; write it from this shell unless it already names
+# a usable executable, so a user's Locate or Settings choice always survives.
+# Never fails the install: without tmux here, warn and let the app prompt.
+# See docs/specs/2026-09-22-tmux-fallback-install-seeding-design.md.
+seed_tmux_fallback() {
+    local tbd_home="${1-}"
+    if [ -z "$tbd_home" ]; then
+        echo "error: seed_tmux_fallback needs a tbd home" >&2
+        return 1
+    fi
+    local file="$tbd_home/tmux-executable-path"
+    local saved=""
+    if [ -f "$file" ]; then
+        # Trim surrounding whitespace and newlines, as the Swift reader does.
+        # An unreadable file counts as unusable; under set -e a failed read
+        # must not abort the install.
+        saved="$(cat "$file" 2>/dev/null)" || saved=""
+        saved="${saved#"${saved%%[![:space:]]*}"}"
+        saved="${saved%"${saved##*[![:space:]]}"}"
+    fi
+    if _is_absolute_regular_executable "$saved"; then
+        return 0
+    fi
+    local found
+    found="$(command -v tmux 2>/dev/null || true)"
+    if ! _is_absolute_regular_executable "$found"; then
+        echo "warning: tmux not found on PATH; TBD will ask you to locate it" >&2
+        return 0
+    fi
+    local unsaved="warning: could not save $found to $file; TBD may ask you to locate tmux"
+    # A directory at the file's path would swallow the mv below.
+    if [ -d "$file" ] || ! mkdir -p "$tbd_home" 2>/dev/null; then
+        echo "$unsaved" >&2
+        return 0
+    fi
+    local tmp
+    if ! tmp="$(mktemp "$file.tmp.XXXXXX" 2>/dev/null)"; then
+        echo "$unsaved" >&2
+        return 0
+    fi
+    if printf '%s' "$found" > "$tmp" && mv -f "$tmp" "$file"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    echo "$unsaved" >&2
+    return 0
+}
+
+# True when <path> is absolute and, after following symlinks, a regular file
+# that is executable: the rule TmuxExecutableResolver applies to a saved path.
+_is_absolute_regular_executable() {
+    case "${1-}" in /*) ;; *) return 1 ;; esac
+    [ -f "$1" ] && [ -x "$1" ]
+}
+
 # Echo the pid of the running app matching <pattern>, or nothing. Non-zero when
 # no process matches.
 app_process_pid() {

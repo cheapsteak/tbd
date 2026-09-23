@@ -2,6 +2,10 @@
 
 Status: **implemented**.
 
+Related: [`2026-09-22-tmux-fallback-install-seeding-design.md`](2026-09-22-tmux-fallback-install-seeding-design.md)
+lets the installer write the saved fallback, because a login relaunch does not
+receive the installation `PATH`. Read it together with this document.
+
 ## Problem
 
 TBD is installed from an interactive shell but normally launched by macOS. Those
@@ -30,8 +34,11 @@ environment genuinely does not expose tmux.
 
 The installer captures its current, non-empty `PATH` in the generated app bundle's
 `LSEnvironment.PATH`. It also supplies that same value explicitly when opening the
-freshly installed app. The bundle value lets macOS apply the installation environment
-again when LaunchServices relaunches the app after the original process exits.
+freshly installed app. LaunchServices does not apply `LSEnvironment.PATH` when it
+relaunches the app at login; that launch inherits launchd's default `PATH`, which
+usually lacks package-manager directories. The installer therefore also seeds the
+saved tmux fallback — see
+[`2026-09-22-tmux-fallback-install-seeding-design.md`](2026-09-22-tmux-fallback-install-seeding-design.md).
 
 The app passes its inherited environment to the daemon. The daemon does not append
 directories, invoke a shell, or otherwise reinterpret `PATH`. This gives the app and
@@ -81,6 +88,11 @@ non-executable, relative, directory, or otherwise invalid target is treated as a
 
 The file contains only the selected executable path. It does not store `PATH`, other
 environment variables, or shell initialization output.
+
+The user writes the file through the Locate tmux prompt or Terminal Settings. The
+installer also writes it, with its shell's tmux, when the file is absent or unusable,
+and never overwrites a valid value; see
+[`2026-09-22-tmux-fallback-install-seeding-design.md`](2026-09-22-tmux-fallback-install-seeding-design.md).
 
 ## Startup experience
 
