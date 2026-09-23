@@ -66,12 +66,18 @@ struct PtyHolderSettingsTests {
     /// failure) surfaces the error and re-fetches capabilities, so the toggle
     /// snaps back to the daemon's persisted value instead of holding the
     /// optimistic flip.
+    ///
+    /// The cache is seeded `true` and the post-failure fetch returns `false` —
+    /// deliberately different values — so the assertion can only pass if the
+    /// refetch actually landed in `daemonCapabilities`. Seeding and fetching
+    /// the same value (as an earlier version of this test did) would pass
+    /// whether or not the refetch ran at all.
     @Test func setterSurfacesAFailureAndRefetchesCapabilities() async {
         struct Boom: Error {}
         await withAppState { state in
             var refreshes = 0
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
+                controlModeEnabled: false, ptyHolderEnabled: true, ptyHolderSupported: true)
             state.ptyHolderFlagSetter = { @MainActor _ in throw Boom() }
             state.daemonCapabilitiesFetcher = { @MainActor in
                 refreshes += 1
@@ -82,7 +88,8 @@ struct PtyHolderSettingsTests {
             await state.setPtyHolderEnabled(true)
 
             #expect(refreshes == 1, "a refused write must re-fetch so the toggle snaps back")
-            #expect(state.daemonCapabilities?.ptyHolderEnabled == false)
+            #expect(state.daemonCapabilities?.ptyHolderEnabled == false,
+                    "the cache must now equal what the refetch returned, not the seeded value")
             #expect(state.alertMessage?.contains("Failed to set the session transport") == true)
         }
     }

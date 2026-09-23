@@ -63,6 +63,13 @@ enum NightwatchModePresentation {
     /// Tooltip for a disabled segment: the daemon's refusal text, verbatim.
     static let disabledHelp: String = NightwatchHolderGate.modeRefusal
 
+    /// Explanatory caption for a disabled menu row. `.help` tooltips are
+    /// unreliable inside a `CommandMenu` (AppKit does not reliably surface
+    /// them there), so a menu that relies on `.help` alone to explain why an
+    /// item is greyed out can look dead with no explanation. This caption is
+    /// rendered as a second, always-disabled row instead.
+    static let holderUnavailableCaption = "Unavailable while the pty-holder transport is on"
+
     /// The tooltip a control should carry: the refusal when the mode is
     /// disabled, otherwise the mode's own help.
     static func effectiveHelp(_ mode: NightwatchMode, holderOn: Bool) -> String {

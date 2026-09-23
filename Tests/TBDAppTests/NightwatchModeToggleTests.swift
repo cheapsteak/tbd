@@ -48,6 +48,7 @@ struct NightwatchModePresentationTests {
         }
         #expect(active == [current])
     }
+
     // MARK: - The pty-holder gate
 
     /// With the holder on, only the watch modes are refused; `.off` stays

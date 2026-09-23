@@ -49,6 +49,11 @@ private struct NightwatchStatusContent: View {
         modeButton("I'm back", mode: .off)
         modeButton("Step out", mode: .daywatch)
         modeButton("Go away for the night", mode: .nightwatch)
+        if appState.nightwatchHolderOn {
+            Divider()
+            Button(NightwatchModePresentation.holderUnavailableCaption) {}
+                .disabled(true)
+        }
     }
 
     @ViewBuilder
