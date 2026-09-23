@@ -39,9 +39,8 @@ struct WorktreeProfilePickerRowShapeTests {
             usageSnapshot: usageSnapshot)
     }
 
-    /// The two buckets a token profile can ever have. The probe reads its
-    /// numbers from response headers, which carry no per-model breakdown, so
-    /// there is never a `weekly_scoped` bucket to go with them.
+    /// The two buckets a token profile can ever have — the same two plan-wide
+    /// windows a signed-in profile reports.
     private var twoBucketSnapshot: ProfileUsageSnapshot {
         snapshot(buckets: [
             ClaudeUsageLimitBucket(kind: "session", group: "session",

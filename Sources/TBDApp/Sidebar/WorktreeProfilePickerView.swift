@@ -608,11 +608,8 @@ struct WorktreeProfilePickerView: View {
     /// (logged-in awaiting first poll, logged out, apiKey/bedrock) keeps its
     /// text subtitle.
     ///
-    /// A token profile contributes exactly two of those buckets and never a
-    /// `weekly_scoped` one — the probe's response headers carry no per-model
-    /// breakdown — which needs no special handling: `UsageBarsView` draws each
-    /// row from an optional lookup and then loops over the scoped buckets, so
-    /// an empty scoped set contributes no rows rather than an empty slot.
+    /// A token profile contributes the same two buckets a signed-in profile
+    /// does, so it needs no special handling here.
     nonisolated static func showsUsageBars(for entry: ModelProfileWithUsage) -> Bool {
         guard rendersClaudeRow(kind: entry.profile.kind,
                                isSelectable: ProfileUsagePresentation.isSelectable(entry))

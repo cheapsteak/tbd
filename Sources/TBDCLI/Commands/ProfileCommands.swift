@@ -77,31 +77,13 @@ func profileLoginUnsupportedMessage(name: String, kind: CredentialKind) -> Strin
     }
 }
 
-/// First bucket in the snapshot matching `kind` (and, for scoped buckets,
-/// the given model display name). nil when the snapshot is missing or the
-/// account doesn't have that bucket.
+/// First bucket in the snapshot matching `kind`. nil when the snapshot is
+/// missing or the account doesn't have that bucket.
 func usageBucket(
     in snapshot: ProfileUsageSnapshot?,
-    kind: String,
-    modelDisplayName: String? = nil
+    kind: String
 ) -> ClaudeUsageLimitBucket? {
-    snapshot?.buckets.first {
-        $0.kind == kind && (modelDisplayName == nil || $0.modelDisplayName == modelDisplayName)
-    }
-}
-
-/// Union of model display names across all profiles' `weekly_scoped` buckets,
-/// sorted for stable column order. Drives the dynamic per-model-family
-/// weekly columns in `tbd profile list` (e.g. "Fable").
-func scopedWeeklyModelNames(in profiles: [ModelProfileWithUsage]) -> [String] {
-    var names: Set<String> = []
-    for entry in profiles {
-        for bucket in entry.usageSnapshot?.buckets ?? []
-        where bucket.kind == "weekly_scoped" {
-            if let name = bucket.modelDisplayName { names.insert(name) }
-        }
-    }
-    return names.sorted()
+    snapshot?.buckets.first { $0.kind == kind }
 }
 
 /// Render a percent cell like "96%", or an em dash when the bucket is absent.
@@ -356,16 +338,10 @@ struct ProfileList: AsyncParsableCommand {
             return
         }
 
-        // Dynamic per-model-family weekly columns ("WK FABLE", ...) driven by
-        // whatever scoped buckets the usage API actually returned.
-        let scopedModels = scopedWeeklyModelNames(in: result.profiles)
-
-        var header: [(String, Int)] = [
+        let header: [(String, Int)] = [
             ("NAME", 24), ("KIND", 6), ("IDENTITY", 26),
-            ("5H", 4), ("RESET", 10), ("WK", 4),
+            ("5H", 4), ("RESET", 10), ("WK", 4), ("", 0),
         ]
-        header.append(contentsOf: scopedModels.map { ("WK \($0.uppercased())", max($0.count + 3, 8)) })
-        header.append(("", 0))
         print(tableRow(header))
         let width = header.reduce(0) { $0 + max($1.1, $1.0.count) + 2 }
         print(String(repeating: "-", count: max(width, 78)))
@@ -389,10 +365,6 @@ struct ProfileList: AsyncParsableCommand {
                 (usageResetCell(session?.resetsAt), 10),
                 (usagePercentCell(weeklyAll), 4),
             ]
-            for model in scopedModels {
-                let bucket = usageBucket(in: snapshot, kind: "weekly_scoped", modelDisplayName: model)
-                cells.append((usagePercentCell(bucket), max(model.count + 3, 8)))
-            }
 
             var trailing: [String] = []
             if entry.profile.id == result.defaultID { trailing.append("[default]") }

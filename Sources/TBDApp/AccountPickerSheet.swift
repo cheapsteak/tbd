@@ -6,7 +6,7 @@ import TBDShared
 /// "Choose account…" item in the "+" menu.
 ///
 /// Lists every model profile with full usage data — identity, 5h window bar +
-/// reset time, weekly-all bar, per-family bars — sorted
+/// reset time, weekly-all bar — sorted
 /// healthiest-session-window first (display order only; nothing is
 /// auto-picked). Cached snapshots render immediately; a forced daemon-side
 /// usage sweep runs on open and updates rows in place ("refreshing…", never a
@@ -178,11 +178,6 @@ private struct AccountPickerRow: View {
             }
             if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
                 bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: usageResetTimeStyle), label: "week")
-            }
-            ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()),
-                    id: \.offset) { _, scoped in
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: usageResetTimeStyle),
-                          label: scoped.modelDisplayName ?? "model")
             }
         }
     }

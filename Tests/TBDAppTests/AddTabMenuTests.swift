@@ -213,8 +213,6 @@ private func makeExecutable(named name: String, in directory: URL) throws {
         buckets: [
             ClaudeUsageLimitBucket(kind: "session", percent: 0, severity: "normal"),
             ClaudeUsageLimitBucket(kind: "weekly_all", percent: 76, severity: "warning"),
-            ClaudeUsageLimitBucket(kind: "weekly_scoped", percent: 100,
-                                   severity: "critical", modelDisplayName: "Fable"),
         ],
         fetchedAt: Date(), lastAttemptAt: Date(), status: "ok"
     )
@@ -227,11 +225,11 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     // Primary line = identity only.
     #expect(gmailItem.title == "Gmail — g@x.co")
     // Two-line attributed title: identity, then the spelled-out usage line
-    // ("used" once, "week", full "Fable") on a second line.
+    // ("used" once, "week") on a second line.
     let attributed = gmailItem.attributedTitle
     #expect(attributed != nil)
     let flattened = attributed?.string ?? ""
-    #expect(flattened == "Gmail — g@x.co\n5h 0% used · week 76% · Fable 100%")
+    #expect(flattened == "Gmail — g@x.co\n5h 0% used · week 76%")
     #expect(flattened.contains("\n"))
     #expect(flattened.contains("used"))
 

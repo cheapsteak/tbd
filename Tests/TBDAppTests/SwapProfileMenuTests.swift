@@ -76,34 +76,30 @@ struct SwapProfileMenuLabelTests {
         #expect(label == "Gmail — 5h 40% · wk 16%")
     }
 
-    @Test func profileWithScopedBuckets() {
-        let profile = profile(name: "Gmail")
-        let sessionBucket = bucket("session", 50.0)
-        let scopedBucket = ClaudeUsageLimitBucket(
-            kind: "weekly_scoped",
-            percent: 100.0,
-            severity: nil,
-            resetsAt: nil,
-            modelDisplayName: "Fable"
-        )
-        let snap = snapshot(with: [sessionBucket, scopedBucket])
-        let label = SwapProfileMenu.menuLabel(for: profile, usage: snap)
-        #expect(label == "Gmail — 5h 50% · F 100%")
-    }
-
-    @Test func profileWithAllBucketTypes() {
+    @Test func legacyScopedBucketAddsNoSegment() {
+        // A stored snapshot can still carry a `weekly_scoped` Fable bucket;
+        // Fable usage counts toward the plan's all-models limits, so the
+        // label shows only the plan-wide windows.
         let profile = profile(name: "Work")
         let sessionBucket = bucket("session", 25.0)
         let weeklyBucket = bucket("weekly_all", 10.0)
         let scopedBucket = ClaudeUsageLimitBucket(
             kind: "weekly_scoped",
-            percent: 75.0,
-            severity: nil,
+            percent: 100.0,
+            severity: "critical",
             resetsAt: nil,
-            modelDisplayName: "Opus"
+            modelDisplayName: "Fable"
         )
         let snap = snapshot(with: [sessionBucket, weeklyBucket, scopedBucket])
         let label = SwapProfileMenu.menuLabel(for: profile, usage: snap)
-        #expect(label == "Work — 5h 25% · wk 10% · O 75%")
+        #expect(label == "Work — 5h 25% · wk 10%")
+    }
+
+    @Test func scopedOnlySnapshotFallsBackToBaseName() {
+        let profile = profile(name: "Gmail")
+        let scopedBucket = ClaudeUsageLimitBucket(
+            kind: "weekly_scoped", percent: 100.0, modelDisplayName: "Fable")
+        let label = SwapProfileMenu.menuLabel(for: profile, usage: snapshot(with: [scopedBucket]))
+        #expect(label == "Gmail")
     }
 }

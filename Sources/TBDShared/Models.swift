@@ -1168,12 +1168,13 @@ public struct ModelProfileUsage: Codable, Sendable, Equatable {
 /// unknown `kind` values flow through untouched so new API buckets appear
 /// without a code change.
 ///
-/// Observed kinds (2026-07): `session` (5-hour window), `weekly_all`
-/// (weekly, all models), `weekly_scoped` (weekly, one model family —
-/// `modelDisplayName` carries the family label, e.g. "Fable").
+/// Kinds TBD keeps: `session` (5-hour window) and `weekly_all` (weekly, all
+/// models), plus any future kind. The API may also send a model-scoped weekly
+/// bucket; the daemon's usage parser drops it, because that model's usage
+/// counts toward the plan's all-models limits rather than a separate cap.
 public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
-    /// Bucket identifier as the API names it (`session`, `weekly_all`,
-    /// `weekly_scoped`, or a future kind).
+    /// Bucket identifier as the API names it (`session`, `weekly_all`, or a
+    /// future kind).
     public var kind: String
     /// Grouping label from the API (`session`, `weekly`). nil if absent.
     public var group: String?
@@ -1182,10 +1183,12 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// Severity label from the API (`normal`, `warning`, `critical`). nil if absent.
     public var severity: String?
     /// When this window resets. nil when the API sends null (e.g. an unused
-    /// scoped bucket).
+    /// window).
     public var resetsAt: Date?
-    /// For scoped buckets: `scope.model.display_name` (e.g. "Fable").
-    /// nil = bucket is not model-scoped.
+    /// The model a bucket is scoped to. Always nil on buckets the daemon
+    /// emits, since it drops model-scoped buckets; kept because the
+    /// `tbd profile list --json` capacity contract (schemaVersion 1) documents
+    /// the key, and removing a field requires a version bump there.
     public var modelDisplayName: String?
     /// The API's `is_active` flag (which limit is currently binding). nil if absent.
     public var isActive: Bool?

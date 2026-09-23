@@ -439,7 +439,26 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
 /// synthesized into `session` / `weekly_all` buckets so older response shapes
 /// still yield data. Malformed individual entries are skipped, unknown kinds
 /// flow through, absent buckets simply don't appear.
+///
+/// Model-scoped buckets are dropped here, at the source. The API has sent a
+/// `weekly_scoped` bucket scoped to one model family (Fable), but that
+/// family's usage now counts toward the plan's all-models limits and carries
+/// no separate cap, so the bucket is not a limit anything should render or
+/// hold on. Every downstream reader — the poller's stored snapshot, the app's
+/// usage surfaces, the `tbd profile list --json` capacity contract — takes
+/// its buckets from this parser, so filtering once here keeps a stale scoped
+/// window out of all of them.
 public enum ClaudeUsagePayloadParser {
+
+    /// The API's per-model-family weekly bucket kind. Dropped by
+    /// `parseBuckets` — see the type comment.
+    static let weeklyScopedKind = "weekly_scoped"
+
+    /// True for a bucket that is not a plan-wide limit: the `weekly_scoped`
+    /// kind, or any bucket the API scoped to a single model.
+    static func isModelScoped(kind: String, modelDisplayName: String?) -> Bool {
+        kind == weeklyScopedKind || modelDisplayName != nil
+    }
 
     public struct ParseError: LocalizedError, CustomStringConvertible {
         public let description: String
@@ -460,13 +479,15 @@ public enum ClaudeUsagePayloadParser {
         if let limits = payload.limits, !limits.isEmpty {
             let buckets = limits.compactMap { raw -> ClaudeUsageLimitBucket? in
                 guard let kind = raw.kind, let percent = raw.percent else { return nil }
+                if isModelScoped(kind: kind, modelDisplayName: raw.scope?.model?.displayName) {
+                    return nil
+                }
                 return ClaudeUsageLimitBucket(
                     kind: kind,
                     group: raw.group,
                     percent: percent,
                     severity: raw.severity,
                     resetsAt: parseResetDate(raw.resetsAt),
-                    modelDisplayName: raw.scope?.model?.displayName,
                     isActive: raw.isActive
                 )
             }
