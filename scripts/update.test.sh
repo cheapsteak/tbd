@@ -1186,6 +1186,32 @@ EOF
         "the running installation is untouched" "$out"
 }
 
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log() {
+    local case_dir out update_log
+    case_dir="$(mkcase auto-failure-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "Compiling module"
+echo "source.swift:10:5: error: 'foo' is not defined" >&2
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+
+    out="$(run_update "$case_dir" --auto)"
+    if [ "$?" -ne 0 ]; then
+        pass "a build failure with --auto exits non-zero"
+    else
+        fail "a build failure with --auto exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    assert_eq "--auto prints nothing to the terminal (silent)" "" "$out"
+    assert_contains "the error excerpt goes to update.log when --auto is set" \
+        "'foo' is not defined" "$update_log"
+    assert_contains "the failure message goes to update.log when --auto is set" \
+        "the running installation is untouched" "$update_log"
+}
+
 test_auto_logs_without_printing() {
     local case_dir out
     case_dir="$(mkcase auto-case)"
@@ -1842,6 +1868,7 @@ test_a_failed_build_stops_before_installing
 test_a_failed_build_leaves_the_previous_stamp_alone
 test_a_failed_build_reports_its_first_errors
 test_a_slot_timeout_is_not_reported_as_a_compile_failure
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log
 test_the_build_ignores_an_inherited_dev_shell_sdk
 test_an_xcode_sdk_selection_is_kept
 test_keep_build_env_switch_turns_the_scrub_off
