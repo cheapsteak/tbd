@@ -9,7 +9,8 @@ import Foundation
 /// empty coordinate, and a row migrating between transports would change name.
 /// The terminal id is minted once, when the row is created, and carried by
 /// both transports alike — and because it is a prefix of what `tbd terminal
-/// list` prints, a reader holding the short form can find the row it names.
+/// list` prints, a reader holding the short form can find the row it names in
+/// that listing. No command accepts the short form as an argument.
 public enum TerminalShortID {
     /// How many leading characters of the UUID the short form keeps.
     public static let length = 8

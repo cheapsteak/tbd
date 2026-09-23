@@ -264,11 +264,16 @@ in one worktree all carry the worktree display name. The terminal discriminator
 is therefore **always present**, never added on collision — a name that changes
 when some other session appears is worse than one that occasionally needs a ref.
 The discriminator is the first eight characters of the terminal row's id, as
-`tbd terminal list` prints it (e.g. `laptop:useful-swallow 5A1B2C3D`), so a
-remote agent naming one names something it can resolve. It is deliberately not
+`tbd terminal list` prints it (e.g. `laptop:useful-swallow 5A1B2C3D`), so the
+terminal a name refers to can be found on the origin machine by reading that
+listing; no command takes the short form as an argument. It is deliberately not
 a transport coordinate: a holder-backed terminal has no tmux pane, and a name
 built from one would collide across every holder tab in a worktree and change
-whenever a terminal moved between transports.
+whenever a terminal moved between transports. Eight hex characters are 32 bits
+of a random UUID, and two names collide only when that prefix matches between
+terminals that also share an origin and a display name, so the prefix is kept
+short enough to read aloud rather than widened against a collision that
+practically does not occur.
 
 The origin label is the sanitized local host name. It only has to be stable and
 distinct between the machines bridging to one host, which is what the

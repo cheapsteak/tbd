@@ -182,9 +182,14 @@ sessions ordinary:
 - **Two worktrees, one name.** Display names are yours to choose and
   nothing stops you reusing one.
 
-The terminal behind the row is how you tell which is which — `tbd peer
-list` names it by its id — and the `[ref]` is how you say which one you
-meant. Status narrows the field but does not identify a row on its own.
+The terminal behind a session is what tells them apart — `tbd peer list`
+names it by its id — and the `[ref]` is how you say which one you meant.
+Carrying one over to the other is the hard part, because a `ListAgents`
+row prints no terminal id. Among rows that share a name, a session on the
+tmux transport can still be matched by its pane, which `ListAgents`,
+`tbd peer list` and `tbd terminal list` all print. A holder-backed
+session prints no pane, so among same-named holder rows only status and
+start time are left, and they narrow the field without identifying a row.
 
 Pull a fresh listing rather than reusing one from earlier in a long
 conversation — refs belong to live sessions, and the pool changes as
@@ -220,14 +225,17 @@ tbd worktree list --json          # worktree id, displayName, directory name, pa
 tbd terminal list <worktree-id>   # every terminal row in that worktree, by id
 ```
 
-The row whose terminal is the one you meant is the lane you meant.
-Address it as `name [ref]` with the name the listing actually shows. The
-same identity works for every transport: a holder-backed session has no
-tmux pane, and a shadow peer standing in for a session on another machine
-carries no local coordinates by design. A session on the tmux transport
-additionally shows its pane (`tmux <server>:<window>.<pane>`) in both
-`ListAgents` and `tbd terminal list`; that is a legacy coordinate, not an
-identity.
+The row whose terminal is the one you meant is the lane you meant, and
+its name is the one to address it by: look that name up in `ListAgents`
+and send to `name [ref]`. The terminal identifies a row on every
+transport, where a pane cannot: a holder-backed session has no tmux pane,
+and a shadow peer standing in for a session on another machine carries no
+local coordinates by design. A session on the tmux transport additionally
+shows its pane (`tmux <server>:<window>.<pane>` in `ListAgents`,
+`tmux %<pane>` in `tbd peer list`, the PANE column in `tbd terminal
+list`) — a legacy coordinate that still
+tells same-named tmux rows apart, as described under [Addressing a
+peer](#addressing-a-peer), but not an identity.
 
 `tbd peer list` prints no `[ref]`, because Claude Code mints one per
 record and never writes it to disk — that value comes from `ListAgents`

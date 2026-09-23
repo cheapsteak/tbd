@@ -62,6 +62,9 @@ import Foundation
     #expect(body.contains("tbd peer list"))
     #expect(body.contains("every peer TBD can see"))
     #expect(body.contains("first eight characters of its id"))
+    // …and the step back to `ListAgents`, where the ref lives: the name
+    // `tbd peer list` shows is what to look the row up by there.
+    #expect(body.contains("is the one to look up in `ListAgents`"))
     #expect(body.contains("tbd terminal list <worktree-id>"))
     #expect(body.contains("tbd worktree list --json"))
     // A tmux pane is a legacy coordinate of tmux-transport rows, never the

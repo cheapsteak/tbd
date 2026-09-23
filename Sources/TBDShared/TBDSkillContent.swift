@@ -139,11 +139,14 @@ instead, whatever the row is named: `tbd peer list` shows
 every peer TBD can see, with the worktree, terminal or remote session behind
 it, and names the terminal by the first eight characters of its id — a prefix
 of the id `tbd terminal list <worktree-id>` prints. `tbd worktree list --json` is where
-the worktree id and the directory slug come from. A TBD session seen from
-another machine is named `<machine>:<worktree> <terminal id prefix>` for the
-same reason. A tmux pane is not an identity: a session on the tmux transport
-also prints the legacy coordinate `tmux <server>:<window>.<pane>`, but a
-session on the pty-holder transport has no pane at all.
+the worktree id and the directory slug come from. The name `tbd peer list`
+shows for the terminal you meant is the one to look up in `ListAgents`. A TBD
+session seen from another machine is named
+`<machine>:<worktree> <terminal id prefix>` for the same reason.
+A tmux pane is not an identity: in `ListAgents` a session on the tmux transport also prints
+the legacy coordinate `tmux <server>:<window>.<pane>` (`tbd peer list` shows it
+as `tmux %<pane>`), which still tells same-named tmux rows apart, but a session
+on the pty-holder transport has no pane at all.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when
