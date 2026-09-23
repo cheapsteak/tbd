@@ -465,6 +465,78 @@ struct HibernationCoordinatorTests {
         #expect(respawns.count == 2)
     }
 
+    // MARK: - The in-place profile swap's claim on a row
+
+    /// The swap claim exists because the row is PARKED and unowned between the
+    /// park and the re-home: `hibernatesInFlight` releases when the park
+    /// returns and `wakesInFlight` is not taken until the wake several
+    /// suspension points later. The app's wake-on-focus wakes exactly the
+    /// active tab's parked terminal, which is the tab "Switch account" was
+    /// pressed on — so without this the ordinary focus-wake can un-park the
+    /// row and start a session under the account being switched away from.
+    @Test func wakeAnswersInFlightWhileAProfileSwapHoldsTheRow() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let coordinator = coordinator(db)
+
+        #expect(await coordinator.claimSwap(terminalID: terminalID),
+                "a row nothing holds refused the swap claim")
+        #expect(await coordinator.wake(terminalID: terminalID) == .inFlight,
+                "a wake raced a swap that holds this row")
+
+        await coordinator.releaseSwap(terminalID: terminalID)
+        // Not an assertion that the wake SUCCEEDS — this row is awake and its
+        // tmux pane is a dry-run fiction. What the release has to restore is
+        // that a wake is answered on its merits again rather than deflected.
+        #expect(await coordinator.wake(terminalID: terminalID) != .inFlight,
+                "releasing the swap claim left the row permanently unwakeable")
+    }
+
+    /// The claim is exclusive in both directions: it refuses a row either
+    /// singleflight set already holds, so a swap cannot start against a park
+    /// or a wake that is mid-ladder.
+    @Test func claimSwapRefusesARowAParkOrWakeAlreadyHolds() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let coordinator = coordinator(db)
+
+        await coordinator.claimHibernateSlotForTest(terminalID)
+        #expect(await coordinator.claimSwap(terminalID: terminalID) == false,
+                "a swap claimed a row whose park is in flight")
+        await coordinator.releaseHibernateSlotForTest(terminalID)
+
+        await coordinator.claimWakeSlotForTest(terminalID)
+        #expect(await coordinator.claimSwap(terminalID: terminalID) == false,
+                "a swap claimed a row whose wake is in flight")
+        await coordinator.releaseWakeSlotForTest(terminalID)
+
+        #expect(await coordinator.claimSwap(terminalID: terminalID),
+                "the claim stayed refused after both singleflights released")
+        #expect(await coordinator.claimSwap(terminalID: terminalID) == false,
+                "two swaps claimed the same row at once")
+        await coordinator.releaseSwap(terminalID: terminalID)
+        #expect(await coordinator.claimSwap(terminalID: terminalID),
+                "releasing the swap claim did not make the row claimable again")
+        await coordinator.releaseSwap(terminalID: terminalID)
+    }
+
+    /// The arm's swap claim excludes wakes and other swaps, and it does NOT
+    /// exclude parks — a hibernate may begin after the claim is taken, and the
+    /// swap's own park is then answered `.alreadyHibernated`, which the arm
+    /// reports as a refusal that changed nothing. This pins the coordinator
+    /// half of that: `parkForProfileSwap` still answers the singleflight, so
+    /// the arm's branch for it is reachable and not dead code.
+    @Test func parkForProfileSwapIsRefusedWhileAParkIsMidLadder() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let coordinator = coordinator(db)
+
+        #expect(await coordinator.claimSwap(terminalID: terminalID),
+                "a row nothing holds refused the swap claim")
+        await coordinator.claimHibernateSlotForTest(terminalID)
+        #expect(await coordinator.parkForProfileSwap(terminalID: terminalID) == .alreadyHibernated,
+                "a park that began after the swap claim did not refuse the swap's own park")
+        await coordinator.releaseHibernateSlotForTest(terminalID)
+        await coordinator.releaseSwap(terminalID: terminalID)
+    }
+
     @Test func manualHibernateRefusesRunningTurn() async throws {
         let (db, _, terminalID) = try await setup(activityState: .working)
         let result = await coordinator(db).manualHibernate(terminalID: terminalID)

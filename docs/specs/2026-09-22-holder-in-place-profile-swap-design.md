@@ -76,6 +76,21 @@ gains a holder arm beside the tmux one. In order:
    on tmux spawns fresh rather than showing "no conversation found", and the
    holder arm matches it.
 
+The arm holds a **swap claim** on the row for the whole of that composition,
+taken before the park and released after the wake on every exit. Each of the
+three verbs singleflights itself and releases when it returns, so between the
+park and the re-home the row is parked and unclaimed — and the app wakes
+exactly the active tab's parked terminal on a selection change, which is the
+very tab "Switch account" was pressed on. Without a claim spanning the
+composition an ordinary focus-wake lands in that window, un-parks the row and
+starts a session under the account being switched away from; with it, such a
+wake answers in-flight and the swap proceeds. The swap's own park and wake are
+unaffected by construction rather than by a flag: the park consults only the
+hibernate singleflight, the wake half the swap calls consults only that and the
+wake singleflight, and the claim is read by the public wake alone. A swap of a
+row some other park, wake or swap already holds is refused before anything is
+touched.
+
 Park comes before re-home, and the order is load-bearing. If the profile were
 re-homed first and the child then survived the ladder, the row would claim the
 new account while the old process ran on under the old one — the state the
@@ -106,6 +121,12 @@ Each half fails into a named state, and the RPC error names the half:
   the new account with the old process still running. The retry is sound
   whichever way the ladder went — a row it parked takes the cold path, and a
   row it rolled back is parked by the retry itself.
+- **The row changed under the switch.** The re-home's compare-and-set found a
+  row that is no longer the one the park left — deleted, or moved by something
+  the swap claim does not cover, such as a worktree whose status left the set
+  the guarded write is allowed in. Nothing was recorded, and the error says so
+  rather than claiming to know where the row is parked, because it may no
+  longer be parked at all.
 - **Re-home failed** (a database write after a successful park). The row is
   parked on the old profile, on the session id and transcript it already had:
   the profile and, on a fresh plan, the fresh session id are one guarded
@@ -124,10 +145,11 @@ Each half fails into a named state, and the RPC error names the half:
   respawn so a failed respawn still leaves it on the new account. The
   actuation finishes `transportFailed` with the wake's reason.
 
-No new refusal strings. Each half already emits one text per cause, and the
-app, the CLI and the tests keep asserting those. `holderInPlaceSwapRefusal`
-and the tests that pin it are deleted; a holder row is no longer a category
-error at that branch.
+Each half already emits one text per cause, and the app, the CLI and the tests
+keep asserting those. The arm adds exactly two strings of its own, for the two
+states no half owns: a swap the claim refused, and a row that changed under the
+switch. `holderInPlaceSwapRefusal` and the tests that pin it are deleted; a
+holder row is no longer a category error at that branch.
 
 ## What stays as it is
 
@@ -180,6 +202,12 @@ holder session to a second profile, then assert the old child is gone, a new
 holder child runs under the row, the row's profile is the destination, and the
 session id is unchanged. A blank-session variant asserts a fresh spawn rather
 than a resume.
+
+A live test also pins the claim, with the concurrent wake it exists to refuse:
+inside the same instant between park and re-home, an ordinary wake of the row
+through the coordinator's public entry point is answered in-flight, and the
+swap then finishes as it always does — the row resumed under the destination
+profile on the session id it started with.
 
 A third live test pins the re-home failure, the one outcome that has no
 observable staging point from outside the RPC: a test seam on the router opens

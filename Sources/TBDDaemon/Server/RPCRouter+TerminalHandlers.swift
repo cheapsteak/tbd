@@ -2769,7 +2769,11 @@ extension RPCRouter {
     ///
     /// No tmux server lock is taken around any of this. A holder session has
     /// no server, the park polls for a process to exit, and `reHomeParkedRow`
-    /// takes the lock for its own write.
+    /// takes the lock for its own write. What IS held for the whole
+    /// composition is the coordinator's swap claim on the row, so an ordinary
+    /// wake arriving while the row is parked mid-swap — the app wakes the
+    /// active tab's parked terminal on a selection change, and that is this
+    /// tab — answers in-flight instead of racing the re-home.
     ///
     /// - Parameter resumeProjectsRoot: the destination profile's `projects/`
     ///   tree on a resume, nil on a fresh spawn. The park's polite `/exit` is
@@ -2782,6 +2786,69 @@ extension RPCRouter {
     /// - Returns: the response to send, and the transport failure to record
     ///   against the actuation (nil when the swap completed).
     private func holderInPlaceSwap(
+        oldTerminal: Terminal,
+        worktree: LocalWorktree,
+        storedSessionID: String,
+        env: [String: String],
+        envOverrides: [String: String],
+        overlayPath: String?,
+        resolved: ResolvedModelProfile?,
+        swapConfig: Config?,
+        cols: Int,
+        rows: Int,
+        resumeProjectsRoot: URL?,
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+    ) async throws -> (response: RPCResponse, failure: String?) {
+        // THE CLAIM, ahead of the park and released after the wake.
+        //
+        // The three verbs below each singleflight themselves, and each releases
+        // the instant it returns: the park's claim is gone before the transcript
+        // re-carry, and the wake's is not taken until several suspension points
+        // later. The row is PARKED across that gap, and the app wakes exactly
+        // the active tab's parked terminal on a selection change — the tab this
+        // very switch was pressed on. Without a claim spanning the whole
+        // composition an ordinary focus-wake could land there, un-park the row
+        // and start a fresh session under the account being switched AWAY from;
+        // `reHomeParkedRow`'s compare-and-set would then refuse its write, which
+        // costs no correctness but leaves the person told their session is
+        // parked on its old account while it is in fact awake there.
+        //
+        // The swap's own halves are unaffected: `performHibernate` consults
+        // `hibernatesInFlight` and `wakeHolderForProfileSwap` consults that and
+        // `wakesInFlight`, and neither reads the swap claim.
+        guard await hibernationCoordinator.claimSwap(terminalID: oldTerminal.id) else {
+            let reason = "Terminal \(oldTerminal.id) was not switched to the other account: another pause, wake or account switch of this session is in flight; nothing was changed. Retry once it has finished."
+            logger.warning("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) is already claimed by a park, wake or swap; refusing rather than racing it")
+            return (RPCResponse(error: reason), reason)
+        }
+        // Released on EVERY exit, thrown ones included. `defer` cannot await,
+        // so the release is written out on both paths rather than implied.
+        do {
+            let outcome = try await holderInPlaceSwapUnderClaim(
+                oldTerminal: oldTerminal,
+                worktree: worktree,
+                storedSessionID: storedSessionID,
+                env: env,
+                envOverrides: envOverrides,
+                overlayPath: overlayPath,
+                resolved: resolved,
+                swapConfig: swapConfig,
+                cols: cols,
+                rows: rows,
+                resumeProjectsRoot: resumeProjectsRoot,
+                composeSpawn: composeSpawn)
+            await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
+            return outcome
+        } catch {
+            await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
+            throw error
+        }
+    }
+
+    /// The three steps of the holder arm, run with the swap claim on the row
+    /// already held. Split from `holderInPlaceSwap` only so the claim's release
+    /// can be structural around every exit this body has.
+    private func holderInPlaceSwapUnderClaim(
         oldTerminal: Terminal,
         worktree: LocalWorktree,
         storedSessionID: String,
@@ -2862,6 +2929,16 @@ extension RPCRouter {
                 terminal: parkedRow, worktree: worktree, destProfileID: resolved?.profileID,
                 freshSessionID: freshSessionID,
                 freshTranscriptPath: parkedRow.transcriptPath)
+        } catch is StaleTerminalReplacementError {
+            // The row moved under the switch, so nothing can be said about
+            // where it is parked — it may not be parked at all. The swap claim
+            // keeps an ordinary focus-wake out of this window, but the
+            // compare-and-set guards more than the claim covers: a row deleted
+            // mid-swap, or a worktree whose status left the set the write is
+            // allowed in, both land here too.
+            logger.error("inPlace swap: re-home refused for holder terminal \(oldTerminal.id, privacy: .public): the row changed under the switch")
+            let reason = "This session was paused for the account switch, but the session changed under the switch (another action took the row); the switch recorded nothing — check the tab and try again."
+            return (RPCResponse(error: reason), reason)
         } catch {
             logger.error("inPlace swap: re-home failed for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             let reason = "This session was paused for the account switch, but the switch could not be recorded (\(error)). It is parked on its previous account, on the conversation it already had — the next focus wakes it there, and switching again now takes the path that has no process to interrupt."

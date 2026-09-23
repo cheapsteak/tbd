@@ -185,6 +185,28 @@ public actor HibernationCoordinator {
     // Not private: `HibernationCoordinator+Holder` claims both.
     var hibernatesInFlight: Set<UUID> = []
 
+    /// Terminal ids with an in-flight in-place profile swap, held across the
+    /// WHOLE of that swap rather than across either half of it.
+    ///
+    /// The swap is a composition — park, re-home, wake — and the two
+    /// singleflight sets above release between them: the park's claim is gone
+    /// the instant the park returns, and the wake's is not taken until several
+    /// suspension points later. The row is parked in that gap and nothing owns
+    /// it, so the app's wake-on-focus (which wakes exactly the active tab's
+    /// parked terminal, and the tab a user just pressed "Switch account" on is
+    /// the active tab) could un-park it and start a fresh session under the
+    /// OLD account before the re-home landed. The re-home's compare-and-set
+    /// then refused the write, which is safe but leaves the user told their
+    /// session is parked on its old account when it is in fact awake there.
+    ///
+    /// So the swap claims the row before it parks and releases it after the
+    /// wake, and the public `wake` answers a claimed row `.inFlight`. The
+    /// swap's OWN halves are exempt by construction, not by a flag a caller
+    /// could forget to pass: `performHibernate` consults only
+    /// `hibernatesInFlight`, and the swap wakes through
+    /// `wakeHolderForProfileSwap`, which consults only the two sets above.
+    private var swapsInFlight: Set<UUID> = []
+
     /// Debounce after a terminal first crosses the idle threshold: the sweep
     /// marks it `pendingKillSince`, and only actually hibernates on a LATER
     /// sweep once this settle window has also elapsed AND every rail still
@@ -414,6 +436,35 @@ public actor HibernationCoordinator {
         }
         return await performHibernate(
             terminal: terminal, reason: .manual, policy: .manual)
+    }
+
+    /// Claim this row for the whole of an in-place profile swap, refusing if
+    /// any park, wake or other swap of it is already in flight.
+    ///
+    /// Paired with `releaseSwap(terminalID:)`, which the caller must reach on
+    /// every exit including a thrown one — a claim that leaks makes the row
+    /// unwakeable until the daemon restarts.
+    ///
+    /// - Returns: true when the claim was taken, false when it was refused and
+    ///   the caller must change nothing.
+    func claimSwap(terminalID: UUID) -> Bool {
+        guard !hibernatesInFlight.contains(terminalID),
+              !wakesInFlight.contains(terminalID),
+              !swapsInFlight.contains(terminalID) else { return false }
+        swapsInFlight.insert(terminalID)
+        return true
+    }
+
+    /// Release the claim `claimSwap(terminalID:)` took. Idempotent, so the
+    /// caller may release on a path it is not certain claimed.
+    func releaseSwap(terminalID: UUID) {
+        swapsInFlight.remove(terminalID)
+    }
+
+    /// Whether an in-place profile swap currently holds this row. For tests
+    /// and for the assertions that pin the claim's lifetime.
+    func isSwapInFlight(terminalID: UUID) -> Bool {
+        swapsInFlight.contains(terminalID)
     }
 
     /// Park a session because an in-place profile swap is about to re-home it
@@ -1061,6 +1112,10 @@ public actor HibernationCoordinator {
         // the replacement process.
         guard !hibernatesInFlight.contains(terminalID) else { return .inFlight }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
+        // An in-place profile swap owns this row from before its park until
+        // after its wake. A focus-wake landing in the gap between those halves
+        // would un-park the row under the account the swap is moving it off.
+        guard !swapsInFlight.contains(terminalID) else { return .inFlight }
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
 

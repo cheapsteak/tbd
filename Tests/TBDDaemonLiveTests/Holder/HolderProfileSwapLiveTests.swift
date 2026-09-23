@@ -115,6 +115,73 @@ struct HolderProfileSwapLiveTests {
                 "the resumed session reads a copy taken before the park flushed its last turn")
     }
 
+    /// The blink between the park and the re-home is not an unowned window.
+    ///
+    /// The three verbs the arm composes each singleflight themselves and each
+    /// releases when it returns, so for the length of the transcript re-carry
+    /// the row is parked with neither `hibernatesInFlight` nor `wakesInFlight`
+    /// naming it. The app wakes exactly the active tab's parked terminal on a
+    /// selection change, and the tab "Switch account" was pressed on IS the
+    /// active tab — so an ordinary focus-wake can arrive precisely here. The
+    /// arm therefore holds a swap claim across the whole composition and an
+    /// arriving wake is answered `.inFlight`.
+    ///
+    /// This is the genuine concurrent wake, driven through the coordinator's
+    /// public entry point — the same call the app's focus rail makes — rather
+    /// than staged by claiming a set. Without the claim it is not merely
+    /// untidy: the wake un-parks the row and spawns a holder under the account
+    /// the switch is moving OFF, and the re-home then refuses, so the two
+    /// assertions after the seam are what make this test discriminate.
+    @Test func inPlaceSwapRefusesAWakeArrivingBetweenTheParkAndTheReHome() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(blank: false, flushOnTerm: true)
+        let oldChild = try #require(terminal.childPID)
+        let oldHolder = try #require(terminal.holderPID)
+
+        let coordinator = fixture.router.hibernationCoordinator
+        let raced = RacedWakeRecorder()
+        fixture.router.holderSwapBetweenParkAndReHome = { terminalID in
+            raced.record(await coordinator.wake(terminalID: terminalID))
+        }
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+        fixture.router.holderSwapBetweenParkAndReHome = nil
+
+        #expect(raced.value == .inFlight,
+                "a focus-wake arriving mid-swap was answered \(String(describing: raced.value)) instead of in-flight, and raced the re-home")
+
+        // And the swap itself finished as it always does.
+        #expect(response.success, "the swap failed: \(response.error ?? "")")
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.profileID == fixture.destProfileID,
+                "the refused wake cost the swap its re-home")
+        #expect(!after.isParked, "the swap left the row parked")
+        #expect(after.claudeSessionID == Self.sessionID,
+                "the swap changed the session id an in-place switch must preserve")
+        let goneSignal = kill(oldChild, 0)
+        let goneErrno = errno
+        #expect(goneSignal == -1 && goneErrno == ESRCH,
+                "the old job survived the swap (kill returned \(goneSignal), errno \(goneErrno))")
+        await pollUntil("the old holder to be reaped") { !holderProcessIsAlive(oldHolder) }
+        let newChild = try #require(after.childPID, "the swapped row records no child")
+        let newHolder = try #require(after.holderPID, "the swapped row records no holder")
+        fixture.remember(holderPID: newHolder, childPID: newChild)
+        #expect(newChild != oldChild && newHolder != oldHolder,
+                "the swap re-used the pids of the session it just ended")
+        #expect(holderProcessIsAlive(newChild), "the swapped row's job is not running")
+        // Exactly one holder ran under this row at the end of it: a wake that
+        // had been let through would have spawned a second generation the row
+        // no longer names, which no reconciler here could reach.
+        #expect(await coordinator.isSwapInFlight(terminalID: terminal.id) == false,
+                "the swap did not release its claim on the row")
+    }
+
     /// The other plan. A blank session resumed would show "no conversation
     /// found", so the tmux arm spawns fresh instead and this one matches it.
     @Test func inPlaceSwapOfABlankSessionSpawnsFresh() async throws {
@@ -502,6 +569,24 @@ struct HolderProfileSwapLiveTests {
             #expect(argv[resumeIndex + 1] == Self.sessionID,
                     "the retry resumed the wrong session: \(argv)")
         }
+    }
+}
+
+// MARK: - Raced wake recorder
+
+/// What the coordinator answered a wake that arrived while a swap held the
+/// row. A box rather than a returned value because the wake is made from
+/// inside the router's seam closure, which returns nothing.
+private final class RacedWakeRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: WakeResult?
+
+    func record(_ result: WakeResult) {
+        lock.withLock { stored = result }
+    }
+
+    var value: WakeResult? {
+        lock.withLock { stored }
     }
 }
 

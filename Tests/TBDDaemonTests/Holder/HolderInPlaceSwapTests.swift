@@ -239,13 +239,19 @@ struct HolderInPlaceSwapTests {
                 "a refused park was recorded as something other than transport-failed")
     }
 
-    /// A park the coordinator answers `.alreadyHibernated` to is a REFUSAL,
-    /// not a park: `performHibernate`'s singleflight guard returns that case
-    /// for any hibernate of this terminal that is currently mid-ladder — the
-    /// idle sweep's autopark, or a racing manual "Hibernate now" — and the
+    /// A park already mid-ladder for this row is a REFUSAL, not a park: the
     /// swap cannot see whether that ladder will finish parking the row or roll
-    /// its intent back because the child survived. So the arm must change
-    /// nothing and say so.
+    /// its intent back because the child survived, and a re-home committed on
+    /// the strength of an intent that later rolls back would leave the row
+    /// awake under the NEW account with the old process running under the old
+    /// one. So the arm must change nothing and say so.
+    ///
+    /// The refusal arrives at the arm's claim rather than at the park, because
+    /// the claim the arm takes before it parks anything is refused by every
+    /// park, wake or swap already holding the row. The arm keeps its own
+    /// `.alreadyHibernated` answer for the park that begins AFTER the claim is
+    /// taken — the claim excludes wakes, not hibernates — and both land in the
+    /// state this test asserts.
     ///
     /// Staged by claiming the singleflight slot for this terminal before the
     /// RPC, which is exactly what a concurrent ladder holds while it runs. The
@@ -253,7 +259,7 @@ struct HolderInPlaceSwapTests {
     /// handler's entry takes the cold path further up and never reaches this
     /// arm at all — the in-flight ladder's park intent, when it lands, is
     /// invisible to a swap that has already passed that branch.
-    @Test("a swap whose park is answered by another in-flight park changes nothing and says which half refused")
+    @Test("a swap whose row a park already holds changes nothing and says which half refused")
     func swapParkAnsweredByAnInFlightParkChangesNothing() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
         defer { fixture.tearDown() }
@@ -264,7 +270,7 @@ struct HolderInPlaceSwapTests {
 
         #expect(!response.success)
         let error = response.error ?? "success"
-        #expect(error.contains("another park of this session is in flight"),
+        #expect(error.contains("another pause, wake or account switch of this session is in flight"),
                 "the refusal does not name the in-flight park: \(error)")
 
         let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
@@ -283,6 +289,53 @@ struct HolderInPlaceSwapTests {
                 "the swap did not open and close exactly one actuation: \(rows)")
         #expect(rows.last?["result"] as? String == "transport-failed",
                 "an in-flight park was recorded as something other than transport-failed")
+    }
+
+    /// The claim the arm takes on the row before it parks anything, seen from
+    /// the outside: a row some other park, wake or swap already holds is
+    /// refused by a named reason, and nothing about it is touched.
+    ///
+    /// Staged by holding the swap claim itself, which is what a concurrent
+    /// "Switch account" on the same row holds for the whole of its
+    /// composition. The same guard is what makes an ordinary focus-wake
+    /// arriving mid-swap answer in-flight rather than un-park the row under
+    /// the account the swap is moving it off — pinned from the wake's side by
+    /// `HibernationCoordinatorTests.wakeAnswersInFlightWhileAProfileSwapHoldsTheRow`
+    /// and end to end by `HolderProfileSwapLiveTests`.
+    @Test("a swap of a row another swap already claimed changes nothing and says so")
+    func swapOfAnAlreadyClaimedRowChangesNothing() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: false)
+        #expect(await fixture.router.hibernationCoordinator.claimSwap(terminalID: terminal.id),
+                "the fixture could not stage a concurrent claim")
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(!response.success)
+        let error = response.error ?? "success"
+        #expect(error.contains("another pause, wake or account switch of this session is in flight"),
+                "the refusal does not name the claim that refused it: \(error)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!after.isParked, "a refused claim still parked the row")
+        #expect(after.profileID == nil, "a refused claim still re-homed the row")
+        #expect(after.holderPID == 9101 && after.childPID == 9102,
+                "a refused claim cleared the row's pids")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "a refused claim reached the wake's replacement reservation")
+
+        let rows = try fixture.actuationRows()
+        #expect(rows.count == 2,
+                "the swap did not open and close exactly one actuation: \(rows)")
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "a refused claim was recorded as something other than transport-failed")
+
+        // And the claim the arm never took is not left behind: a release the
+        // arm reached anyway would have freed a claim this test still holds.
+        #expect(await fixture.router.hibernationCoordinator.isSwapInFlight(terminalID: terminal.id),
+                "the refused arm released a claim it never took")
+        await fixture.router.hibernationCoordinator.releaseSwap(terminalID: terminal.id)
     }
 
     // MARK: - The wake half, refused
@@ -340,11 +393,23 @@ struct HolderInPlaceSwapTests {
     }
 }
 
-/// The seam the in-flight-park test needs: claim the per-terminal singleflight
-/// slot `performHibernate` checks, without running a ladder. A real concurrent
-/// hibernate holds exactly this for the length of its ladder.
+/// The seams the in-flight tests need: claim or release either per-terminal
+/// singleflight slot without running a ladder or a respawn. A real concurrent
+/// hibernate or wake holds exactly these for the length of its own work.
 extension HibernationCoordinator {
     func claimHibernateSlotForTest(_ terminalID: UUID) {
         hibernatesInFlight.insert(terminalID)
+    }
+
+    func releaseHibernateSlotForTest(_ terminalID: UUID) {
+        hibernatesInFlight.remove(terminalID)
+    }
+
+    func claimWakeSlotForTest(_ terminalID: UUID) {
+        wakesInFlight.insert(terminalID)
+    }
+
+    func releaseWakeSlotForTest(_ terminalID: UUID) {
+        wakesInFlight.remove(terminalID)
     }
 }
