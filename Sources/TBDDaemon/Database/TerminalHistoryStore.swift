@@ -121,41 +121,42 @@ public struct TerminalHistoryStore: Sendable {
     /// (the rows survived a failed delete or an unrecorded reconcile kill), and
     /// by then the first close has disposed the holder, so the retry can only
     /// answer "no capture": overwriting would throw away the first close's
-    /// capture, as the tmux path never does when its capture fails.
+    /// capture, as the tmux path never does when its capture fails. The check
+    /// and the insert are one transaction, and a capture-less close touches no
+    /// file, so it cannot remove a capture a concurrent close is writing.
     public func recordOnClose(terminal: Terminal, capture: String?) async {
-        if Self.nonBlank(capture) == nil {
-            do {
-                let existing = try await writer.read { db in
-                    try TerminalHistoryRecord.exists(db, key: terminal.id.uuidString)
-                }
-                if existing { return }
-            } catch {
-                logger.warning("failed to read closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-        await persist(terminal: terminal, text: capture, closedAt: Date())
+        await persist(
+            terminal: terminal, text: Self.nonBlank(capture), closedAt: Date(),
+            keepingExistingEntryWithoutText: true)
     }
 
     /// Store seam (internal so tests can control `closedAt` for deterministic
     /// prune ordering). Best-effort: failures are logged, never thrown.
     func store(terminal: Terminal, text: String, closedAt: Date) async {
-        guard Self.nonBlank(text) != nil else { return }
+        guard let text = Self.nonBlank(text) else { return }
         await persist(terminal: terminal, text: text, closedAt: closedAt)
     }
 
     /// `text` unless it is empty or whitespace-only — the one statement of
-    /// what counts as "no capture" for both close paths.
+    /// what counts as "no capture" for both close paths. Scans only up to the
+    /// first visible character rather than trimming a copy of the capture.
     private static func nonBlank(_ text: String?) -> String? {
-        text.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        guard let text, text.unicodeScalars.contains(where: {
+            !CharacterSet.whitespacesAndNewlines.contains($0)
+        }) else { return nil }
+        return text
     }
 
-    /// Writes the content file (when there is non-blank text), the metadata
-    /// row, and prunes. Without text it writes the row alone and removes any
-    /// stray content file at the terminal's path, so the row's `lineCount` 0
-    /// and the file the viewer and revive read cannot disagree.
-    private func persist(terminal: Terminal, text rawText: String?, closedAt: Date) async {
-        let text = Self.nonBlank(rawText)
+    /// Writes the content file (when there is text — callers pass it through
+    /// `nonBlank`), the metadata row, and prunes. Without text it writes the
+    /// row alone, and with `keepingExistingEntryWithoutText` only when the
+    /// terminal has no entry yet.
+    private func persist(
+        terminal: Terminal, text: String?, closedAt: Date,
+        keepingExistingEntryWithoutText: Bool = false
+    ) async {
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
+        let keepExisting = keepingExistingEntryWithoutText && text == nil
         do {
             if let text {
                 try FileManager.default.createDirectory(
@@ -163,8 +164,6 @@ public struct TerminalHistoryStore: Sendable {
                     withIntermediateDirectories: true
                 )
                 try text.write(toFile: path, atomically: true, encoding: .utf8)
-            } else if FileManager.default.fileExists(atPath: path) {
-                try FileManager.default.removeItem(atPath: path)
             }
 
             let entry = TerminalHistoryEntry(
@@ -181,6 +180,10 @@ public struct TerminalHistoryStore: Sendable {
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID
             let pruned = try await writer.write { db -> [String] in
+                if keepExisting,
+                   try TerminalHistoryRecord.exists(db, key: record.id) {
+                    return []
+                }
                 try record.save(db)
                 // Prune to the newest N; rowid breaks closedAt ties (insertion order).
                 let stale = try String.fetchAll(db, sql: """

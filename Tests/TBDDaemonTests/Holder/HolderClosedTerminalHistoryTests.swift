@@ -151,25 +151,6 @@ import Testing
                 "the retry threw away the first close's capture")
     }
 
-    @Test("a capture-less entry removes a stray content file at its path")
-    func captureLessEntryRemovesStrayContentFile() async throws {
-        let fx = try await makeFixture()
-        defer { fx.cleanup() }
-        let path = fx.contentPath()
-        try FileManager.default.createDirectory(
-            atPath: (path as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true)
-        try "stray".write(toFile: path, atomically: true, encoding: .utf8)
-
-        await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: nil)
-
-        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
-        #expect(entries.map(\.id) == [fx.terminal.id])
-        #expect(entries.first?.lineCount == 0)
-        #expect(!FileManager.default.fileExists(atPath: path),
-                "the row says no capture while the viewer and revive would read the file")
-    }
-
     @Test("a blank capture writes the entry without a content file")
     func blankCaptureWritesEntryWithoutFile() async throws {
         let fx = try await makeFixture()
