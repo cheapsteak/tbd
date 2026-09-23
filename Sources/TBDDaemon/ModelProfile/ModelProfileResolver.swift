@@ -19,6 +19,46 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     /// Free-form env overrides carried by this profile (profile scope). Merged
     /// into the spawned session's env under `global < repo < profile` precedence.
     public let envOverrides: [String: String]
+    /// The balanced pick's reservation on the shared ledger, when this profile
+    /// came from one. The spawn hands it back through
+    /// `ModelProfileResolver.settleReservation` once its terminal row is
+    /// inserted. Nil for every other step of the chain.
+    public let reservationID: UUID?
+
+    public init(
+        profileID: UUID,
+        name: String,
+        kind: CredentialKind,
+        baseURL: String?,
+        model: String?,
+        secret: String?,
+        awsRegion: String?,
+        awsProfile: String?,
+        fallbackModels: [String]?,
+        envOverrides: [String: String],
+        reservationID: UUID? = nil
+    ) {
+        self.profileID = profileID
+        self.name = name
+        self.kind = kind
+        self.baseURL = baseURL
+        self.model = model
+        self.secret = secret
+        self.awsRegion = awsRegion
+        self.awsProfile = awsProfile
+        self.fallbackModels = fallbackModels
+        self.envOverrides = envOverrides
+        self.reservationID = reservationID
+    }
+
+    /// The same profile carrying `reservationID`.
+    func withReservation(_ id: UUID?) -> ResolvedModelProfile {
+        ResolvedModelProfile(
+            profileID: profileID, name: name, kind: kind, baseURL: baseURL,
+            model: model, secret: secret, awsRegion: awsRegion,
+            awsProfile: awsProfile, fallbackModels: fallbackModels,
+            envOverrides: envOverrides, reservationID: id)
+    }
 }
 
 public struct ModelProfileResolver: Sendable {
@@ -26,17 +66,35 @@ public struct ModelProfileResolver: Sendable {
     let repos: RepoStore
     let config: ConfigStore
     let keychain: @Sendable (String) throws -> String?
+    let candidateSource: ProfilePoolCandidateSource?
+    /// Makes the balanced pick atomic across concurrent spawns. Nil picks
+    /// straight from the stores, as tests that exercise one spawn at a time
+    /// do; the daemon always passes its single shared instance.
+    let reservations: ProfilePickReservations?
+    /// Surfaces an account a balanced pick skips for a stale reading (design
+    /// §6.1). Nil surfaces nothing; the daemon always passes its single
+    /// shared instance, so the once-per-profile latch holds across spawns.
+    let staleAlerts: StaleAccountAlerts?
+    let now: @Sendable () -> Date
 
     public init(
         profiles: ModelProfileStore,
         repos: RepoStore,
         config: ConfigStore,
-        keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) }
+        keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) },
+        candidateSource: ProfilePoolCandidateSource? = nil,
+        reservations: ProfilePickReservations? = nil,
+        staleAlerts: StaleAccountAlerts? = nil,
+        now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.profiles = profiles
         self.repos = repos
         self.config = config
         self.keychain = keychain
+        self.candidateSource = candidateSource
+        self.reservations = reservations
+        self.staleAlerts = staleAlerts
+        self.now = now
     }
 
     /// Load a profile by explicit ID, bypassing the precedence chain.
@@ -94,6 +152,35 @@ public struct ModelProfileResolver: Sendable {
         )
     }
 
+    /// Whether a terminal spawn may take a balanced pick. A resumed
+    /// conversation belongs to the account holding its transcript, which the
+    /// history row does not record, so a resume keeps the stable
+    /// pre-balancing resolution; a load-sensitive pick could land it on an
+    /// account without the transcript.
+    public static func balances(resumeSessionID: String?) -> Bool {
+        resumeSessionID == nil
+    }
+
+    /// Whether a worktree-create spawn may take a balanced pick: never when
+    /// it restores archived conversations or carries one over, for the same
+    /// reason as `balances(resumeSessionID:)` — those resume transcripts that
+    /// live under whichever account wrote them.
+    public static func balancesWorktreeSpawn(
+        restoringArchivedSessions: Bool,
+        carryingOver: Bool
+    ) -> Bool {
+        !restoringArchivedSessions && !carryingOver
+    }
+
+    /// Settle a balanced pick's reservation: the spawn's terminal row has
+    /// been inserted and now carries the load in the live counts. Call it
+    /// with `resolved?.reservationID` right after the row lands; nil (any
+    /// non-balanced resolution) and a resolver without a ledger are no-ops.
+    public func settleReservation(_ id: UUID?) async {
+        guard let id, let reservations else { return }
+        await reservations.release(id)
+    }
+
     /// Resolve the model profile for a spawn.
     ///
     /// `override` is an explicit per-creation profile id (e.g. chosen in the
@@ -101,7 +188,21 @@ public struct ModelProfileResolver: Sendable {
     /// EVERY tier of the precedence chain below. A nil `override` (the default)
     /// preserves the exact pre-existing precedence: repo override → scratch
     /// override → global default → none.
-    public func resolve(repoID: UUID?, override overrideID: UUID? = nil) async throws -> ResolvedModelProfile? {
+    ///
+    /// `balance: false` keeps that pre-balancing chain even when
+    /// `profileBalancingEnabled` is on: the global-default step returns the
+    /// default (or nil), with no pick and no reservation. Spawns that resume
+    /// an existing conversation pass it — see `balances(resumeSessionID:)`.
+    ///
+    /// `worktreeID` names the spawning worktree, so a balanced pick that skips
+    /// an account for a stale reading can say so there (design §6.1). Nil
+    /// surfaces nothing.
+    public func resolve(
+        repoID: UUID?,
+        override overrideID: UUID? = nil,
+        balance: Bool = true,
+        worktreeID: UUID? = nil
+    ) async throws -> ResolvedModelProfile? {
         // Step 0: explicit per-creation override — highest priority. If the
         // row/keychain is missing we log and fall through to the normal chain
         // rather than fail the spawn.
@@ -133,7 +234,104 @@ public struct ModelProfileResolver: Sendable {
             logger.warning("scratch profile override \(scratchOverrideID, privacy: .public) is missing; falling back to global default")
         }
 
-        // Step 2: global default.
+        // Step 2: global default, or balanced pick if enabled.
+        if balance, cfg.profileBalancingEnabled, let source = candidateSource {
+            // Balancing is enabled and we have a source: build candidates and ask the picker.
+            var reservationID: UUID?
+            do {
+                let candidates: [ProfilePoolCandidate]
+                let decision: ProfilePoolDecision
+                let pickTime = now()
+                if let reservations {
+                    // Every read happens first, and then one non-suspending
+                    // call picks and reserves, so a concurrent spawn into
+                    // another worktree sees this pick even before its
+                    // terminal row exists.
+                    let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    let outcome = await reservations.pickAndReserve(
+                        candidates: stored, pickTime: pickTime)
+                    candidates = outcome.candidates
+                    decision = outcome.decision
+                    reservationID = outcome.reservationID
+                } else {
+                    candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    decision = ProfilePoolPicker.pick(
+                        candidates: candidates,
+                        excludingAccountKeys: [],
+                        now: pickTime
+                    )
+                }
+
+                // Tell the person about any account skipped for a stale
+                // reading. It never throws, and a failed post only logs.
+                if let staleAlerts {
+                    await staleAlerts.observe(
+                        candidates: candidates, decision: decision,
+                        worktreeID: worktreeID, now: pickTime,
+                        profileName: { [profiles] id in try? await profiles.get(id: id)?.name })
+                }
+
+                if let chosenID = decision.chosen {
+                    if let resolved = try await loadResolved(id: chosenID) {
+                        // Log the balanced decision.
+                        let chosenCandidate = candidates.first(where: { $0.profileID == chosenID })
+                        let headroom = chosenCandidate.flatMap { candidate in
+                            decision.verdicts[candidate.profileID]
+                                .flatMap { verdict in
+                                    if case let .eligible(_, hr, accountLoad) = verdict {
+                                        return (hr, accountLoad)
+                                    }
+                                    return nil
+                                }
+                        }
+
+                        if let (hr, accountLoad) = headroom {
+                            logger.info("balanced pick: profile \(chosenID, privacy: .public), headroom \(String(format: "%.1f%%", hr * 100)), account live sessions \(accountLoad)")
+                        } else {
+                            logger.info("balanced pick: profile \(chosenID, privacy: .public)")
+                        }
+
+                        // Log rejected candidates.
+                        for candidate in candidates where candidate.profileID != chosenID {
+                            if let verdict = decision.verdicts[candidate.profileID] {
+                                let reason: String
+                                switch verdict {
+                                case .eligible:
+                                    reason = "eligible but lower rank"
+                                case .wrongKind:
+                                    reason = "wrongKind"
+                                case .noCredential:
+                                    reason = "noCredential"
+                                case .optedOut:
+                                    reason = "optedOut"
+                                case .sameAccount:
+                                    reason = "sameAccount"
+                                case .noFreshReading:
+                                    reason = "noFreshReading"
+                                case .exhausted:
+                                    reason = "exhausted"
+                                }
+                                logger.debug("rejected candidate \(candidate.profileID, privacy: .public): \(reason)")
+                            }
+                        }
+
+                        return resolved.withReservation(reservationID)
+                    }
+                    logger.warning("balanced pick \(chosenID, privacy: .public) did not load; falling back to default")
+                } else {
+                    logger.info("balancing found no eligible candidate; falling back to default")
+                }
+            } catch {
+                logger.error("candidate source threw; falling back to default: \(error, privacy: .public)")
+            }
+            // Reaching here means the pick placed nothing; its reservation
+            // must not count against the profile.
+            if let reservationID, let reservations {
+                await reservations.release(reservationID)
+            }
+        }
+
+        // Fallback to step 2 / step 3: global default or nothing.
         if let defaultID = cfg.defaultProfileID {
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved

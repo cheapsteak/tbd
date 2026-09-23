@@ -23,6 +23,9 @@ public final class RPCRouter: Sendable {
     public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
+    /// Injected for the rate-limit handler's profile suggestion; a seam like
+    /// `limitResumeScheduler` so tests can install one after construction.
+    public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
@@ -387,6 +390,7 @@ public final class RPCRouter: Sendable {
         prManager: PRStatusManager = PRStatusManager(),
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
+        profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
@@ -430,10 +434,28 @@ public final class RPCRouter: Sendable {
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
+        // Default the candidate source from the router's own stores rather
+        // than leaving it nil: the rate-limit handler's suggestion reads it,
+        // and a caller that forgets to pass one would otherwise disable it
+        // silently (the AI review caught exactly that gap in the daemon's
+        // wiring). Callers that pass one — the
+        // daemon, so the resolver and the handler share it, and tests that
+        // inject fakes — still win.
+        let resolvedCandidateSource = profilePoolCandidateSource ?? ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { [configDirManager] in configDirManager.loginIdentity(forProfileID: $0) }
+        )
+        self.profilePoolCandidateSource = resolvedCandidateSource
         let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
-            config: db.config
+            config: db.config,
+            candidateSource: resolvedCandidateSource,
+            reservations: ProfilePickReservations(),
+            staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
@@ -734,6 +756,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.modelProfilePrepareConfigDir:
                 return try await handleModelProfilePrepareConfigDir(request.paramsData)
+            case RPCMethod.modelProfileSetPoolOptOut:
+                return try await handleModelProfileSetPoolOptOut(request.paramsData)
             case RPCMethod.appSetForegroundState:
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
@@ -837,6 +861,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRetainedTranscriptsEnabled(request.paramsData)
             case RPCMethod.configSetRemoteDeleteEnabled:
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
+            case RPCMethod.configSetProfileBalancingEnabled:
+                return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1000,6 +1026,9 @@ public final class RPCRouter: Sendable {
         result.modelProxySupported = proxy.supported
         result.modelProxyPort = proxy.port
         result.modelProxyVersion = proxy.version
+        // Assigned rather than passed, for the same budget reason as the
+        // model-proxy fields above: the load-balancing soak gate.
+        result.profileBalancingEnabled = config.profileBalancingEnabled
         return try RPCResponse(result: result)
     }
 

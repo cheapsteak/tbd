@@ -62,6 +62,11 @@ public enum StateDelta: Codable, Sendable {
     /// decode it and drops the line, like any unknown delta — the request is
     /// then simply not acted on.
     case remoteSessionReconnectRequested(RemoteSessionReconnectDelta)
+    /// A terminal hit a hard usage limit — session limit reached or similar
+    /// (design 2026-09-05 §7). Carries the terminal, the suggested profile,
+    /// and reset time so the app can show the limit banner and offer the
+    /// one-click switch.
+    case terminalLimitHit(TerminalLimitHitDelta)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
@@ -522,5 +527,37 @@ public struct RemoteSessionAttentionDelta: Codable, Sendable {
         self.provider = provider; self.sessionID = sessionID
         self.title = title; self.kind = kind; self.reason = reason
         self.exitCode = exitCode
+    }
+}
+
+/// A terminal hit a hard usage limit (session limit, weekly limit, etc.).
+/// Carries the terminal and worktree IDs, the session's pinned profile, the
+/// limit reset time, and the suggested profile so the app can show a banner
+/// and offer a one-click switch (design 2026-09-05 §7.1). The daemon never
+/// switches the session itself.
+public struct TerminalLimitHitDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    /// The profile the session is running on, when it is pinned. Nil for
+    /// ambient sessions.
+    public let profileID: UUID?
+    /// When the limit resets.
+    public let resetsAt: Date
+    /// The limit type: "session" or "weekly_all" or another label the
+    /// daemon's rate-limit detector names (used for the banner).
+    public let limitType: String
+    /// The profile the daemon would suggest switching to, or nil when no
+    /// profile is eligible. The app offers it as the banner's switch button.
+    public let suggestedProfileID: UUID?
+
+    public init(terminalID: UUID, worktreeID: UUID, profileID: UUID?,
+                resetsAt: Date, limitType: String,
+                suggestedProfileID: UUID? = nil) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.profileID = profileID
+        self.resetsAt = resetsAt
+        self.limitType = limitType
+        self.suggestedProfileID = suggestedProfileID
     }
 }

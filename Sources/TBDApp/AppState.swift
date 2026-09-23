@@ -37,6 +37,17 @@ struct TabCloseContext: Equatable {
     let tabID: UUID
 }
 
+/// In-memory limit-hit state for a terminal (app-local, not persisted).
+/// Built from a `TerminalLimitHitDelta` and used to render the limit banner
+/// in `TerminalPanelView`.
+struct TerminalLimitHit: Equatable {
+    let profileID: UUID?
+    let resetsAt: Date
+    let limitType: String
+    let suggestedProfileID: UUID?
+    let receivedAt: Date
+}
+
 /// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
 /// unique within one server, so it is always paired with `worktreeID` — the
 /// same keying as the daemon router and `SidecarInputHeader`.
@@ -211,6 +222,11 @@ final class AppState {
         return index
     }
     var terminals: [UUID: [Terminal]] = [:]
+    /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
+    /// ID to the limit hit information. Cleared when the terminal starts working,
+    /// changes profile, is removed, or the user dismisses. Used to render the
+    /// limit banner.
+    var limitHits: [UUID: TerminalLimitHit] = [:]
     /// Ordering watermark for transcript presentation snapshots whose value
     /// did not change. Kept outside `Terminal` so a two-second poll confirming
     /// the same state does not publish a different row solely because its
@@ -1859,6 +1875,14 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptStreamingEnabled(enabled: enabled)
         }
+    /// How `setProfileBalancingEnabled` persists the profile-balancing soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profileBalancingFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setProfileBalancing(enabled: enabled) }
+    /// How `setProfilePoolOptOut` persists a profile's pool opt-out —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] profileID, optOut in try await daemonClient.setProfilePoolOptOut(id: profileID, optOut: optOut) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
@@ -2750,6 +2774,14 @@ final class AppState {
             handleRemoteSessionAttentionDelta(d)
         case .remoteSessionReconnectRequested(let d):
             reconnectRemoteSession(RemoteSessionSelection(provider: d.provider, sessionID: d.sessionID))
+        case .terminalLimitHit(let d):
+            limitHits[d.terminalID] = TerminalLimitHit(
+                profileID: d.profileID,
+                resetsAt: d.resetsAt,
+                limitType: d.limitType,
+                suggestedProfileID: d.suggestedProfileID,
+                receivedAt: Date()
+            )
         default:
             break
         }
@@ -2975,6 +3007,11 @@ final class AppState {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
+        // Clear any limit hit when the terminal transitions to working
+        // (design 2026-09-05 §7.1)
+        if delta.activityState == .working {
+            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
+        }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
             // Claude and shell activity deltas remain raw last-arrival state;
             // provenance ordering is part of the Codex presentation fix only.
@@ -3057,6 +3094,8 @@ final class AppState {
             return
         }
         terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
+        // Clear any limit hit when the profile changes (design 2026-09-05 §7.1)
+        if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,

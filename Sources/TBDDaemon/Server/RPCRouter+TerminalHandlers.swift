@@ -342,7 +342,13 @@ extension RPCRouter {
                 if let overrideID = params.overrideProfileID {
                     resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
                 } else {
-                    resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                    // A resumed conversation belongs to the account holding its
+                    // transcript, which the history row does not record, so a
+                    // resume keeps the stable pre-balancing resolution.
+                    resolvedProfile = try await modelProfileResolver.resolve(
+                        repoID: worktree.repoID,
+                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
+                        worktreeID: params.worktreeID)
                 }
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
@@ -572,6 +578,9 @@ extension RPCRouter {
                 return (terminal, currentWorktree.tmuxServer)
             }
         }
+        // The row is in, so its live count now carries a balanced pick's
+        // load; hand the reservation back so it stops counting too.
+        await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
@@ -1283,7 +1292,11 @@ extension RPCRouter {
             }
             var resolvedProfile: ResolvedModelProfile? = nil
             do {
-                resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so a
+                // revive keeps the stable pre-balancing resolution.
+                resolvedProfile = try await modelProfileResolver.resolve(
+                    repoID: worktree.repoID, balance: false)
             } catch {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil

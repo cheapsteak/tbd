@@ -37,7 +37,11 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile?
         if let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo.id, override: nil)
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so it
+                // keeps the stable pre-balancing resolution.
+                resolvedProfile = try await resolver.resolve(
+                    repoID: repo.id, override: nil, balance: false)
             } catch {
                 logger.warning(
                     "fresh revive: model profile resolution failed; validating against the ambient projects root")

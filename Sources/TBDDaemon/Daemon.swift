@@ -831,10 +831,25 @@ public final class Daemon: Sendable {
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
+        let configDirManager = ClaudeProfileConfigDirManager()
+        let profilePoolCandidateSource = ProfilePoolCandidateSource(
+            profiles: database.modelProfiles,
+            snapshots: database.oauthUsageSnapshots,
+            terminals: database.terminals,
+            loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) }
+        )
+        // One reservation ledger for the whole daemon: the lifecycle and the
+        // router hold copies of this resolver, and a balanced pick is only
+        // atomic across spawns that share the same ledger. The stale-account
+        // latch is shared the same way, so it holds to once across spawns.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
-            config: database.config
+            config: database.config,
+            candidateSource: profilePoolCandidateSource,
+            reservations: ProfilePickReservations(),
+            staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
         let pendingQuestions = PendingQuestionStore()
 
@@ -1103,6 +1118,10 @@ public final class Daemon: Sendable {
             subscriptions: subs,
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
+            // The same candidate source the resolver balances on; the
+            // rate-limit handler reads it to suggest a profile with room.
+            // Without it the suggestion is silently unreachable.
+            profilePoolCandidateSource: profilePoolCandidateSource,
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,

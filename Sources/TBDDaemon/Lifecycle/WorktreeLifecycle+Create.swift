@@ -1397,7 +1397,16 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile? = nil
         if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo?.id, override: overrideProfileID)
+                // Restored or carried-over conversations belong to the account
+                // holding their transcripts, which nothing here records, so
+                // they keep the stable pre-balancing resolution. Fresh spawns
+                // balance.
+                resolvedProfile = try await resolver.resolve(
+                    repoID: repo?.id, override: overrideProfileID,
+                    balance: ModelProfileResolver.balancesWorktreeSpawn(
+                        restoringArchivedSessions: !archivedSessions.isEmpty,
+                        carryingOver: carryover != nil),
+                    worktreeID: worktreeID)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
@@ -1652,6 +1661,11 @@ extension WorktreeLifecycle {
             transport: transport,
             attachment: primaryAttachment,
             modelProxySupervisor: modelProxySupervisor)
+        // The primary row is in, so its live count now carries a balanced
+        // pick's load; hand the reservation back so it stops counting too.
+        // Archived-session restores below reuse the same resolution; the
+        // first row settles it once.
+        await modelProfileResolver?.settleReservation(resolvedProfile?.reservationID)
         // Recapture reads a tmux pane's screen, so it has nothing to read on a
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.

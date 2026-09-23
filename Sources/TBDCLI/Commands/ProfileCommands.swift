@@ -15,6 +15,8 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileList.self,
             ProfileSetDefault.self,
             ProfileLogin.self,
+            ProfileBalancing.self,
+            ProfilePool.self,
         ]
     )
 }
@@ -142,8 +144,35 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
 func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
     jsonString(VersionedJSONEnvelope(
         schemaVersion: profileListSchemaVersion,
-        payload: result
+        payload: ProfileListJSONPayload(result: result)
     ))
+}
+
+/// The `tbd profile list --json` payload: the RPC result's own fields, plus the
+/// top-level `balancing` object the capacity contract documents
+/// (`docs/capacity-facts.md`, design 2026-09-05 §8.4). Added by the same
+/// shared-container technique `VersionedJSONEnvelope` uses, so every field the
+/// RPC result grows still flows through untouched.
+struct ProfileListJSONPayload: JSONObjectPayload {
+    let result: ModelProfileListResult
+
+    private struct Balancing: Encodable {
+        let enabled: Bool
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case balancing
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try result.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        // A daemon that sends no flag predates balancing, so nothing on it
+        // balances: `false`, not the shipped default a newer daemon resolves.
+        try container.encode(
+            Balancing(enabled: result.profileBalancingEnabled ?? false),
+            forKey: .balancing)
+    }
 }
 
 /// Whether a failed usage-refresh may be tolerated, and if so the one-line
@@ -362,7 +391,7 @@ struct ProfileList: AsyncParsableCommand {
 
         var header: [(String, Int)] = [
             ("NAME", 24), ("KIND", 6), ("IDENTITY", 26),
-            ("5H", 4), ("RESET", 10), ("WK", 4),
+            ("LIVE", 4), ("5H", 4), ("RESET", 10), ("WK", 4),
         ]
         header.append(contentsOf: scopedModels.map { ("WK \($0.uppercased())", max($0.count + 3, 8)) })
         header.append(("", 0))
@@ -385,6 +414,7 @@ struct ProfileList: AsyncParsableCommand {
                 (entry.profile.name, 24),
                 (entry.profile.kind.rawValue, 6),
                 (identity, 26),
+                (String(entry.liveSessions ?? 0), 4),
                 (usagePercentCell(session), 4),
                 (usageResetCell(session?.resetsAt), 10),
                 (usagePercentCell(weeklyAll), 4),
@@ -520,5 +550,66 @@ struct ProfileLogin: AsyncParsableCommand {
             arguments: [],
             environment: env
         )
+    }
+}
+
+// MARK: - profile balancing
+
+struct ProfileBalancing: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "balancing",
+        abstract: "Enable or disable spreading new sessions across profiles (default off)",
+        discussion: """
+            When on, new sessions land on the eligible profile with the most \
+            room in its usage window, adjusted for how many sessions that \
+            account already carries.
+            """
+    )
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetProfileBalancingEnabled,
+            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
+        print("Profile balancing \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+// MARK: - profile pool
+
+struct ProfilePool: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pool",
+        abstract: "Include or exclude a profile from automatic balancing",
+        discussion: """
+            By default, all eligible profiles are in the balancing pool. Pass \
+            'exclude' to keep a profile out of automatic balancing — it stays \
+            reachable through explicit picks and overrides.
+            """
+    )
+    @Argument(help: "Profile name or UUID") var name: String
+    @Argument(help: "include | exclude") var action: String
+    mutating func run() async throws {
+        let optOut: Bool
+        switch action.lowercased() {
+        case "include": optOut = false
+        case "exclude": optOut = true
+        default: throw ValidationError("Expected 'include' or 'exclude', got: \(action)")
+        }
+        let client = SocketClient()
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self
+        )
+        let entry = try resolveProfile(named: name, in: list.profiles)
+        try client.callVoid(
+            method: RPCMethod.modelProfileSetPoolOptOut,
+            params: ModelProfileSetPoolOptOutParams(id: entry.profile.id, optOut: optOut))
+        print("Profile '\(entry.profile.name)' is now \(optOut ? "excluded" : "included") in the balancing pool.")
     }
 }

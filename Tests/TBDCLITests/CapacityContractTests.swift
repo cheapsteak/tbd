@@ -126,6 +126,23 @@ struct CapacityContractTests {
         #expect(profiles[0]["loginIdentity"] as? String == "operator@example.com")
     }
 
+    @Test func profileListJSON_carriesTheBalancingObject() throws {
+        let on = try composedProfileListJSON(ModelProfileListResult(
+            profiles: [], profileBalancingEnabled: true))
+        let onBalancing = try #require(on["balancing"] as? [String: Any])
+        #expect(onBalancing["enabled"] as? Bool == true)
+        #expect(onBalancing.count == 1)
+
+        let off = try composedProfileListJSON(ModelProfileListResult(
+            profiles: [], profileBalancingEnabled: false))
+        #expect((off["balancing"] as? [String: Any])?["enabled"] as? Bool == false)
+
+        // An older daemon sends no flag; it cannot balance, so `false`.
+        let absent = try composedProfileListJSON(ModelProfileListResult(profiles: []))
+        #expect((absent["balancing"] as? [String: Any])?["enabled"] as? Bool == false)
+        #expect(absent["schemaVersion"] as? Int == 1)
+    }
+
     @Test func profileListJSON_carriesUnknownPayloadFieldsThrough() throws {
         // Fields the capacity contract does not interpret still ship inside the
         // same versioned object — the envelope mirrors nothing by hand, so a
