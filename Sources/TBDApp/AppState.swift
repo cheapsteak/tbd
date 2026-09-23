@@ -446,16 +446,6 @@ final class AppState {
             }
         }
     }
-    /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
-    /// set when a sidebar context-menu action (e.g. "View Log") jumps
-    /// straight to a specific tab instead of the default. Consumed (read AND
-    /// cleared) by the detail view on appear/selection-change — mirrors the
-    /// reveal-nonce discipline documented for `RepoDetailView`'s persistent
-    /// `@State`: a reveal must be a one-shot consumed by the acting child,
-    /// checked in BOTH onAppear and onChange, or a stale hint replays on an
-    /// unrelated later selection. `selectRemoteSession(provider:sessionID:tab:)`
-    /// sets this alongside `selectedRemoteSession`; nil means "default tab".
-    var remoteSessionRequestedTab: RemoteSessionDetailTab?
 
     // MARK: - Navigation history (back/forward)
 

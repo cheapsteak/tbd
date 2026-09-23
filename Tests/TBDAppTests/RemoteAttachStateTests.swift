@@ -203,18 +203,18 @@ struct RemoteAttachStateTests {
         }
     }
 
-    /// The context menu's "Attach" item (`tab: .attach`) is an explicit
+    /// The context menu's "Attach" item (`reattach: true`) is an explicit
     /// re-attach request even when the row is ALREADY the current
     /// selection — this is the path that keeps "Keep the Attach
     /// context-menu item ... it's how you re-attach after detaching" true.
-    @Test func explicitAttachTabRequestReattachesEvenWithoutATransition() {
+    @Test func explicitAttachRequestReattachesEvenWithoutATransition() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             state.selectRemoteSession(provider: "acme", sessionID: "s1")
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1", tab: .attach)
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }

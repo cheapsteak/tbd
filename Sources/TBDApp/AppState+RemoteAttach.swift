@@ -34,11 +34,11 @@ extension AppState {
     ///   particular is ordinary transport flake. Blocking on them would turn
     ///   one bad poll into "you can't open your sessions".
     ///
-    /// Reuses `RemoteSessionDetailGates.available` — the
-    /// exact same gate that decides whether the Attach TAB even renders — so
-    /// a provider without the capability, or a gone session, can never end up
-    /// attach-eligible here while simultaneously having no Attach tab to
-    /// show it in (the two must never disagree). The `dismissed` exclusion is
+    /// Reuses `RemoteSessionDetailGates.canAttach` — the
+    /// exact same gate that decides whether the detail pane shows the attach
+    /// terminal at all — so a provider without the capability, or a gone
+    /// session, can never end up attach-eligible here while simultaneously
+    /// having no attach pane to show it in (the two must never disagree). The `dismissed` exclusion is
     /// separate: it mirrors `usableEntryIndex`'s navigation-staleness
     /// predicate (`AppState+Navigation.swift`), which excludes `dismissed`
     /// but keeps `gone`. Currently unreachable in practice — Dismiss is only
@@ -51,7 +51,7 @@ extension AppState {
             let provider = remoteProviders.first { $0.config.name == session.provider }
             guard provider?.health != .needsAuth else { return nil }
             let capabilities = provider?.describe?.capabilities ?? []
-            guard RemoteSessionDetailGates.available(capabilities: capabilities, gone: session.gone).contains(.attach) else {
+            guard RemoteSessionDetailGates.canAttach(capabilities: capabilities, gone: session.gone) else {
                 return nil
             }
             return RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)

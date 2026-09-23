@@ -17,6 +17,10 @@ struct ContentView: View {
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.
     @Environment(\.colorScheme) private var colorScheme
+    /// The remote session whose toolbar Stop is awaiting confirmation. Holds
+    /// the selection itself, not a Bool, so the dialog stops the session it
+    /// was raised for even if the selection has moved on.
+    @State private var remoteStopConfirm: RemoteSessionSelection?
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -32,6 +36,14 @@ struct ContentView: View {
                 worktree: worktree,
                 repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
             )
+        } else if let selection = appState.selectedRemoteSession {
+            // A Remote-section row selects no worktree; name the session the
+            // way `WorktreeTitleView` names a local one. (An adopted lane's
+            // row IS a worktree selection and takes the branch above.)
+            Text(appState.remoteSessionDisplayName(for: selection))
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
@@ -273,6 +285,42 @@ struct ContentView: View {
                     }
                 }
 
+                // A selected remote session's actions, where a local
+                // session's live: plain buttons (no badges to flatten) on
+                // one fused capsule, like back/forward.
+                if let selection = appState.selectedRemoteSession {
+                    let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+                    let showsStop = appState.remoteSessionShowsStop(selection)
+                    if showsReconnect || showsStop {
+                        ToolbarItemGroup(placement: .primaryAction) {
+                            if showsReconnect {
+                                // Restarts the local `attach` child in place —
+                                // the way out of a pane whose transport died
+                                // without the child exiting, which nothing
+                                // else can detect.
+                                Button {
+                                    appState.reconnectRemoteSession(selection)
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .help("Reconnect — restart this session's attach connection")
+                            }
+                            if showsStop {
+                                Button {
+                                    remoteStopConfirm = selection
+                                } label: {
+                                    Image(systemName: "stop.circle")
+                                }
+                                .help("Stop this remote session")
+                            }
+                        }
+
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
+                    }
+                }
+
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         // Defer the toggle one run-loop tick and skip the explicit
@@ -294,6 +342,22 @@ struct ContentView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .overlay(alignment: .bottomTrailing) { ToastOverlay() }
+        .confirmationDialog(
+            "Stop \(remoteStopConfirm.map { appState.remoteSessionDisplayName(for: $0) } ?? "session")?",
+            isPresented: Binding(
+                get: { remoteStopConfirm != nil },
+                set: { if !$0 { remoteStopConfirm = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: remoteStopConfirm
+        ) { selection in
+            Button("Stop", role: .destructive) {
+                Task { await appState.stopRemoteSession(selection) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This asks the provider to terminate the remote session.")
+        }
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             overlayCoordinator.close()
             markSelectedWorktreesAsRead(newSelection)

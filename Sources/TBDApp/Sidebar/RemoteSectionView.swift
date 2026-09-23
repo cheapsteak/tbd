@@ -740,15 +740,13 @@ struct RemoteSessionRowView: View {
         case .rename:
             isEditing = true
         case .attach:
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .attach)
+            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, reattach: true)
         case .reconnect:
             appState.reconnectRemoteSession(
                 RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
-        case .viewLog:
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .log)
         case .sendText:
-            // No dedicated tab for Send — the send field renders below
-            // whichever tab is active, so this just selects the session.
+            // Input goes straight into the attached terminal, so this just
+            // selects the session and lets its pane take focus.
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         case .copySessionID:
             NSPasteboard.general.clearContents()

@@ -22,7 +22,6 @@ enum RemoteSessionActionMenu {
         /// (`AppState.reconnectRemoteSession`). Offered only while a pane is
         /// attached — there is nothing to restart otherwise.
         case reconnect
-        case viewLog
         case sendText
         case copySessionID
         case stop
@@ -73,7 +72,6 @@ enum RemoteSessionActionMenu {
     static let renameLabel = "Rename…"
     static let attachLabel = "Attach"
     static let reconnectLabel = "Reconnect"
-    static let viewLogLabel = "View Log"
     static let sendTextLabel = "Send Text…"
     static let copySessionIDLabel = "Copy Session ID"
     static let stopLabel = "Stop"
@@ -97,7 +95,6 @@ enum RemoteSessionActionMenu {
     /// optional verb — kept as named constants (not re-typed at each call
     /// site) so a typo can't silently make a capability gate always false.
     private static let attachCapability = "attach"
-    private static let logCapability = "log"
     private static let sendCapability = "send"
     private static let deleteCapability = "delete"
 
@@ -112,7 +109,7 @@ enum RemoteSessionActionMenu {
     /// reports, and renaming/stopping a row that's already a caller-side
     /// tombstone isn't meaningful.
     ///
-    /// For a live row: Rename…, then Attach/View Log/Send Text… gated on
+    /// For a live row: Rename…, then Attach/Send Text… gated on
     /// their respective capabilities — with Reconnect right after Attach
     /// when `isAttached` (this app currently holds a live attach pane for the
     /// session), then Copy Session ID (always
@@ -181,9 +178,6 @@ enum RemoteSessionActionMenu {
                 actions.append(Action(kind: .reconnect, title: reconnectLabel))
             }
         }
-        if capabilities.contains(logCapability) {
-            actions.append(Action(kind: .viewLog, title: viewLogLabel))
-        }
         if snapshotFresh, capabilities.contains(sendCapability) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
@@ -209,7 +203,7 @@ enum RemoteSessionActionMenu {
     ///
     /// **This one action is present-but-disabled when its capability is
     /// absent, and that departure from this menu's omit-when-absent convention
-    /// is deliberate.** Attach, View Log and Send Text vanish when undeclared,
+    /// is deliberate.** Attach and Send Text vanish when undeclared,
     /// because a user who cannot attach has nothing to learn from a grey
     /// "Attach" — the session simply works differently there. Delete is not
     /// like that: a fleet with no reclaim path is the problem this whole design
