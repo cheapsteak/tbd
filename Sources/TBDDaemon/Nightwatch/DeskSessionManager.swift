@@ -1250,6 +1250,13 @@ public actor DeskSessionManager: DeskSessionManaging {
             // Archive the worktree (preserve the folder on disk)
             try await db.worktrees.archive(id: wt.id)
 
+            // The desk this budget was counting against no longer exists; the
+            // next one starts its own incident. Reset only once the archive has
+            // landed: a close that threw partway leaves the row active, the next
+            // ensure finds that same desk, and a reset here would hand a still-
+            // running incident a fresh budget.
+            resetRecoveryBudget()
+
             // Mirror handleScratchArchive: tell connected clients immediately.
             subscriptions?.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
 
@@ -1259,9 +1266,6 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         deskWorktreeID = nil
-        // The desk this budget was counting against no longer exists; the next
-        // one starts its own incident.
-        resetRecoveryBudget()
     }
 
     public func releaseJudgeLease(worktreeID: UUID) async {

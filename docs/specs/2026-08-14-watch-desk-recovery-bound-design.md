@@ -62,10 +62,12 @@ worst case. The first spawn is not counted because it is the desk's normal start
 recovery; the bound is on recoveries.
 
 **Reset belongs to the incident, not the spawn.** The count is cleared by a nudge that
-actually reached a pane, by a desk built from scratch, and by a desk closed. It is
-specifically *not* cleared by the spawn itself: the spawn is what the count counts, and
-clearing there makes the counter unreachable — it increments to one and is reset to zero
-before the next increment, forever. A reset at spawn time also encodes the wrong claim,
+actually reached a pane, by a desk built from scratch, and by a desk closed once its
+archive has landed. A close that fails partway leaves the same desk active, and the
+incident with it, so it clears nothing. The count is specifically *not* cleared by the
+spawn itself: the spawn is what the count counts, and clearing there makes the counter
+unreachable — it increments to one and is reset to zero before the next increment,
+forever. A reset at spawn time also encodes the wrong claim,
 that a launch which never came up was a success.
 
 **Exhaustion notifies.** Reaching the cap raises an error notification naming what
@@ -90,7 +92,7 @@ forty-five minutes at the desk's tick, and at most three replacements after the 
 first spawn (so at most four sessions in the worst case) before the rail stops and says so.
 
 **Who chose it.** The repository owner confirmed the cap of three on 2026-09-23,
-with the reasoning above and the rejected alternatives below in front of him.
+with the reasoning above and the rejected alternatives below in front of them.
 
 ## Rejected alternatives
 

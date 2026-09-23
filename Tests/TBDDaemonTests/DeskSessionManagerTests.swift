@@ -2039,6 +2039,47 @@ extension TBDHomeSerialized {
             }
         }
 
+        /// A close resets the budget only because the desk it was counting against
+        /// is gone. A close whose archive write throws leaves that desk active,
+        /// the next `ensure` finds the very same desk by name, and the incident is
+        /// still running — so it must not come back with a fresh budget of three.
+        ///
+        /// The archive is made to fail the way an unwritable database would, with
+        /// a trigger that aborts the status update, then the trigger is removed so
+        /// the next `ensure` sees a healthy database.
+        @Test("a close whose archive fails does not hand the same desk a fresh budget")
+        func testFailedCloseKeepsRecoveryBudgetSpent() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget-failed-close")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            for _ in 1...3 { _ = try await killAllAndTick(f, desk: desk.id) }
+            let capped = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                capped == (try await f.db.terminals.list(worktreeID: desk.id).count),
+                "the desk must be at its cap for this test to mean anything")
+
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: """
+                    CREATE TRIGGER fail_desk_archive BEFORE UPDATE OF status ON worktree
+                    BEGIN SELECT RAISE(ABORT, 'archive refused by test'); END
+                    """)
+            }
+            await f.manager.closeDeskSession()
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: "DROP TRIGGER fail_desk_archive")
+            }
+            #expect(
+                try await f.db.worktrees.getLocal(id: desk.id)?.status == .active,
+                "fixture check: the failed close must have left the desk active")
+
+            let again = try await f.manager.ensureDeskSession(mode: .daywatch)
+            #expect(again.id == desk.id, "fixture check: ensure must find the same desk")
+            #expect(
+                try await f.db.terminals.list(worktreeID: desk.id).isEmpty,
+                "a close that never archived the desk must not reset its spent budget")
+        }
+
         /// The desk asks tmux three read-only questions, and until now only one of
         /// them could say "I could not look". `windowExists` answered a plain
         /// `Bool` and swallowed every error into `false`, so a wedged or
