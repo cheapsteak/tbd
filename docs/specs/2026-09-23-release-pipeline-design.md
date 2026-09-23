@@ -262,9 +262,11 @@ through `update.sh` removes that link first, so SwiftPM recreates its own.
   symlinks), and `refresh_installed_cli`'s hard link all work unchanged.
   `refresh_installed_cli` works because `~/tbd` and `~/.local` share a volume.
 
-If SwiftPM turns out to mishandle a foreign `.build/release` symlink, the
-fallback is a compiled candidate for the prebuilt tree in
-`DaemonCandidateFinder` (decision 8).
+SwiftPM tolerates this. A throwaway package on Swift 6.3.2 had its
+`.build/release` pre-pointed at an unrelated directory, and SwiftPM replaced
+that link with its own on both a cold build and a warm incremental one. It
+wrote nothing into the foreign directory, and the incremental build only
+relinked.
 
 ### 4.5 What the daemon compares against
 
@@ -374,9 +376,7 @@ would not have been retried until the next push.
   - the source precedence and the check-ref file.
 - `UpdateCheckRefTests` covers the check ref: no file compares against `main`,
   a release file against the tag, and malformed contents fall back to `main`.
-- Before the default flips, three checks remain:
-  - SwiftPM on the pinned toolchain re-points a foreign `.build/release`
-    symlink on a local build, and that build is incremental (decision 8);
+- Before the default flips, two checks remain:
   - a first `release.yml` run on `main` passes its smoke test;
   - after a reboot, the app respawns the downloaded daemon.
 
@@ -409,7 +409,6 @@ The repository owner decided each of these on 2026-09-23.
 7. **What the check compares against.** The `main-builds` tag while the update
    source is `release`, and `main` otherwise (section 4.5).
 8. **Where a download lives.** `~/tbd/updates/prebuilt/<commit>/`, with the
-   clone's `.build/release` symlink pointed at it. If SwiftPM mishandles that
-   symlink, a compiled `DaemonCandidateFinder` candidate replaces it. Either
-   way the update clone stays at the installed commit, so the build identity
+   clone's `.build/release` symlink pointed at it (section 4.4 records the
+   SwiftPM check this rests on). The update clone stays at the installed commit, so the build identity
    names a real local checkout.
