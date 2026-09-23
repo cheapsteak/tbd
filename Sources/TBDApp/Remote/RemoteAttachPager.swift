@@ -104,9 +104,10 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
             onViewDismantled: { [weak appState] view in
                 appState?.unregisterRemoteTerminalView(view, for: selection)
             },
-            // The spawn-time claim takes the selection path's gate: a session
-            // opened straight to its Log tab still mounts and spawns this
-            // pane, transparent, and must not take focus into it.
+            // The spawn-time claim takes the selection path's gate: a pane
+            // can mount and spawn while its detail view keeps it transparent
+            // (the log fallback, a sign-in prompt), and must not take focus
+            // into it.
             onClaimFocus: { [weak appState] in
                 appState?.focusRemoteTerminalAfterSelectionChange(selection)
             }

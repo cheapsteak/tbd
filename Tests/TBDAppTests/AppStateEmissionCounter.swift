@@ -100,7 +100,6 @@ final class AppStateEmissionTracker {
         _ = state.selectedScratchSection
         _ = state.selectedRemoteProvider
         _ = state.selectedRemoteSession
-        _ = state.remoteSessionRequestedTab
         _ = state.canGoBack
         _ = state.canGoForward
         _ = state.archivedWorktrees
@@ -218,7 +217,6 @@ final class AppStateEmissionTracker {
         "selectedScratchSection",
         "selectedRemoteProvider",
         "selectedRemoteSession",
-        "remoteSessionRequestedTab",
         "canGoBack",
         "canGoForward",
         "archivedWorktrees",

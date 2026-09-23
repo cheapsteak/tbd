@@ -262,13 +262,8 @@ extension AppState {
             // state directly. Plus the same `leavingRepoID` revive-snapshot
             // cleanup those two cases do — `activateRemoteSession` alone
             // doesn't do this (a plain click never reaches this path).
-            // Deliberately resets to the DEFAULT tab (does not restore
-            // whichever tab — Attach/Log — was showing when this entry was
-            // recorded): worktree entries don't carry per-tab/pane state
-            // either, so this keeps remote sessions consistent with that
-            // precedent rather than inventing tab-level history.
             if let leavingRepoID { clearRevivingArchived(repoID: leavingRepoID) }
-            activateRemoteSession(selection, tab: nil)
+            activateRemoteSession(selection, reattach: false)
         }
     }
 
@@ -297,14 +292,13 @@ extension AppState {
     /// selection does (unlike scratch spaces, which keep the documented
     /// scope cut).
     ///
-    /// - Parameter tab: an optional one-shot hint for which tab the detail
-    ///   view should land on (set by a context-menu action like "View Log"
-    ///   or "Attach" that jumps straight to a tab). `nil` (the default, used
-    ///   by a plain row click) means "default tab" — always overwrites any
-    ///   stale leftover hint from a previous selection.
-    func selectRemoteSession(provider: String, sessionID: String, tab: RemoteSessionDetailTab? = nil) {
+    /// - Parameter reattach: an explicit re-attach request (the context
+    ///   menu's "Attach" item). `false` (the default, used by a plain row
+    ///   click) leaves an already-current session's detach state alone —
+    ///   see `showRemoteSessionSurface`.
+    func selectRemoteSession(provider: String, sessionID: String, reattach: Bool = false) {
         let selection = RemoteSessionSelection(provider: provider, sessionID: sessionID)
-        activateRemoteSession(selection, tab: tab)
+        activateRemoteSession(selection, reattach: reattach)
         recordNavigation(.remoteSession(selection))
     }
 
@@ -316,7 +310,6 @@ extension AppState {
         selectedRepoID = nil
         selectedScratchSection = false
         selectedRemoteSession = nil
-        remoteSessionRequestedTab = nil
         selectedRemoteProvider = provider
     }
 
@@ -329,8 +322,8 @@ extension AppState {
     /// call sites stay symmetric with how `.worktrees`/`.repo` apply state
     /// directly rather than through their own "select" functions).
     ///
-    /// Clears the other three mutually-exclusive selections, sets the tab
-    /// hint, clears this session's unread entry, and feeds the
+    /// Clears the other three mutually-exclusive selections, clears this
+    /// session's unread entry, and feeds the
     /// attach-lifecycle recency log (`touchAttachedRemoteSession`) — a click
     /// AND a back/forward landing both count as "viewed" for keep-alive
     /// purposes, matching how a worktree click OR a back/forward landing on
@@ -340,20 +333,20 @@ extension AppState {
     /// (`explicitlyDetachedRemoteSessions`) is cleared — allowing it to
     /// auto-attach again — only when this call is a genuine NEW transition
     /// (the previously selected session, if any, differs from `selection`)
-    /// or an explicit re-attach request (`tab == .attach`, the context
+    /// or an explicit re-attach request (`reattach`, the context
     /// menu's "Attach" item). A REDUNDANT reselection of the session that's
-    /// ALREADY current, with no `.attach` tab request, changes nothing —
+    /// ALREADY current, with no re-attach request, changes nothing —
     /// this is the rule that keeps a detach from looping: the pty exiting
     /// while its row stays the current selection must never by itself cause
     /// a respawn, since nothing re-invokes this function merely because the
     /// selection didn't change.
-    private func activateRemoteSession(_ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?) {
+    private func activateRemoteSession(_ selection: RemoteSessionSelection, reattach: Bool) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = false
         selectedRemoteProvider = nil
-        showRemoteSessionSurface(selection, tab: tab)
+        showRemoteSessionSurface(selection, reattach: reattach)
     }
 
     /// Put `selection` on the remote-session surface, WITHOUT touching the
@@ -368,18 +361,17 @@ extension AppState {
     /// half directly (`syncRemoteSurfaceToWorktreeSelection`).
     ///
     /// Everything below the selections is identical for both, and that is the
-    /// point: the tab hint, the unread clear, the keep-alive recency touch and
+    /// point: the unread clear, the keep-alive recency touch and
     /// the detach-flag rule are what make the surface work, so a lane row that
     /// skipped them would reach the same view in a different state.
     func showRemoteSessionSurface(
-        _ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?
+        _ selection: RemoteSessionSelection, reattach: Bool
     ) {
         let isTransition = selectedRemoteSession != selection
         selectedRemoteSession = selection
-        remoteSessionRequestedTab = tab
         unreadByRemoteSession[selection] = nil
         touchAttachedRemoteSession(selection)
-        if isTransition || tab == .attach {
+        if isTransition || reattach {
             clearRemoteSessionDetachedFlag(selection)
         }
         focusRemoteTerminalAfterSelectionChange(selection)
@@ -411,7 +403,7 @@ extension AppState {
             selectedRemoteSession = nil
             return
         }
-        showRemoteSessionSurface(selection, tab: nil)
+        showRemoteSessionSurface(selection, reattach: false)
     }
 
     /// The provider session a worktree selection stands for, or nil when it

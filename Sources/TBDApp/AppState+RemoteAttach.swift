@@ -14,8 +14,11 @@ private let remoteAttachLogger = Logger(subsystem: "com.tbd.app", category: "rem
 /// type-scoped) — this file only computes read-only inputs/outputs.
 extension AppState {
     /// Sessions eligible for auto-attach right now: present in the daemon's
-    /// mirror, not `gone`, not `dismissed`, whose provider declares the
-    /// `attach` capability, and whose provider is not `.needsAuth`.
+    /// mirror, not `gone`, not exited, not `dismissed`, whose provider
+    /// declares the `attach` capability, and whose provider is not
+    /// `.needsAuth`. A session that exits while attached leaves this set, so
+    /// the pager tears its child down (exit callback suppressed) and no
+    /// reconnect path re-attaches it.
     ///
     /// The health check covers `.needsAuth` and NOTHING else, and the
     /// asymmetry is deliberate:
@@ -34,11 +37,11 @@ extension AppState {
     ///   particular is ordinary transport flake. Blocking on them would turn
     ///   one bad poll into "you can't open your sessions".
     ///
-    /// Reuses `RemoteSessionDetailGates.available` — the
-    /// exact same gate that decides whether the Attach TAB even renders — so
-    /// a provider without the capability, or a gone session, can never end up
-    /// attach-eligible here while simultaneously having no Attach tab to
-    /// show it in (the two must never disagree). The `dismissed` exclusion is
+    /// Reuses `RemoteSessionDetailGates.canAttach` — the
+    /// exact same gate that decides whether the detail pane shows the attach
+    /// terminal at all — so a provider without the capability, or a gone or
+    /// exited session, can never end up attach-eligible here while simultaneously
+    /// having no attach pane to show it in (the two must never disagree). The `dismissed` exclusion is
     /// separate: it mirrors `usableEntryIndex`'s navigation-staleness
     /// predicate (`AppState+Navigation.swift`), which excludes `dismissed`
     /// but keeps `gone`. Currently unreachable in practice — Dismiss is only
@@ -51,11 +54,29 @@ extension AppState {
             let provider = remoteProviders.first { $0.config.name == session.provider }
             guard provider?.health != .needsAuth else { return nil }
             let capabilities = provider?.describe?.capabilities ?? []
-            guard RemoteSessionDetailGates.available(capabilities: capabilities, gone: session.gone).contains(.attach) else {
+            guard RemoteSessionDetailGates.canAttach(
+                capabilities: capabilities, gone: session.gone, exited: session.payload.state == .exited)
+            else {
                 return nil
             }
             return RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)
         })
+    }
+
+    /// Whether selecting `selection` would show a live attached terminal in
+    /// its pane: the same predicate `RemoteAttachLifecycle` applies to the
+    /// selected session (eligible, not explicitly detached, not blocked on
+    /// reconnect backoff). The sidebar context menu uses it to offer Send
+    /// Text… exactly where the pane will carry a send footer.
+    func remoteSessionAttachesWhenSelected(_ selection: RemoteSessionSelection, now: Date = Date()) -> Bool {
+        RemoteAttachLifecycle.attachedSelections(
+            selected: selection,
+            recentlyViewed: [],
+            eligible: attachEligibleRemoteSelections,
+            explicitlyDetached: Set(explicitlyDetachedRemoteSessions.keys),
+            pendingReconnect: pendingReconnectBlockedSelections(now: now),
+            cap: 0
+        ).contains(selection)
     }
 
     /// Whether the app's OWN bookkeeping already says `selection`'s last

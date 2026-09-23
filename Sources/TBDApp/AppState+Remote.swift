@@ -643,3 +643,42 @@ extension AppState {
         "Only sessions started from TBD on this Mac appear here — one begun on claude.ai, in the "
         + "mobile app, or from a terminal TBD did not spawn is not listed."
 }
+
+// MARK: - Toolbar actions for the selected remote session
+
+extension AppState {
+    /// The name the window toolbar shows for a selected remote session — the
+    /// same resolution the sidebar row uses (local rename, else provider
+    /// title, else session id).
+    func remoteSessionDisplayName(for selection: RemoteSessionSelection) -> String {
+        let title = remoteSessions.first {
+            $0.provider == selection.provider && $0.payload.id == selection.sessionID
+        }?.payload.title
+        return remoteSessionDisplayName(
+            provider: selection.provider, sessionID: selection.sessionID, providerTitle: title)
+    }
+
+    /// Whether the toolbar offers Stop for `selection` — see
+    /// `RemoteSessionDetailGates.showsStop`.
+    func remoteSessionShowsStop(_ selection: RemoteSessionSelection) -> Bool {
+        let session = remoteSessions.first {
+            $0.provider == selection.provider && $0.payload.id == selection.sessionID
+        }
+        let provider = remoteProviders.first { $0.config.name == selection.provider }
+        return RemoteSessionDetailGates.showsStop(
+            sessionExists: session != nil,
+            gone: session?.gone ?? false,
+            snapshotFresh: provider?.hasStaleSnapshot != true)
+    }
+
+    /// Ask the provider to terminate the session. Failures are logged; the
+    /// next `list` poll is what reports the session's actual fate.
+    func stopRemoteSession(_ selection: RemoteSessionSelection) async {
+        do {
+            try await daemonClient.remoteStop(provider: selection.provider, sessionID: selection.sessionID)
+        } catch {
+            remoteLogger.error(
+                "remoteStop failed for \(selection.provider, privacy: .public)/\(selection.sessionID, privacy: .public): \(error, privacy: .public)")
+        }
+    }
+}

@@ -58,10 +58,13 @@ struct RemoteAttachStateTests {
         ]
     }
 
-    private func seedSession(_ state: AppState, provider: String, id: String, gone: Bool = false, dismissed: Bool = false) {
+    private func seedSession(
+        _ state: AppState, provider: String, id: String, gone: Bool = false, dismissed: Bool = false,
+        processState: RemoteProcessState = .running
+    ) {
         state.remoteSessions.append(RemoteSessionInfo(
             provider: provider,
-            payload: RemoteSessionPayload(id: id, state: .running),
+            payload: RemoteSessionPayload(id: id, state: processState),
             gone: gone, dismissed: dismissed, lastSeen: Date()
         ))
     }
@@ -203,18 +206,18 @@ struct RemoteAttachStateTests {
         }
     }
 
-    /// The context menu's "Attach" item (`tab: .attach`) is an explicit
+    /// The context menu's "Attach" item (`reattach: true`) is an explicit
     /// re-attach request even when the row is ALREADY the current
     /// selection — this is the path that keeps "Keep the Attach
     /// context-menu item ... it's how you re-attach after detaching" true.
-    @Test func explicitAttachTabRequestReattachesEvenWithoutATransition() {
+    @Test func explicitAttachRequestReattachesEvenWithoutATransition() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             state.selectRemoteSession(provider: "acme", sessionID: "s1")
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1", tab: .attach)
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
@@ -459,6 +462,67 @@ struct RemoteAttachStateTests {
             state.reattachRemoteSession(sel("acme", "s1"))
 
             #expect(!state.remoteSessionHasLocalAuthExit(sel("acme", "s1")))
+        }
+    }
+
+    // MARK: - Exited sessions are never attached
+
+    @Test func selectingAnExitedSessionNeverAttaches() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1", processState: .exited)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// A session that exits while attached drops out of the attached set,
+    /// and its viewer's own exit afterwards does not bring it back through
+    /// the reconnect path once provider health is ok.
+    @Test func aSessionThatExitsWhileAttachedIsDetachedAndNotReattached() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            state.remoteSessions = []
+            seedSession(state, provider: "acme", id: "s1", processState: .exited)
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
+            seedProvider(state, name: "acme", health: .ok)
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachedRemoteSelections(now: Date().addingTimeInterval(3600))
+                .contains(sel("acme", "s1")))
+        }
+    }
+
+    // MARK: - remoteSessionAttachesWhenSelected
+
+    @Test func attachesWhenSelectedForAnEligibleRunningSession() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            #expect(state.remoteSessionAttachesWhenSelected(sel("acme", "s1")))
+        }
+    }
+
+    @Test func doesNotAttachWhenSelectedOnceDetachedExitedOrUnauthenticated() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "detached")
+            seedSession(state, provider: "acme", id: "exited", processState: .exited)
+            state.markRemoteSessionDetached(sel("acme", "detached"), exitCode: 0)
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("acme", "detached")))
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("acme", "exited")))
+
+            seedProvider(state, name: "other", health: .needsAuth)
+            seedSession(state, provider: "other", id: "s1")
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("other", "s1")))
         }
     }
 

@@ -84,7 +84,6 @@ struct RemoteProviderDeskView: View {
             if let presentation = RemoteProviderAuthPresentation.make(from: provider) {
                 RemoteProviderAuthCTAView(
                     presentation: presentation,
-                    showsSessionReassurance: false,
                     onRun: { runningRemediation = RemoteRemediationRun(presentation) }
                 )
                 .padding(16)

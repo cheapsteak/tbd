@@ -1,120 +1,124 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDShared
 
-/// Fix pass 1 (task-10 review finding 2): pure capability gates behind
-/// `RemoteSessionDetailView` — `available`, `initialTab`, `showsPicker`,
-/// `showsSendField`. One test per gate direction, per repo policy for
-/// behavior-gating conditionals, including the exact `log`-only shape that
-/// let finding 1 (permanently blank pane) through.
+/// Pure capability gates behind `RemoteSessionDetailView` and the window
+/// toolbar's remote-session buttons — `canAttach`, `content`,
+/// `showsSendFooter`, `showsStop`.
+/// One test per gate direction, per repo policy for behavior-gating
+/// conditionals, including the `log`-only shape that once rendered a
+/// permanently blank pane.
 @Suite("Remote session detail — pure capability gates")
 struct RemoteSessionDetailGatesTests {
-    private typealias Tab = RemoteSessionDetailTab
+    // MARK: - canAttach(capabilities:gone:exited:)
 
-    // MARK: - available(capabilities:gone:)
-
-    @Test func availableIsEmptyForNoCapabilities() {
-        #expect(RemoteSessionDetailGates.available(capabilities: [], gone: false) == [])
+    @Test func canAttachWhenAttachDeclaredAndNotGone() {
+        #expect(RemoteSessionDetailGates.canAttach(capabilities: ["attach"], gone: false, exited: false))
     }
 
-    @Test func availableIsAttachOnlyWhenOnlyAttachDeclared() {
-        #expect(RemoteSessionDetailGates.available(capabilities: ["attach"], gone: false) == [.attach])
+    @Test func cannotAttachWithoutTheCapability() {
+        #expect(!RemoteSessionDetailGates.canAttach(capabilities: [], gone: false, exited: false))
+        #expect(!RemoteSessionDetailGates.canAttach(capabilities: ["log", "send"], gone: false, exited: false))
     }
 
-    @Test func availableIsLogOnlyWhenOnlyLogDeclared() {
-        // Finding 1's exact shape: a `log`-only provider must not produce an
-        // `availableTabs` list `initialTab`/the view can only render blank.
-        #expect(RemoteSessionDetailGates.available(capabilities: ["log"], gone: false) == [.log])
+    @Test func cannotAttachWhenGoneEvenIfDeclared() {
+        // Consistent with `RemoteSessionActionMenu.items(gone:)` collapsing
+        // Attach out of the context menu for a tombstone row.
+        #expect(!RemoteSessionDetailGates.canAttach(capabilities: ["attach"], gone: true, exited: false))
     }
 
-    @Test func availableIsAttachThenLogWhenBothDeclared() {
-        #expect(RemoteSessionDetailGates.available(capabilities: ["log", "attach"], gone: false) == [.attach, .log])
+    @Test func cannotAttachWhenExitedEvenIfDeclared() {
+        // The provider reports the process finished; a Reattach could only fail.
+        #expect(!RemoteSessionDetailGates.canAttach(capabilities: ["attach"], gone: false, exited: true))
     }
 
-    @Test func availableIgnoresUnrecognizedCapabilityStrings() {
-        #expect(RemoteSessionDetailGates.available(capabilities: ["events", "rename"], gone: false) == [])
+    // MARK: - content(capabilities:gone:exited:)
+
+    @Test func contentIsAttachWheneverAttachIsPossible() {
+        #expect(RemoteSessionDetailGates.content(capabilities: ["attach"], gone: false, exited: false) == .attach)
+        // The log never displaces a usable terminal — there is no picker.
+        #expect(RemoteSessionDetailGates.content(
+            capabilities: ["log", "attach"], gone: false, exited: false) == .attach)
     }
 
-    @Test func availableDropsAttachWhenGoneEvenIfDeclared() {
-        // Finding 7: consistent with `RemoteSessionActionMenu.items(gone:)`
-        // collapsing Attach out of the context menu for a tombstone row.
-        #expect(RemoteSessionDetailGates.available(capabilities: ["attach"], gone: true) == [])
+    @Test func contentFallsBackToLogWhenAttachIsNotDeclared() {
+        // The shape that once rendered a blank pane: a `log`-only provider.
+        #expect(RemoteSessionDetailGates.content(capabilities: ["log"], gone: false, exited: false) == .log)
     }
 
-    @Test func availableKeepsLogWhenGone() {
-        // Log stays available for a gone session — reading the last
-        // scrollback is still useful even though the provider no longer
-        // reports the session.
-        #expect(RemoteSessionDetailGates.available(capabilities: ["log"], gone: true) == [.log])
+    @Test func contentFallsBackToLogWhenGone() {
+        // A gone session can't attach, but its last scrollback is still
+        // worth reading.
+        #expect(RemoteSessionDetailGates.content(capabilities: ["attach", "log"], gone: true, exited: false) == .log)
     }
 
-    @Test func availableDropsOnlyAttachWhenGoneWithBothCapabilities() {
-        #expect(RemoteSessionDetailGates.available(capabilities: ["attach", "log"], gone: true) == [.log])
+    @Test func contentFallsBackToLogWhenExited() {
+        #expect(RemoteSessionDetailGates.content(capabilities: ["attach", "log"], gone: false, exited: true) == .log)
     }
 
-    // MARK: - initialTab(available:requested:)
-
-    @Test func initialTabPrefersRequestedWhenAvailable() {
-        #expect(RemoteSessionDetailGates.initialTab(available: [.attach, .log], requested: .log) == .log)
+    @Test func contentIsUnsupportedWithNeitherCapability() {
+        #expect(RemoteSessionDetailGates.content(capabilities: [], gone: false, exited: false) == .unsupported)
+        #expect(RemoteSessionDetailGates.content(
+            capabilities: ["events", "rename"], gone: false, exited: false) == .unsupported)
+        #expect(RemoteSessionDetailGates.content(capabilities: ["attach"], gone: true, exited: false) == .unsupported)
+        #expect(RemoteSessionDetailGates.content(capabilities: ["attach"], gone: false, exited: true) == .unsupported)
     }
 
-    @Test func initialTabFallsBackToFirstAvailableWhenRequestedIsAbsent() {
-        // The core of finding 1: a `.attach`-placeholder request against a
-        // `log`-only provider must resolve to `.log`, not nil/blank.
-        #expect(RemoteSessionDetailGates.initialTab(available: [.log], requested: .attach) == .log)
+    // MARK: - showsSendFooter(capabilities:gone:snapshotFresh:hasLiveAttachedPane:)
+
+    @Test func sendFooterShownWhenNoLiveTerminalIsAttached() {
+        // No attach capability at all, the log fallback, and an attach
+        // provider whose pane shows the Detached or auth prompt.
+        for capabilities in [["send"], ["log", "send"], ["attach", "send"], ["attach", "log", "send"]] {
+            #expect(RemoteSessionDetailGates.showsSendFooter(
+                capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
+        }
     }
 
-    @Test func initialTabFallsBackToFirstAvailableWhenRequestedIsNil() {
-        #expect(RemoteSessionDetailGates.initialTab(available: [.attach, .log], requested: nil) == .attach)
+    @Test func sendFooterHiddenWhileALiveTerminalIsAttached() {
+        // The attached terminal takes typing directly.
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "log", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true))
     }
 
-    @Test func initialTabIsNilWhenNothingIsAvailable() {
-        #expect(RemoteSessionDetailGates.initialTab(available: [], requested: .attach) == nil)
-        #expect(RemoteSessionDetailGates.initialTab(available: [], requested: nil) == nil)
+    @Test func sendFooterHiddenWithoutTheSendCapability() {
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["log"], gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: [], gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
     }
 
-    // MARK: - showsPicker(available:)
-
-    @Test func showsPickerIsFalseForZeroAvailableTabs() {
-        #expect(RemoteSessionDetailGates.showsPicker(available: []) == false)
+    @Test func sendFooterHiddenWhenGoneOrStale() {
+        // A gone session has fallen back to the log even with attach
+        // declared, but the provider no longer reports it; a stale snapshot
+        // makes mutating a session unsafe.
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["attach", "log", "send"], gone: true, snapshotFresh: true, hasLiveAttachedPane: false))
+        #expect(!RemoteSessionDetailGates.showsSendFooter(
+            capabilities: ["log", "send"], gone: false, snapshotFresh: false, hasLiveAttachedPane: false))
     }
 
-    @Test func showsPickerIsFalseForExactlyOneAvailableTab() {
-        // Finding 1's other half: a single available tab must render its
-        // content unconditionally, which the view achieves by never gating
-        // that content on the (suppressed) picker's selection.
-        #expect(RemoteSessionDetailGates.showsPicker(available: [.log]) == false)
-        #expect(RemoteSessionDetailGates.showsPicker(available: [.attach]) == false)
+    // MARK: - showsStop(sessionExists:gone:snapshotFresh:)
+
+    @Test func showsStopForAPresentLiveSessionWithAFreshSnapshot() {
+        #expect(RemoteSessionDetailGates.showsStop(sessionExists: true, gone: false, snapshotFresh: true))
     }
 
-    @Test func showsPickerIsTrueForTwoAvailableTabs() {
-        #expect(RemoteSessionDetailGates.showsPicker(available: [.attach, .log]) == true)
+    @Test func hidesStopWhenTheSessionIsNotInTheMirror() {
+        #expect(!RemoteSessionDetailGates.showsStop(sessionExists: false, gone: false, snapshotFresh: true))
     }
 
-    // MARK: - showsSendField(capabilities:gone:)
-
-    @Test func showsSendFieldIsTrueWhenSendDeclaredAndNotGone() {
-        #expect(RemoteSessionDetailGates.showsSendField(capabilities: ["send"], gone: false) == true)
+    @Test func hidesStopWhenGone() {
+        #expect(!RemoteSessionDetailGates.showsStop(sessionExists: true, gone: true, snapshotFresh: true))
     }
 
-    @Test func showsSendFieldIsFalseWhenSendNotDeclared() {
-        #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: false) == false)
-    }
-
-    @Test func showsSendFieldIsFalseWhenGoneEvenIfSendDeclared() {
-        // Finding 7: consistent with the context menu dropping Send Text…
-        // for gone rows.
-        #expect(RemoteSessionDetailGates.showsSendField(capabilities: ["send"], gone: true) == false)
-    }
-
-    @Test func showsSendFieldIsFalseForEmptyCapabilityProviderRegardlessOfGone() {
-        #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: true) == false)
-        #expect(RemoteSessionDetailGates.showsSendField(capabilities: [], gone: false) == false)
-    }
-
-    @Test func showsSendFieldIsFalseWhenSnapshotIsStale() {
-        #expect(RemoteSessionDetailGates.showsSendField(
-            capabilities: ["send"], gone: false, snapshotFresh: false) == false)
+    @Test func hidesStopWhenTheSnapshotIsStale() {
+        // Mutating a session from a stale inventory is unsafe; the context
+        // menu withholds Stop under the same condition.
+        #expect(!RemoteSessionDetailGates.showsStop(sessionExists: true, gone: false, snapshotFresh: false))
     }
 }
 
@@ -139,21 +143,21 @@ struct RemoteSessionStatePresentationTests {
         #expect(RemoteSessionStatePresentation.terminalLabel(.unknown) == "Terminal: State unavailable")
     }
 
-    @Test func warningAppearsOnlyForPresentTerminalWithUnknownAgentState() {
-        let expected = "Agent activity is unavailable; terminal liveness alone does not confirm agent health."
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .running, agentState: .unknown, gone: false) == expected)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .running, agentState: .working, gone: false) == nil)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .running, agentState: .idle, gone: false) == nil)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .starting, agentState: .unknown, gone: false) == nil)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .exited, agentState: .unknown, gone: false) == nil)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .unknown, agentState: .unknown, gone: false) == nil)
-        #expect(RemoteSessionStatePresentation.activityUnavailableWarning(
-            terminalState: .running, agentState: .unknown, gone: true) == nil)
+    @Test func detachedFateLineSaysKeepsRunningOnlyForARunningOrStartingSession() {
+        let running = "The session keeps running remotely."
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: .running) == running)
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: .starting) == running)
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: .exited)
+            == "The remote session has exited.")
+        let neutral = "The remote session is unaffected by detaching."
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: .unknown) == neutral)
+        #expect(RemoteSessionStatePresentation.detachedFateLine(terminalState: nil) == neutral)
+    }
+
+    @Test func staleSnapshotNoteMentionsAttachOnlyWhenAttachIsAvailable() {
+        #expect(RemoteSessionDetailView.staleSnapshotNote(attachAvailable: true)
+            == "Attach remains available; changes are paused until inventory refresh recovers.")
+        #expect(RemoteSessionDetailView.staleSnapshotNote(attachAvailable: false)
+            == "Changes are paused until inventory refresh recovers.")
     }
 }

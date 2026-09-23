@@ -707,6 +707,8 @@ struct RemoteSessionRowView: View {
                 exited: session.payload.state == .exited,
                 deleteEnabled: appState.remoteDeleteEnabled,
                 isAttached: appState.attachedRemoteSelections.contains(
+                    RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)),
+                liveAttachUnavailable: !appState.remoteSessionAttachesWhenSelected(
                     RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
             )
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -740,15 +742,14 @@ struct RemoteSessionRowView: View {
         case .rename:
             isEditing = true
         case .attach:
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .attach)
+            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, reattach: true)
         case .reconnect:
             appState.reconnectRemoteSession(
                 RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
-        case .viewLog:
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, tab: .log)
         case .sendText:
-            // No dedicated tab for Send — the send field renders below
-            // whichever tab is active, so this just selects the session.
+            // Offered only when the session's pane shows no live attached
+            // terminal; selecting it brings up the pane whose send footer
+            // takes the text.
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         case .copySessionID:
             NSPasteboard.general.clearContents()

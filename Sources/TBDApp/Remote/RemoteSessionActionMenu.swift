@@ -22,7 +22,6 @@ enum RemoteSessionActionMenu {
         /// (`AppState.reconnectRemoteSession`). Offered only while a pane is
         /// attached — there is nothing to restart otherwise.
         case reconnect
-        case viewLog
         case sendText
         case copySessionID
         case stop
@@ -73,7 +72,6 @@ enum RemoteSessionActionMenu {
     static let renameLabel = "Rename…"
     static let attachLabel = "Attach"
     static let reconnectLabel = "Reconnect"
-    static let viewLogLabel = "View Log"
     static let sendTextLabel = "Send Text…"
     static let copySessionIDLabel = "Copy Session ID"
     static let stopLabel = "Stop"
@@ -97,8 +95,6 @@ enum RemoteSessionActionMenu {
     /// optional verb — kept as named constants (not re-typed at each call
     /// site) so a typo can't silently make a capability gate always false.
     private static let attachCapability = "attach"
-    private static let logCapability = "log"
-    private static let sendCapability = "send"
     private static let deleteCapability = "delete"
 
     // MARK: - Composition
@@ -112,10 +108,14 @@ enum RemoteSessionActionMenu {
     /// reports, and renaming/stopping a row that's already a caller-side
     /// tombstone isn't meaningful.
     ///
-    /// For a live row: Rename…, then Attach/View Log/Send Text… gated on
-    /// their respective capabilities — with Reconnect right after Attach
-    /// when `isAttached` (this app currently holds a live attach pane for the
-    /// session), then Copy Session ID (always
+    /// For a live row: Rename…, then Attach gated on its capability — with
+    /// Reconnect right after it when `isAttached` (this app currently holds a
+    /// live attach pane for the session) — then Send Text… when the session's
+    /// pane, once selected, shows no live attached terminal: the provider
+    /// lacks `attach`, or `liveAttachUnavailable` says selecting it would not
+    /// attach (the session is detached, exited, or its provider needs
+    /// authentication). The item selects the session so its pane's send
+    /// footer is at hand. Then Copy Session ID (always
     /// available — the id is known locally, no provider call needed), then
     /// the pin toggle, then a divider, then Stop as the last, destructive
     /// item.
@@ -154,7 +154,7 @@ enum RemoteSessionActionMenu {
     static func items(
         capabilities: [String], gone: Bool, snapshotFresh: Bool = true,
         isPinned: Bool, exited: Bool = false, deleteEnabled: Bool = false,
-        isAttached: Bool = false
+        isAttached: Bool = false, liveAttachUnavailable: Bool = false
     ) -> [Item] {
         let pinAction = isPinned
             ? Action(kind: .unpin, title: unpinLabel)
@@ -181,10 +181,11 @@ enum RemoteSessionActionMenu {
                 actions.append(Action(kind: .reconnect, title: reconnectLabel))
             }
         }
-        if capabilities.contains(logCapability) {
-            actions.append(Action(kind: .viewLog, title: viewLogLabel))
-        }
-        if snapshotFresh, capabilities.contains(sendCapability) {
+        // Only where the pane shows a send footer: with a live attached
+        // terminal, typing goes straight into it and needs no menu item.
+        if RemoteSessionDetailGates.showsSendFooter(
+            capabilities: capabilities, gone: false, snapshotFresh: snapshotFresh,
+            hasLiveAttachedPane: capabilities.contains(attachCapability) && !liveAttachUnavailable) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))
@@ -209,7 +210,7 @@ enum RemoteSessionActionMenu {
     ///
     /// **This one action is present-but-disabled when its capability is
     /// absent, and that departure from this menu's omit-when-absent convention
-    /// is deliberate.** Attach, View Log and Send Text vanish when undeclared,
+    /// is deliberate.** Attach and Send Text vanish when undeclared,
     /// because a user who cannot attach has nothing to learn from a grey
     /// "Attach" — the session simply works differently there. Delete is not
     /// like that: a fleet with no reclaim path is the problem this whole design

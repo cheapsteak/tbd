@@ -1,80 +1,83 @@
 import Foundation
 import TBDShared
 
-/// Pure capability gates behind `RemoteSessionDetailView` — which tabs a
-/// provider's capabilities make available, which tab to land/re-land on,
-/// whether the tab picker renders, and whether the Send footer renders.
-/// Mirrors `RemoteSessionActionMenu`'s split: no SwiftUI here, so every gate
-/// is directly unit-testable without a view hierarchy or `AppState`.
+/// What `RemoteSessionDetailView` fills its pane with. There is no picker:
+/// the attach terminal is the pane, exactly as a local session's terminal
+/// is. The log view exists only so a session that cannot be attached to
+/// still shows something rather than a blank pane.
+enum RemoteSessionDetailContent: Equatable {
+    /// The live attach terminal (or, while detached, the Reattach / auth
+    /// prompt that stands in for it).
+    case attach
+    /// Read-only scrollback — only when attach is unavailable.
+    case log
+    /// The provider offers neither.
+    case unsupported
+}
+
+/// Pure capability gates behind `RemoteSessionDetailView` and the window
+/// toolbar's remote-session buttons. Mirrors `RemoteSessionActionMenu`'s
+/// split: no SwiftUI here, so every gate is directly unit-testable without a
+/// view hierarchy or `AppState`.
 ///
-/// These three gates used to be inline conditionals in the view, with
-/// `selectedTab` defaulting to `.attach` regardless of what the provider
-/// actually declared. For a `log`-only provider that left `availableTabs ==
-/// [.log]`: the picker was suppressed (only shown for >1 tab) AND the
-/// content area rendered nothing (the attach branch was gated false, the log
-/// branch required `selectedTab == .log`, which nothing ever corrected in
-/// the steady state — the `.onChange(of:)` two-parameter overload doesn't
-/// fire for the INITIAL value). Extracting the decisions here, and having
-/// the view derive what to render from `initialTab` rather than trust
-/// `selectedTab` alone, makes that permanently-blank-pane state
-/// unrepresentable instead of merely rare.
+/// The view derives what to render from `content` on every `body`
+/// evaluation rather than from separately-tracked `@State`, so no timing of
+/// `onAppear`/`onChange` can leave a provider with a usable capability
+/// looking at a blank pane.
 enum RemoteSessionDetailGates {
-    /// The `describe.capabilities` string each optional gate checks — named
-    /// constants (not re-typed at each call site) so a typo can't silently
-    /// make a gate always false.
+    /// The `describe.capabilities` string each gate checks — named constants
+    /// (not re-typed at each call site) so a typo can't silently make a gate
+    /// always false.
     private static let attachCapability = "attach"
     private static let logCapability = "log"
     private static let sendCapability = "send"
 
-    /// Ordered tabs available for a provider's declared capabilities. Attach
-    /// first, then Log — matches `RemoteSessionDetailTab`'s declaration
-    /// order. Empty when the provider declares neither (the view renders its
-    /// "doesn't support attach or a log view" empty state instead).
+    /// Whether a live attach terminal can be offered for the session.
     ///
-    /// `gone` drops Attach even when the provider declares the capability —
+    /// `gone` blocks attach even when the provider declares the capability —
     /// consistent with `RemoteSessionActionMenu.items(gone:)`, which
-    /// collapses a tombstone row's context menu to exactly Copy Session ID +
-    /// Dismiss: starting a new interactive attach against a session the
-    /// provider no longer reports isn't meaningful. Log stays available when
-    /// `gone` — reading a dead session's last scrollback is still useful.
-    static func available(capabilities: [String], gone: Bool) -> [RemoteSessionDetailTab] {
-        var tabs: [RemoteSessionDetailTab] = []
-        if !gone, capabilities.contains(attachCapability) { tabs.append(.attach) }
-        if capabilities.contains(logCapability) { tabs.append(.log) }
-        return tabs
+    /// collapses a tombstone row's context menu to Copy Session ID + Dismiss:
+    /// starting a new interactive attach against a session the provider no
+    /// longer reports isn't meaningful. `exited` blocks it for the same
+    /// reason: the provider reports the session's process as finished, so a
+    /// fresh `attach` has nothing to connect to and a Reattach button could
+    /// only fail. A session that exits while attached therefore drops out of
+    /// attach eligibility and its pane falls back to the log; nothing tries
+    /// to re-attach it.
+    static func canAttach(capabilities: [String], gone: Bool, exited: Bool) -> Bool {
+        !gone && !exited && capabilities.contains(attachCapability)
     }
 
-    /// The tab to show: `requested` when it's one of `available`, otherwise
-    /// `available`'s first tab, otherwise nil (nothing to show — `available`
-    /// is empty, the empty state renders instead). Never returns a tab
-    /// absent from `available`, so a caller that always renders based on
-    /// this result — rather than trusting a separately-tracked `selectedTab`
-    /// to already be valid — can't land on a blank pane, regardless of
-    /// timing: this is safe to call from the very first `body` evaluation,
-    /// not just from `onAppear`/`onChange`.
-    static func initialTab(
-        available: [RemoteSessionDetailTab], requested: RemoteSessionDetailTab?
-    ) -> RemoteSessionDetailTab? {
-        if let requested, available.contains(requested) { return requested }
-        return available.first
+    /// What fills the detail pane. Attach whenever it is possible; otherwise
+    /// the log, which stays readable for a `gone` or exited session — its
+    /// last scrollback is still useful; otherwise the unsupported message.
+    static func content(capabilities: [String], gone: Bool, exited: Bool) -> RemoteSessionDetailContent {
+        if canAttach(capabilities: capabilities, gone: gone, exited: exited) { return .attach }
+        if capabilities.contains(logCapability) { return .log }
+        return .unsupported
     }
 
-    /// Whether the segmented tab picker renders — only when there's an
-    /// actual choice between tabs. A single available tab (or zero) must
-    /// still render its content; it just does so unconditionally rather than
-    /// via a picker selection.
-    static func showsPicker(available: [RemoteSessionDetailTab]) -> Bool {
-        available.count > 1
-    }
-
-    /// Whether the Send footer renders. `gone` suppresses it for the same
-    /// reason `available` drops Attach: sending input to a session the
-    /// provider no longer reports isn't meaningful, and mutating a session
-    /// from a stale snapshot is unsafe. This keeps the detail view consistent
-    /// with the context menu, which drops Send Text… in both cases.
-    static func showsSendField(
-        capabilities: [String], gone: Bool, snapshotFresh: Bool = true
+    /// Whether the pane carries a send-text footer. Only while no live
+    /// attached terminal is showing: an attached terminal takes typing
+    /// directly, so a separate field would be a second, redundant input
+    /// path. Whenever the pane shows anything else — the log fallback, the
+    /// Detached prompt, the provider-authentication prompt — the footer is
+    /// the only way to send input. Withheld for a `gone` session, which the
+    /// provider no longer reports, and on a stale snapshot, where mutating a
+    /// session is unsafe — the same conditions under which the context menu
+    /// withholds Send Text….
+    static func showsSendFooter(
+        capabilities: [String], gone: Bool, snapshotFresh: Bool, hasLiveAttachedPane: Bool
     ) -> Bool {
-        snapshotFresh && !gone && capabilities.contains(sendCapability)
+        snapshotFresh && !gone && !hasLiveAttachedPane
+            && capabilities.contains(sendCapability)
+    }
+
+    /// Whether the toolbar offers Stop. Needs a session actually present in
+    /// the mirror, one the provider still reports, and a fresh inventory:
+    /// mutating a session from a stale snapshot is unsafe — the context menu
+    /// withholds Stop under the same condition.
+    static func showsStop(sessionExists: Bool, gone: Bool, snapshotFresh: Bool) -> Bool {
+        sessionExists && !gone && snapshotFresh
     }
 }

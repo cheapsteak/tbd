@@ -50,8 +50,9 @@ struct RemoteAttachFocusTests {
         ///     pager is not showing is out of it (the pager is an
         ///     `NSTabViewController`), so `false` is a hidden kept-alive pane.
         ///   - slotShown: whether the detail view reports this session's
-        ///     attach slot as visible. `false` is the Log tab, where the pane
-        ///     stays in its window at zero opacity.
+        ///     attach slot as visible. `false` is a hidden slot (a prompt or
+        ///     the log fallback), where the pane stays in its window at zero
+        ///     opacity.
         init(mounted: Bool, slotShown: Bool = true) {
             _ = NSApplication.shared
             suiteName = "TBDAppTests.RemoteAttachFocus.\(UUID().uuidString)"
@@ -172,7 +173,7 @@ struct RemoteAttachFocusTests {
     }
 
     @MainActor
-    @Test("selecting a session whose detail view shows its Log tab leaves focus alone")
+    @Test("selecting a session whose detail view hides its attach slot leaves focus alone")
     func aTransparentPaneLeavesFocusAlone() async throws {
         let fixture = Fixture(mounted: true, slotShown: false)
         defer { fixture.tearDown() }
@@ -215,7 +216,7 @@ struct RemoteAttachFocusTests {
         fixture.state.setRemoteAttachSlotShown(nil)
 
         #expect(fixture.window.firstResponder !== fixture.view, """
-            switching to the Log tab left focus in the now-transparent attach pane, so typing \
+            hiding the attach slot left focus in the now-transparent attach pane, so typing \
             would reach the remote session unseen
             """)
     }
@@ -251,8 +252,8 @@ struct RemoteAttachFocusTests {
     }
 
     @MainActor
-    @Test("a pane that spawns while its Log tab is shown leaves focus alone")
-    func aSpawnBehindTheLogTabLeavesFocusAlone() async throws {
+    @Test("a pane that spawns while its attach slot is hidden leaves focus alone")
+    func aSpawnBehindAHiddenSlotLeavesFocusAlone() async throws {
         let fixture = Fixture(mounted: true, slotShown: false)
         defer { fixture.tearDown() }
 
@@ -266,7 +267,7 @@ struct RemoteAttachFocusTests {
 
         #expect(fixture.window.firstResponder === fixture.sink, """
             the attach child's spawn took focus into a pane the detail view keeps transparent: \
-            "View Log" on a never-attached session would send typing to it unseen
+            typing would reach a session hidden behind a prompt or the log fallback, unseen
             """)
     }
 
