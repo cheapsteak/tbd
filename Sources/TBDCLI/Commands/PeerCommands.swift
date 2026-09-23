@@ -90,8 +90,10 @@ struct PeerList: AsyncParsableCommand {
                              every local session can address it.
               unattributed   the daemon did not answer, so nothing could be joined.
 
-            It reaches rows no tmux pane could identify. A holder-backed session has no
-            pane at all. A shadow peer carries no `tmux` field by design — remote
+            A local row is joined to its terminal by the Claude session id TBD captured
+            at `SessionStart`, falling back to its tmux pane when none was captured. A
+            holder-backed session has no pane, so until its session id is recorded it
+            lists as `external`. A shadow peer carries no `tmux` field by design — remote
             coordinates would look joinable against local panes and would join to the
             wrong terminal — and it carries no marker of TBD's either, because one
             unknown key makes a record invisible to every listing. A shadow is

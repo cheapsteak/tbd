@@ -221,7 +221,7 @@ is otherwise ownerless.
 
 ## Addressing and naming
 
-Names are the whole identity of a shadow peer. The pane join that resolves
+Names are the whole identity of a shadow peer. The terminal join that resolves
 ambiguity for local peers is unavailable: a shadow has no local terminal, and it
 **MUST NOT** carry a `tmux` field. Remote coordinates would be actively harmful,
 because the far host's tmux server is also called `main` and also has a pane
@@ -565,18 +565,18 @@ column would read as "this peer has no ref", which is false for every row.
 
 This replaces a manual join: pull `tbd worktree list --json`, pull
 `tbd terminal list`, and match rows by hand to work out which row is which lane.
-The command does that join, including for holder-backed rows, which have no tmux
-pane.
+The command does that join. It joins a record to its terminal by the Claude
+session id TBD captured through the `SessionStart` hook, and falls back to the
+record's `cwd` and tmux pane when none was captured. A holder-backed session has
+no pane, so it joins only once its session id is recorded; until then it lists
+as `external`.
 
-**A line is added to the TBD skill** (`Sources/TBDShared/TBDSkillContent.swift`,
-in the passage that currently teaches the manual join), pointing sessions at the
-command:
-
-> `tbd peer list` does that join for you — every peer TBD can see, with the
-> worktree, terminal or remote session behind it.
-
-That file's substrings are pinned by `TBDSkillContentTests`; the line lands with
-the command, not before it.
+**The TBD skill points sessions at the command**
+(`Sources/TBDShared/TBDSkillContent.swift`, in the passage on a
+`No agent named 'X' is reachable.` refusal): it names `tbd peer list` as the way
+to find a row by its terminal id and worktree — every peer TBD can see, with the
+worktree, terminal or remote session behind it. That file's substrings are
+pinned by `TBDSkillContentTests`.
 
 ## Flag and rollout
 

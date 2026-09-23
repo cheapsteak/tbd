@@ -47,9 +47,10 @@ private let liveProcStart = ProcessStartTime.format(liveStartedAt) ?? "unrendera
 private let repoA = UUID()
 private let repoB = UUID()
 
-/// The terminal row every default fixture session runs in. Fixed rather than
+/// The terminal row the default fixture session runs in. Fixed rather than
 /// random so an assertion can spell out the announced name, whose
-/// discriminator is this id's first eight characters.
+/// discriminator is this id's first eight characters. A test that adds a
+/// second session gives it a terminal of its own, as a real second session has.
 private let fixtureTerminalID = UUID(uuidString: "5A1B2C3D-7E8F-4A0B-9C1D-2E3F4A5B6C7D")!
 
 private func spawnedSession(
@@ -363,7 +364,8 @@ struct RosterWatcherScopingTests {
                     displayName: "other-repo-worktree",
                     worktreePath: "/tmp/tbd-roster-fixture/other-repo-worktree",
                     pane: "%99",
-                    claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000"),
+                    claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
+                    terminalID: UUID()),
             ])
             let sink = FrameSink()
             let subject = watcher(directory: directory, sessions: sessions)
@@ -948,7 +950,8 @@ struct RosterWatcherReconnectTests {
                 displayName: "zesty-otter",
                 worktreePath: "/tmp/tbd-roster-fixture/zesty-otter",
                 pane: "%3542",
-                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000")
+                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
+                terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
             let sink = FrameSink()
             let mintHook = OneShotHook()
@@ -998,12 +1001,14 @@ struct RosterWatcherReconnectTests {
                 displayName: "brisk-otter",
                 worktreePath: "/tmp/tbd-roster-fixture/brisk-otter",
                 pane: "%3542",
-                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000")
+                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
+                terminalID: UUID())
             let cheerful = spawnedSession(
                 displayName: "cheerful-moth",
                 worktreePath: "/tmp/tbd-roster-fixture/cheerful-moth",
                 pane: "%3543",
-                claudeSessionID: "CCCCCCCC-0000-0000-0000-000000000000")
+                claudeSessionID: "CCCCCCCC-0000-0000-0000-000000000000",
+                terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
 
             let sink = FrameSink()
