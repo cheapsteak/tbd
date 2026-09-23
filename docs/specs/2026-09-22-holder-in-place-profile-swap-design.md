@@ -16,9 +16,9 @@ daemon already has and that already soak in the field: **park** the row
 (the holder half of hibernation), **re-home** its profile (the cold swap a
 parked row already takes), and **wake** it (the holder half of wake, which
 spawns a fresh holder running the resume). One actuation, one tab, one row,
-one session id. The tab shows the parked placeholder for the duration of the
-park's ending ladder and then the resumed session under the new profile; that
-blink is the same one a focus-wake shows today.
+one session id. The tab shows the session's last frame under a "Switching
+account to <profile>…" caption for the duration of the ladder, and then the
+resumed session under the new profile.
 
 The decisions a human made, in order:
 
@@ -53,8 +53,12 @@ gains a holder arm beside the tmux one. In order:
 
 1. **Park**, through `performHolderHibernate` with a new eligibility policy,
    `HibernateEligibilityPolicy.profileSwap`. Under it the park skips the
-   typed-input rail, does not read the screen at all, and skips the
-   transcript-tail rail. Everything else is the park as it stands: park
+   typed-input rail and the screen-trust rails, and skips the
+   transcript-tail rail. It still reads the screen once, as a display capture
+   only: a readable daemon-rendered frame becomes the row's
+   `suspendedSnapshot`, the tab's backdrop, as it does for every park, and an
+   unreadable one leaves the snapshot empty. Neither what the frame shows nor
+   whether it can be read refuses the park. Everything else is the park as it stands: park
    intent is written before the process is touched, then the ending ladder —
    polite `/exit`, poll, `SIGTERM` to the identity-verified child, abandon the
    holder — and the same "child survived the escalation" outcome, which
@@ -99,9 +103,15 @@ daemon could die lands in a state something owns: parked under the old profile
 (the next focus-wake resumes it there, and a retry of the swap takes the cold
 path), or parked under the new one (the next focus-wake resumes it there).
 
-Nothing changes in the app. The pane's identity includes the row's parked
-state, so it rebuilds on each flip: placeholder while parked, a fresh attach
-when the wake clears the marker. The mid-turn warning on "Switch account"
+The app holds a per-terminal "switching account" record for as long as the
+RPC is in flight, set before it is sent and cleared when it returns, on
+success or error. An ordinary pane's identity includes the row's parked state,
+so it rebuilds on each flip; a switching pane's identity leaves the parked
+state out, so it rebuilds once, when the record clears or the wake's fresh
+attach arrives, and not on the park. While switching, the placeholder shows
+the park's snapshot under the "Switching account to <profile>…" caption, with
+no hibernation banner. When the swap fails the record clears and the row
+renders whatever state it was left in. The mid-turn warning on "Switch account"
 (`busyCaption`, shown when `activityState == .working`) applies as it does
 for tmux. The response is the updated row with the same terminal id, as the
 tmux arm returns. The wake's minted incarnation id rides on the row as it does

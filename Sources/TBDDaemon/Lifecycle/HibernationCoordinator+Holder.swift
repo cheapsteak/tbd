@@ -221,6 +221,28 @@ extension HibernationCoordinator {
         return .readable(screen)
     }
 
+    /// The frame a profile swap's park freezes as the tab's backdrop, or nil
+    /// when there is no readable screen to freeze.
+    ///
+    /// A display capture and nothing more: the same bytes every other park
+    /// persists into `suspendedSnapshot`, read through the same fail-closed
+    /// reading, but never judged. Whatever the screen says, and whether or not
+    /// it can be read at all, the swap's park goes on — an unreadable screen
+    /// costs the backdrop, never the swap. A screen the daemon may not judge
+    /// is also one it will not show, because the frame it would freeze is not
+    /// the one the session was showing.
+    func holderSwapBackdrop(
+        terminalID: UUID, registry: HolderRegistry
+    ) async -> String? {
+        switch await holderScreenReading(terminalID: terminalID, registry: registry) {
+        case .refused(let refusal):
+            logger.debug("hibernate: swap park of \(terminalID, privacy: .public) freezes no backdrop — \(refusal, privacy: .public)")
+            return nil
+        case .readable(let screen):
+            return screen.output.isEmpty ? nil : screen.output
+        }
+    }
+
     /// Whether the screen the park's pending-input rail would have to judge is
     /// one this daemon may not judge — a viewer holds the pty, no reader was
     /// ever adopted for the session, or the reader's emulator was built over a
@@ -371,14 +393,12 @@ extension HibernationCoordinator {
         // screen carries that as `contentObserved`, and this rail refuses it
         // like every other screen it may not judge.
         //
-        // **A profile swap's park does not ask at all.** Not "asks and
-        // ignores the answer": the question is what the user's own gesture has
-        // already answered, the tmux arm of the same action has never asked
-        // it, and asking would hold this session's emulator lock for a
-        // whole-buffer walk on the way to a decision that cannot change. The
-        // snapshot goes with it — a swap's park has no screen to freeze, so
-        // the tab shows the parked placeholder without a backdrop for the
-        // second or two the ladder takes.
+        // **A profile swap's park does not judge the screen.** The question
+        // is what the user's own gesture has already answered, and the tmux
+        // arm of the same action has never asked it. It still reads the
+        // screen once, for the backdrop alone: the tab shows the last frame
+        // under its "Switching account" caption for the second or two the
+        // ladder takes. See `holderSwapBackdrop`.
         let capturedSnapshot: String?
         if policy.honoursLiveRails {
             switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
@@ -395,7 +415,8 @@ extension HibernationCoordinator {
                 capturedSnapshot = screen.output.isEmpty ? nil : screen.output
             }
         } else {
-            capturedSnapshot = nil
+            capturedSnapshot = await holderSwapBackdrop(
+                terminalID: terminal.id, registry: registry)
         }
 
         // The reader the polite `/exit` below is written through. Read after

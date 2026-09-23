@@ -658,6 +658,9 @@ extension AppState {
     /// tmux window/terminal row under the new profile. The row is updated in
     /// place via the `terminalProfileChanged` delta — no new tab is created, so
     /// this method just fires the RPC and lets the delta reconcile local state.
+    /// For the RPC's duration the terminal is recorded in
+    /// `switchingAccountTerminals`, so a holder row's park and wake render as
+    /// one switch rather than a hibernation (see `SwitchingAccount`).
     ///
     /// `.fork` ("Fork session"): the daemon forks the conversation into a NEW
     /// tab/terminal row; this method appends it to local state and selects it.
@@ -666,16 +669,32 @@ extension AppState {
         newProfileID: UUID?,
         mode: TerminalSwapMode = .inPlace
     ) async {
+        if mode == .inPlace {
+            let profileName = newProfileID.flatMap { id in
+                modelProfiles.first(where: { $0.profile.id == id })?.profile.name
+            }
+            switchingAccountTerminals[terminalID] = SwitchingAccount(profileName: profileName)
+        }
+        // Cleared on every exit. A failed swap leaves the row in whatever state
+        // its failing half left it — awake on the old account, or parked on
+        // either — and with the record gone the pane renders that state as it
+        // would any other.
+        defer {
+            if mode == .inPlace {
+                switchingAccountTerminals[terminalID] = nil
+            }
+        }
         do {
             let size = mainAreaTerminalSize()
-            let resultTerminal = try await daemonClient.swapTerminalProfile(
-                terminalID: terminalID, newProfileID: newProfileID,
-                mode: mode, cols: size.cols, rows: size.rows
-            )
+            let resultTerminal = try await terminalProfileSwapper(
+                terminalID, newProfileID, mode, size.cols, size.rows)
             guard mode == .fork else {
                 // In-place: same tab/row. The `terminalProfileChanged` +
                 // `terminalSessionUpdated` deltas already reconciled the row;
-                // nothing to add or re-select here.
+                // nothing to add or re-select here — except the wake, whose
+                // delta travels on another socket and can land after this
+                // reply. See `applySwitchedTerminalWake`.
+                applySwitchedTerminalWake(resultTerminal)
                 return
             }
             mergeCreatedTerminalAndSelect(resultTerminal)
@@ -683,6 +702,28 @@ extension AppState {
             logger.error("Failed to swap profile on terminal: \(error, privacy: .public)")
             showAlert("Failed to swap profile: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    /// Carry an in-place swap's wake onto the cached row when the swap's reply
+    /// outran the wake's hibernation delta.
+    ///
+    /// The delta arrives over the subscription socket and the reply over the
+    /// request socket, so nothing orders them. A reply that wins would clear
+    /// the switching record over a row the cache still holds parked, and the
+    /// pane would rebuild into the hibernated placeholder, banner and all, only
+    /// to rebuild again when the delta caught up. Applying the un-park here,
+    /// while the record still stands, advances the attach epoch exactly as the
+    /// delta would have, and the late delta then finds the row awake and
+    /// changes nothing. A reply that describes a parked row — the cold path, or
+    /// a wake that failed — is left to the deltas.
+    func applySwitchedTerminalWake(_ result: Terminal) {
+        guard switchingAccountTerminals[result.id] != nil, !result.isParked,
+              let idx = terminals[result.worktreeID]?.firstIndex(where: { $0.id == result.id }),
+              terminals[result.worktreeID]?[idx].isParked == true else { return }
+        terminalAttachEpochs[result.id, default: 0] += 1
+        terminals[result.worktreeID]?[idx].hibernatedAt = nil
+        terminals[result.worktreeID]?[idx].suspendedAt = nil
+        terminals[result.worktreeID]?[idx].hibernateReason = nil
     }
 
     /// Open (or focus) a Claude *login session* pinned to `profileID` so the
