@@ -447,7 +447,9 @@ seed_tmux_fallback() {
     local saved=""
     if [ -f "$file" ]; then
         # Trim surrounding whitespace and newlines, as the Swift reader does.
-        saved="$(< "$file")"
+        # An unreadable file counts as unusable; under set -e a failed read
+        # must not abort the install.
+        saved="$(cat "$file" 2>/dev/null)" || saved=""
         saved="${saved#"${saved%%[![:space:]]*}"}"
         saved="${saved%"${saved##*[![:space:]]}"}"
     fi

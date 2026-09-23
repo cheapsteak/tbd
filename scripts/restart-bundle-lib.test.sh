@@ -566,6 +566,19 @@ test_seed_rewrites_a_non_executable_or_directory_saved_path() {
         "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
 }
 
+test_seed_survives_an_unreadable_saved_file_under_set_e() {
+    local d; d="$(seed_fixture unreadable)"
+    printf '%s' "$d/gone/tmux" > "$d/home/tmux-executable-path"
+    chmod 000 "$d/home/tmux-executable-path"
+    local out
+    out="$(PATH="$d/bin:/usr/bin:/bin" bash -c \
+        'set -e; source "$1"; seed_tmux_fallback "$2"; echo survived' _ "$HELPER" "$d/home" 2>/dev/null)"
+    chmod 644 "$d/home/tmux-executable-path"
+    assert_eq "seed does not abort a set -e caller on an unreadable file" "survived" "$out"
+    assert_eq "seed replaces an unreadable saved file" \
+        "$d/bin/tmux" "$(cat "$d/home/tmux-executable-path")"
+}
+
 test_seed_keeps_a_valid_saved_path() {
     local d; d="$(seed_fixture keep)"
     mkdir -p "$d/other"; printf '#!/bin/sh\n' > "$d/other/tmux"; chmod +x "$d/other/tmux"
@@ -631,6 +644,7 @@ test_seed_creates_missing_tbd_home
 test_seed_rewrites_a_dead_saved_path
 test_seed_rewrites_a_non_executable_or_directory_saved_path
 test_seed_keeps_a_valid_saved_path
+test_seed_survives_an_unreadable_saved_file_under_set_e
 test_seed_warns_and_succeeds_without_tmux
 test_seed_keeps_a_symlinked_tmux_path
 test_seed_ignores_a_non_absolute_command_v
