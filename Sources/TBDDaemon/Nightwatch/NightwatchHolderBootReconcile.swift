@@ -44,7 +44,7 @@ enum NightwatchHolderBootReconcile {
         // shape — so the refusal lands on the Watch Desk scratch worktree when
         // one exists, else on the first local worktree, else nowhere. This leg
         // is best-effort: the mode write and its broadcast above already
-        // happened, so a failure here must not rethrow and undo neither.
+        // happened, so a failure here is logged, not rethrown.
         do {
             let worktrees = try await db.worktrees.listLocal(excludeArchived: true)
             let target = worktrees.first(where: {

@@ -319,7 +319,7 @@ struct GeneralSettingsTab: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if appState.nightwatchMode != .off {
+        if supported && !(capabilities?.ptyHolderEnabled ?? false) && appState.nightwatchMode != .off {
             Text(nightwatchExperimental
                 ? NightwatchHolderGate.holderRefusal
                 : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
