@@ -23,6 +23,41 @@ enum HibernateEligibilityPolicy: Sendable {
         inputVetoEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
+    /// The park half of an in-place profile swap.
+    ///
+    /// A fourth policy rather than a switch on the others, because it is the
+    /// only one that deliberately bypasses the live rails: the user asked for
+    /// this session to move accounts, the tmux arm of the same action has
+    /// never honoured any of them, and a "Switch account" that refuses on a
+    /// re-adopted row until its screen has been observed again would refuse
+    /// exactly the case a user reaching for it after a daemon restart is in.
+    /// See `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md`,
+    /// "The swap interrupts regardless, matching tmux".
+    case profileSwap
+}
+
+extension HibernateEligibilityPolicy {
+    /// Whether this park is judged by the rails that read live state — the
+    /// typed screen and the transcript tail — as opposed to the row alone.
+    ///
+    /// One predicate, named once, so the rails that do answer to it cannot
+    /// come to disagree about which policies they answer to.
+    ///
+    /// **What it reaches.** Three rails consult it: the holder park's screen
+    /// reading and its typed-input check (`HibernationCoordinator+Holder`),
+    /// and the transcript-tail rail both transports share
+    /// (`transcriptTailRefusal`). The tmux leg's own typed-input rail, which
+    /// reads the pane through `capturePaneWithAnsi` before taking the server
+    /// lock, is **not** gated by this predicate and refuses under every
+    /// policy. That is not an oversight left to fix: `.profileSwap` is
+    /// holder-only today — `handleTerminalSwapProfile` branches on
+    /// `transport == .holder` and no other caller passes the policy — so a
+    /// tmux park never sees it, and gating a rail no `.profileSwap` park can
+    /// reach would be a behaviour change dressed as consistency.
+    var honoursLiveRails: Bool {
+        if case .profileSwap = self { return false }
+        return true
+    }
 }
 
 /// How an unparked terminal's pane disagreed with the row that claims it is
@@ -134,7 +169,8 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight wake respawn, so a double-focus can't
     /// spawn two `claude --resume` processes into the same window.
-    private var wakesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var wakesInFlight: Set<UUID> = []
 
     /// Invoked after EVERY `ensureServer` on the wake-recreate path (whether or
     /// not a server was actually created — the downstream control-mode
@@ -146,7 +182,30 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight hibernate, so a manual "Hibernate now"
     /// racing the idle sweep (or two sweeps) can't respawn-to-shell twice.
-    private var hibernatesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var hibernatesInFlight: Set<UUID> = []
+
+    /// Terminal ids with an in-flight in-place profile swap, held across the
+    /// WHOLE of that swap rather than across either half of it.
+    ///
+    /// The swap is a composition — park, re-home, wake — and the two
+    /// singleflight sets above release between them: the park's claim is gone
+    /// the instant the park returns, and the wake's is not taken until several
+    /// suspension points later. The row is parked in that gap and nothing owns
+    /// it, so the app's wake-on-focus (which wakes exactly the active tab's
+    /// parked terminal, and the tab a user just pressed "Switch account" on is
+    /// the active tab) could un-park it and start a fresh session under the
+    /// OLD account before the re-home landed. The re-home's compare-and-set
+    /// then refused the write, which is safe but leaves the user told their
+    /// session is parked on its old account when it is in fact awake there.
+    ///
+    /// So the swap claims the row before it parks and releases it after the
+    /// wake, and the public `wake` answers a claimed row `.inFlight`. The
+    /// swap's OWN halves are exempt by construction, not by a flag a caller
+    /// could forget to pass: `performHibernate` consults only
+    /// `hibernatesInFlight`, and the swap wakes through
+    /// `wakeHolderForProfileSwap`, which consults only the two sets above.
+    private var swapsInFlight: Set<UUID> = []
 
     /// Debounce after a terminal first crosses the idle threshold: the sweep
     /// marks it `pendingKillSince`, and only actually hibernates on a LATER
@@ -379,6 +438,61 @@ public actor HibernationCoordinator {
             terminal: terminal, reason: .manual, policy: .manual)
     }
 
+    /// Claim this row for the whole of an in-place profile swap, refusing if
+    /// any park, wake or other swap of it is already in flight.
+    ///
+    /// Paired with `releaseSwap(terminalID:)`, which the caller must reach on
+    /// every exit including a thrown one — a claim that leaks makes the row
+    /// unwakeable until the daemon restarts.
+    ///
+    /// - Returns: true when the claim was taken, false when it was refused and
+    ///   the caller must change nothing.
+    func claimSwap(terminalID: UUID) -> Bool {
+        guard !hibernatesInFlight.contains(terminalID),
+              !wakesInFlight.contains(terminalID),
+              !swapsInFlight.contains(terminalID) else { return false }
+        swapsInFlight.insert(terminalID)
+        return true
+    }
+
+    /// Release the claim `claimSwap(terminalID:)` took. Idempotent, so the
+    /// caller may release on a path it is not certain claimed.
+    func releaseSwap(terminalID: UUID) {
+        swapsInFlight.remove(terminalID)
+    }
+
+    /// Whether an in-place profile swap currently holds this row. For tests
+    /// and for the assertions that pin the claim's lifetime.
+    func isSwapInFlight(terminalID: UUID) -> Bool {
+        swapsInFlight.contains(terminalID)
+    }
+
+    /// Park a session because an in-place profile swap is about to re-home it
+    /// onto another account and resume it there.
+    ///
+    /// The park half of `terminal.swapProfile`'s holder arm, and the only
+    /// caller of `.profileSwap`. `.auto` rather than `.manual` as the reason,
+    /// deliberately: a daemon that dies between this park and the wake that
+    /// follows it leaves a row the next focus-wake heals, where a manual park
+    /// is excluded from wake-on-focus and would sit there until somebody woke
+    /// it by hand.
+    ///
+    /// It does not check the transport. The park mechanic exists on both, and
+    /// `performHibernate` already routes a holder row to the holder arm; what
+    /// the swap handler decides is which rows it calls this for — and today it
+    /// calls this for **holder rows only**, because `handleTerminalSwapProfile`
+    /// branches on `transport == .holder` before reaching the arm that calls
+    /// here. So `.profileSwap` never reaches a tmux park, and the rails a tmux
+    /// park applies unconditionally (its pre-lock typed-input check) are
+    /// untouched by this policy existing. See `honoursLiveRails`.
+    func parkForProfileSwap(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        return await performHibernate(
+            terminal: terminal, reason: .auto, policy: .profileSwap)
+    }
+
     /// The reason a manual hibernate was refused, for the RPC error string.
     private func manualBlockReason(_ terminal: Terminal) -> String {
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
@@ -537,11 +651,10 @@ public actor HibernationCoordinator {
         // unresumable jsonl (#18880). Only park when the last line is
         // complete JSON. Missing/empty transcript is allowed (nothing to
         // corrupt); the resume will just find no prior turns.
-        if let transcriptPath = terminal.transcriptPath,
-           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
-           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+        if let refusal = Self.transcriptTailRefusal(
+            transcriptPath: terminal.transcriptPath, policy: policy) {
             logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
-            return .notEligible(reason: "Transcript is mid-write; try again shortly")
+            return refusal
         }
 
         do {
@@ -801,7 +914,47 @@ public actor HibernationCoordinator {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
             }
             return nil
+
+        case .profileSwap:
+            // The one refusal this policy keeps. The swap handler routes an
+            // already-parked row down the cold path before it ever asks for a
+            // park, so reaching here means the row parked between that read
+            // and this call — a focus-wake, or the idle sweep, either mid-ladder
+            // or freshly complete. This is a refusal to the swap, not a signal
+            // to proceed: `holderInPlaceSwapUnderClaim` treats `.alreadyHibernated`
+            // as a hard error, records nothing, and never calls
+            // `reHomeParkedRow` — it tells the caller to retry, and a retry
+            // against a row whose park has by then completed takes the cold
+            // path instead. Every other rail is deliberately absent: the
+            // handler has already established that this is a resumable Claude
+            // session, and refusing a *working* session is precisely what this
+            // policy exists not to do.
+            guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
+            return nil
         }
+    }
+
+    /// The park's transcript-tail rail: the refusal a mid-write transcript
+    /// earns, or nil when the tail is complete, absent, or the policy does not
+    /// honour the rail.
+    ///
+    /// Killing claude mid-write can leave an unresumable jsonl, so both
+    /// transports ask this before they touch the process. Named and shared so
+    /// the tmux park, the holder park and the test assert one decision rather
+    /// than three copies of it — and so the `.profileSwap` bypass is stated
+    /// once. An unreadable or missing file is not a refusal: there is nothing
+    /// there to corrupt.
+    static func transcriptTailRefusal(
+        transcriptPath: String?,
+        policy: HibernateEligibilityPolicy
+    ) -> HibernateResult? {
+        guard policy.honoursLiveRails else { return nil }
+        guard let transcriptPath,
+              let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
+              !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) else {
+            return nil
+        }
+        return .notEligible(reason: "Transcript is mid-write; try again shortly")
     }
 
     /// Confirm the respawn-to-shell actually replaced claude, and log any
@@ -962,6 +1115,10 @@ public actor HibernationCoordinator {
         // the replacement process.
         guard !hibernatesInFlight.contains(terminalID) else { return .inFlight }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
+        // An in-place profile swap owns this row from before its park until
+        // after its wake. A focus-wake landing in the gap between those halves
+        // would un-park the row under the account the swap is moving it off.
+        guard !swapsInFlight.contains(terminalID) else { return .inFlight }
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
 

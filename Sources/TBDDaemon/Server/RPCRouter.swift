@@ -264,6 +264,29 @@ public final class RPCRouter: Sendable {
         @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
     )?
 
+    /// The instant between the two halves of a holder in-place profile swap,
+    /// opened for a test to act in. `holderInPlaceSwap` awaits it with the
+    /// terminal's id once the park has succeeded and the parked row has been
+    /// re-read, and before `reHomeParkedRow` writes anything. **A test seam
+    /// only** — production never sets it, and nil means the arm awaits nothing.
+    ///
+    /// It exists because the spec's second failure outcome — a re-home that
+    /// fails after a successful park leaves the row parked on its OLD profile
+    /// — has no other observable staging point. The park needs a reader over a
+    /// real pty, so only the live suite can reach this arm at all, and by the
+    /// time the RPC returns the whole composition has run: there is no moment
+    /// from outside at which the worktree row, the terminal row or the CAS
+    /// snapshot can be made stale in the narrow window `reHomeParkedRow`
+    /// guards. A test sets this to change the worktree's status out from under
+    /// the status the handler captured at entry, which is exactly what the
+    /// lock's `allowedStatuses` check refuses, and then asserts the row is
+    /// still parked and still on the account it started on.
+    ///
+    /// Deliberately an interposition point and nothing more: it takes no
+    /// decision, returns nothing, and neither the response nor any actuation
+    /// reads it.
+    nonisolated(unsafe) var holderSwapBetweenParkAndReHome: (@Sendable (UUID) async -> Void)?
+
     /// Delivers `terminal.send` to a holder-backed session, routed by who is
     /// reading its pty. Set by `Daemon` after construction, beside the registry
     /// and the sidecar it is built from. `nil` in mock mode and in tests that

@@ -1158,10 +1158,28 @@ public struct TerminalStore: Sendable {
     /// by the caller is still current. A wake or replacement that wins first
     /// rejects this write atomically instead of leaving the row's profile out
     /// of sync with the process that was launched.
+    ///
+    /// `sessionID` names the conversation the row is to hold once it is
+    /// re-homed, and it travels in THIS statement rather than a write of its
+    /// own so the two cannot land separately. The in-place profile swap on a
+    /// holder row is what needs it: a blank session is spawned fresh under a
+    /// new id rather than resumed, and a second write that failed after the
+    /// re-home would leave the row on the destination account naming a
+    /// conversation whose transcript was never carried there — the "no
+    /// conversation found" the swap exists to avoid. It is the same
+    /// commitment `prepareProfileAgentRespawn` above makes for the tmux
+    /// transport. nil leaves both session columns exactly as they are, which
+    /// is what the cold swap and every resume pass.
+    ///
+    /// `transcriptPath` is honoured only alongside a `sessionID`: a transcript
+    /// file belongs to the conversation named beside it and never travels on
+    /// its own.
     func setParkedProfileID(
         id: UUID,
         expectedState: TerminalReplacementSnapshot,
-        profileID: UUID?
+        profileID: UUID?,
+        sessionID: String? = nil,
+        transcriptPath: String? = nil
     ) async throws -> Terminal? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -1172,6 +1190,17 @@ public struct TerminalStore: Sendable {
                 return nil
             }
             record.profile_id = profileID?.uuidString
+            if let sessionID {
+                record.claudeSessionID = sessionID
+                // No ordered SessionStart observation is available here, so a
+                // replacement identity must not inherit the prior Codex
+                // process's durable boundary — the same reason `updateSession`
+                // clears it.
+                record.codexTranscriptBoundaryOffset = nil
+                if let transcriptPath {
+                    record.transcriptPath = transcriptPath
+                }
+            }
             try record.update(db)
             return record.toModel()
         }

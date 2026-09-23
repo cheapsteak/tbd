@@ -127,6 +127,10 @@ struct ForkSwapTransportGateTests {
             environment: environment,
             listTerminals: { [] },
             spawner: spawner)
+        // The coordinator's registry as well as the router's: the in-place
+        // holder arm parks through the coordinator, and a coordinator with no
+        // registry refuses for a reason that is not the one under test.
+        await router.hibernationCoordinator.setHolderRegistry(router.holderRegistry)
         let probe = RecaptureProbe()
         router.sessionRecaptureFactory = { db, tmux in
             probe.scheduler(db: db, tmux: tmux)
@@ -259,13 +263,16 @@ struct ForkSwapTransportGateTests {
         #expect(fixture.probe.targets.isEmpty, "a fork that never spawned scheduled a recapture")
     }
 
-    // MARK: - The in-place refusal is untouched
+    // MARK: - The in-place holder arm is not this suite's
 
-    /// The holder refusal for `.inPlace` is scoped to that mode and stays put:
-    /// a holder source row cannot be respawned in place, whatever the flag
-    /// says about new spawns.
-    @Test("an in-place swap on a holder row is still refused")
-    func inPlaceOnAHolderRowIsStillRefused() async throws {
+    /// `.inPlace` on a holder row is no longer refused on its transport: it
+    /// takes the holder arm, which parks the session first. This fixture's
+    /// registry adopted nothing, so the park stops at the reader the polite
+    /// `/exit` needs — enough to say the transport is not what stopped it, and
+    /// enough to say the fork path below is still the only one that spawns.
+    /// The arm itself is `HolderInPlaceSwapTests` and the live suite.
+    @Test("an in-place swap on a holder row takes the holder arm rather than refusing")
+    func inPlaceOnAHolderRowTakesTheHolderArm() async throws {
         let fixture = try await Self.makeFixture(holderFlag: true, spawner: nil)
         defer { fixture.tearDown() }
         let holderSource = try await fixture.db.terminals.create(
@@ -284,14 +291,10 @@ struct ForkSwapTransportGateTests {
                 terminalID: holderSource.id, newProfileID: nil, mode: .inPlace)))
 
         #expect(!response.success)
-        // The refusal itself, not merely a failure: `.inPlace` on a holder row
-        // has several other ways to fail (an unresolvable profile, a missing
-        // source session), and only this text says the transport was what
-        // stopped it.
         #expect(
-            response.error?.contains(
-                RPCRouter.holderInPlaceSwapRefusal(terminalID: holderSource.id)) == true,
+            response.error == HibernationCoordinator.holderNoReaderRefusal,
             "the swap failed for some other reason: \(response.error ?? "success")")
         #expect(fixture.recorder.count("new-window") == 0)
+        #expect(fixture.recorder.count("respawn-window") == 0)
     }
 }

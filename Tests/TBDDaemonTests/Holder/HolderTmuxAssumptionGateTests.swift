@@ -1021,8 +1021,18 @@ struct HolderTmuxAssumptionGateTests {
 
     // MARK: - Gate 4: terminal.swapProfile, .inPlace
 
-    @Test("an in-place profile swap refuses a holder row and leaves every column alone")
-    func inPlaceSwapRefusesHolderRow() async throws {
+    /// The gate inverted: an in-place swap on a holder row is no longer a
+    /// category error, and what stops it here is the PARK rather than the
+    /// transport.
+    ///
+    /// This suite's registry adopted nothing, so the daemon holds no reader to
+    /// write the polite `/exit` through and the park refuses by name — which
+    /// is this suite's standing way of saying a path got as far as the reader.
+    /// The row assertions are the half a return value cannot see: the arm
+    /// parks BEFORE it re-homes precisely so that a park which refuses leaves
+    /// the row claiming nothing new.
+    @Test("an in-place profile swap reaches the park on a holder row rather than refusing")
+    func inPlaceSwapOnAHolderRowReachesThePark() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1032,25 +1042,25 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .holder)
         let before = RowFingerprint(terminal)
 
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+        let router = self.router(db, tmux: tmux)
+        let registry = holderRegistry(listing: [terminal])
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
+
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(
                 terminalID: terminal.id, newProfileID: nil, mode: .inPlace)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.holderInPlaceSwapRefusal(terminalID: terminal.id))
+        #expect(response.error == HibernationCoordinator.holderNoReaderRefusal,
+                "the swap failed somewhere other than the park: \(response.error ?? "success")")
 
-        // The row is the whole point. Unguarded, `inPlaceSwapRespawn` commits
-        // the replacement identity — a fresh `sessionIncarnationID`, the new
-        // profile — BEFORE it asks tmux for anything, and only then fails
-        // against `tmuxWindowID == ""`. A test that read the error string alone
-        // would go green against exactly that bug.
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
-                "a refused in-place swap still committed a new identity to the holder row")
-        // The other half a return value cannot see: the graceful interrupt that
-        // precedes the respawn addresses `tmuxPaneID == ""`, so the real
-        // process is never interrupted while the row is being told it was.
+                "a swap whose park refused still committed a new identity to the holder row")
+        // The other half a return value cannot see: no arm of this swap may
+        // address a tmux coordinate a holder row has not got.
         #expect(recorded.snapshot().isEmpty,
                 "the in-place swap reached tmux for a holder row: \(recorded.snapshot())")
     }
@@ -2774,5 +2784,159 @@ struct HolderTmuxAssumptionGateTests {
             written.last?["error"] as? String == HibernationCoordinator.holderNoReaderRefusal,
             "the sweep fired, but not past its own screen check: \(written)")
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
+    }
+
+    // MARK: - Gate 6: the park an in-place profile swap performs
+
+    /// A screen oracle that counts how many times a park asked it.
+    ///
+    /// "The swap's park does not read the screen at all" is the requirement,
+    /// and a refusal string cannot express it: a park that read the screen,
+    /// judged it clear, and then stopped at the reader lookup answers exactly
+    /// what a park that never read it answers. The count is what
+    /// discriminates.
+    ///
+    /// `withLock` rather than `lock()`/`unlock()`: the oracle it vends is
+    /// `async`, where the unscoped pair is unavailable.
+    private final class CountingScreenOracle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var asks = 0
+        private let answer: @Sendable () throws -> TerminalScreen?
+
+        init(_ answer: @escaping @Sendable () throws -> TerminalScreen?) {
+            self.answer = answer
+        }
+
+        var count: Int { lock.withLock { asks } }
+
+        func oracle() -> @Sendable (UUID) async throws -> TerminalScreen? {
+            { [self] _ in
+                lock.withLock { asks += 1 }
+                return try answer()
+            }
+        }
+    }
+
+    /// A coordinator wired to a counting oracle and a registry that adopted
+    /// nothing — so a park which CLEARS the rails stops at the reader the
+    /// polite `/exit` needs, and `holderNoReaderRefusal` is this suite's
+    /// standing way of saying "the rail passed".
+    private func coordinatorCounting(
+        _ oracle: CountingScreenOracle, db: TBDDatabase, terminal: Terminal
+    ) async -> HibernationCoordinator {
+        let coord = await coordinator(
+            db, tmux: TmuxManager(dryRun: true),
+            registry: holderRegistry(listing: [terminal]))
+        await coord.setHolderScreenOracle(oracle.oracle())
+        return coord
+    }
+
+    /// The typed-input rail, both branches of the policy, over one screen.
+    ///
+    /// The manual leg is not ceremony: `honoursLiveRails` is a single
+    /// comparison, and an inverted one would disable the rail for every park
+    /// this daemon performs while leaving the swap's assertion green.
+    @Test("a profile swap's park bypasses the typed-input rail a manual park honours")
+    func swapParkSkipsTheTypedInputRail() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let typed = try Self.screen(lines: Self.typedComposer)
+
+        let manualOracle = CountingScreenOracle { typed }
+        let manual = await coordinatorCounting(manualOracle, db: db, terminal: terminal)
+        let manualResult = await manual.manualHibernate(terminalID: terminal.id)
+        #expect(manualResult == .notEligible(reason: "Terminal has unsent typed input"),
+                "the manual park stopped somewhere other than the typed-input rail: \(manualResult)")
+        #expect(manualOracle.count > 0, "the manual park never read the screen")
+
+        let swapOracle = CountingScreenOracle { typed }
+        let swap = await coordinatorCounting(swapOracle, db: db, terminal: terminal)
+        let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
+        #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "the swap's park honoured a rail it must bypass: \(swapResult)")
+        #expect(swapOracle.count == 0,
+                "the swap's park read the screen \(swapOracle.count) time(s); it must not read it at all")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(!after.isParked, "a park that refused at the reader still parked the row")
+    }
+
+    /// The re-adopted screen: the case the spec names as the one a user
+    /// reaching for "Switch account" after a daemon restart is most likely to
+    /// be in, and the reason the swap bypasses the screen rather than trusting
+    /// it.
+    @Test("a profile swap's park bypasses the re-adopted-screen rail a manual park honours")
+    func swapParkSkipsTheUnobservedScreenRail() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let unobserved = try Self.screen(
+            lines: Self.emptyComposer, source: .daemon, contentObserved: false)
+
+        let manualOracle = CountingScreenOracle { unobserved }
+        let manual = await coordinatorCounting(manualOracle, db: db, terminal: terminal)
+        let manualResult = await manual.manualHibernate(terminalID: terminal.id)
+        #expect(
+            manualResult == .notEligible(
+                reason: HibernationCoordinator.holderContentUnobservedRefusal),
+            "the manual park did not fail the provenance rail closed: \(manualResult)")
+
+        let swapOracle = CountingScreenOracle { unobserved }
+        let swap = await coordinatorCounting(swapOracle, db: db, terminal: terminal)
+        let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
+        #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "the swap's park honoured a rail it must bypass: \(swapResult)")
+        #expect(swapOracle.count == 0, "the swap's park read the screen it must not read")
+    }
+
+    /// The transcript-tail rail, asked of the shipped decision directly.
+    ///
+    /// A function rather than a park, because the rail sits *after* the reader
+    /// lookup that this fixture cannot satisfy: driven through
+    /// `parkForProfileSwap` both policies would stop at the reader and the test
+    /// would discriminate nothing. `transcriptTailRefusal` is the decision
+    /// itself, and both parks call it.
+    @Test("the transcript-tail rail refuses a mid-write tail for a park and not for a swap")
+    func transcriptTailRailIsSkippedForASwap() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-holdergate-tail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // One complete line and one truncated one: a transcript caught
+        // mid-write, which is the state the rail exists to refuse.
+        let cut = dir.appendingPathComponent("cut.jsonl").path
+        let cutBody = #"""
+        {"type":"user","message":{"content":"hello"}}
+        {"type":"assistant","message":{"con
+        """#
+        try cutBody.write(toFile: cut, atomically: true, encoding: .utf8)
+
+        #expect(
+            HibernationCoordinator.transcriptTailRefusal(transcriptPath: cut, policy: .manual)
+                == .notEligible(reason: "Transcript is mid-write; try again shortly"),
+            "the manual park stopped honouring the transcript rail")
+        #expect(
+            HibernationCoordinator.transcriptTailRefusal(
+                transcriptPath: cut, policy: .profileSwap) == nil,
+            "the swap's park honoured the transcript rail it must bypass")
+
+        // The other half, or the assertion above would pass for a helper that
+        // refuses nothing at all: a complete tail is no refusal under either
+        // policy, and neither is a row with no transcript.
+        let whole = dir.appendingPathComponent("whole.jsonl").path
+        try #"{"type":"user","message":{"content":"hello"}}"#
+            .write(toFile: whole, atomically: true, encoding: .utf8)
+        #expect(
+            HibernationCoordinator.transcriptTailRefusal(transcriptPath: whole, policy: .manual)
+                == nil)
+        #expect(
+            HibernationCoordinator.transcriptTailRefusal(transcriptPath: nil, policy: .manual)
+                == nil)
     }
 }
