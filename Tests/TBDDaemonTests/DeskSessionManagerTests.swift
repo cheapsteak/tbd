@@ -1739,7 +1739,7 @@ extension TBDHomeSerialized {
                     .first(where: { $0.label == TerminalLabel.claudeCode }))
 
             // Proven dead: tmux answers that the pane is gone.
-            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.identities.set(.absent, for: original.tmuxPaneID)
             f.dead.markDead(original.tmuxWindowID)
 
             let beforeRecovery = try await f.db.terminals.list(worktreeID: desk.id).count
@@ -1759,7 +1759,7 @@ extension TBDHomeSerialized {
             // Now the replacement dies too. One death, one replacement.
             let replacement = try #require(
                 afterRecovery.max(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }))
-            f.identities.set(.missing, for: replacement.tmuxPaneID)
+            f.identities.set(.absent, for: replacement.tmuxPaneID)
             f.dead.markDead(replacement.tmuxWindowID)
             _ = try await f.manager.ensureDeskSession(mode: .daywatch)
             let afterSecondDeath = try await f.db.terminals.list(worktreeID: desk.id).count
@@ -1779,7 +1779,7 @@ extension TBDHomeSerialized {
             desk: UUID
         ) async throws -> Int {
             for terminal in try await f.db.terminals.list(worktreeID: desk) {
-                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.identities.set(.absent, for: terminal.tmuxPaneID)
                 f.dead.markDead(terminal.tmuxWindowID)
             }
             _ = try await f.manager.ensureDeskSession(mode: .daywatch)
@@ -1915,7 +1915,7 @@ extension TBDHomeSerialized {
                 actuationLog: makeTestActuationLog()
             )
 
-            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.identities.set(.absent, for: original.tmuxPaneID)
             f.dead.markDead(original.tmuxWindowID)
             armed.arm()
             _ = try await manager.ensureDeskSession(mode: .daywatch)
@@ -1927,7 +1927,7 @@ extension TBDHomeSerialized {
             // Kill the agents only; the user's shell stays open, as it would.
             for terminal in try await f.db.terminals.list(worktreeID: desk.id)
             where terminal.id != intruderID {
-                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.identities.set(.absent, for: terminal.tmuxPaneID)
                 f.dead.markDead(terminal.tmuxWindowID)
             }
 
@@ -2250,7 +2250,7 @@ extension TBDHomeSerialized {
                 try await f.db.terminals.list(worktreeID: desk.id)
                     .first(where: { $0.label == TerminalLabel.claudeCode }))
 
-            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.identities.set(.absent, for: original.tmuxPaneID)
             f.dead.markDead(original.tmuxWindowID)
 
             let before = try await f.db.terminals.list(worktreeID: desk.id).count
@@ -2373,7 +2373,7 @@ extension TBDHomeSerialized {
                 worktreeID: desk.id, terminalID: incumbent.id, now: Date())
             #expect(lease.isValid(at: Date()))
 
-            f.identities.set(.missing, for: incumbent.tmuxPaneID)
+            f.identities.set(.absent, for: incumbent.tmuxPaneID)
             f.dead.markDead(incumbent.tmuxWindowID)
 
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
@@ -2439,7 +2439,7 @@ extension TBDHomeSerialized {
 
         /// Genuine death is still diagnosable: when a pane is truly gone
         /// (window killed, pane dead, no agent process), spawning is triggered.
-        /// The `.missing` answer from `paneSendTarget` is the expected failure
+        /// The `.absent` answer from `paneSendTarget` is the expected failure
         /// mode that should license recovery spawn.
         @Test("genuinely missing pane triggers recovery spawn (verified distinct from unverifiable)")
         func testGenuinelyMissingPaneSpawns() async throws {
