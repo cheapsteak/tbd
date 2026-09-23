@@ -30,8 +30,11 @@ public struct TBDSpawnedSession: Sendable, Equatable {
     /// The worktree directory on this machine. Joined against the record's
     /// `cwd`.
     public let worktreePath: String
-    /// The tmux pane the session runs in, TBD's own documented join key —
-    /// `%3541`. Joined against the pane component of the record's `tmux`.
+    /// The tmux pane the session runs in — `%3541` — or empty for a
+    /// holder-backed terminal, which has none. Joined against the pane
+    /// component of the record's `tmux`, the fallback when no Claude session id
+    /// was captured. Never part of the announced name: that names the terminal
+    /// by `terminalID`, which every transport carries.
     public let tmuxPaneID: String
     /// The Claude session id TBD captured for this terminal through the
     /// `SessionStart` hook, when one was captured. Joined against the record's
@@ -207,11 +210,11 @@ public struct LocalPeerRegistryRecord: Sendable, Equatable, Decodable {
 /// resolves inbound frames, and every message addressed to a local session
 /// would resolve to nothing.
 public struct RosterEntry: Sendable, Equatable {
-    /// `<origin>:<display name> %<pane>`. The pane discriminator is *always*
-    /// present, never added on collision: several Claude terminals in one
-    /// worktree all carry the worktree display name, and a name that changes
-    /// when some other session appears is worse than one that occasionally
-    /// needs a ref.
+    /// `<origin>:<display name> <terminal short id>`. The terminal
+    /// discriminator is *always* present, never added on collision: several
+    /// Claude terminals in one worktree all carry the worktree display name,
+    /// and a name that changes when some other session appears is worse than
+    /// one that occasionally needs a ref.
     public let name: String
     /// Verbatim from the registry row, or `unknownStatus` when the row carried
     /// none.
@@ -915,17 +918,23 @@ public actor RosterWatcher {
         }
     }
 
-    /// `<origin>:<display name> %<pane>`.
+    /// `<origin>:<display name> <terminal short id>`, e.g.
+    /// `laptop:useful-swallow 5A1B2C3D`.
     ///
-    /// The pane discriminator is always present, never added on collision:
+    /// The terminal discriminator is always present, never added on collision:
     /// collisions are the norm rather than the exception here, since several
     /// Claude terminals in one worktree all carry the worktree display name,
     /// and a name that changes when some other session appears is worse than
-    /// one that occasionally needs a ref. The pane is TBD's own documented join
-    /// key, so a remote agent naming one names something `tbd terminal list`
-    /// can resolve.
+    /// one that occasionally needs a ref.
+    ///
+    /// The discriminator is the terminal row's id rather than any transport
+    /// coordinate. A holder-backed terminal has no tmux pane, so a pane would
+    /// give every holder tab in a worktree the same name, and a terminal moving
+    /// between transports would be renamed under its peers. The short id is
+    /// the prefix of what `tbd terminal list` prints for the row, so a remote
+    /// agent naming one names something it can resolve.
     private func announcedName(for session: TBDSpawnedSession) -> String {
-        "\(origin):\(session.displayName) \(RosterJoinKeys.normalizedPaneID(session.tmuxPaneID))"
+        "\(origin):\(session.displayName) \(TerminalShortID.of(session.terminalID))"
     }
 
     // MARK: Registry I/O

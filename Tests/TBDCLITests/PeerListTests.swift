@@ -180,8 +180,36 @@ struct PeerListTests {
 
         let behind = peerBehindColumn(row)
         #expect(behind.contains("lane-a"))
-        #expect(behind.contains("%3541"))
+        #expect(behind.contains("tmux %3541"))
         #expect(behind.contains("terminal \(shortPeerID(terminal.id))"))
+    }
+
+    /// A holder-backed terminal has no tmux pane — its row carries an empty
+    /// `tmuxPaneID` — so the listing names it by the terminal id alone, the
+    /// same eight-character discriminator the roster announces to remote
+    /// peers, and never renders the empty pane as a bare `%`.
+    @Test func holderRowNamesItsTerminalIDAndNoPane() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let terminalID = try #require(UUID(uuidString: "5A1B2C3D-7E8F-4A0B-9C1D-2E3F4A5B6C7D"))
+        let terminal = Self.terminal(
+            id: terminalID, worktreeID: worktree.id, pane: "", claudeSessionID: "S-holder")
+        let scan = PeerRegistryScan(entries: [
+            PeerRegistryEntry(pid: 4010, record: try Self.record(Self.liveSessionFields(
+                sessionID: "S-holder", cwd: Self.laneAPath, name: "lane-a",
+                pane: nil, socket: "/opt/peertest/socks/4010.sock")))
+        ])
+
+        let result = Self.compose(
+            scan: scan,
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [worktree], terminals: [terminal]))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.terminalID == terminalID)
+        #expect(row.tmuxPane == nil)
+
+        #expect(peerBehindColumn(row) == "lane-a · terminal 5A1B2C3D")
     }
 
     /// The pane join is the one the docs teach, and it has to keep working for

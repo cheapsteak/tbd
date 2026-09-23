@@ -258,13 +258,17 @@ whenever anything about that session changes, and the whole roster is
 re-announced after the next `hello` — so a session TBD adopts later is published
 on the next line for it.
 
-**Reverse, a local session seen remotely: `<origin>:<display name> %<pane>`.**
+**Reverse, a local session seen remotely: `<origin>:<display name> <terminal short id>`.**
 Here collisions are the norm rather than the exception: several Claude terminals
-in one worktree all carry the worktree display name. The pane discriminator is
-therefore **always present**, never added on collision — a name that changes when
-some other session appears is worse than one that occasionally needs a ref. The
-pane is TBD's own documented join key, so a remote agent naming one names
-something `tbd terminal list` can resolve.
+in one worktree all carry the worktree display name. The terminal discriminator
+is therefore **always present**, never added on collision — a name that changes
+when some other session appears is worse than one that occasionally needs a ref.
+The discriminator is the first eight characters of the terminal row's id, as
+`tbd terminal list` prints it (e.g. `laptop:useful-swallow 5A1B2C3D`), so a
+remote agent naming one names something it can resolve. It is deliberately not
+a transport coordinate: a holder-backed terminal has no tmux pane, and a name
+built from one would collide across every holder tab in a worktree and change
+whenever a terminal moved between transports.
 
 The origin label is the sanitized local host name. It only has to be stable and
 distinct between the machines bridging to one host, which is what the
@@ -289,7 +293,7 @@ multi-tenant: two laptops bridging to it would otherwise publish colliding names
 for sessions on different machines belonging to different people, and a
 collision there is a misdelivery rather than a display glitch.
 
-TBD composes the whole name — origin, display name, and pane — and sends it on
+TBD composes the whole name — origin, display name, and terminal short id — and sends it on
 the `peer` line. The provider **MUST** publish that name verbatim, **MUST NOT**
 prefix or otherwise modify it, and **MUST NOT** publish two peers under one
 name. Putting the composition on TBD's side rather than the provider's is
@@ -554,10 +558,10 @@ reader of the registry can produce one. The row carries the session id, which is
 on disk, and the listing says where refs actually come from. An always-empty ref
 column would read as "this peer has no ref", which is false for every row.
 
-This replaces a manual join the docs currently teach: pull
-`tbd worktree list --json`, pull `tbd terminal list`, join them on the tmux pane
-to work out which row is which lane. The command does that join, and keeps
-working for rows that have no pane to join on.
+This replaces a manual join: pull `tbd worktree list --json`, pull
+`tbd terminal list`, and match rows by hand to work out which row is which lane.
+The command does that join, including for holder-backed rows, which have no tmux
+pane.
 
 **A line is added to the TBD skill** (`Sources/TBDShared/TBDSkillContent.swift`,
 in the passage that currently teaches the manual join), pointing sessions at the

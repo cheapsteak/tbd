@@ -124,24 +124,26 @@ If `ListAgents` and `SendMessage` are among your tools, sibling sessions on this
 machine should show up in `ListAgents` — registration is best-effort, so a
 running session can be missing — and `SendMessage` hands one plain text,
 delivered between the recipient's turns. Each row carries a name, a short
-`[ref]`, its kind and its status; TBD-spawned rows also carry a tmux pane. TBD
-sets a session's peer name from the worktree display name at spawn, so rows
-usually match the sidebar — but two things pull them apart. A session spawned
-before the running daemon supported naming carries the
-working-directory slug plus a short suffix instead. And a worktree renamed
-after a session started leaves that session on its spawn-time name, because the
-name is fixed at spawn and a new one applies only at the next respawn or
-resume.
+`[ref]`, its kind and its status. TBD sets a session's peer name from the
+worktree display name at spawn, so rows usually match the sidebar — but two
+things pull them apart. A session spawned before the running daemon supported
+naming carries the working-directory slug plus a short suffix instead. And a
+worktree renamed after a session started leaves that session on its spawn-time
+name, because the name is fixed at spawn and a new one applies only at the next
+respawn or resume.
 
 So a `No agent named 'X' is reachable.` refusal usually means the peer is
 listed under a different name, not that it is dead — do not conclude a session
-is gone from a failed send. Identify its row by the tmux pane instead:
-every TBD-spawned row prints `tmux <server>:<window>.<pane>`, and
-`tbd terminal list <worktree-id>` prints that worktree's own window and pane, so
-the two join whatever the row is named. `tbd worktree list --json` is where the
-worktree id and the directory slug come from.
-`tbd peer list` does that join for you — every peer TBD can see, with the
-worktree, terminal or remote session behind it.
+is gone from a failed send. Identify its row by its terminal id and worktree
+instead, whatever the row is named: `tbd peer list` shows
+every peer TBD can see, with the worktree, terminal or remote session behind
+it, and names the terminal by the first eight characters of its id — a prefix
+of the id `tbd terminal list <worktree-id>` prints. `tbd worktree list --json` is where
+the worktree id and the directory slug come from. A TBD session seen from
+another machine is named `<machine>:<worktree> <terminal id prefix>` for the
+same reason. A tmux pane is not an identity: a session on the tmux transport
+also prints the legacy coordinate `tmux <server>:<window>.<pane>`, but a
+session on the pty-holder transport has no pane at all.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when

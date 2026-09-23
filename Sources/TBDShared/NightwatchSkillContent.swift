@@ -213,7 +213,7 @@ If you build one: it types into ~96 live panes, so it MUST use the composer ghos
 raw mouse escape sequences as if a human had typed them.
 
 ## TBD integration
-- **Read:** `~/tbd/state.db` (worktrees/terminals/`tmuxServer` per pane — pane IDs collide across servers, always read the server, never hardcode)
+- **Read:** `~/tbd/state.db` (worktrees/terminals — identify a terminal by its `id`, which every transport carries; `tmuxPaneID` is a legacy coordinate that only tmux-transport rows fill in and that collides across servers, so pair it with the worktree's `tmuxServer` and never hardcode it — holder-backed rows have no pane)
 - **Act:** `tbd terminal send --submit` (nudge/resolve) · `tbd worktree archive` (prune) · `tbd worktree create` (spawn)
 
 ## Durable scheduling (opt-in — never auto-runs)

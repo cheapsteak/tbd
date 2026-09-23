@@ -47,17 +47,23 @@ private let liveProcStart = ProcessStartTime.format(liveStartedAt) ?? "unrendera
 private let repoA = UUID()
 private let repoB = UUID()
 
+/// The terminal row every default fixture session runs in. Fixed rather than
+/// random so an assertion can spell out the announced name, whose
+/// discriminator is this id's first eight characters.
+private let fixtureTerminalID = UUID(uuidString: "5A1B2C3D-7E8F-4A0B-9C1D-2E3F4A5B6C7D")!
+
 private func spawnedSession(
     repoID: UUID = repoA,
     displayName: String = "useful-swallow",
     worktreePath: String = "/tmp/tbd-roster-fixture/useful-swallow",
     pane: String = "%3541",
-    claudeSessionID: String? = "4E12DD65-92B8-4D8E-9920-214C6553FC63"
+    claudeSessionID: String? = "4E12DD65-92B8-4D8E-9920-214C6553FC63",
+    terminalID: UUID = fixtureTerminalID
 ) -> TBDSpawnedSession {
     TBDSpawnedSession(
         worktreeID: UUID(),
         repoID: repoID,
-        terminalID: UUID(),
+        terminalID: terminalID,
         displayName: displayName,
         worktreePath: worktreePath,
         tmuxPaneID: pane,
@@ -191,8 +197,8 @@ private func watcher(
 @Suite("Roster watcher — announcements")
 struct RosterWatcherAnnouncementTests {
     /// A session appearing produces a `peer` line, complete rather than
-    /// partial, named `<origin>:<display name> %<pane>` with the pane
-    /// discriminator always present.
+    /// partial, named `<origin>:<display name> <terminal short id>` with the
+    /// terminal discriminator always present.
     @Test func aSessionAppearingIsAnnouncedAsAPeer() async throws {
         try await withRegistry { directory in
             try write(registryRecord(), pid: 4242, in: directory)
@@ -204,7 +210,7 @@ struct RosterWatcherAnnouncementTests {
             let announced = peers(await sink.drain())
             #expect(announced.count == 1)
             let peer = try #require(announced.first)
-            #expect(peer.name == "laptop:useful-swallow %3541")
+            #expect(peer.name == "laptop:useful-swallow 5A1B2C3D")
             #expect(peer.status == "busy")
             #expect(peer.peerProtocol == 1)
         }
@@ -364,7 +370,7 @@ struct RosterWatcherScopingTests {
             await subject.addLink(link(repoID: repoA, sink: sink))
 
             let announced = peers(await sink.drain())
-            #expect(announced.map(\.name) == ["laptop:useful-swallow %3541"])
+            #expect(announced.map(\.name) == ["laptop:useful-swallow 5A1B2C3D"])
             // Both sessions are on the roster; only one is on this link.
             #expect(await subject.currentEntries().count == 2)
         }
@@ -398,7 +404,7 @@ struct RosterWatcherScopingTests {
             let subject = watcher(directory: directory, sessions: sessions)
             await subject.addLink(link(sink: sink))
 
-            #expect(peers(await sink.drain()).map(\.name) == ["laptop:useful-swallow %3541"])
+            #expect(peers(await sink.drain()).map(\.name) == ["laptop:useful-swallow 5A1B2C3D"])
         }
     }
 
@@ -439,7 +445,7 @@ struct RosterWatcherToleranceTests {
             let peer = try #require(peers(await sink.drain()).first)
             #expect(peer.status == LocalPeerRegistryRecord.unknownStatus)
             #expect(peer.status != "idle")
-            #expect(peer.name == "laptop:useful-swallow %3541")
+            #expect(peer.name == "laptop:useful-swallow 5A1B2C3D")
         }
     }
 
@@ -656,7 +662,7 @@ struct RosterWatcherTickTests {
             // continuation was resumed.
             try await clock.requireSleeperArmed()
 
-            #expect(peers(await sink.frames).map(\.name) == ["laptop:useful-swallow %3541"])
+            #expect(peers(await sink.frames).map(\.name) == ["laptop:useful-swallow 5A1B2C3D"])
         }
     }
 }
@@ -914,7 +920,7 @@ struct RosterWatcherReconnectTests {
             #expect(second.handle != first)
             // Both lines really are about one session, which is what makes the
             // order matter rather than being a cosmetic preference.
-            #expect(second.name == "laptop:useful-swallow %3541")
+            #expect(second.name == "laptop:useful-swallow 5A1B2C3D")
         }
     }
 
@@ -1262,5 +1268,120 @@ struct DatabaseLocalSessionDirectoryTests {
 
         #expect(sessions.map(\.terminalID) == [owned.terminal.id])
         #expect(!sessions.contains(where: { $0.worktreeID == scratch.id }))
+    }
+}
+
+// MARK: - The announced name across transports
+
+/// The name a local session is announced under names its **terminal row**, not
+/// a transport coordinate.
+///
+/// A holder-backed terminal has no tmux pane — its row carries an empty
+/// `tmuxPaneID` — so a pane discriminator gave every holder tab in a worktree
+/// the same name (`… %`), and a terminal that moved between transports was
+/// renamed under its peers. Every fixture here goes through the stores'
+/// creation paths and the production `DatabaseLocalSessionDirectory`, so the
+/// terminal ids and the empty pane are the ones a real row carries.
+@Suite("Roster watcher — the announced name")
+struct RosterWatcherAnnouncedNameTests {
+    private static let holderSessionID = "4E12DD65-92B8-4D8E-9920-214C6553FC63"
+    private static let secondHolderSessionID = "9D2E3F40-5A6B-4C7D-8E9F-A0B1C2D3E4F5"
+    private static let tmuxSessionID = "7C0FFEE0-1111-4222-8333-944455556666"
+
+    /// One worktree with two holder-backed Claude terminals and one tmux-backed
+    /// one, and a live registry record for each, joined on the captured
+    /// session id. Returns the announced names keyed by terminal id.
+    private func announceThreeTerminalsInOneWorktree(
+        _ directory: URL
+    ) async throws -> (holder: Terminal, tmux: Terminal, names: [String: String]) {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/tbd-roster-repo-\(UUID().uuidString)",
+            displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "useful-swallow", displayName: "useful-swallow",
+            branch: "b", path: "/tmp/tbd-roster-wt/\(UUID().uuidString)", tmuxServer: "srv")
+        let holder = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: Self.holderSessionID, kind: .claude, transport: .holder)
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: Self.secondHolderSessionID, kind: .claude, transport: .holder)
+        let tmux = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@3541", tmuxPaneID: "%3541",
+            claudeSessionID: Self.tmuxSessionID, kind: .claude)
+
+        // A holder session runs outside tmux, so its record carries no `tmux`.
+        try write(
+            registryRecord(
+                sessionID: Self.holderSessionID, cwd: worktree.localPath,
+                socket: "/tmp/cc-socks/4242.sock", tmux: nil),
+            pid: 4242, in: directory)
+        try write(
+            registryRecord(
+                sessionID: Self.secondHolderSessionID, cwd: worktree.localPath,
+                socket: "/tmp/cc-socks/4444.sock", tmux: nil),
+            pid: 4444, in: directory)
+        try write(
+            registryRecord(
+                sessionID: Self.tmuxSessionID, cwd: worktree.localPath,
+                socket: "/tmp/cc-socks/4343.sock"),
+            pid: 4343, in: directory)
+
+        let subject = RosterWatcher(
+            sessionsDirectory: directory,
+            sessions: DatabaseLocalSessionDirectory(
+                worktrees: db.worktrees, terminals: db.terminals),
+            origin: "laptop",
+            interval: .seconds(2),
+            procStartForPID: { [4242, 4343, 4444].contains($0) ? liveProcStart : nil },
+            clock: ContinuousClock())
+        let sink = FrameSink()
+        await subject.addLink(link(repoID: repo.id, sink: sink))
+
+        let entries = await subject.currentEntries()
+        var names: [String: String] = [:]
+        for entry in entries { names[entry.terminalID.uuidString] = entry.name }
+        #expect(peers(await sink.drain()).count == 3)
+        return (holder, tmux, names)
+    }
+
+    /// A holder row — empty pane — is announced under its terminal's short id,
+    /// the prefix of what `tbd terminal list` prints for it, and never under a
+    /// bare `%`.
+    @Test func aHolderRowIsAnnouncedUnderItsTerminalShortID() async throws {
+        try await withRegistry { directory in
+            let made = try await announceThreeTerminalsInOneWorktree(directory)
+
+            let name = try #require(made.names[made.holder.id.uuidString])
+            let prefix = String(made.holder.id.uuidString.prefix(8))
+            #expect(name == "laptop:useful-swallow \(prefix)")
+            #expect(!name.contains("%"))
+        }
+    }
+
+    /// A tmux row carries the same kind of discriminator, not its pane, so a
+    /// terminal keeps its name if it moves between transports.
+    @Test func aTmuxRowIsAnnouncedUnderItsTerminalShortIDNotItsPane() async throws {
+        try await withRegistry { directory in
+            let made = try await announceThreeTerminalsInOneWorktree(directory)
+
+            let name = try #require(made.names[made.tmux.id.uuidString])
+            let prefix = String(made.tmux.id.uuidString.prefix(8))
+            #expect(name == "laptop:useful-swallow \(prefix)")
+            #expect(!name.contains("%3541"))
+        }
+    }
+
+    /// Claude terminals in one worktree share a display name; the
+    /// discriminator is what keeps their announced names apart — including two
+    /// holder-backed ones, which have no pane between them to tell apart.
+    @Test func terminalsInOneWorktreeAnnounceDistinctNames() async throws {
+        try await withRegistry { directory in
+            let made = try await announceThreeTerminalsInOneWorktree(directory)
+
+            #expect(made.names.count == 3)
+            #expect(Set(made.names.values).count == 3)
+        }
     }
 }
