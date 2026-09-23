@@ -56,7 +56,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
 /// Captured TEXT is file-backed at
 /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
 /// (`TBDConstants.terminalHistoryPath`); the DB row keeps display metadata.
-/// Empty/whitespace-only captures store nothing (no file, no row).
+/// Empty/whitespace-only captures store nothing (no file, no row) on the
+/// tmux path (`captureOnClose`); the holder path (`recordOnClose`) writes the
+/// row without a file instead.
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
     // config knob only if someone actually asks for more retention.
@@ -103,17 +105,42 @@ public struct TerminalHistoryStore: Sendable {
         await store(terminal: terminal, text: text, closedAt: Date())
     }
 
+    /// Holder-transport close: writes an entry whether or not there is a
+    /// capture. NEVER throws.
+    ///
+    /// Unlike `captureOnClose`, a missing or blank capture still writes the
+    /// metadata row (no content file, `lineCount` 0). A holder's screen can be
+    /// unreadable at close for a reason that says nothing about the session —
+    /// a viewer holds the pty, so the daemon's copy is frozen — and the entry
+    /// is still what lets a Claude session be revived by its session id.
+    /// Revive already handles a missing file (the shell path skips the `cat`),
+    /// and the viewer reads a missing file as empty.
+    public func recordOnClose(terminal: Terminal, capture: String?) async {
+        let text = capture.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        await persist(terminal: terminal, text: text, closedAt: Date())
+    }
+
     /// Store seam (internal so tests can control `closedAt` for deterministic
     /// prune ordering). Best-effort: failures are logged, never thrown.
     func store(terminal: Terminal, text: String, closedAt: Date) async {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        await persist(terminal: terminal, text: text, closedAt: closedAt)
+    }
+
+    /// Writes the content file (when there is text), the metadata row, and
+    /// prunes. `text == nil` writes the row alone.
+    private func persist(terminal: Terminal, text: String?, closedAt: Date) async {
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
         do {
-            try FileManager.default.createDirectory(
-                atPath: (path as NSString).deletingLastPathComponent,
-                withIntermediateDirectories: true
-            )
-            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            if let text {
+                try FileManager.default.createDirectory(
+                    atPath: (path as NSString).deletingLastPathComponent,
+                    withIntermediateDirectories: true
+                )
+                try text.write(toFile: path, atomically: true, encoding: .utf8)
+            }
 
             let entry = TerminalHistoryEntry(
                 id: terminal.id,
@@ -122,7 +149,9 @@ public struct TerminalHistoryStore: Sendable {
                 kind: terminal.kind,
                 closedAt: closedAt,
                 claudeSessionID: terminal.claudeSessionID,
-                lineCount: text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+                lineCount: text.map {
+                    $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+                } ?? 0
             )
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID

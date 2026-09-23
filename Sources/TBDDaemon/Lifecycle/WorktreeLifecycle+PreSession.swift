@@ -630,12 +630,11 @@ extension WorktreeLifecycle {
         let terminal = try? await db.terminals.get(id: terminalID)
         switch terminal?.transport ?? unreadableRowTransport {
         case .holder:
-            // No Closed Terminals capture for a holder hook tab: the holder has
-            // no scrollback dump yet (issue #851 §4, Phase 2 item "Closed-
-            // terminal history on holder dispose"), which is exactly what
-            // `disposeHolder` already does on every other teardown of a holder
-            // row. The tmux kill would be worse than a no-op here — a holder
-            // row's `windowID` names nothing, and the holder, its job and its
+            // The Closed Terminals entry comes from the daemon's own emulator,
+            // through the same helper every history-keeping holder teardown
+            // uses, and before the reclaim below releases the reader. The tmux
+            // kill would be worse than a no-op here — a holder row's
+            // `windowID` names nothing, and the holder, its job and its
             // rendezvous files would outlive the row that is their only record.
             //
             // Reclaimed through `abandonHookHolder` on both halves, not
@@ -647,6 +646,8 @@ extension WorktreeLifecycle {
             // `HolderRegistry.abandonVerifiedJob`). The row is still the better
             // source for the pids while it can be read.
             if let terminal {
+                await Self.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
                 await abandonHookHolder(
                     terminalID: terminal.id,
                     holderPID: terminal.holderPID,
