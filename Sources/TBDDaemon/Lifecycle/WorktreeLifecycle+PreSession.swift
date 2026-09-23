@@ -424,13 +424,14 @@ extension WorktreeLifecycle {
             switch preSession.transport {
             case .tmux:
                 // Refuse to kill a window whose pane belongs to a DIFFERENT
-                // terminal — see `TmuxManager.paneStillBelongsTo`. The wait
+                // terminal — see `TmuxManager.paneOwnership`. The wait
                 // this follows can run arbitrarily long, so the tmux server
                 // can be recreated (window/pane numbering reset) before this
                 // cleanup ever runs — the same hazard class as PR #902.
-                if await tmux.paneStillBelongsTo(
+                let ownership = await tmux.paneOwnership(
                     terminalID: preSession.terminalID, server: preSession.tmuxServer,
-                    paneID: preSession.paneID) {
+                    paneID: preSession.paneID)
+                if ownership.permitsTeardown {
                     try? await tmux.killWindow(
                         server: preSession.tmuxServer, windowID: preSession.windowID
                     )
@@ -438,7 +439,7 @@ extension WorktreeLifecycle {
                     logger.warning("""
                         phase-3: leaving window \(preSession.windowID, privacy: .public) \
                         untouched for terminal \(preSession.terminalID, privacy: .public) — \
-                        its pane now belongs to a different terminal
+                        \(ownership.refusalDetail ?? "", privacy: .public)
                         """)
                 }
             case .holder:
@@ -686,17 +687,18 @@ extension WorktreeLifecycle {
             }
         case .tmux:
             // Refuse to capture or kill a pane that belongs to a DIFFERENT
-            // terminal — see `TmuxManager.paneStillBelongsTo`. A hook tab's
+            // terminal — see `TmuxManager.paneOwnership`. A hook tab's
             // wait for its setup script can run arbitrarily long, so the
             // tmux server can be recreated (and its window/pane numbering
             // reset) in the gap between spawning this hook tab and tearing
             // it down here — the same hazard class as PR #902.
-            guard await tmux.paneStillBelongsTo(
-                terminalID: terminalID, server: tmuxServer, paneID: paneID) else {
+            let ownership = await tmux.paneOwnership(
+                terminalID: terminalID, server: tmuxServer, paneID: paneID)
+            guard ownership.permitsTeardown else {
                 logger.warning("""
                     closeHookTerminal: leaving window \(windowID, privacy: .public) untouched \
-                    for terminal \(terminalID, privacy: .public) — its pane now belongs to a \
-                    different terminal
+                    for terminal \(terminalID, privacy: .public) — \
+                    \(ownership.refusalDetail ?? "", privacy: .public)
                     """)
                 break
             }

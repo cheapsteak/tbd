@@ -77,14 +77,14 @@ extension WorktreeLifecycle {
                 }
             } else {
                 // Refuse to kill a window whose pane belongs to a DIFFERENT
-                // terminal — see `TmuxManager.paneStillBelongsTo`. The row is
+                // terminal — see `TmuxManager.paneOwnership`. The row is
                 // gone from the DB either way (below); only the tmux-side
                 // teardown is gated, the same asymmetry `handleTerminalDelete`
                 // uses.
-                let stillOwned = await tmux.paneStillBelongsTo(
+                let ownership = await tmux.paneOwnership(
                     terminalID: terminal.id, server: worktree.tmuxServer,
                     paneID: terminal.tmuxPaneID)
-                if stillOwned {
+                if ownership.permitsTeardown {
                     try? await tmux.killWindow(
                         server: worktree.tmuxServer,
                         windowID: terminal.tmuxWindowID
@@ -92,8 +92,8 @@ extension WorktreeLifecycle {
                 } else {
                     forgetLogger.warning("""
                         forget: leaving window \(terminal.tmuxWindowID, privacy: .public) \
-                        untouched for terminal \(terminal.id, privacy: .public) — its pane \
-                        now belongs to a different terminal
+                        untouched for terminal \(terminal.id, privacy: .public) — \
+                        \(ownership.refusalDetail ?? "", privacy: .public)
                         """)
                 }
             }

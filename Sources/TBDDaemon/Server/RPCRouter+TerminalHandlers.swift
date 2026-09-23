@@ -983,6 +983,10 @@ extension RPCRouter {
         // carried out separately, or the record would call a close that
         // reclaimed nothing `dispatched`.
         var transportCleanupFailure: String?
+        // Set when the tmux-side teardown was deliberately skipped because the
+        // pane now belongs to a different terminal. Recorded as a refusal, not
+        // a transport failure: nothing failed, the guard did its job.
+        var teardownRefusal: String?
         if terminal.transport == .holder {
             // The one path in the holder family that DOES the work instead of
             // refusing it. Its siblings refuse because acting on a holder row's
@@ -1011,22 +1015,31 @@ extension RPCRouter {
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
             // Refuse to kill a window whose pane belongs to a DIFFERENT
-            // terminal — see `TmuxManager.paneStillBelongsTo` for why. A
+            // terminal — see `TmuxManager.paneOwnership` for why. A
             // close racing a recycled coordinate must not `kill-window` a
             // session it was never asked to touch.
-            let stillOwned = await tmux.paneStillBelongsTo(
+            //
+            // The two refusals are recorded as what they are rather than as a
+            // tmux error: a recycled coordinate is a deliberate protective
+            // skip (`refused(.targetMismatch)`); an unreadable identity means
+            // the read-only consultation itself failed to run, which IS a
+            // transport failure — just not one caused by the kill.
+            let ownership = await tmux.paneOwnership(
                 terminalID: terminal.id, server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
 
-            if !stillOwned {
+            if let detail = ownership.refusalDetail {
                 let message =
-                    "pane \(terminal.tmuxPaneID) now belongs to a different terminal — " +
-                    "the tmux coordinate was recycled, so the window was left untouched"
+                    "pane \(terminal.tmuxPaneID): \(detail), so the window was left untouched"
                 logger.warning("""
                     terminalDelete: refusing to kill-window for terminal \
                     \(terminal.id.uuidString, privacy: .public) — \
                     \(message, privacy: .public)
                     """)
-                transportCleanupFailure = message
+                if case .ownedByAnother = ownership {
+                    teardownRefusal = message
+                } else {
+                    transportCleanupFailure = message
+                }
             } else {
                 await db.terminalHistory.captureOnClose(terminal: terminal) {
                     try await tmux.capturePaneScrollback(
@@ -1061,6 +1074,8 @@ extension RPCRouter {
 
         if let transportCleanupFailure {
             await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
+        } else if let teardownRefusal {
+            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
         } else {
             await finishActuation(actuationID, .dispatched)
         }
@@ -1628,7 +1643,7 @@ extension RPCRouter {
                     // Once the dead pane is eliminated, rotate the token and
                     // clear its process-local facts before exposing the park.
                     //
-                    // No `paneStillBelongsTo` check needed here (unlike the
+                    // No `paneOwnership` check needed here (unlike the
                     // codex/shell branches below): the `probeWindow` switch
                     // above already returned `.absent` — tmux's own
                     // definitive "no such window" answer — so there is no
@@ -1756,14 +1771,14 @@ extension RPCRouter {
                     // Kill the old window and rebuild the server while holding
                     // the same lock reconciliation uses for ownership reads.
                     // Refuse to kill a window whose pane belongs to a
-                    // DIFFERENT terminal — see `TmuxManager.paneStillBelongsTo`.
+                    // DIFFERENT terminal — see `TmuxManager.paneOwnership`.
                     // A recreate racing a recycled coordinate must not destroy
                     // a live stranger's session; the row itself is genuinely
                     // stale at that point, so the same error every other
                     // staleness check in this closure throws applies here too.
-                    guard await tmux.paneStillBelongsTo(
+                    guard await tmux.paneOwnership(
                         terminalID: currentTerminal.id, server: currentWorktree.tmuxServer,
-                        paneID: currentTerminal.tmuxPaneID) else {
+                        paneID: currentTerminal.tmuxPaneID).permitsTeardown else {
                         throw StaleTerminalReplacementError()
                     }
                     try? await tmux.killWindow(
@@ -1879,11 +1894,11 @@ extension RPCRouter {
                         terminal: currentTerminal)
                     var replacementEnv = env
                     // Refuse to kill a window whose pane belongs to a
-                    // DIFFERENT terminal — see `TmuxManager.paneStillBelongsTo`
+                    // DIFFERENT terminal — see `TmuxManager.paneOwnership`
                     // and the matching guard in the codex branch above.
-                    guard await tmux.paneStillBelongsTo(
+                    guard await tmux.paneOwnership(
                         terminalID: currentTerminal.id, server: currentWorktree.tmuxServer,
-                        paneID: currentTerminal.tmuxPaneID) else {
+                        paneID: currentTerminal.tmuxPaneID).permitsTeardown else {
                         throw StaleTerminalReplacementError()
                     }
                     try? await tmux.killWindow(

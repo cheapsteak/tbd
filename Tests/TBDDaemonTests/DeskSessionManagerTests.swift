@@ -277,8 +277,11 @@ extension TBDHomeSerialized {
         /// `closeScratchTerminals` — see PR #902. A tmux server restart can
         /// hand the desk terminal's recorded coordinate to a DIFFERENT, live
         /// stranger terminal; closing the desk must not destroy it.
-        @Test("closeDeskSession leaves a window untouched when its pane belongs to a stranger")
-        func testCloseDeskSessionLeavesAWindowUntouchedOnPaneMismatch() async throws {
+        @Test("closeDeskSession leaves a window untouched when its pane is not provably its own",
+              arguments: RefusingPaneAnswer.allCases)
+        func testCloseDeskSessionLeavesAWindowUntouchedOnPaneMismatch(
+            _ refusal: RefusingPaneAnswer
+        ) async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("tbd-desk-close-mismatch-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
@@ -292,7 +295,7 @@ extension TBDHomeSerialized {
             let tmux = TmuxManager(
                 dryRun: true,
                 dryRunRecorder: { recorder.append($0) },
-                dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+                dryRunPaneSendTarget: { _, _ in try refusal.answer() })
             let lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
             let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path

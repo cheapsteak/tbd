@@ -164,7 +164,11 @@ import Testing
     /// runs. A mismatched pane must neither be captured (leaking a live
     /// stranger's screen into this row's Closed Terminals history) nor
     /// killed — see PR #902.
-    @Test func closeHookTerminalLeavesAWindowUntouchedWhenItsPaneBelongsToAStranger() async throws {
+    /// An unreadable probe (a wedged server) refuses too: unknown is not gone.
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func closeHookTerminalLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(
+        _ refusal: RefusingPaneAnswer
+    ) async throws {
         let fx = try await makeFixture(label: TerminalLabel.preSession, kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
         let recorder = RecordedTmuxArgs()
@@ -172,7 +176,7 @@ import Testing
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
             dryRunCapturePane: { _, _ in "setup hook output\n" },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let lifecycle = WorktreeLifecycle(
             db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
 

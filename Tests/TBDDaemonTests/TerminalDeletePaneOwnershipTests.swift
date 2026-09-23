@@ -116,9 +116,10 @@ struct TerminalDeletePaneOwnershipTests {
                 "a pane with no identity to compare must fall back to killing the window: \(recorder.snapshot())")
     }
 
-    /// An unreadable probe (a wedged server) is not evidence of a mismatch
-    /// either — it must not newly turn an ordinary close into a refusal.
-    @Test func killsTheWindowWhenTheProbeThrows() async throws {
+    /// An unreadable probe (a wedged server, a tmux that failed to spawn) is
+    /// "we do not know", not "gone" — the same stance the reconcile sweep
+    /// takes. The kill is refused; the row still closes.
+    @Test func refusesToKillTheWindowWhenTheProbeThrows() async throws {
         let fx = try await makeFixture()
         let recorder = RecordedTmuxArgs()
         let tmux = TmuxManager(
@@ -127,16 +128,60 @@ struct TerminalDeletePaneOwnershipTests {
             dryRunPaneSendTarget: { _, _ in
                 throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(5))
             })
+        let logPath = Self.actuationLogPath()
         let router = RPCRouter(
             db: fx.db,
             lifecycle: WorktreeLifecycle(
                 db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+            tmux: tmux, startTime: Date(), actuationLog: ActuationLog(path: logPath))
+
+        let resp = try await close(router, fx.terminal.id)
+
+        #expect(resp.success, "the row itself must still close")
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "an unreadable probe must refuse the kill, not guess: \(recorder.snapshot())")
+        let captured = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
+        #expect(captured.isEmpty, "an unverified pane's screen must not be captured")
+        // The consultation itself failed to run, which is a transport failure.
+        let outcome = try #require(try Self.outcomes(at: logPath).last)
+        #expect(outcome["result"] as? String == "transport-failed")
+        #expect(outcome["reason"] == nil)
+    }
+
+    /// A deliberate protective skip is recorded as a refusal naming the
+    /// mismatch, not as a tmux error — the actuation log must be able to tell
+    /// the guard doing its job from a kill-window that failed.
+    @Test func recordsAMismatchRefusalAsTargetMismatchNotTransportFailure() async throws {
+        let fx = try await makeFixture()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+        let logPath = Self.actuationLogPath()
+        let router = RPCRouter(
+            db: fx.db,
+            lifecycle: WorktreeLifecycle(
+                db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: ActuationLog(path: logPath))
 
         let resp = try await close(router, fx.terminal.id)
 
         #expect(resp.success)
-        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
-                "an unreadable probe must fall back to killing the window, not refuse: \(recorder.snapshot())")
+        let outcome = try #require(try Self.outcomes(at: logPath).last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "target-mismatch")
+    }
+
+    private static func actuationLogPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-tdpo-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("actuations.jsonl").path
+    }
+
+    private static func outcomes(at path: String) throws -> [[String: Any]] {
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        return try text.split(separator: "\n").compactMap { line in
+            try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        }.filter { $0["kind"] as? String == "outcome" }
     }
 }

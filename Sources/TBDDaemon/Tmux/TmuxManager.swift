@@ -39,6 +39,34 @@ public enum PaneSendTarget: Sendable, Equatable {
     case live(terminalID: String?)
 }
 
+/// The answer `TmuxManager.paneOwnership` gives before a coordinate-destroying
+/// teardown: only `.owned` permits it. See that method for the policy.
+public enum PaneOwnership: Sendable, Equatable {
+    /// The pane is this terminal's, carries no identity, or is already gone.
+    case owned
+    /// The pane positively answers with a different terminal's id.
+    case ownedByAnother(terminalID: String)
+    /// The consultation could not be run (tmux timed out or failed to spawn).
+    case unverifiable(reason: String)
+
+    public var permitsTeardown: Bool { self == .owned }
+
+    /// Why a teardown was refused, for logs and the actuation record; `nil`
+    /// when it was not.
+    public var refusalDetail: String? {
+        switch self {
+        case .owned:
+            return nil
+        case .ownedByAnother(let other):
+            return "its pane now belongs to a different terminal (\(other)) — "
+                + "the tmux coordinate was recycled"
+        case .unverifiable(let reason):
+            return "its pane's identity could not be read (\(reason)), "
+                + "so it cannot be proven to still be this terminal's"
+        }
+    }
+}
+
 /// Serializes tmux resource ownership transitions per server.
 ///
 /// A tmux window becomes externally visible before the database row that owns
@@ -1427,27 +1455,43 @@ public struct TmuxManager: Sendable {
     /// tears down a pane by coordinate shares this one question before it
     /// acts, rather than each re-deriving the `.live`/`.dead` match by hand.
     ///
-    /// Returns `false` ONLY on a positive mismatch: the pane answers with a
-    /// DIFFERENT terminal's id (checked jointly against `.live` and `.dead`,
-    /// case-insensitively — a stranger pane whose process has already exited
-    /// still answers `.dead` and must still be caught). An unstamped pane
-    /// (`nil` id), a pane that already answers `.missing`, or an unreadable
-    /// probe all return `true` — the deliberate fallback to today's
-    /// behavior, because refusing on any of those would turn an ordinary
-    /// teardown of an already-dead window into a new failure.
-    public func paneStillBelongsTo(
+    /// Three answers, and only `.owned` permits the teardown:
+    /// - **`.owned`** – the pane answers with this terminal's id, carries no
+    ///   id at all (unstamped), or tmux positively reports it `.missing`.
+    ///   Refusing on an unstamped or already-gone pane would turn an ordinary
+    ///   teardown of an already-dead window into a new failure, so absence of
+    ///   an identity is not treated as disagreement.
+    /// - **`.ownedByAnother`** – a positive mismatch: the pane answers with a
+    ///   DIFFERENT terminal's id (checked jointly against `.live` and `.dead`,
+    ///   case-insensitively — a stranger pane whose process has already
+    ///   exited still answers `.dead` and must still be caught).
+    /// - **`.unverifiable`** – the consultation could not be run at all: tmux
+    ///   timed out on a wedged server, or failed to spawn. That is "we do not
+    ///   know", not "gone", so the teardown is refused. This is the same
+    ///   policy the reconcile sweep applies (an unreadable identity is not
+    ///   evidence of staleness — keep the row) and the one `AgentReaper`
+    ///   applies (keep whenever identity is uncertain). A `kill-window`
+    ///   against a server too wedged to answer a read-only `list-panes`
+    ///   would most likely fail too, so refusing costs little and never
+    ///   destroys a stranger on a guess.
+    public func paneOwnership(
         terminalID: UUID, server: String, paneID: String
-    ) async -> Bool {
-        guard let probe = try? await paneSendTarget(server: server, paneID: paneID) else {
-            return true
+    ) async -> PaneOwnership {
+        let probe: PaneSendTarget
+        do {
+            probe = try await paneSendTarget(server: server, paneID: paneID)
+        } catch {
+            return .unverifiable(reason: "\(error)")
         }
         let paneTerminalID: String?
         switch probe {
         case .live(let id), .dead(let id): paneTerminalID = id
         case .missing: paneTerminalID = nil
         }
-        guard let paneTerminalID else { return true }
-        return paneTerminalID.caseInsensitiveCompare(terminalID.uuidString) == .orderedSame
+        guard let paneTerminalID,
+              paneTerminalID.caseInsensitiveCompare(terminalID.uuidString) != .orderedSame
+        else { return .owned }
+        return .ownedByAnother(terminalID: paneTerminalID)
     }
 
     /// Stamp `@tbd_terminal_id` onto a freshly created or respawned pane, when

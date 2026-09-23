@@ -847,19 +847,19 @@ public actor DeskSessionManager: DeskSessionManaging {
                     }
                 } else {
                     // Refuse to kill a window whose pane belongs to a
-                    // DIFFERENT terminal — see `TmuxManager.paneStillBelongsTo`.
+                    // DIFFERENT terminal — see `TmuxManager.paneOwnership`.
                     // The row is gone from the DB either way (below); only the
                     // tmux-side teardown is gated, the same asymmetry
                     // `handleTerminalDelete` uses.
-                    let stillOwned = await tmux.paneStillBelongsTo(
+                    let ownership = await tmux.paneOwnership(
                         terminalID: t.id, server: wt.tmuxServer, paneID: t.tmuxPaneID)
-                    if stillOwned {
+                    if ownership.permitsTeardown {
                         try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
                     } else {
                         logger.warning("""
                             Watch Desk close: leaving window \(t.tmuxWindowID, privacy: .public) \
-                            untouched for terminal \(t.id, privacy: .public) — its pane now \
-                            belongs to a different terminal
+                            untouched for terminal \(t.id, privacy: .public) — \
+                            \(ownership.refusalDetail ?? "", privacy: .public)
                             """)
                     }
                 }

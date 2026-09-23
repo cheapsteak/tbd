@@ -4,7 +4,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The pane-ownership guard (`TmuxManager.paneStillBelongsTo`) extended to
+/// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to
 /// every other call site that tears down a tmux window by DB-recorded
 /// coordinate — `terminal.delete` (`TerminalDeletePaneOwnershipTests`) was
 /// the first, but `forgetWorktree`, `scratch.delete`'s teardown, and
@@ -13,6 +13,11 @@ import Testing
 /// resets window/pane numbering, and several worktrees of one repo share a
 /// server, so a stale row's coordinate can collide with an unrelated live
 /// terminal's.
+///
+/// Every refusal case runs twice: once against a pane that positively names a
+/// stranger, and once against a probe that could not run at all (a wedged
+/// server). The second is "we do not know", not "gone", so it refuses too —
+/// the same stance the reconcile sweep takes on an unreadable identity.
 @Suite("kill-window sibling sites — pane-ownership guard")
 struct KillWindowSiblingSitesPaneOwnershipTests {
 
@@ -26,7 +31,8 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
     /// reconcile sweep — guarding here covers both. A mismatch must not
     /// capture the stranger's screen into this row's Closed Terminals
     /// history, nor destroy their window.
-    @Test func captureThenKillWindowLeavesAWindowUntouchedWhenItsPaneBelongsToAStranger() async throws {
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func captureThenKillWindowLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/kwss-capture-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
@@ -40,16 +46,16 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
 
         await lifecycle.captureThenKillWindow(terminal: terminal, server: wt.tmuxServer)
 
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
         let captured = try await db.terminalHistory.list(worktreeID: wt.id)
         #expect(captured.isEmpty,
-                "a stranger's screen must never be captured into this row's Closed Terminals history")
+                "an unverified pane's screen must never be captured into this row's Closed Terminals history")
     }
 
     /// The positive control: a pane answering with the row's own id captures
@@ -79,7 +85,8 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
 
     // MARK: - forgetWorktree
 
-    @Test func forgetLeavesAWindowUntouchedWhenItsPaneBelongsToAStranger() async throws {
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func forgetLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/kwss-forget-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
@@ -93,7 +100,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
 
         try await lifecycle.forgetWorktree(worktreeID: wt.id)
@@ -103,12 +110,13 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         #expect(try await db.terminals.get(id: terminal.id) == nil,
                 "forget must still remove the stale terminal row")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
     }
 
     // MARK: - scratch.delete
 
-    @Test func scratchDeleteLeavesAWindowUntouchedWhenItsPaneBelongsToAStranger() async throws {
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func scratchDeleteLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await db.worktrees.createScratch(
             name: "scratch", displayName: "scratch",
@@ -120,7 +128,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
@@ -134,7 +142,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         #expect(try await db.terminals.get(id: terminal.id) == nil,
                 "scratch delete must still remove the stale terminal row")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
     }
 
     // MARK: - terminal.recreateWindow (non-Claude-resumable branch)
@@ -144,7 +152,8 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
     /// so a mismatch means that row's own coordinate has already been
     /// recycled — the same "stale, please retry" condition every other check
     /// in this handler reports, rather than a silent skip.
-    @Test func recreateWindowRefusesWhenThePaneBelongsToAStranger() async throws {
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func recreateWindowRefusesWhenThePaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
         let db = try TBDDatabase(inMemory: true)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-kwss-recreate-\(UUID().uuidString)", isDirectory: true)
@@ -162,7 +171,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
@@ -174,12 +183,12 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
-        #expect(!resp.success, "a mismatched pane must refuse the recreate rather than destroy a stranger's window")
+        #expect(!resp.success, "a pane not provably this terminal's must refuse the recreate rather than destroy a stranger's window")
         let unchanged = try #require(try await db.terminals.get(id: terminal.id))
         #expect(unchanged.tmuxWindowID == "@2", "the row's own coordinate must be untouched by a refused recreate")
         #expect(unchanged.tmuxPaneID == "%2", "the row's own coordinate must be untouched by a refused recreate")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
     }
 
     /// The positive control: a pane answering with the row's own id recreates
@@ -222,7 +231,8 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
     /// The codex branch's own guard, mirroring the shell branch's mismatch
     /// test above — the two branches duplicate the same guard shape, and a
     /// regression in one would not be caught by a test of the other.
-    @Test func recreateWindowCodexBranchRefusesWhenThePaneBelongsToAStranger() async throws {
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func recreateWindowCodexBranchRefusesWhenThePaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
         let db = try TBDDatabase(inMemory: true)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-kwss-recreate-codex-\(UUID().uuidString)", isDirectory: true)
@@ -241,7 +251,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
@@ -251,11 +261,27 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
-        #expect(!resp.success, "a mismatched pane must refuse the recreate rather than destroy a stranger's window")
+        #expect(!resp.success, "a pane not provably this terminal's must refuse the recreate rather than destroy a stranger's window")
         let unchanged = try #require(try await db.terminals.get(id: terminal.id))
         #expect(unchanged.tmuxWindowID == "@2", "the row's own coordinate must be untouched by a refused recreate")
         #expect(unchanged.tmuxPaneID == "%2", "the row's own coordinate must be untouched by a refused recreate")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
+    }
+}
+
+/// The two pane answers that must refuse a teardown: a positive mismatch, and
+/// a consultation that could not be run at all.
+enum RefusingPaneAnswer: String, CaseIterable, Sendable {
+    case stranger
+    case unreadable
+
+    func answer() throws -> PaneSendTarget {
+        switch self {
+        case .stranger:
+            return .live(terminalID: UUID().uuidString)
+        case .unreadable:
+            throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(5))
+        }
     }
 }
