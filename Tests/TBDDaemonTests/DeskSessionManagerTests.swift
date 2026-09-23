@@ -2065,6 +2065,82 @@ extension TBDHomeSerialized {
                 "a hibernated replacement must not block the next recovery")
         }
 
+        /// Make one terminal row unreadable by `get(id:)` while leaving the desk's
+        /// own row listing healthy: the row moves to another worktree, so the
+        /// desk's `list` never decodes it, and its `createdAt` becomes text no
+        /// `Date` can be read from, so fetching it by id throws the way an
+        /// unreadable table would. This isolates the by-id reads the two
+        /// fail-closed branches guard from the staffing read that runs first.
+        private func makeRowUnreadableByID(
+            _ f: (db: TBDDatabase, manager: DeskSessionManager, recorder: DeskTmuxRecorder,
+                  dead: DeadWindows, commands: PaneCommands, identities: PaneIdentities,
+                  spawnFailures: SpawnFailureSwitch, home: URL, priorTBDHome: String?),
+            terminalID: UUID
+        ) async throws {
+            let elsewhere = try await f.db.worktrees.createScratch(
+                name: "elsewhere-\(UUID().uuidString.prefix(8))", displayName: "elsewhere",
+                path: f.home.appendingPathComponent("elsewhere-\(UUID().uuidString)").path,
+                tmuxServer: "elsewhere")
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(
+                    sql: "UPDATE terminal SET worktreeID = ?, createdAt = 'not a date' WHERE id = ?",
+                    arguments: [elsewhere.id.uuidString, terminalID.uuidString])
+            }
+            await #expect(throws: (any Error).self, "fixture check: the row must be unreadable by id") {
+                _ = try await f.db.terminals.get(id: terminalID)
+            }
+        }
+
+        /// Gate 2 reads the previous replacement's row to decide whether it is
+        /// gone. A read that throws is not "the row is gone": a `try?` there
+        /// would turn an unreadable table into permission to spawn.
+        @Test("an unreadable previous-replacement row spawns nothing")
+        func testUnreadablePreviousReplacementSpawnsNothing() async throws {
+            let f = try makeDeskFixture(tag: "staff-gate2-unreadable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = Set(try await f.db.terminals.list(worktreeID: desk.id).map(\.id))
+            _ = try await killAllAndTick(f, desk: desk.id)
+            let replacement = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { !original.contains($0.id) }),
+                "fixture check: the first tick must have spawned a replacement")
+
+            try await makeRowUnreadableByID(f, terminalID: replacement.id)
+
+            let before = try await f.db.terminals.list(worktreeID: desk.id).count
+            let after = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                after == before,
+                "a previous replacement nobody could read must not license another spawn")
+        }
+
+        /// Revocation reads the lease owner's row when the owner is not among the
+        /// live candidates. A read that throws is not proof the owner is gone,
+        /// so the lease must survive it untouched.
+        @Test("an unreadable lease-owner row does not revoke the lease")
+        func testUnreadableLeaseOwnerKeepsLease() async throws {
+            let f = try makeDeskFixture(tag: "staff-owner-unreadable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let incumbent = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+            let lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: incumbent.id, now: Date())
+
+            try await makeRowUnreadableByID(f, terminalID: incumbent.id)
+
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+            let after = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(after.terminalID == incumbent.id, "the lease must stay with its owner")
+            #expect(after.generation == lease.generation, "the lease must not have been revoked")
+            #expect(after.isValid(at: Date()), "an unreadable owner row is not proof it is gone")
+        }
+
         /// A close resets the budget only because the desk it was counting against
         /// is gone. A close whose archive write throws leaves that desk active,
         /// the next `ensure` finds the very same desk by name, and the incident is
