@@ -1492,6 +1492,42 @@ struct HibernationCoordinatorTests {
                 "onServerCreated must fire once with the recreated server name")
     }
 
+    /// A restarted tmux server may assign the replacement the same numeric id
+    /// stored by the dead pre-reboot window. Cleanup must distinguish identity
+    /// from that reused coordinate and leave the fresh replacement alive for
+    /// the agent respawn.
+    @Test func wakeDoesNotKillReplacementWhenTmuxReusesOldWindowID() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.updateTmuxIDs(
+            id: terminalID, windowID: "@mock-0", paneID: "%mock-0")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunWindowIsDead: { $0 == "@mock-0" })
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let wake = await coord.wake(terminalID: terminalID)
+
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(wake == .ok(sessionIncarnationID: after.sessionIncarnationID))
+        #expect(!after.isParked)
+        #expect(after.tmuxWindowID == "@mock-0")
+        #expect(after.tmuxPaneID == "%mock-0")
+        let commands = recorded.snapshot()
+        #expect(!commands.contains {
+            $0.contains("kill-window") && $0.contains("@mock-0")
+        }, "cleanup killed the freshly-created replacement: \(commands)")
+        #expect(commands.contains {
+            $0.contains("respawn-window") && $0.contains("@mock-0")
+        }, "replacement was not respawned: \(commands)")
+    }
+
     @Test func deadWindowWakePersistsReplacementTokenBeforeAgentLaunch() async throws {
         let (db, _, terminalID) = try await setup()
         // Dry-run recreation returns these same coordinates, exercising the

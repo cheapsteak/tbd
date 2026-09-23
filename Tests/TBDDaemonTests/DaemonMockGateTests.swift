@@ -158,6 +158,47 @@ struct DaemonMockGateTests {
         #expect(recorder.contains("@2"))
     }
 
+    @Test("mock OFF: startup preserves pending Codex recovery for post-bind handoff")
+    func mockOffPreservesPendingCodexRecoveryBeforeOrdinaryDisposal() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunWindowIsDead: { _ in true }),
+            hooks: HookResolver())
+        let scratch = try await db.worktrees.createScratch(
+            name: "scratch-pending-recovery",
+            displayName: "Scratch Pending Recovery",
+            path: "/tmp/tbd-scratch-pending-recovery",
+            tmuxServer: "scratch-shared")
+        let terminal = try await db.terminals.create(
+            worktreeID: scratch.id,
+            tmuxWindowID: "@gone",
+            tmuxPaneID: "%gone",
+            label: TerminalLabel.codex,
+            claudeSessionID: "source-thread",
+            kind: .codex)
+        let pendingToken = UUID()
+        _ = try #require(try await db.terminals.beginContinueInClaude(
+            id: terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: terminal),
+            pendingIncarnationID: pendingToken))
+
+        await Daemon().performStartupReconciliation(
+            mockMode: nil,
+            database: db,
+            git: GitManager(),
+            lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
+
+        let preserved = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(preserved.kind == .codex)
+        #expect(preserved.pendingSessionIncarnationID == pendingToken)
+        #expect(!preserved.isParked)
+    }
+
     @Test("mock OFF: an unstamped dead scratch pane remains for compatibility")
     func mockOffKeepsDeadScratchTerminalWithNoPaneIdentity() async throws {
         let db = try TBDDatabase(inMemory: true)

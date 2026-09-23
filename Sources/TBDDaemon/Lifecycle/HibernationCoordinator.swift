@@ -1654,13 +1654,18 @@ public actor HibernationCoordinator {
                 // it first would destroy the session and make createWindow
                 // fail on every retry; killing after the new window exists
                 // can never leave the session windowless.
-                if !claimedByOther {
+                // A restarted tmux server can reuse the parked row's stale id
+                // for the replacement we just created. In that ABA shape the
+                // old and replacement ids are textually identical, so cleanup
+                // must not kill the fresh inert pane before it is respawned.
+                if !claimedByOther, windowID != window.windowID {
                     try? await tmux.killWindow(server: server, windowID: windowID)
                 }
                 // ensureServer returns the untracked bootstrap window id when
                 // it just created the server; kill it now that the real
                 // window exists (mirrors WorktreeLifecycle+PreSession).
-                if let bootstrapWindowID, !bootstrapWindowID.isEmpty {
+                if let bootstrapWindowID, !bootstrapWindowID.isEmpty,
+                   bootstrapWindowID != window.windowID {
                     try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
                 }
                 let preparedIncarnationID: UUID?

@@ -149,6 +149,37 @@ extension AppState {
         }
     }
 
+    /// Apply an in-place provider replacement without touching the tab or its
+    /// layout. The terminal ID is the tab anchor, so replacing only the cached
+    /// row preserves selection and every split containing that terminal.
+    func applyTerminalReplacedDelta(_ terminal: Terminal) {
+        adoptProviderReplacement(terminal)
+    }
+
+    /// Adopt a provider replacement and clear only the tab's generated Codex
+    /// label. A nil label lets the ordinary Claude/profile label resolver take
+    /// over, while a user-renamed tab survives unchanged.
+    private func adoptProviderReplacement(_ terminal: Terminal) {
+        guard let source = terminals[terminal.worktreeID]?.first(where: {
+            $0.id == terminal.id
+        }) else { return }
+        if source.kind != terminal.kind
+            || source.sessionIncarnationID != terminal.sessionIncarnationID {
+            terminalReplacementObservationGeneration &+= 1
+            terminalReplacementObservedGeneration[terminal.id] =
+                terminalReplacementObservationGeneration
+        }
+        adoptRecreatedTerminal(terminal)
+
+        guard source.label != terminal.label,
+              let tabIndex = tabs[terminal.worktreeID]?.firstIndex(where: { tab in
+                  let layout = layouts[tab.id] ?? .pane(tab.content)
+                  return layout.allTerminalIDs().contains(terminal.id)
+                      && tab.label == source.label
+              }) else { return }
+        tabs[terminal.worktreeID]?[tabIndex].label = nil
+    }
+
     private func worktreeIDRepresentingTerminal(_ terminalID: UUID) -> UUID? {
         if let worktreeID = terminals.first(where: { _, terminals in
             terminals.contains { $0.id == terminalID }
@@ -282,20 +313,31 @@ extension AppState {
     }
 
     /// Adopt a daemon snapshot without allowing a response that overlaps an
-    /// authoritative deletion to resurrect that terminal locally. Snapshot
-    /// absence itself is observational only because responses may be unordered;
-    /// it must not alter deletion or recovery-budget state.
+    /// authoritative deletion to resurrect that terminal locally, or a list
+    /// begun before a provider-replacement delta to restore its source row.
+    /// Snapshot absence itself is observational only because responses may be
+    /// unordered; it must not alter deletion or recovery-budget state.
     func adoptTerminalSnapshot(
         _ snapshots: [Terminal],
         worktreeID: UUID,
+        startedAtReplacementGeneration: UInt64? = nil,
         date: Date = Date()
     ) {
+        let snapshotGeneration = startedAtReplacementGeneration
+            ?? terminalReplacementObservationGeneration
         pruneRecentTerminalDeletions(date: date)
         let existing = terminals[worktreeID] ?? []
         let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
         let visible = snapshots.compactMap { snapshot -> Terminal? in
             guard !terminalDeletionsAwaitingRecreationCompletion.contains(snapshot.id),
                   recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
+            let current = existingByID[snapshot.id]
+            if let current,
+               let replacementGeneration = terminalReplacementObservedGeneration[snapshot.id],
+               replacementGeneration > snapshotGeneration,
+               snapshot.isCodexTerminal != current.isCodexTerminal {
+                return current
+            }
             guard snapshot.isCodexTerminal else {
                 // Claude and shell rows retain terminal.list's established
                 // arrival-order replacement. The hidden ordering rails belong
@@ -306,7 +348,6 @@ extension AppState {
                 return snapshot
             }
             var merged = snapshot
-            let current = existingByID[snapshot.id]
             let incomingActivityOrderObservedAt = snapshot.activityStateOrderObservedAt
                 ?? snapshot.activityStateObservedAt
             let incomingSessionOrderObservedAt = snapshot.sessionOrderObservedAt
@@ -381,6 +422,7 @@ extension AppState {
         for terminal in existing where !visibleIDs.contains(terminal.id) {
             terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
             terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
+            terminalReplacementObservedGeneration.removeValue(forKey: terminal.id)
         }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
@@ -594,6 +636,7 @@ extension AppState {
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
         terminalPresentationOrderObservedAt.removeValue(forKey: terminalID)
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
+        terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {
@@ -813,6 +856,40 @@ extension AppState {
                 "Continue in Codex failed: \(error.localizedDescription, privacy: .public)")
             showAlert(
                 "Couldn't continue in Codex: \(error.localizedDescription)",
+                isError: true)
+            handleConnectionError(error)
+        }
+    }
+
+    /// Replace an idle Codex process with Claude in the same terminal row and
+    /// tmux window. The daemon owns eligibility and rollback; this layer keeps
+    /// the UI on the existing tab and adopts the returned replacement row.
+    func continueInClaude(sourceTerminalID: UUID, profileID: UUID?) async {
+        guard let source = terminals.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == sourceTerminalID }) else {
+            showAlert("Couldn't continue in Claude: source terminal not found.", isError: true)
+            return
+        }
+
+        do {
+            let size = mainAreaTerminalSize()
+            let updated = try await daemonClient.continueInClaude(
+                sourceTerminalID: sourceTerminalID,
+                profileID: profileID,
+                cols: size.cols,
+                rows: size.rows)
+            guard updated.id == source.id,
+                  updated.worktreeID == source.worktreeID,
+                  updated.tmuxWindowID == source.tmuxWindowID else {
+                throw DaemonClientError.invalidResponse
+            }
+            adoptProviderReplacement(updated)
+        } catch {
+            logger.error(
+                "Continue in Claude failed: \(error.localizedDescription, privacy: .public)")
+            showAlert(
+                "Couldn't continue in Claude: \(error.localizedDescription)",
                 isError: true)
             handleConnectionError(error)
         }
