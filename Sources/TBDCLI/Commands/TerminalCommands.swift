@@ -40,8 +40,21 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
     var claudeSettings: String?
 
+    @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
+    var model: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    mutating func validate() throws {
+        guard let model else { return }
+        guard type == .codex else {
+            throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
+        }
+        if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError("--model must not be empty.")
+        }
+    }
 
     mutating func run() async throws {
         let client = SocketClient()
@@ -49,7 +62,7 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
             resultType: Terminal.self
         )
 

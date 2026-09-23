@@ -498,7 +498,8 @@ enum CodexSpawnCommandBuilder {
     static func build(
         initialPrompt: String?,
         resumeThreadID: String? = nil,
-        executablePath: String
+        executablePath: String,
+        model: String? = nil
     ) -> String {
         let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
             commandOutput(arguments: arguments, timeout: 3)
@@ -507,7 +508,8 @@ enum CodexSpawnCommandBuilder {
             initialPrompt: initialPrompt,
             resumeThreadID: resumeThreadID,
             executablePath: executablePath,
-            profileFlag: profileFlag
+            profileFlag: profileFlag,
+            model: model
         )
     }
 
@@ -516,13 +518,15 @@ enum CodexSpawnCommandBuilder {
         codexHelpOutput: String? = nil,
         codexVersionOutput: String? = nil,
         resumeThreadID: String? = nil,
-        executablePath: String = "codex"
+        executablePath: String = "codex",
+        model: String? = nil
     ) -> String {
         build(
             initialPrompt: initialPrompt,
             resumeThreadID: resumeThreadID,
             executablePath: executablePath,
-            profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput)
+            profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput),
+            model: model
         )
     }
 
@@ -538,12 +542,14 @@ enum CodexSpawnCommandBuilder {
         initialPrompt: String?,
         resumeThreadID: String?,
         executablePath: String,
-        profileFlag: String
+        profileFlag: String,
+        model: String? = nil
     ) -> String {
         let command = baseCommand(
             executablePath: executablePath,
             profileFlag: profileFlag,
-            resumeThreadID: resumeThreadID)
+            resumeThreadID: resumeThreadID,
+            model: model)
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
@@ -557,12 +563,47 @@ enum CodexSpawnCommandBuilder {
     private static func baseCommand(
         executablePath: String,
         profileFlag: String,
-        resumeThreadID: String? = nil
+        resumeThreadID: String? = nil,
+        model: String? = nil
     ) -> String {
         let executable = SystemPromptBuilder.shellEscape(executablePath)
-        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+        // A per-terminal model rides Codex's own `-c key=value` override, which
+        // layers over the `tbd` profile for this process only. The whole
+        // assignment is escaped as one argument so the identifier stays opaque.
+        let modelOverride = modelOverrideArgument(model).map { " -c \($0)" } ?? ""
+        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride) --dangerously-bypass-approvals-and-sandbox"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
         return "\(base) resume \(SystemPromptBuilder.shellEscape(resumeThreadID))"
+    }
+
+    /// The shell-escaped `model="<id>"` assignment for Codex's `-c`, or nil
+    /// when there is no override. Codex parses the value as TOML and only
+    /// falls back to a raw string when that fails, so an identifier such as
+    /// `1.5` would otherwise arrive as a float; quoting it as a TOML basic
+    /// string keeps every identifier a string without TBD interpreting it.
+    static func modelOverrideArgument(_ model: String?) -> String? {
+        guard let model, !model.isEmpty else { return nil }
+        return SystemPromptBuilder.shellEscape("model=\(tomlBasicString(model))")
+    }
+
+    static func tomlBasicString(_ value: String) -> String {
+        var escaped = ""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\"": escaped += "\\\""
+            case "\\": escaped += "\\\\"
+            case "\n": escaped += "\\n"
+            case "\t": escaped += "\\t"
+            case "\r": escaped += "\\r"
+            default:
+                if scalar.value < 0x20 || scalar.value == 0x7F {
+                    escaped += String(format: "\\u%04X", scalar.value)
+                } else {
+                    escaped.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return "\"\(escaped)\""
     }
 
     static func profileFlag(codexHelpOutput: String?, codexVersionOutput: String?) -> String {

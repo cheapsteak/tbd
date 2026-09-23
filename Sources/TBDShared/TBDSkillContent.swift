@@ -53,6 +53,8 @@ that the new session can make judgment calls rather than follow narrow steps.
 EOF
 ```
 
+Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` does the same for a new worktree whose primary agent is Codex. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
+
 ### Create a new worktree with an initial task
 
 ```bash
