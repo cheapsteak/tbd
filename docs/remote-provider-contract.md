@@ -563,7 +563,7 @@ Line kinds:
 
 ```json
 {"kind": "hello", "protocol": 1, "origin": "acme-laptop"}
-{"kind": "peer", "handle": "h-4f2a1c", "name": "acme-laptop:fix-flaky-ci %388", "status": "working", "protocol": 1}
+{"kind": "peer", "handle": "h-4f2a1c", "name": "acme-laptop:fix-flaky-ci 5A1B2C3D", "status": "working", "protocol": 1}
 {"kind": "peer", "handle": "p-7c02b9", "name": "fix flaky CI", "status": "working", "protocol": 1, "session": "fix-flaky-ci"}
 {"kind": "peer-gone", "handle": "h-4f2a1c"}
 {"kind": "message", "id": "m-8c31d4", "to": "h-9b71e0", "from": "h-4f2a1c", "content": "..."}
@@ -578,7 +578,7 @@ Line kinds:
 - **`peer-inventory`** — provider to caller only. Periodic, and the complete set of handles the provider currently publishes on its own side. The caller diffs it against what it asked the provider to publish and surfaces the difference. Its cadence is under Inventory cadence below.
 - **`ping`** — both directions. Keepalive, as on `events`.
 
-**Handles are opaque, and each side mints the handles for its own peers.** A handle names one addressable session for the life of one connection and means nothing outside it: a receiver MUST NOT parse it, derive anything from it, persist it across connections, or use it to address a session on any other stream. Raw addressing detail — a socket path, a process id, a terminal pane — MUST NOT travel on this stream in either direction. Delivery is a lookup of a handle in a table the receiving side built from its own announcements and never shares, so a wire that carried real addresses instead would let either side name a session the other never offered.
+**Handles are opaque, and each side mints the handles for its own peers.** A handle names one addressable session for the life of one connection and means nothing outside it: a receiver MUST NOT parse it, derive anything from it, persist it across connections, or use it to address a session on any other stream. Raw addressing detail — a socket path, a process id, a terminal pane — MUST NOT travel on this stream in either direction. A `name` is display text, not addressing detail: the caller's composed name ends in the first eight characters of a local terminal row's id, which no verb on either side accepts as an address and which exists only to keep same-named sessions apart for a reader. Delivery is a lookup of a handle in a table the receiving side built from its own announcements and never shares, so a wire that carried real addresses instead would let either side name a session the other never offered.
 
 **Announce before you address.** A `message` naming a handle the receiving side has not been told about is dropped and counted — never held against a `peer` line that might arrive later, and never delivered on a guess.
 

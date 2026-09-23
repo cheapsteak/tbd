@@ -221,7 +221,7 @@ is otherwise ownerless.
 
 ## Addressing and naming
 
-Names are the whole identity of a shadow peer. The pane join that resolves
+Names are the whole identity of a shadow peer. The terminal join that resolves
 ambiguity for local peers is unavailable: a shadow has no local terminal, and it
 **MUST NOT** carry a `tmux` field. Remote coordinates would be actively harmful,
 because the far host's tmux server is also called `main` and also has a pane
@@ -258,13 +258,26 @@ whenever anything about that session changes, and the whole roster is
 re-announced after the next `hello` — so a session TBD adopts later is published
 on the next line for it.
 
-**Reverse, a local session seen remotely: `<origin>:<display name> %<pane>`.**
+**Reverse, a local session seen remotely: `<origin>:<display name> <terminal short id>`.**
 Here collisions are the norm rather than the exception: several Claude terminals
-in one worktree all carry the worktree display name. The pane discriminator is
-therefore **always present**, never added on collision — a name that changes when
-some other session appears is worse than one that occasionally needs a ref. The
-pane is TBD's own documented join key, so a remote agent naming one names
-something `tbd terminal list` can resolve.
+in one worktree all carry the worktree display name. The terminal discriminator
+is therefore **always present**, never added on collision — a name that changes
+when some other session appears is worse than one that occasionally needs a ref.
+The discriminator is the first eight characters of the terminal row's id, as
+`tbd terminal list` prints it (e.g. `laptop:useful-swallow 5A1B2C3D`), so the
+terminal a name refers to can be found on the origin machine by reading that
+listing; no command takes the short form as an argument. It is deliberately not
+a transport coordinate: a holder-backed terminal has no tmux pane, and a name
+built from one would collide across every holder tab in a worktree. It would also
+bring a tmux terminal woken from a park back under a new name: a wake always
+withdraws the old handle and announces a new one, because the resumed session is
+a new process on a new socket, and the wake gives the terminal a new pane. With
+the terminal id the re-announced peer keeps the name remote agents already
+address it by. Eight hex characters are 32 bits
+of a random UUID, and two names collide only when that prefix matches between
+terminals that also share an origin and a display name, so the prefix is kept
+short enough to read aloud rather than widened against a collision that
+practically does not occur.
 
 The origin label is the sanitized local host name. It only has to be stable and
 distinct between the machines bridging to one host, which is what the
@@ -289,7 +302,7 @@ multi-tenant: two laptops bridging to it would otherwise publish colliding names
 for sessions on different machines belonging to different people, and a
 collision there is a misdelivery rather than a display glitch.
 
-TBD composes the whole name — origin, display name, and pane — and sends it on
+TBD composes the whole name — origin, display name, and terminal short id — and sends it on
 the `peer` line. The provider **MUST** publish that name verbatim, **MUST NOT**
 prefix or otherwise modify it, and **MUST NOT** publish two peers under one
 name. Putting the composition on TBD's side rather than the provider's is
@@ -554,20 +567,20 @@ reader of the registry can produce one. The row carries the session id, which is
 on disk, and the listing says where refs actually come from. An always-empty ref
 column would read as "this peer has no ref", which is false for every row.
 
-This replaces a manual join the docs currently teach: pull
-`tbd worktree list --json`, pull `tbd terminal list`, join them on the tmux pane
-to work out which row is which lane. The command does that join, and keeps
-working for rows that have no pane to join on.
+This replaces a manual join: pull `tbd worktree list --json`, pull
+`tbd terminal list`, and match rows by hand to work out which row is which lane.
+The command does that join. It joins a record to its terminal by the Claude
+session id TBD captured through the `SessionStart` hook, and falls back to the
+record's `cwd` and tmux pane when none was captured. A holder-backed session has
+no pane, so it joins only once its session id is recorded; until then it lists
+as `external`.
 
-**A line is added to the TBD skill** (`Sources/TBDShared/TBDSkillContent.swift`,
-in the passage that currently teaches the manual join), pointing sessions at the
-command:
-
-> `tbd peer list` does that join for you — every peer TBD can see, with the
-> worktree, terminal or remote session behind it.
-
-That file's substrings are pinned by `TBDSkillContentTests`; the line lands with
-the command, not before it.
+**The TBD skill points sessions at the command**
+(`Sources/TBDShared/TBDSkillContent.swift`, in the passage on a
+`No agent named 'X' is reachable.` refusal): it names `tbd peer list` as the way
+to find a row by its terminal id and worktree — every peer TBD can see, with the
+worktree, terminal or remote session behind it. That file's substrings are
+pinned by `TBDSkillContentTests`.
 
 ## Flag and rollout
 

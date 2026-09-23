@@ -72,15 +72,17 @@ struct PeerList: AsyncParsableCommand {
         discussion: """
             A **peer** is one live Claude Code session another session can address by
             name (docs/cross-session-messaging.md). This lists every one on this
-            machine — local and remote alike — and does the join the docs otherwise
-            teach a human to do by hand: pull `tbd worktree list --json`, pull
-            `tbd terminal list`, and match them on the tmux pane to work out which
-            row is which lane.
+            machine — local and remote alike — and joins each one to the worktree and
+            terminal behind it, work that otherwise means pulling
+            `tbd worktree list --json` and `tbd terminal list` and matching rows by
+            hand. A terminal is named by the first eight characters of its id, a
+            prefix of the id `tbd terminal list` prints; that is the row's identity on
+            every transport.
 
             The KIND column says what a row turned out to be:
 
-              local          a session TBD spawned; BEHIND names its worktree, pane
-                             and terminal.
+              local          a session TBD spawned; BEHIND names its worktree and
+                             terminal, plus the tmux pane on a tmux-transport row.
               shadow         a shadow peer standing in for a session on another
                              machine; BEHIND names the provider session it mirrors.
               external       a peer TBD did not spawn — a plain-terminal `claude`, or
@@ -88,13 +90,16 @@ struct PeerList: AsyncParsableCommand {
                              every local session can address it.
               unattributed   the daemon did not answer, so nothing could be joined.
 
-            It keeps working where the pane join cannot reach. A shadow peer carries
-            no `tmux` field by design — remote coordinates would look joinable
-            against local panes and would join to the wrong terminal — and it carries
-            no marker of TBD's either, because one unknown key makes a record
-            invisible to every listing. It is therefore recognised the only way it
-            can be: by looking its pid up in TBD's own durable shadow-peer ledger,
-            which the daemon answers with over `peer.status`.
+            A local row is joined to its terminal by the Claude session id TBD captured
+            at `SessionStart`, falling back to its tmux pane when none was captured. A
+            holder-backed session has no pane, so until its session id is recorded it
+            lists as `external`. A shadow peer carries no `tmux` field by design — remote
+            coordinates would look joinable against local panes and would join to the
+            wrong terminal — and it carries no marker of TBD's either, because one
+            unknown key makes a record invisible to every listing. A shadow is
+            therefore recognised the only way it can be: by looking its pid up in
+            TBD's own durable shadow-peer ledger, which the daemon answers with over
+            `peer.status`.
 
             One thing this command deliberately does not claim:
 

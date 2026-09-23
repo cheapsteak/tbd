@@ -286,10 +286,15 @@ struct PeerRow: Encodable, Equatable, Sendable {
     /// every row of a run that could not reach the daemon.
     let worktreeID: UUID?
     let worktreeDisplayName: String?
-    /// The terminal behind a local session. A shadow has none: it stands in for
-    /// a session on another machine and deliberately carries no tmux
-    /// coordinates, so there is no pane to name.
+    /// The terminal behind a local session — the row's identity, on every
+    /// transport. A shadow has none: it stands in for a session on another
+    /// machine and deliberately carries no local coordinates.
     let terminalID: UUID?
+    /// The tmux pane, a legacy coordinate. On a joined row it is the terminal's
+    /// own pane, which only a tmux-transport terminal has — nil for a
+    /// holder-backed one. On an unjoined row it is whatever pane the record
+    /// claims, which may belong to a tmux server TBD does not run, so a
+    /// non-nil value is not evidence of a TBD terminal.
     let tmuxPane: String?
 
     // Shadow rows: the provider session behind the shadow, and the link state.
@@ -615,8 +620,18 @@ private struct PeerFleetIndex {
             worktreeDisplayName = worktree.displayName
         }
 
-        var pane = terminal.map { PeerJoinKeys.normalizedPaneID($0.tmuxPaneID) }
-        if pane == nil { pane = record.tmuxPaneID }
+        // A joined terminal answers for its own pane, and only a tmux-transport
+        // one has a pane. A holder row is discriminated by `transport` alone —
+        // its pane column is a placeholder nobody may read back — and an empty
+        // pane id must never render as a bare `%`. Only an unjoined row falls
+        // back to what its record claims.
+        let pane: String?
+        if let terminal {
+            pane = terminal.transport == .tmux && !terminal.tmuxPaneID.isEmpty
+                ? PeerJoinKeys.normalizedPaneID(terminal.tmuxPaneID) : nil
+        } else {
+            pane = record.tmuxPaneID
+        }
 
         var socketPresent = false
         if let socketPath { socketPresent = socketExists(socketPath) }
@@ -812,10 +827,13 @@ func peerBehindColumn(_ peer: PeerRow) -> String {
     switch peer.kind {
     case .local:
         parts.append(peer.worktreeDisplayName ?? "(worktree unknown)")
-        if let pane = peer.tmuxPane { parts.append(pane) }
+        // The terminal is the row's identity, the same short id the roster
+        // announces to remote peers, and it is present on every transport.
+        // The pane is a legacy coordinate only a tmux-transport row has.
         if let terminalID = peer.terminalID {
             parts.append("terminal \(shortPeerID(terminalID))")
         }
+        if let pane = peer.tmuxPane { parts.append("tmux \(pane)") }
     case .shadow:
         parts.append("\(peer.provider ?? "remote") session \(peer.providerSessionID ?? "(unknown)")")
         parts.append("link \(peer.linkState ?? PeerRow.unknownLinkState)")
@@ -832,10 +850,11 @@ func peerBehindColumn(_ peer: PeerRow) -> String {
     return parts.joined(separator: " · ")
 }
 
-/// The first eight characters of a UUID — enough to name a row in a listing
-/// that also prints the full value under `--json`.
+/// The first eight characters of a terminal id — enough to name a row in a
+/// listing that also prints the full value under `--json`, and the same
+/// discriminator the roster puts in the name it announces to remote peers.
 func shortPeerID(_ id: UUID) -> String {
-    String(id.uuidString.prefix(8))
+    TerminalShortID.of(id)
 }
 
 /// `~`-abbreviated, for reading. Never used as a join key: every join above is

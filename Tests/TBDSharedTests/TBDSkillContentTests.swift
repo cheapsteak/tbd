@@ -55,21 +55,27 @@ import Foundation
     // not-found reads as "the peer is dead" unless the text says otherwise.
     #expect(body.contains("No agent named 'X' is reachable."))
     #expect(body.contains("listed under a different name, not that it is dead"))
-    // The recovery is a mechanical join between the row's tmux pane and TBD's
-    // own terminal listing, plus the worktree listing that yields the id the
-    // second one needs; all three legs have to survive.
-    #expect(body.contains("tmux <server>:<window>.<pane>"))
-    #expect(body.contains("tbd terminal list <worktree-id>"))
-    #expect(body.contains("tbd worktree list --json"))
-    // …and the command that performs that join, so a session is not left
-    // hand-rolling it. It reaches rows the pane join cannot: a shadow peer
-    // standing in for a remote session carries no pane to join on.
+    // The recovery identifies the row by its terminal id and worktree — the
+    // identity every transport carries — through `tbd peer list`, with the
+    // two listings that resolve what it prints; all three legs have to survive.
+    #expect(body.contains("Identify its row by its terminal id and worktree"))
     #expect(body.contains("tbd peer list"))
     #expect(body.contains("every peer TBD can see"))
-    // Only rows for sessions running under tmux carry that pane — `cloud` and
-    // remote-control rows do not — so the join is scoped to what TBD spawns.
-    // Pin the scope, so a rewrite that promises it of every row reds.
-    #expect(body.contains("every TBD-spawned row prints"))
+    #expect(body.contains("first eight characters of its id"))
+    // …and the step back to `ListAgents`, where the ref lives: the name
+    // `tbd peer list` shows is what to look the row up by there.
+    #expect(body.contains("is the one to look up in `ListAgents`"))
+    #expect(body.contains("tbd terminal list <worktree-id>"))
+    #expect(body.contains("tbd worktree list --json"))
+    // A tmux pane is a legacy coordinate of tmux-transport rows, never the
+    // identity: a holder-backed session has none, so text that teaches the
+    // pane as the way to find a row strands every holder session. Pin the
+    // demotion, and red on the old instruction coming back.
+    #expect(body.contains("A tmux pane is not an identity"))
+    #expect(body.contains("legacy coordinate `tmux <server>:<window>.<pane>`"))
+    #expect(!body.contains("Identify its row by the tmux pane"))
+    #expect(!body.contains("every TBD-spawned row prints"))
+    #expect(!body.contains("TBD-spawned rows also carry a tmux pane"))
     // The `[ref]` is the address, not merely a tiebreak for ambiguous names:
     // a peer that has not been messaged before must be addressed `name [ref]`,
     // and a bare name is refused even where exactly one row answers to it.
