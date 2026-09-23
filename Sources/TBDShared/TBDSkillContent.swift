@@ -149,9 +149,11 @@ as `tmux %<pane>`), which still tells same-named tmux rows apart, but a session
 on the pty-holder transport has no pane at all. When several holder sessions in
 one worktree share a name, `ListAgents` offers nothing that says which is which
 — status and start time narrow the field but do not identify a row — so ask the
-user, or use `tbd terminal send --terminal <full id>` (the full id is in
-`tbd peer list --json` or `tbd terminal list`; the eight-character prefix is not
-accepted) rather than guess a ref.
+user rather than guess a ref. `tbd terminal send --terminal <full id>` does name
+the session exactly (the full id is in `tbd peer list --json` or
+`tbd terminal list`; the eight-character prefix is not accepted), but it types
+into that session's composer rather than delivering between turns, so use it
+only while `tbd peer list` shows that session `idle`.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when

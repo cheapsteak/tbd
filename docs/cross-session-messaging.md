@@ -190,10 +190,13 @@ tmux transport can still be matched by its pane, which `ListAgents`,
 `tbd peer list` and `tbd terminal list` all print. A holder-backed
 session prints no pane, so among same-named holder rows only status and
 start time are left, and they narrow the field without identifying a row.
-Rather than guess a ref there, reach the session through `tbd terminal
-send --terminal <id>` with its full terminal id — from `tbd peer list
---json` or `tbd terminal list`; the eight-character prefix is not
-accepted — which names it exactly.
+Rather than guess a ref there, ask the user. `tbd terminal send
+--terminal <id>` with the full terminal id — from `tbd peer list --json`
+or `tbd terminal list`; the eight-character prefix is not accepted —
+names the session exactly, but it types into that session's composer
+instead of delivering between turns, so it can answer a prompt or land
+in half-typed input. Use it only while `tbd peer list` shows that
+session `idle`.
 
 Pull a fresh listing rather than reusing one from earlier in a long
 conversation — refs belong to live sessions, and the pool changes as

@@ -132,6 +132,9 @@ private actor FakeSessionDirectory: LocalSessionDirectory {
     }
 
     func spawnedSessions() async -> [TBDSpawnedSession] { sessions }
+
+    /// Replace what the directory reports, the way a wake rewrites a row.
+    func replace(_ sessions: [TBDSpawnedSession]) { self.sessions = sessions }
 }
 
 /// Everything one link was told, in order.
@@ -1362,6 +1365,35 @@ struct RosterWatcherAnnouncedNameTests {
             let prefix = String(made.holder.id.uuidString.prefix(8))
             #expect(name == "laptop:useful-swallow \(prefix)")
             #expect(!name.contains("%"))
+        }
+    }
+
+    /// A wake gives a tmux terminal a new pane. The terminal row is the same,
+    /// so the peer keeps its name and its handle: the next scan re-announces it
+    /// unchanged rather than renaming it or withdrawing it under its peers.
+    @Test func aPaneChangeNeitherRenamesNorWithdrawsThePeer() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let sessions = FakeSessionDirectory([spawnedSession(pane: "%3541")])
+            let subject = watcher(directory: directory, sessions: sessions)
+            await subject.addLink(link(sink: sink))
+            let first = try #require(peers(await sink.drain()).first)
+            #expect(first.name == "laptop:useful-swallow 5A1B2C3D")
+
+            // The row now names the woken pane, and so does the record.
+            await sessions.replace([spawnedSession(pane: "%4100")])
+            try write(registryRecord(tmux: "main:@4100.%4100"), pid: 4242, in: directory)
+            await subject.refresh()
+
+            let frames = await sink.drain()
+            #expect(goneHandles(frames).isEmpty)
+            for peer in peers(frames) {
+                #expect(peer.handle == first.handle)
+                #expect(peer.name == first.name)
+            }
+            let entry = try #require(await subject.currentEntries().first)
+            #expect(entry.name == first.name)
         }
     }
 

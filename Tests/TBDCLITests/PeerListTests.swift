@@ -216,6 +216,32 @@ struct PeerListTests {
         #expect(peerBehindColumn(row) == "lane-a · terminal 5A1B2C3D")
     }
 
+    /// A holder-backed session joins its terminal only through the captured
+    /// session id: its record carries no `tmux`, so there is no pane to fall
+    /// back on. Until the `SessionStart` hook records the id, the row lists as
+    /// `external` — what the help text promises — and is never attached to
+    /// whichever holder terminal happens to share its worktree.
+    @Test func holderSessionWithNoCapturedSessionIDListsAsExternal() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let terminal = Self.terminal(
+            worktreeID: worktree.id, pane: "", claudeSessionID: nil, transport: .holder)
+        let scan = PeerRegistryScan(entries: [
+            PeerRegistryEntry(pid: 4011, record: try Self.record(Self.liveSessionFields(
+                sessionID: "S-not-yet-captured", cwd: Self.laneAPath, name: "lane-a",
+                pane: nil, socket: "/opt/peertest/socks/4011.sock")))
+        ])
+
+        let result = Self.compose(
+            scan: scan,
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [worktree], terminals: [terminal]))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.terminalID == nil)
+        #expect(row.tmuxPane == nil)
+    }
+
     /// The cwd-and-pane fallback join has to keep working for a tmux session
     /// whose `SessionStart` hook never fired — that is the case the session id
     /// cannot cover.
