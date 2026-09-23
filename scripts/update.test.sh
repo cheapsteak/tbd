@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/update.sh — run: bash scripts/update.test.sh
+# Tests for scripts/update.sh — run: /bin/bash scripts/update.test.sh (macOS bash 3.2; any bash works)
 #
 # Nothing here builds, installs, signals a daemon, or touches a real ~/tbd.
 # HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
@@ -24,6 +24,15 @@ fi
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
+
+# Every nested `bash` — the cases' `bash "$SCRIPT"`, update.sh's own re-exec,
+# and `#!/usr/bin/env bash` stubs — runs the same interpreter as this harness,
+# so `/bin/bash scripts/update.test.sh` exercises macOS's bash 3.2 all the way
+# down rather than whichever bash comes first on PATH.
+mkdir -p "$TEST_TMP/bash-pin"
+ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
+PATH="$TEST_TMP/bash-pin:$PATH"
+export PATH
 
 # Source the script for the pure-function cases. Sourcing defines functions and
 # runs nothing: main is guarded on BASH_SOURCE. TBD_HOME is set first because

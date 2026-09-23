@@ -32,7 +32,8 @@
 #
 # What is deliberately NOT cleared: a toolchain selection the user made on
 # purpose — TBD_SWIFT_BIN, TOOLCHAINS, and an SDKROOT or DEVELOPER_DIR that
-# points into an installed Xcode or the Command Line Tools. TBD_KEEP_BUILD_ENV=1
+# points into an installed Xcode, the Command Line Tools or the active developer
+# directory (see sdk_path_is_apple_toolchain). TBD_KEEP_BUILD_ENV=1
 # turns the whole scrub off.
 
 # Variables that redirect the compiler's SDK, headers or libraries. NIX_*
@@ -47,12 +48,55 @@ SDK_OVERRIDE_NIX_PREFIXES=(
     NIX_APPLE NIX_DONT NIX_IGNORE
 )
 
-# True when $1 is a path inside an installed Xcode or the Command Line Tools —
-# an SDK selection a person makes on purpose, as opposed to a dev shell's.
-sdk_path_is_apple_toolchain() {
+# True when $1 names one of the standard Apple toolchain locations: an Xcode
+# under /Applications or the Command Line Tools. A pure string test.
+sdk_path_has_apple_prefix() {
     case "${1-}" in
         /Applications/Xcode*.app|/Applications/Xcode*.app/*) return 0 ;;
         /Library/Developer/CommandLineTools|/Library/Developer/CommandLineTools/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Print $1 with every symlink resolved, or nothing when it is not an existing
+# directory. `cd -P` rather than `realpath`, which older macOS lacks.
+sdk_resolve_dir() {
+    [ -d "${1-}" ] || return 1
+    (cd -P "$1" 2>/dev/null && pwd -P)
+}
+
+# Print the active developer directory, as `xcode-select -p` reports it, with
+# symlinks resolved; nothing when xcode-select is missing or has no answer.
+# DEVELOPER_DIR is removed from xcode-select's environment because xcode-select
+# reports DEVELOPER_DIR back when it is set — which would make every inherited
+# DEVELOPER_DIR, a dev shell's included, look like the user's own selection.
+sdk_active_developer_dir() {
+    command -v xcode-select >/dev/null 2>&1 || return 1
+    local dir
+    dir="$(env -u DEVELOPER_DIR xcode-select -p 2>/dev/null)" || return 1
+    [ -n "$dir" ] || return 1
+    sdk_resolve_dir "$dir"
+}
+
+# True when $1 is a path inside an installed Xcode or the Command Line Tools —
+# an SDK selection a person makes on purpose, as opposed to a dev shell's. It
+# qualifies when any of these holds:
+#   - it lies under /Applications/Xcode*.app or /Library/Developer/CommandLineTools;
+#   - it resolves, through symlinks, to a path under one of those;
+#   - it resolves to a path under the active developer directory
+#     (`xcode-select -p`), which covers an Xcode installed somewhere else.
+# Only absolute paths qualify; an empty value never does.
+sdk_path_is_apple_toolchain() {
+    local path="${1-}" resolved active
+    case "$path" in /*) ;; *) return 1 ;; esac
+    sdk_path_has_apple_prefix "$path" && return 0
+    resolved="$(sdk_resolve_dir "$path")" || resolved=""
+    [ -n "$resolved" ] || return 1
+    sdk_path_has_apple_prefix "$resolved" && return 0
+    active="$(sdk_active_developer_dir)" || active=""
+    [ -n "$active" ] || return 1
+    case "$resolved" in
+        "$active"|"$active"/*) return 0 ;;
     esac
     return 1
 }
@@ -63,8 +107,11 @@ sdk_override_names() {
     [ "${TBD_KEEP_BUILD_ENV-}" = "1" ] && return 0
     local name prefix value
     for name in "${SDK_OVERRIDE_VARS[@]}"; do
-        [ -n "${!name+x}" ] || continue
-        value="${!name}"
+        # Set, even to the empty string, counts. Plain `eval` over a name from
+        # the fixed list above rather than `${!name+x}`, so the test reads the
+        # same in every bash, 3.2 included.
+        eval "[ \"\${$name+x}\" = x ]" || continue
+        eval "value=\"\${$name}\""
         case "$name" in
             SDKROOT|DEVELOPER_DIR)
                 sdk_path_is_apple_toolchain "$value" && continue ;;

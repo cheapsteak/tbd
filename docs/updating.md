@@ -160,6 +160,10 @@ around its build) clears them and says so in the log, for example
 
 Left alone on purpose: `TBD_SWIFT_BIN`, `TOOLCHAINS`, and an `SDKROOT` or
 `DEVELOPER_DIR` that points into an installed Xcode or the Command Line Tools.
+That covers an Xcode under `/Applications`, the Command Line Tools, anything
+under the developer directory `xcode-select -p` reports (so an Xcode installed
+elsewhere counts once it is selected), and a symlink that resolves to any of
+those.
 `TBD_KEEP_BUILD_ENV=1` turns the clearing off entirely. `PATH` is not edited,
 so a dev shell that puts a different compiler first on it still wins.
 
