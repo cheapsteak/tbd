@@ -400,7 +400,7 @@ private final class CodexAppServerLineInbox: @unchecked Sendable {
     }
 }
 
-private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
+final class ProcessCodexAppServerConnection: CodexAppServerConnection,
     @unchecked Sendable {
     private struct ReadState {
         var buffer = Data()
@@ -414,12 +414,43 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         /// the termination handler and the stderr readability handler are
         /// independent GCD sources with no ordering between them.
         var exitStatus: Int32?
+        /// Test observability: how many times the exit reached the inbox
+        /// (must never exceed one) and how many drain-grace timers the exit
+        /// path started (zero whenever stderr had already drained or the
+        /// connection was already closed).
+        var exitReports = 0
+        var graceTimersScheduled = 0
     }
 
-    /// How long a reported exit waits for stderr to reach EOF. EOF normally
-    /// follows the exit immediately; this bound only matters when a
-    /// grandchild inherited the write end and keeps it open.
+    /// The three things a finish attempt can find. Distinguishing "already
+    /// closed" from "not drained yet" is what keeps the exit path from
+    /// starting a grace timer after a successful import has closed the
+    /// connection.
+    private enum FinishAttempt {
+        case finished(status: Int32, stderr: String)
+        case alreadyClosed
+        case notReady
+    }
+
+    /// How long a reported exit waits for stderr to reach EOF.
+    ///
+    /// EOF normally follows the exit within milliseconds, so this bound only
+    /// matters when a grandchild inherited the write end and keeps it open.
+    /// One second is well past any ordinary pipe-delivery lag yet short
+    /// enough that the user does not notice the delay on an already-failed
+    /// import. Raising it catches stderr from a slower-flushing grandchild at
+    /// the cost of a slower error; lowering it risks reporting the exit
+    /// before the last line lands, which is the bug this ordering fixes.
     static let stderrDrainGrace: Duration = .seconds(1)
+
+    /// How much of the child's stderr is kept for the exit error.
+    ///
+    /// The user sees only a short tail (`stderrTail`, 500 characters), so
+    /// 8 KiB leaves ample room for that tail to be whole lines while bounding
+    /// memory against a child that floods stderr. Raising it costs memory
+    /// per import for no visible gain; lowering it toward the display cap
+    /// risks cutting the last line mid-way.
+    static let stderrCaptureCap = 8 * 1024
 
     private let process: Process
     private let stdinPipe: Pipe
@@ -537,7 +568,7 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         readState.withLock { state in
             guard !state.closed else { return }
             state.stderr.append(data)
-            let cap = 8 * 1024
+            let cap = Self.stderrCaptureCap
             if state.stderr.count > cap {
                 state.stderr.removeSubrange(..<(state.stderr.count - cap))
             }
@@ -566,36 +597,54 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
 
     private func stderrDidDrain() {
         readState.withLock { $0.stderrDrained = true }
-        finishIfReady(force: false)
+        reportExit(attemptFinish(force: false))
     }
 
     private func processDidExit(status: Int32) {
         readState.withLock { $0.exitStatus = status }
-        guard !finishIfReady(force: false) else { return }
-        // Stderr has not reached EOF yet. Wait a bounded grace for it, then
-        // report the exit with whatever was captured.
-        let clock = self.clock
-        Task { [weak self] in
-            try? await clock.sleep(for: Self.stderrDrainGrace)
-            self?.finishIfReady(force: true)
+        switch attemptFinish(force: false) {
+        case .finished(let status, let stderr):
+            reportExit(.finished(status: status, stderr: stderr))
+        case .alreadyClosed:
+            // A successful import closed the connection first; nothing to do.
+            return
+        case .notReady:
+            // Stderr has not reached EOF yet. Wait a bounded grace for it,
+            // then report the exit with whatever was captured.
+            readState.withLock { $0.graceTimersScheduled += 1 }
+            let clock = self.clock
+            Task { [weak self] in
+                try? await clock.sleep(for: Self.stderrDrainGrace)
+                guard let self else { return }
+                self.reportExit(self.attemptFinish(force: true))
+            }
         }
     }
 
-    /// Report the exit once it has happened and stderr has drained (or the
-    /// drain grace lapsed). Snapshots stderr and closes in one critical
-    /// section, so exactly one caller finishes the inbox.
-    @discardableResult
-    private func finishIfReady(force: Bool) -> Bool {
-        let outcome = readState.withLock { state -> (status: Int32, stderr: String)? in
-            guard !state.closed, let status = state.exitStatus,
-                  state.stderrDrained || force else { return nil }
+    /// Claim the exit report once it has happened and stderr has drained (or
+    /// the drain grace lapsed). Snapshots stderr and closes in one critical
+    /// section, so exactly one caller ever gets `.finished`.
+    private func attemptFinish(force: Bool) -> FinishAttempt {
+        readState.withLock { state in
+            guard !state.closed else { return .alreadyClosed }
+            guard let status = state.exitStatus, state.stderrDrained || force else {
+                return .notReady
+            }
             state.closed = true
+            state.exitReports += 1
             let stderr = String(data: state.stderr, encoding: .utf8) ?? ""
-            return (status, stderr)
+            return .finished(status: status, stderr: stderr)
         }
-        guard let outcome else { return false }
-        inbox.finish(CodexSessionImportError.processExited(
-            status: outcome.status, stderr: outcome.stderr))
-        return true
     }
+
+    private func reportExit(_ attempt: FinishAttempt) {
+        guard case .finished(let status, let stderr) = attempt else { return }
+        inbox.finish(CodexSessionImportError.processExited(status: status, stderr: stderr))
+    }
+
+    /// Test observability; see `ReadState.exitReports`.
+    var exitReportCount: Int { readState.withLock { $0.exitReports } }
+    var graceTimersScheduledCount: Int { readState.withLock { $0.graceTimersScheduled } }
+    var hasObservedExit: Bool { readState.withLock { $0.exitStatus != nil } }
+    var isStderrDrained: Bool { readState.withLock { $0.stderrDrained } }
 }

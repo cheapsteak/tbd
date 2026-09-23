@@ -258,6 +258,106 @@ struct CodexSessionImporterTests {
         }
     }
 
+    /// Writes an executable shell script standing in for `codex`; the
+    /// `app-server --stdio` arguments are ignored.
+    private func makeFakeCodex(in dir: URL, body: String) throws -> URL {
+        let script = dir.appendingPathComponent("fake-codex")
+        try "#!/bin/sh\n\(body)\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return script
+    }
+
+    private func makeScratchDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-import-stderr-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private struct PollTimedOut: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    // Tier 1: the grace under test runs only on virtual time; the pollers
+    // below observe real pipe delivery and are bounded.
+    @Test("a grandchild holding stderr open is reported once, after the grace")
+    func graceReportsExitOnceWhenGrandchildHoldsStderr() async throws {
+        let dir = try makeScratchDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidFile = dir.appendingPathComponent("grandchild.pid")
+        let script = try makeFakeCodex(in: dir, body: """
+            sleep 30 >&2 &
+            echo $! > '\(pidFile.path)'
+            echo last-line >&2
+            exit 3
+            """)
+        var grandchild: pid_t = 0
+        defer { if grandchild > 0 { kill(grandchild, SIGKILL) } }
+
+        let clock = EventDrivenTestClock()
+        let connection = try ProcessCodexAppServerConnection.start(
+            executablePath: script.path,
+            codexHome: dir,
+            workingDirectory: dir,
+            clock: clock)
+        defer { connection.close() }
+        let receive = Task { try await connection.receive() }
+
+        // The exit parks on the drain grace because the grandchild keeps the
+        // stderr write end open.
+        try await clock.requireSleeperArmed()
+        grandchild = pid_t(
+            (try? String(contentsOf: pidFile, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        #expect(grandchild > 0)
+        #expect(connection.hasObservedExit)
+        #expect(connection.exitReportCount == 0)
+        #expect(!connection.isStderrDrained)
+
+        await clock.advance(by: ProcessCodexAppServerConnection.stderrDrainGrace)
+        do {
+            _ = try await receive.value
+            Issue.record("expected the child's exit to end the stream")
+        } catch let CodexSessionImportError.processExited(status, stderr) {
+            #expect(status == 3)
+            #expect(stderr.contains("last-line"))
+        }
+
+        // A late EOF must not report the exit a second time.
+        if grandchild > 0 { kill(grandchild, SIGKILL) }
+        guard await pollUntilTrue(timeout: .seconds(10), { connection.isStderrDrained })
+            == .satisfied else {
+            throw PollTimedOut(description:
+                "stderr never reached EOF after killing the grandchild; "
+                + "drained=\(connection.isStderrDrained)")
+        }
+        #expect(connection.exitReportCount == 1)
+    }
+
+    @Test("an exit after close schedules no drain-grace timer")
+    func exitAfterCloseSchedulesNoGraceTimer() async throws {
+        let dir = try makeScratchDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let script = try makeFakeCodex(in: dir, body: "exec sleep 30")
+
+        let clock = EventDrivenTestClock()
+        let connection = try ProcessCodexAppServerConnection.start(
+            executablePath: script.path,
+            codexHome: dir,
+            workingDirectory: dir,
+            clock: clock)
+        // The successful-import path: the importer closes, which terminates.
+        connection.close()
+        guard await pollUntilTrue(timeout: .seconds(10), { connection.hasObservedExit })
+            == .satisfied else {
+            throw PollTimedOut(description: "the child's exit was never observed after close")
+        }
+        #expect(connection.graceTimersScheduledCount == 0)
+        #expect(connection.exitReportCount == 0)
+        #expect(clock.sleeperCount == 0)
+    }
+
     @Test("an empty stderr leaves the exit message unadorned")
     func processExitedWithoutStderrStaysClean() {
         let error = CodexSessionImportError.processExited(status: 2, stderr: "   \n\n")
