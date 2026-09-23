@@ -617,13 +617,15 @@ private struct PeerFleetIndex {
             worktreeDisplayName = worktree.displayName
         }
 
-        // A joined terminal answers for its own pane, and a holder-backed one
-        // has none — an empty pane id must not render as a bare `%`. Only an
-        // unjoined row falls back to what its record claims.
+        // A joined terminal answers for its own pane, and only a tmux-transport
+        // one has a pane. A holder row is discriminated by `transport` alone —
+        // its pane column is a placeholder nobody may read back — and an empty
+        // pane id must never render as a bare `%`. Only an unjoined row falls
+        // back to what its record claims.
         let pane: String?
         if let terminal {
-            pane = terminal.tmuxPaneID.isEmpty
-                ? nil : PeerJoinKeys.normalizedPaneID(terminal.tmuxPaneID)
+            pane = terminal.transport == .tmux && !terminal.tmuxPaneID.isEmpty
+                ? PeerJoinKeys.normalizedPaneID(terminal.tmuxPaneID) : nil
         } else {
             pane = record.tmuxPaneID
         }

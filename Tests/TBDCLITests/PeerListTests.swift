@@ -42,15 +42,17 @@ struct PeerListTests {
         id: UUID = UUID(),
         worktreeID: UUID,
         pane: String,
-        claudeSessionID: String? = nil
+        claudeSessionID: String? = nil,
+        transport: TerminalTransport = .tmux
     ) -> Terminal {
         Terminal(
             id: id,
             worktreeID: worktreeID,
-            tmuxWindowID: "@1",
+            tmuxWindowID: transport == .tmux ? "@1" : "",
             tmuxPaneID: pane,
             claudeSessionID: claudeSessionID,
-            kind: .claude)
+            kind: .claude,
+            transport: transport)
     }
 
     /// A registry record, composed from JSON so the decoder under test is the
@@ -184,15 +186,17 @@ struct PeerListTests {
         #expect(behind.contains("terminal \(shortPeerID(terminal.id))"))
     }
 
-    /// A holder-backed terminal has no tmux pane — its row carries an empty
-    /// `tmuxPaneID` — so the listing names it by the terminal id alone, the
-    /// same eight-character discriminator the roster announces to remote
-    /// peers, and never renders the empty pane as a bare `%`.
+    /// A holder-backed terminal has no tmux pane — its row is discriminated by
+    /// `transport` and carries an empty placeholder `tmuxPaneID` — so the
+    /// listing names it by the terminal id alone, the same eight-character
+    /// discriminator the roster announces to remote peers, and never renders
+    /// the empty pane as a bare `%`.
     @Test func holderRowNamesItsTerminalIDAndNoPane() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
         let terminalID = try #require(UUID(uuidString: "5A1B2C3D-7E8F-4A0B-9C1D-2E3F4A5B6C7D"))
         let terminal = Self.terminal(
-            id: terminalID, worktreeID: worktree.id, pane: "", claudeSessionID: "S-holder")
+            id: terminalID, worktreeID: worktree.id, pane: "", claudeSessionID: "S-holder",
+            transport: .holder)
         let scan = PeerRegistryScan(entries: [
             PeerRegistryEntry(pid: 4010, record: try Self.record(Self.liveSessionFields(
                 sessionID: "S-holder", cwd: Self.laneAPath, name: "lane-a",

@@ -146,7 +146,10 @@ session seen from another machine is named
 A tmux pane is not an identity: in `ListAgents` a session on the tmux transport also prints
 the legacy coordinate `tmux <server>:<window>.<pane>` (`tbd peer list` shows it
 as `tmux %<pane>`), which still tells same-named tmux rows apart, but a session
-on the pty-holder transport has no pane at all.
+on the pty-holder transport has no pane at all. When several holder sessions in
+one worktree share a name, `ListAgents` offers nothing that says which is which
+— status and start time narrow the field but do not identify a row — so ask the
+user, or use `tbd terminal send` with the terminal id, rather than guess a ref.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when
