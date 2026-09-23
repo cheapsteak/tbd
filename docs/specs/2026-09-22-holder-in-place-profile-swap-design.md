@@ -105,7 +105,9 @@ path), or parked under the new one (the next focus-wake resumes it there).
 
 The app holds a per-terminal "switching account" record for as long as the
 RPC is in flight, set before it is sent and cleared when it returns, on
-success or error. An ordinary pane's identity includes the row's parked state,
+success or error. It is set only for a row the app holds awake: a parked row
+takes the cold path and has no park or wake to ride, and a second swap on a
+row already switching neither replaces nor clears the first's record. An ordinary pane's identity includes the row's parked state,
 so it rebuilds on each flip; a switching pane's identity leaves the parked
 state out, so it rebuilds once, when the record clears or the wake's fresh
 attach arrives, and not on the park. While switching, the placeholder shows

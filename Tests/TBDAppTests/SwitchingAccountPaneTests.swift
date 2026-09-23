@@ -41,6 +41,7 @@ struct SwitchingAccountPaneTests {
     func recordSpansASuccessfulSwap() async {
         await withAppState { state in
             let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
             let dest = ModelProfile(name: "Acme", kind: .oauth)
             state.modelProfiles = [ModelProfileWithUsage(profile: dest)]
             var seenDuringRPC: SwitchingAccount?
@@ -63,6 +64,7 @@ struct SwitchingAccountPaneTests {
         struct Refused: Error {}
         await withAppState { state in
             let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
             var seenDuringRPC: SwitchingAccount?
             state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
                 seenDuringRPC = state.switchingAccountTerminals[terminalID]
@@ -85,6 +87,7 @@ struct SwitchingAccountPaneTests {
     func forkSetsNoRecord() async {
         await withAppState { state in
             let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
             var seenDuringRPC: SwitchingAccount?
             state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
                 seenDuringRPC = state.switchingAccountTerminals[terminalID]
@@ -94,6 +97,64 @@ struct SwitchingAccountPaneTests {
             await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil, mode: .fork)
 
             #expect(seenDuringRPC == nil)
+        }
+    }
+
+    /// The cold path: a row already parked is re-homed and stays parked, so
+    /// there is no park or wake to ride. A record there would flip the pane's
+    /// identity to the switching one and back — two rebuilds of a pane that
+    /// needs none — and strip its hibernation notice for the RPC's length.
+    @Test("a swap of an already parked row sets no record and leaves the pane's identity alone")
+    func coldPathSetsNoRecord() async {
+        await withAppState { state in
+            let row = Self.holderRow(parked: true)
+            state.terminals[row.worktreeID] = [row]
+            var identitiesDuringRPC: [String] = []
+            var seenDuringRPC: SwitchingAccount?
+            let identity = { @MainActor () -> String in
+                let cached = state.terminals[row.worktreeID]!.first!
+                return TerminalPanePresentation.identity(
+                    for: cached, switching: state.switchingAccountTerminals[row.id],
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+            }
+            let before = identity()
+            state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
+                seenDuringRPC = state.switchingAccountTerminals[terminalID]
+                identitiesDuringRPC.append(identity())
+                return row
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(seenDuringRPC == nil, "a cold swap recorded a switch it has no park or wake for")
+            #expect(identitiesDuringRPC == [before], "the pane's identity changed while the cold swap ran")
+            #expect(identity() == before, "the pane's identity changed after the cold swap returned")
+            #expect(TerminalPanePresentation.parkedNoticeMessage(
+                for: row, switching: state.switchingAccountTerminals[row.id]) != nil)
+        }
+    }
+
+    /// A second swap while the first is in flight: the daemon refuses it on
+    /// the first's claim, and that refusal must not clear the first's record.
+    @Test("a swap refused while another is in flight leaves the first's record in place")
+    func overlappingSwapLeavesTheRecord() async {
+        struct Refused: Error {}
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            state.terminals[row.worktreeID] = [row]
+            let first = SwitchingAccount(profileName: "Acme")
+            state.switchingAccountTerminals[row.id] = first
+            var seenDuringRPC: SwitchingAccount?
+            state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
+                seenDuringRPC = state.switchingAccountTerminals[terminalID]
+                throw Refused()
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(seenDuringRPC == first, "the second swap replaced the first's record")
+            #expect(state.switchingAccountTerminals[row.id] == first,
+                    "the second swap's refusal cleared the first's record")
         }
     }
 
@@ -157,26 +218,43 @@ struct SwitchingAccountPaneTests {
     @Test("a reply that outruns the wake delta applies the wake once")
     func replyAppliesTheWakeOnce() async {
         await withAppState { state in
-            let parkedRow = Self.holderRow(parked: true)
-            var woken = parkedRow
-            woken.hibernatedAt = nil
-            state.terminals[parkedRow.worktreeID] = [parkedRow]
-            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in woken }
+            // The swap's park delta lands while the RPC runs; its wake delta
+            // does not arrive until after the reply.
+            let awakeRow = Self.holderRow(parked: false)
+            let worktreeID = awakeRow.worktreeID
+            state.terminals[worktreeID] = [awakeRow]
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: awakeRow.id, worktreeID: worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                return awakeRow
+            }
 
-            await state.swapTerminalProfile(terminalID: parkedRow.id, newProfileID: nil)
+            await state.swapTerminalProfile(terminalID: awakeRow.id, newProfileID: nil)
+            #expect(state.terminalAttachEpochs[awakeRow.id] == 1)
+            #expect(state.terminals[worktreeID]?.first?.isParked == false)
             state.applyTerminalHibernationDelta(TerminalHibernationDelta(
-                terminalID: parkedRow.id, worktreeID: parkedRow.worktreeID,
+                terminalID: awakeRow.id, worktreeID: worktreeID,
                 hibernated: false, keepWarm: false))
+            #expect(state.terminalAttachEpochs[awakeRow.id] == 1,
+                    "the late wake delta advanced the epoch a second time")
+            #expect(state.terminals[worktreeID]?.first?.isParked == false)
 
-            #expect(state.terminalAttachEpochs[parkedRow.id] == 1)
-            #expect(state.terminals[parkedRow.worktreeID]?.first?.isParked == false)
-
-            let stillParked = Self.holderRow(worktreeID: parkedRow.worktreeID, parked: true)
-            state.terminals[parkedRow.worktreeID]?.append(stillParked)
-            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in stillParked }
-            await state.swapTerminalProfile(terminalID: stillParked.id, newProfileID: nil)
-            #expect(state.terminalAttachEpochs[stillParked.id] == nil)
-            #expect(state.terminals[parkedRow.worktreeID]?.last?.isParked == true)
+            // A wake that failed: the reply describes a row still parked, and
+            // the pane is left to the deltas.
+            let failedWake = Self.holderRow(worktreeID: worktreeID, parked: false)
+            var stillParked = failedWake
+            stillParked.hibernatedAt = Date()
+            state.terminals[worktreeID]?.append(failedWake)
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: failedWake.id, worktreeID: worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                return stillParked
+            }
+            await state.swapTerminalProfile(terminalID: failedWake.id, newProfileID: nil)
+            #expect(state.terminalAttachEpochs[failedWake.id] == nil)
+            #expect(state.terminals[worktreeID]?.last?.isParked == true)
         }
     }
 

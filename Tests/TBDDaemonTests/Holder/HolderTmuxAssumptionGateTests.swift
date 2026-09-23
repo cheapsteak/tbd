@@ -2914,8 +2914,8 @@ struct HolderTmuxAssumptionGateTests {
             let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
             #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
                     "\(name): the swap's park refused on a screen it must not judge: \(swapResult)")
-            #expect(swapOracle.count <= 1,
-                    "\(name): the swap's park read the screen \(swapOracle.count) time(s)")
+            #expect(swapOracle.count == 1,
+                    "\(name): the swap's park read the screen \(swapOracle.count) time(s); it must read it exactly once, for the backdrop")
 
             let backdrop = await swap.holderSwapBackdrop(
                 terminalID: terminal.id, registry: holderRegistry(listing: [terminal]))
@@ -2949,7 +2949,8 @@ struct HolderTmuxAssumptionGateTests {
         let swapResult = await swap.parkForProfileSwap(terminalID: terminal.id)
         #expect(swapResult == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
                 "the swap's park honoured a rail it must bypass: \(swapResult)")
-        #expect(swapOracle.count <= 1, "the swap's park read the screen more than once")
+        #expect(swapOracle.count == 1,
+                "the swap's park read the screen \(swapOracle.count) time(s); it must read it exactly once, for the backdrop")
     }
 
     /// The transcript-tail rail, asked of the shipped decision directly.

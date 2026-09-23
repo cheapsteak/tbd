@@ -658,7 +658,7 @@ extension AppState {
     /// tmux window/terminal row under the new profile. The row is updated in
     /// place via the `terminalProfileChanged` delta — no new tab is created, so
     /// this method just fires the RPC and lets the delta reconcile local state.
-    /// For the RPC's duration the terminal is recorded in
+    /// For the RPC's duration an awake terminal is recorded in
     /// `switchingAccountTerminals`, so a holder row's park and wake render as
     /// one switch rather than a hibernation (see `SwitchingAccount`).
     ///
@@ -669,7 +669,25 @@ extension AppState {
         newProfileID: UUID?,
         mode: TerminalSwapMode = .inPlace
     ) async {
-        if mode == .inPlace {
+        // Recorded only for a row the cache holds awake, and only by the first
+        // swap to claim it.
+        //
+        // A row already parked takes the daemon's cold path: it is re-homed and
+        // stays parked, so there is no park or wake to ride. Recording it would
+        // flip the pane's identity to the switching one and back — two rebuilds
+        // of a pane that needs none, and a parked placeholder that loses its
+        // notice for the length of the RPC.
+        //
+        // A second swap on a row whose switch is still in flight neither
+        // replaces the record nor clears it: the daemon refuses that swap while
+        // the first holds its claim, and clearing the record on the refusal
+        // would drop the first switch's park and wake back to rendering as a
+        // hibernation.
+        let ownsSwitchingRecord = mode == .inPlace
+            && switchingAccountTerminals[terminalID] == nil
+            && terminals.values.lazy.flatMap { $0 }
+                .first(where: { $0.id == terminalID })?.isParked == false
+        if ownsSwitchingRecord {
             let profileName = newProfileID.flatMap { id in
                 modelProfiles.first(where: { $0.profile.id == id })?.profile.name
             }
@@ -680,7 +698,7 @@ extension AppState {
         // either — and with the record gone the pane renders that state as it
         // would any other.
         defer {
-            if mode == .inPlace {
+            if ownsSwitchingRecord {
                 switchingAccountTerminals[terminalID] = nil
             }
         }
@@ -713,8 +731,10 @@ extension AppState {
     /// pane would rebuild into the hibernated placeholder, banner and all, only
     /// to rebuild again when the delta caught up. Applying the un-park here,
     /// while the record still stands, advances the attach epoch exactly as the
-    /// delta would have, and the late delta then finds the row awake and
-    /// changes nothing. A reply that describes a parked row — the cold path, or
+    /// delta would have. The late delta then finds the row awake, so it does
+    /// not advance the epoch a second time; what else it writes — `keepWarm`,
+    /// the cleared park fields — restates the woken row, and a holder row's
+    /// empty tmux ids stay empty. A reply that describes a parked row — the cold path, or
     /// a wake that failed — is left to the deltas.
     func applySwitchedTerminalWake(_ result: Terminal) {
         guard switchingAccountTerminals[result.id] != nil, !result.isParked,
