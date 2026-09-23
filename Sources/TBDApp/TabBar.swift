@@ -347,7 +347,7 @@ enum AddTabMenu {
             // name plus a short login-identity suffix (" — email" / " — needs
             // /login" for oauth profiles); when the daemon has a usage snapshot,
             // a smaller, indented secondary line underneath spells out the
-            // usage ("5h 0% · resets 23:10 · wk 76% · Fable 100%"). Each gets a
+            // usage ("5h 0% · resets 23:10 · wk 76%"). Each gets a
             // transparent placeholder icon the same size as the Claude asterisk
             // so its title lines up in the same title column as "Claude" — the
             // empty icon slot is the visual nesting cue. The profile id rides

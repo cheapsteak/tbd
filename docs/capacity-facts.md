@@ -198,11 +198,10 @@ old. Read truth-of-last-outcome from `statusKind`, and age from `fetchedAt`.
 Each element of `buckets` is one rate-limit window as the usage API names it:
 
 - **`kind`** – `session` (the rolling 5-hour window), `weekly_all` (weekly,
-  all models), `weekly_scoped` (weekly, one model family), or a kind TBD has
-  never seen. Unknown kinds are passed through verbatim; do not assume the
-  list is closed.
-- **`modelDisplayName`** – for `weekly_scoped`, the model family the window
-  applies to (e.g. `"Fable"`). Absent when the bucket is not model-scoped.
+  all models), or a kind TBD has never seen. Unknown kinds are passed through
+  verbatim; do not assume the list is closed.
+- **`modelDisplayName`** – always absent. The key belongs to schema version 1,
+  so it stays documented, but TBD emits no model-scoped buckets (see below).
 - **`group`** – the API's grouping label (`session`, `weekly`). Absent if the
   API omits it.
 - **`percent`** – utilization of this window, a JSON number carrying the
@@ -210,13 +209,21 @@ Each element of `buckets` is one rate-limit window as the usage API names it:
   means the window is spent. TBD does not rescale it (see "The versioning
   promise").
 - **`resetsAt`** – ISO 8601 instant when the window resets. **Absent when the
-  API sent null**, which happens for a scoped window that has not been used.
-  Absent is not "resets now."
+  API sent null**, which happens for a window that has not been used. Absent
+  is not "resets now."
 - **`severity`** – the API's label: `normal`, `warning`, `critical`. Passed
   through as sent; absent when the API omits it. It is the provider's
   judgment, not TBD's threshold.
 - **`isActive`** – whether this is the window currently binding the account.
   Absent when the API omits it.
+
+**Model-scoped windows are dropped.** The usage API can return a
+`weekly_scoped` bucket scoped to one model family (Fable). That family's
+usage counts toward the plan's all-models limits and has no cap of its own,
+so the scoped bucket is not a limit, and a caller holding on it at 100% would
+stop an account that still has room. TBD therefore discards `weekly_scoped`
+buckets, and any bucket the API scoped to a model, when it parses the usage
+response. `session` and `weekly_all` are the windows that govern an account.
 
 ## The terminal join
 
@@ -298,13 +305,7 @@ tracks no usage for at all.
             "isActive": true,
             "resetsAt": "2026-07-07T18:00:00Z"
           },
-          { "kind": "weekly_all", "group": "weekly", "percent": 17 },
-          {
-            "kind": "weekly_scoped",
-            "group": "weekly",
-            "percent": 3,
-            "modelDisplayName": "Fable"
-          }
+          { "kind": "weekly_all", "group": "weekly", "percent": 17 }
         ]
       }
     },

@@ -50,11 +50,10 @@ private func claudeTerminal(profileID: UUID? = nil,
              createdAt: createdAt, profileID: profileID, kind: kind)
 }
 
-/// The live-verified Gmail shape: 5h 0% resetting 23:10, weekly 76%, Fable 100%.
+/// The live-verified Gmail shape: 5h 0% resetting 23:10, weekly 76%.
 private let gmailSnapshot = snapshot(buckets: [
     bucket(kind: "session", percent: 0, severity: "normal", resetsAt: resetDate),
     bucket(kind: "weekly_all", percent: 76, severity: "warning"),
-    bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
 ])
 
 // MARK: - Claude tab card
@@ -78,15 +77,13 @@ struct ClaudeTabCardTests {
         #expect(card?.title == "g@gmail.com")
         #expect(card?.titleStyle == .plain)
         let rows = card?.rows ?? []
-        #expect(rows.count == 5)
+        #expect(rows.count == 4)
         #expect(rows[0] == HoverCardRow(label: "Profile", value: "Gmail"))
         #expect(rows[1] == HoverCardRow(label: "5h window", value: "0% · resets at 11:10pm",
                                         monospacedDigits: true, tint: .normal))
         #expect(rows[2] == HoverCardRow(label: "Week", value: "76%",
                                         monospacedDigits: true, tint: .warning))
-        #expect(rows[3] == HoverCardRow(label: "Fable", value: "100%",
-                                        monospacedDigits: true, tint: .critical))
-        #expect(rows[4] == HoverCardRow(label: "Spawned", value: "2026-07-03 23:10",
+        #expect(rows[3] == HoverCardRow(label: "Spawned", value: "2026-07-03 23:10",
                                         monospacedDigits: true))
     }
 
@@ -208,12 +205,18 @@ struct UsageRowsTests {
         #expect(AccountHoverCards.tint(for: criticalNoSeverity) == .critical)
     }
 
-    @Test func scopedBucketWithoutFamilyNameFallsBackToModelLabel() {
+    @Test func scopedAndUnknownBucketsRenderNoRow() {
+        // A stored snapshot can still carry a `weekly_scoped` Fable bucket;
+        // Fable usage counts toward the plan's all-models limits, so it gets
+        // no row. Nor does a kind TBD has never seen.
         let rows = AccountHoverCards.usageRows(
-            for: snapshot(buckets: [bucket(kind: "weekly_scoped", percent: 50)]),
-            timeZone: utc, now: Date()
+            for: snapshot(buckets: gmailSnapshot.buckets + [
+                bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
+                bucket(kind: "future_kind", percent: 50),
+            ]),
+            timeZone: utc, now: resetDate
         )
-        #expect(rows.first?.label == "Model")
+        #expect(rows.map(\.label) == ["5h window", "Week"])
     }
 }
 

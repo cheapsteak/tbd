@@ -76,6 +76,23 @@ struct OAuthUsageSnapshotStoreTests {
         #expect(all == [good.id: snap])
     }
 
+    @Test func storedModelScopedBucketIsStrippedOnLoad() async throws {
+        // A row written while the parser still kept model-scoped buckets must
+        // not bring a Fable limit back after a daemon restart: Fable usage
+        // counts toward the plan's all-models limits.
+        let db = try TBDDatabase(inMemory: true)
+        let profile = try await db.modelProfiles.create(name: "P", kind: .oauth)
+        let clean = snapshot(fetchedAt: Date(timeIntervalSince1970: 1))
+        var legacy = clean
+        legacy.buckets.append(ClaudeUsageLimitBucket(
+            kind: "weekly_scoped", group: "weekly", percent: 100,
+            severity: "critical", modelDisplayName: "Fable", isActive: true))
+        try await db.oauthUsageSnapshots.upsert(profileID: profile.id, snapshot: legacy)
+
+        let all = try await db.oauthUsageSnapshots.loadAll()
+        #expect(all == [profile.id: clean])
+    }
+
     @Test func deleteExceptRemovesOnlyRowsOutsideTheKeepSet() async throws {
         let db = try TBDDatabase(inMemory: true)
         let keep = try await db.modelProfiles.create(name: "Keep", kind: .oauth)

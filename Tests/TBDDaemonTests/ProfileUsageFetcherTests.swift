@@ -84,9 +84,9 @@ private let capturedUsageJSON = """
 
 struct ClaudeUsagePayloadParserTests {
 
-    @Test func capturedResponseParsesAllBuckets() throws {
+    @Test func capturedResponseParsesThePlanWideBuckets() throws {
         let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: capturedUsageJSON)
-        #expect(buckets.count == 3)
+        #expect(buckets.count == 2)
 
         let session = try #require(buckets.first { $0.kind == "session" })
         #expect(session.percent == 96)
@@ -101,11 +101,48 @@ struct ClaudeUsagePayloadParserTests {
         let weeklyAll = try #require(buckets.first { $0.kind == "weekly_all" })
         #expect(weeklyAll.percent == 76)
         #expect(weeklyAll.group == "weekly")
+        #expect(weeklyAll.modelDisplayName == nil)
+    }
 
-        let scoped = try #require(buckets.first { $0.kind == "weekly_scoped" })
-        #expect(scoped.percent == 100)
-        #expect(scoped.modelDisplayName == "Fable")
-        #expect(scoped.isActive == true)
+    @Test func weeklyScopedFableBucketIsDropped() throws {
+        // Fable usage counts toward the plan's all-models limits, so the
+        // scoped bucket the API still sends — here spent, critical, and the
+        // active limit — is not a limit and must not reach any consumer.
+        let json = """
+        { "limits": [
+            { "kind": "session", "group": "session", "percent": 12,
+              "severity": "normal", "resets_at": "2026-07-04T01:10:00Z",
+              "scope": null, "is_active": false },
+            { "kind": "weekly_all", "group": "weekly", "percent": 40,
+              "severity": "normal", "resets_at": "2026-07-07T22:00:00Z",
+              "scope": null, "is_active": false },
+            { "kind": "weekly_scoped", "group": "weekly", "percent": 100,
+              "severity": "critical", "resets_at": "2026-07-07T22:00:00Z",
+              "scope": { "model": { "id": null, "display_name": "Fable" },
+                         "surface": null },
+              "is_active": true }
+        ] }
+        """.data(using: .utf8)!
+        let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: json)
+        #expect(buckets.map(\.kind) == ["session", "weekly_all"])
+        #expect(buckets.allSatisfy { $0.modelDisplayName == nil })
+        #expect(buckets.allSatisfy { $0.severity != "critical" })
+    }
+
+    @Test func anyModelScopedBucketIsDropped() throws {
+        // Defensive: a kind TBD has never seen still flows through, unless
+        // the API scoped it to one model.
+        let json = """
+        { "limits": [
+            { "kind": "session", "group": "session", "percent": 5 },
+            { "kind": "monthly_scoped", "group": "monthly", "percent": 90,
+              "scope": { "model": { "id": null, "display_name": "Opus" } } },
+            { "kind": "monthly_all", "group": "monthly", "percent": 30,
+              "scope": null }
+        ] }
+        """.data(using: .utf8)!
+        let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: json)
+        #expect(buckets.map(\.kind) == ["session", "monthly_all"])
     }
 
     @Test func unknownBucketKindsFlowThroughAsData() throws {
@@ -123,16 +160,14 @@ struct ClaudeUsagePayloadParserTests {
     @Test func nullResetsAtYieldsNilDate() throws {
         let json = """
         { "limits": [
-            { "kind": "weekly_scoped", "group": "weekly", "percent": 0,
+            { "kind": "weekly_all", "group": "weekly", "percent": 0,
               "severity": "normal", "resets_at": null,
-              "scope": { "model": { "id": null, "display_name": "Fable" } },
-              "is_active": false }
+              "scope": null, "is_active": false }
         ] }
         """.data(using: .utf8)!
         let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: json)
         #expect(buckets.count == 1)
         #expect(buckets[0].resetsAt == nil)
-        #expect(buckets[0].modelDisplayName == "Fable")
     }
 
     @Test func malformedLimitEntriesAreSkipped() throws {
@@ -166,13 +201,12 @@ struct ClaudeUsagePayloadParserTests {
     }
 
     @Test func absentBucketsSimplyDoNotAppear() throws {
-        // Account without any scoped weekly bucket: only what the API sent.
+        // Only what the API sent: no weekly bucket here, so none appears.
         let json = """
         { "limits": [ { "kind": "session", "group": "session", "percent": 5 } ] }
         """.data(using: .utf8)!
         let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: json)
         #expect(buckets.map(\.kind) == ["session"])
-        #expect(buckets.first { $0.kind == "weekly_scoped" } == nil)
     }
 
     @Test func garbageJSONThrows() {
@@ -360,7 +394,7 @@ struct LiveProfileUsageFetcherTests {
             Issue.record("expected .ok, got \(status)")
             return
         }
-        #expect(buckets.count == 3)
+        #expect(buckets.count == 2)  // the captured weekly_scoped bucket is dropped
         let request = try #require(ProfileUsageMockURLProtocol.lastRequest)
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-oat01-TEST")
         #expect(request.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20")
