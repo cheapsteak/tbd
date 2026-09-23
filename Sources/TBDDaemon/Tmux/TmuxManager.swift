@@ -6,9 +6,27 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager"
 
 /// What one read-only `list-panes` consultation says about a pane that a send
 /// is aimed at. Read before anything is typed; see `paneSendTargetQuery`.
+///
+/// The two negative cases are deliberately separate facts, and conflating them
+/// was a real defect: a reachable server answering "no such pane" is positive
+/// evidence of absence, while a server that could not be reached at all is a
+/// failed READ that says nothing about the pane. The daemon spawns tmux with
+/// `environment: nil`, so its `TMUX_TMPDIR` can differ from the user's shell
+/// and `-L <name>` can resolve to a different socket file — the second case
+/// happens in the field, and reporting it as absence refuses sends to (and,
+/// worse, parks) perfectly live sessions. Affirmative evidence of absence is
+/// what `docs/specs/2026-08-11-bounded-terminal-recovery-design.md` requires;
+/// the app layer already honours it (`TmuxPreparationFailure.windowMissing`
+/// versus `.commandFailed`).
 public enum PaneSendTarget: Sendable, Equatable {
-    /// tmux cannot find the pane — it, its window, or the whole server is gone.
-    case missing
+    /// tmux answered about a reachable server and this pane is not on it — it,
+    /// or its window, is gone. Positive evidence of absence.
+    case absent
+    /// The consultation could not be completed: the server did not answer on
+    /// the socket this daemon resolved. NOT evidence about the pane, and never
+    /// to be reported as "gone" — the pane may well be alive and typed into by
+    /// a shell that resolves the same `-L` name to a different socket.
+    case unreachable
     /// The pane object exists (`remain-on-exit` kept it) but its process has
     /// exited. `send-keys` into it still exits 0 and the keys go nowhere.
     /// `terminalID` carries the same ownership stamp as a live pane so
@@ -132,7 +150,10 @@ public struct TmuxManager: Sendable {
     /// Throwing, because "the consultation could not be run at all" is one of
     /// the answers: it is the wedged-tmux path the send classifies as a
     /// transport failure rather than a refusal, and a non-throwing hook would
-    /// leave that branch with no way to be exercised.
+    /// leave that branch with no way to be exercised. Returning `.unreachable`
+    /// is the neighbouring case — the consultation ran and could not reach the
+    /// server — and every consumer must treat it as "I don't know", never as
+    /// "gone".
     public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
     /// Optional test hook consulted by `panePID` in dryRun mode:
     /// `(server, paneID)` to the pid string to report. Without it dryRun reports
@@ -774,20 +795,69 @@ public struct TmuxManager: Sendable {
          + "#{pane_start_command}"]
     }
 
+    /// The reachability probe run after a failed `paneSendTargetQuery`: one
+    /// read-only, server-wide inventory of pane identities.
+    ///
+    /// Server-wide (`-a`) rather than `-t <pane>` deliberately. The whole point
+    /// is to separate "tmux answered" from "tmux could not be reached", and a
+    /// second target-scoped query would fail for BOTH reasons exactly as the
+    /// first one did. `list-panes -a` names no target, so its exit status is
+    /// about the SERVER: it exits 0 with the inventory when the server answers
+    /// and non-zero when nothing is listening on that socket.
+    ///
+    /// It reports `#{pane_id}` and nothing else — no prose, no stderr parsing.
+    /// The bounded-recovery spec rejects reading tmux's human-facing text
+    /// ("rendered and human-facing text is not a stable machine interface. Exit
+    /// status and formatted identity inventories are"), so absence is concluded
+    /// from a formatted inventory that does not contain the id, never from an
+    /// error message that says so.
+    public static func allPaneIDsQuery(server: String) -> [String] {
+        ["-L", server, "list-panes", "-a", "-F", "#{pane_id}"]
+    }
+
+    /// Whether a server-wide `allPaneIDsQuery` inventory names `paneID`.
+    static func paneInventoryLists(_ output: String, paneID: String) -> Bool {
+        output.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespaces) == paneID
+        }
+    }
+
+    /// Turn a failed `paneSendTargetQuery` into a verdict, given what the
+    /// reachability probe saw. Pure, so all three branches are unit-testable
+    /// without a tmux server.
+    ///
+    /// - Parameter paneInventory: `allPaneIDsQuery`'s stdout, or `nil` when the
+    ///   probe itself failed.
+    ///
+    /// Three cases, and only one of them is evidence:
+    /// - probe failed → `.unreachable`. Two failed reads in a row still say
+    ///   nothing about the pane.
+    /// - probe answered and the inventory does NOT name the pane → `.absent`.
+    ///   The server is reachable and does not have this pane: positive absence.
+    /// - probe answered and the inventory DOES name the pane → `.unreachable`.
+    ///   The first failure was transient or anomalous, and the one thing this
+    ///   function must never do is report a pane tmux just listed as gone.
+    static func classifyFailedConsultation(
+        paneInventory: String?, paneID: String
+    ) -> PaneSendTarget {
+        guard let paneInventory else { return .unreachable }
+        return paneInventoryLists(paneInventory, paneID: paneID) ? .unreachable : .absent
+    }
+
     /// Classify `paneSendTargetQuery`'s stdout for the pane the send named.
     /// Pure, so the classification is unit-testable without a tmux server.
     ///
     /// Only the line whose `#{pane_id}` is `paneID` counts — the query returns
     /// one line per pane in the target's window. A run with no such line means
-    /// tmux answered about a window that no longer holds this pane, which is
-    /// the same fact as `can't find pane`: `.missing`.
+    /// tmux answered — exit 0, on a reachable server — about a window that no
+    /// longer holds this pane: positive evidence of absence, `.absent`.
     static func parsePaneSendTarget(_ output: String, paneID: String) -> PaneSendTarget {
         parsePaneSendProbe(output, paneID: paneID).target
     }
 
     /// `parsePaneSendTarget` plus the window tmux says the pane lives in, for
     /// the callers that name a window rather than only typing into a pane.
-    /// `windowID` is nil whenever the target is `.missing` — there was no line
+    /// `windowID` is nil whenever the target is `.absent` — there was no line
     /// to read it from.
     static func parsePaneSendProbe(
         _ output: String, paneID: String
@@ -808,16 +878,17 @@ public struct TmuxManager: Sendable {
             }
             return (.live(terminalID: terminalID), windowID)
         }
-        // rc 0 but no line for this pane (including no output at all): nothing
-        // answered for the coordinate the send named.
+        // rc 0 but no line for this pane (including no output at all): the
+        // server answered, and nothing on it holds the coordinate the send
+        // named.
         if !sawWellFormedLine {
             warnIfUnparseable(output, query: "paneSendTargetQuery for \(paneID)")
         }
-        return (.missing, nil)
+        return (.absent, nil)
     }
 
     /// Warn when tmux produced output but no line of it splits into the query's
-    /// five fields. The caller's answer stays `.missing`, but that answer is
+    /// five fields. The caller's answer stays `.absent`, but that answer is
     /// then a parse failure rather than an observed fact about tmux. The known
     /// cause is a client that sanitized the tab separators to `_`; see
     /// `executionArguments`.
@@ -1290,12 +1361,21 @@ public struct TmuxManager: Sendable {
     /// Read-only — a query, not an actuation. Throws only when the query itself
     /// could not be *run*: a wedged server tripping the subprocess timeout
     /// (`TmuxError.timedOut`) or a tmux that would not spawn at all, neither of
-    /// which this catch matches. A non-zero *exit* is read as an answer instead,
-    /// because the only way this fixed argv can exit non-zero is tmux failing to
-    /// resolve the target — `can't find pane`, or no server on that socket, both
-    /// of which mean the same thing for a send. (`paneSendTargetQuery`'s exact
-    /// argv is pinned by a unit test, so it cannot drift into a usage error that
-    /// would arrive here wearing the same clothes.)
+    /// which this catch matches.
+    ///
+    /// A non-zero *exit* is ambiguous and is NOT read as an answer on its own.
+    /// This fixed argv can exit non-zero for two unrelated reasons — the pane
+    /// could not be resolved on a server that answered, or no server answered on
+    /// that socket at all — and only the first is evidence about the pane. The
+    /// second is a failed read: the daemon spawns tmux with `environment: nil`,
+    /// so a `TMUX_TMPDIR` that differs from the user's shell puts the same
+    /// `-L <name>` on a different socket file, and a live pane then wears the
+    /// clothes of a vanished one. So a failure is disambiguated by a positive
+    /// server-reachability probe (`allPaneIDsQuery`) rather than by reading
+    /// tmux's error prose; see `classifyFailedConsultation`.
+    /// (`paneSendTargetQuery`'s exact argv is pinned by a unit test, so it
+    /// cannot drift into a usage error that would arrive here wearing the same
+    /// clothes.)
     public func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
         try await paneSendProbe(server: server, paneID: paneID).target
     }
@@ -1303,7 +1383,7 @@ public struct TmuxManager: Sendable {
     /// The same single consultation, also answering which window tmux says the
     /// pane lives in — for callers that go on to *name* a window and so must
     /// verify it rather than emit it on trust. `windowID` is nil when the pane
-    /// is missing, or when tmux answered with an empty field.
+    /// is absent or unreachable, or when tmux answered with an empty field.
     public func paneSendProbe(
         server: String, paneID: String
     ) async throws -> (target: PaneSendTarget, windowID: String?) {
@@ -1315,7 +1395,25 @@ public struct TmuxManager: Sendable {
         do {
             return Self.parsePaneSendProbe(try await runTmux(args), paneID: paneID)
         } catch TmuxError.commandFailed {
-            return (.missing, nil)
+            let inventory = try? await runTmux(Self.allPaneIDsQuery(server: server))
+            let verdict = Self.classifyFailedConsultation(
+                paneInventory: inventory, paneID: paneID)
+            if verdict == .unreachable {
+                // The one drift this whole split exists to make diagnosable in
+                // the field: which server name, and which pane, could not be
+                // consulted — and whether the reachability probe itself
+                // answered (transient failure) or not (socket mismatch / dead
+                // server).
+                let probeOutcome = inventory == nil
+                    ? "the reachability probe also failed"
+                    : "the reachability probe still lists the pane"
+                logger.warning("""
+                    paneSendTarget: could not establish whether pane \(paneID, privacy: .public) \
+                    exists on server \(server, privacy: .public) — the consultation failed and \
+                    \(probeOutcome, privacy: .public); reporting unreachable rather than absent
+                    """)
+            }
+            return (verdict, nil)
         }
     }
 

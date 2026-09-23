@@ -98,7 +98,7 @@ import TestSupport
     /// successful no-op. It carries a machine-readable code so an autonomous
     /// caller can branch without matching message text.
     @Test func wakeOnUnparkedRowWithNoPaneIsAnErrorNotASilentNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .missing })
+        let (router, db) = try makeRouter(paneTarget: { _, _ in .absent })
         let terminal = try await makeUnparkedTerminal(db, tag: "repoW")
 
         let req = try RPCRequest(
@@ -155,7 +155,7 @@ import TestSupport
     /// routes through the same coordinator, so a silent no-op here would be the
     /// original bug surviving at the other entry point.
     @Test func legacyResumeOnUnparkedRowWithNoPaneIsAnErrorNotASilentNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .missing })
+        let (router, db) = try makeRouter(paneTarget: { _, _ in .absent })
         let terminal = try await makeUnparkedTerminal(db, tag: "repoW5")
 
         let req = try RPCRequest(

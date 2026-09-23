@@ -84,8 +84,10 @@ private final class PaneIdentities: @unchecked Sendable {
         answers[paneID] = target
     }
 
-    /// Make the consultation itself fail for a pane — a wedged tmux, not an
-    /// answer about the pane.
+    /// Make the consultation itself fail for a pane — a wedged tmux tripping
+    /// the subprocess timeout, not an answer about the pane. Distinct from
+    /// `set(.unreachable, for:)`, where the consultation RAN and reached no
+    /// server; both are non-answers, and the rail must survive either.
     func markUnreachable(_ paneID: String) {
         lock.lock(); defer { lock.unlock() }
         unreachable.insert(paneID)
@@ -1136,6 +1138,38 @@ extension TBDHomeSerialized {
 
             let targets = Array(f.recorder.pastedPanes.dropFirst(before))
             #expect(targets.isEmpty, "an unverifiable pane must receive nothing, got \(targets)")
+        }
+
+        /// The defect, on the rail where "not a candidate" is destructive. A
+        /// consultation that RAN and reached no tmux server says nothing about
+        /// the pane — but an empty candidate list here is an ACTION, not a
+        /// silence: `nudgeDeskSession` spawns a replacement agent onto what may
+        /// be a perfectly live desk. So the pass aborts instead of concluding
+        /// absence, and spawn recovery is deliberately left ENABLED here (unlike
+        /// the sibling tests above) because "it was never reached" is the whole
+        /// property under test.
+        @Test("an unreachable server neither nudges nor replaces the desk agent")
+        func testUnreachableServerDoesNotReplaceTheDeskAgent() async throws {
+            let f = try makeDeskFixture(tag: "nudge-unreachable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+            let rowsBefore = seeded.count
+
+            f.identities.set(.unreachable, for: claude.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets.isEmpty, "an unreadable pane must receive nothing, got \(targets)")
+            let rowsAfter = try await f.db.terminals.list(worktreeID: desk.id)
+            #expect(rowsAfter.count == rowsBefore,
+                    "a failed read must not spawn a replacement desk agent")
+            // And the row it could not read is left exactly where it was.
+            #expect(rowsAfter.contains { $0.id == claude.id })
         }
 
         /// `postShiftWrapUp` reaches the same candidate list on the same timer,
