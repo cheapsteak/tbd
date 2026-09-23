@@ -738,6 +738,9 @@ stop_handover_successor() {
 # are reachable from a test. A failed relaunch is logged, not fatal: the daemon
 # has already handed over and the app is only a viewer.
 run_app_stage() {
+    # Before the opt-out: the next login relaunch ignores LSEnvironment.PATH
+    # and needs the saved tmux fallback whether or not this run relaunches.
+    seed_tmux_fallback "$TBD_HOME_DIR"
     if [ "$OPT_NO_APP" = true ]; then
         log "--no-app: leaving the running app alone"
         return 0
