@@ -1,0 +1,145 @@
+name: Release
+
+# Builds the runtime products for a commit on main whose Test run passed, and
+# publishes them to the rolling `main-builds` prerelease so that
+# `tbd update --from-release` can install them without compiling locally.
+# Design: docs/specs/2026-09-23-release-pipeline-design.md. Installer:
+# scripts/update-release-lib.sh.
+#
+# Two jobs, split by privilege. `build` holds a read-only token and runs the
+# compiler, and everything the compiler pulls in. `publish` holds the write
+# scopes and runs only this repository's own scripts against the archive
+# `build` produced. Neither job ever runs for a pull request: `workflow_run`
+# fires in the base repository's context, and the `if:` below admits only a
+# push to this repository's main.
+
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+  # Backfill one commit on main, for example one whose build was cancelled
+  # because a newer push superseded it.
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Full commit on main to build (default: the head of main)'
+        required: false
+        default: ''
+
+permissions: {}
+
+# One publish at a time, newest wins. A superseded commit gets no asset, which
+# costs nothing: an update always wants the newest commit that has one, and
+# walks back along main to find it.
+concurrency:
+  group: release-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: release-build
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: macos-26
+    # A cold release build of all five published products, unmeasured on this
+    # runner when this was written; the debug equivalent of the test job's
+    # first step has reached 21 minutes cold. Generous rather than tight: this
+    # bounds a wedged job, it is not a performance budget.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+    env:
+      # Same cap as test.yml: the ~7 GB runner holds three release frontends.
+      TBD_SWIFT_JOBS: "3"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.commit || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the commit and require it to be on main
+        id: commit
+        run: |
+          commit="$(git rev-parse HEAD)"
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$commit is not on main; only commits on main are published"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode 26.6 (Swift 6.3.3)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Build the published products (release)
+        run: |
+          source scripts/update-release-lib.sh
+          # SwiftPM honors only the last --product, so one invocation each.
+          for product in "${RELEASE_PRODUCTS[@]}"; do
+            echo "::group::$product"
+            swift build -c release -j "$TBD_SWIFT_JOBS" --product "$product"
+            echo "::endgroup::"
+          done
+
+      - name: Package
+        run: |
+          bash scripts/ci/package-release.sh .build/release \
+            "${{ steps.commit.outputs.commit }}" "$RUNNER_TEMP/dist"
+
+      - name: Smoke-test the package as a machine that did not build it
+        run: |
+          bash scripts/ci/smoke-release.sh \
+            "$RUNNER_TEMP/dist/tbd-${{ steps.commit.outputs.commit }}-macos-arm64.tar.gz" \
+            "${{ steps.commit.outputs.commit }}" "$GITHUB_WORKSPACE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.commit.outputs.commit }}
+          path: ${{ runner.temp }}/dist/
+          # Only the publish job below reads it.
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: release-publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Upload assets, move the main-builds tag, prune old assets.
+      contents: write
+      # Sign the build-provenance attestation (Sigstore, via OIDC).
+      id-token: write
+      attestations: write
+    env:
+      COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.commit }}
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/tbd-${{ needs.build.outputs.commit }}-macos-arm64.tar.gz
+
+      - name: Publish to main-builds, move its tag, prune old assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/ci/publish-release.sh dist "$COMMIT"

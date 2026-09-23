@@ -1,15 +1,11 @@
-# Release pipeline: build in CI, install the download — design (draft)
-
-**Status: draft with open questions.** The repository owner has not answered
-the questions in the last section yet. Nothing here is decided until they
-have, and no implementation starts before that.
+# Release pipeline: build in CI, install the download — design
 
 `tbd update` compiles the whole installation on the machine it updates. This
-spec moves that compile to a GitHub Actions macOS runner. A workflow builds
-the release configuration of every runtime product for a commit on `main` and
-publishes the output as a release asset keyed by that commit. `tbd update`
-then downloads and verifies the asset instead of building, and falls back to
-the local build when no asset fits.
+spec moves most of that compile to a GitHub Actions macOS runner. A workflow
+builds the release configuration of the runtime products for each commit on
+`main` whose test run passed, and publishes the output as a release asset keyed
+by that commit. `tbd update --from-release` downloads and verifies the asset
+instead of building, and falls back to the local build when none fits.
 
 The design behind `tbd update` is
 [`2026-09-04-automatic-version-updates-design.md`](2026-09-04-automatic-version-updates-design.md).
@@ -17,6 +13,10 @@ That spec lists "a release channel, tags, or signed downloadable builds" among
 its non-goals, so "latest" there means a commit on `main`. This spec revises
 that non-goal and nothing else. The commit is still the identity; a download
 is another way to get that commit's binaries onto disk.
+
+The repository owner decided the design questions on 2026-09-23; section 8
+records them. The first scope in section 3, which publishes every product but
+the app, is pending his confirmation.
 
 ## 1. What is wrong today
 
@@ -43,16 +43,16 @@ is another way to get that commit's binaries onto disk.
 
 Goals:
 
-- One CI build per eligible commit on `main`, published where an unauthenticated
-  `curl` can fetch it.
-- `tbd update` can install that build with no local compile, and the
-  installation it produces behaves the same as a locally built one: same
-  bundle assembly, same local signing identity, same handover, same kept
-  previous bundle, same build-identity reporting.
-- The operator can check that a download is the artifact CI built from that
-  commit.
-- When no usable asset exists, the update degrades to something predictable
-  and never installs a partial or unverified tree.
+- One CI build per commit on `main` that passed its tests, published where an
+  unauthenticated `curl` can fetch it.
+- `tbd update --from-release` installs that build without compiling the
+  daemon side. The resulting installation behaves the same as a locally built
+  one: same bundle assembly, same local signing identity, same handover, same
+  kept previous bundle, same build-identity reporting.
+- An unattended install only ever trusts bytes provably built by the release
+  workflow from `main`.
+- When no usable asset exists, the update degrades predictably and never
+  installs a partial or unverified tree.
 
 Non-goals:
 
@@ -60,388 +60,356 @@ Non-goals:
   who have never built TBD. The installation still starts from a checkout.
 - Semantic versions, a changelog, or release notes. The commit is still the
   version.
-- Intel or universal binaries, unless Question 5 says otherwise.
+- Intel or universal binaries.
 - Changing the handover, the wake pacing, or anything after the install step.
 
 ## 3. What the updater's layout requires
 
-Researching `update.sh`, `restart-bundle-lib.sh` and the app's daemon lookup
-changed the ask in three ways.
-
-- **`TBD.app` cannot be built in CI and shipped whole.** `assemble_app_bundle`
-  writes the installing shell's `PATH` into `Contents/Info.plist`
-  (`write_restart_environment_plist`); a login relaunch depends on that value.
-  `sign_app_bundle` signs with a per-machine self-signed `TBD Dev Signing`
-  identity, so that TCC decisions persist across rebuilds
-  ([`docs/tcc-signing.md`](../tcc-signing.md)). A bundle signed anywhere else
-  would bring back the endless consent prompts that document describes.
-  `Contents/SourceWorktreePath.txt` names a local path. **So CI ships the
-  build products, and the local updater assembles, signs and installs the
-  bundle from them exactly as it does today.** The download replaces
-  `build_products` and nothing downstream of it.
+- **`TBD.app` is assembled on the machine that installs it.**
+  `assemble_app_bundle` writes the installing shell's `PATH` into
+  `Contents/Info.plist` (`write_restart_environment_plist`), and a login
+  relaunch depends on that value. `sign_app_bundle` signs with a per-machine
+  self-signed `TBD Dev Signing` identity, so that TCC decisions persist across
+  rebuilds ([`docs/tcc-signing.md`](../tcc-signing.md)).
+  `Contents/SourceWorktreePath.txt` names a local path. So CI ships build
+  products, and the local updater assembles, signs and installs the bundle
+  from them exactly as it does after a local build.
 - **The daemon never lives in the bundle.** `update.sh` starts the successor
   from `<build_dir>/TBDDaemon`, and the daemon finds `TBDCLI`, `TBDHolder`,
   `TBDPeerHelper` and `TBDModelProxy` as siblings of its own binary. After a
   reboot, the app respawns a missing daemon from the first executable
   candidate `DaemonCandidateFinder` names: the app bundle's `MacOS/TBDDaemon`,
   then `<sourceWorktree>/.build/release/TBDDaemon`, then `.build/debug`. A
-  downloaded daemon that sits anywhere else is invisible to that respawn, and
-  the app would bring up whatever stale local build the update clone last
-  produced. Section 4.4 places the download where that lookup finds it.
-- **The update clone stays, and stays at the installed commit.**
-  `sourceWorktree` in the build identity is what `tbd update` execs
-  `scripts/update.sh` from. It is also where the daemon's update checker runs
-  `git remote get-url`, `git merge-base --is-ancestor` and `git rev-list
-  --count`. `assemble_app_bundle` reads `Resources/TBDApp.Info.plist` and
-  `Resources/AppIcon.icns` from it. So the fetch and detach into
-  `~/tbd/updates/src` keep running; only the compile goes away. Fetching is
-  seconds; the compile is what costs.
+  downloaded daemon must therefore be reachable at
+  `<sourceWorktree>/.build/release/TBDDaemon` (section 4.4).
+- **The update clone stays, at the installed commit.** `sourceWorktree` in the
+  build identity is what `tbd update` execs `scripts/update.sh` from. It is
+  also where the daemon's update checker runs `git remote get-url`, `git
+  merge-base --is-ancestor` and `git rev-list --count`. `assemble_app_bundle`
+  reads `Resources/TBDApp.Info.plist` and `Resources/AppIcon.icns` from it. So
+  the fetch into `~/tbd/updates/src` keeps running; only the compile goes
+  away.
+- **Resource bundles travel with the binaries, and the app cannot find its own
+  from a download.** SwiftPM's generated `Bundle.module` accessor looks for
+  `<Name>.bundle` at `Bundle.main.bundleURL` first. If that fails, it tries an
+  absolute build path baked in at compile time
+  (`<builder>/.build/arm64-apple-macosx/release/<Name>.bundle`), and calls
+  `fatalError` if both fail.
+  - For every executable except the app, `Bundle.main.bundleURL` is the
+    executable's own directory, so bundles shipped beside it are found.
+    `SQLMigrationLoader` does not use `Bundle.module` at all.
+  - For the installed app, `Bundle.main.bundleURL` is the root of
+    `/Applications/TBD.app`, while `assemble_app_bundle` stages the bundles in
+    `Contents/Resources`. The installed app therefore resolves `Bundle.module`
+    only through the baked build path, which exists on the machine that
+    compiled it and nowhere else. The affected consumers are TBDApp's sidebar
+    and content icons, `MarkdownStylesheet`, and the Highlightr dependency,
+    whose `init` reads `Bundle.module` unconditionally. The code viewer, the
+    diff highlighter and `CodeHighlightService` all construct `Highlightr()`.
+  - So a CI-built `TBDApp` would stop at its first resource lookup on any
+    user's machine.
+- **The first scope therefore publishes five products and builds `TBDApp`
+  locally.** The asset carries `TBDDaemon`, `TBDCLI`, `TBDHolder`,
+  `TBDPeerHelper` and `TBDModelProxy` with their resource bundles. The update
+  compiles `TBDApp` alone (about 30% of a cold build, measured in
+  [`docs/research/2026-08-19-cold-build-split/findings.md`](../research/2026-08-19-cold-build-split/findings.md))
+  and adds it to the downloaded tree. A follow-up makes the app's resource
+  lookups relocatable: a resolver that checks `Bundle.main.resourceURL` for
+  TBDApp's own call sites, and the same change in a Highlightr fork, following
+  the SwiftTerm fork precedent. With that in place, `TBDApp` joins the asset
+  and the update compiles nothing. Rejected ways to ship the app sooner are in
+  section 5. **This scope is pending the owner's confirmation.**
 
-Two further facts shape the artifact.
-
-- **Resource bundles must travel with the binaries.** A release build dir holds
-  `TBD_TBDApp.bundle`, `TBD_TBDDaemonLib.bundle` (SQL migrations),
-  `SwiftTerm_SwiftTerm.bundle` (Metal shaders), `Highlightr_Highlightr.bundle`,
-  `GRDB_GRDB.bundle` and `swift-nio_NIOPosix.bundle`. SwiftPM's generated
-  `Bundle.module` accessor falls back to an absolute `.build` path baked in at
-  compile time. On the machine that built the binary, that fallback hides a
-  missing bundle. A CI-built binary is the first TBD binary to run on a
-  machine that did not build it, so any consumer that relies on the fallback
-  breaks there for the first time. `SQLMigrationLoader` avoids
-  `Bundle.module` for exactly this reason. The TBDApp consumers
-  (`MarkdownStylesheet`, the sidebar and content icons) do not, and must be
-  checked against a relocated tree before this ships (section 7).
-- **The six products all exist.** `RUNTIME_PRODUCTS` in
-  `scripts/restart-bundle-lib.sh` is `TBDDaemon TBDApp TBDCLI TBDHolder
-  TBDPeerHelper TBDModelProxy`, and each is an `executableTarget` in
-  `Package.swift` (tools version 6.0, `platforms: [.macOS(.v15)]`). `TBDApp`
-  links the committed `rust/comrak-ffi/lib/libcomrak_ffi.a`, so CI needs no
-  Rust toolchain. Current release binaries total about 144 MB uncompressed,
-  arm64 only.
-
-## 4. Proposed design
+## 4. Design
 
 ### 4.1 The workflow
 
-A new `.github/workflows/release.yml`, separate from `test.yml` so that the
-test workflow's cache policy and concurrency stay untouched.
+`.github/workflows/release.yml` is separate from `test.yml`, so the test
+workflow's triggers, cache policy and concurrency stay untouched.
 
-- **Trigger.** Question 2 decides between every push to `main` and only
-  commits whose `test.yml` run on `main` passed (`workflow_run`). A
-  `workflow_dispatch` input for a given commit exists either way, to backfill
-  a missed build.
-- **Runner and toolchain.** `macos-26`, `sudo xcode-select -s
-  /Applications/Xcode_26.6.app`, the same pin `test.yml` uses. The manifest
-  records the exact `swift --version`.
-- **Concurrency.** `group: release-main`, `cancel-in-progress: true`. When
-  `main` moves during a build, the build of the older commit is cancelled.
-  Commits superseded that way get no asset, which is fine, because an update
-  always wants the newest commit that has one (section 4.3).
-- **Build.** One `swift build -c release --product <P>` per product, in
-  `RUNTIME_PRODUCTS` order. CI calls SwiftPM directly, as `test.yml` already
-  does; `scripts/swift-safe` governs a shared developer machine, not a
-  single-tenant runner. `timeout-minutes` is set on the job, following the
-  repository convention.
-- **Cache.** None at first. The Actions cache store held 9.4 GB of its 10 GB
-  when last measured. A release-configuration entry would evict the debug
-  entries `test.yml` depends on. Measure the cold build duration first, then
-  decide.
-- **Package.** Stage the six executables and every `*.bundle` beside them,
-  except `*Tests.bundle` (the same exclusion `assemble_app_bundle` applies),
-  into `tbd-<commit>-macos-arm64/`. Add `manifest.json`: the full commit, the
-  build time, the Swift and Xcode versions, the runner image, the run URL,
-  the product list and a SHA-256 per file. Archive it as
-  `tbd-<commit>-macos-arm64.tar.gz` and write
-  `tbd-<commit>-macos-arm64.tar.gz.sha256` beside it.
-- **Smoke test before publishing.** Run each helper with `--help` or
-  `--version`. Start `TBDDaemon` against a scratch `TBD_HOME` long enough to
-  run its migrations, from a copy of the staged directory at a path unrelated
-  to the checkout. This catches the relocation failures of section 3 in CI
-  rather than on a user's machine.
-- **Attest** (Question 4). `actions/attest-build-provenance` over the tarball,
-  which needs `id-token: write` and `attestations: write`.
-- **Publish** (Question 3). Upload with `contents: write`, the only write
-  scope the job holds. The workflow never runs on `pull_request` or
-  `pull_request_target`, so no contributor-controlled code runs holding that
-  token.
+- **Trigger.** `workflow_run` on the `Test` workflow, completed. A job-level
+  condition admits only a successful run from a `push` to this repository's
+  `main`. A `workflow_dispatch` input backfills one commit, and the job
+  refuses any commit that `main` does not contain.
+- **Two jobs, split by privilege.**
+  - `release-build` runs on `macos-26` with `contents: read`. It selects Xcode
+    26.6 (the pin `test.yml` uses) and runs `swift build -c release --product
+    <P>` for each of the five published products, with the same `-j 3` cap
+    as `test.yml`. It then packages, smoke-tests and uploads the archive as a
+    one-day workflow artifact.
+  - `release-publish` runs on `ubuntu-latest` with `contents: write`,
+    `id-token: write` and `attestations: write`. It runs only this
+    repository's scripts against that artifact.
+- **Concurrency.** `group: release-main`, `cancel-in-progress: true`. A
+  superseded commit gets no asset, which costs nothing, because an update
+  walks back to the newest commit that has one.
+- **Cache.** None. The Actions cache store holds about 9.4 of its 10 GB, and a
+  release-configuration entry would evict the debug entries `test.yml`
+  depends on.
+- **Package** (`scripts/ci/package-release.sh`). This stages the five products
+  and every non-test `*.bundle` beside them into
+  `tbd-<commit>-macos-arm64/`, and adds `manifest.json`. The manifest records
+  the commit, the architecture, the build time, the product list, the Swift,
+  Xcode and macOS versions, the runner image, the run URL and a SHA-256 per
+  file. The script archives the directory as `tbd-<commit>-macos-arm64.tar.gz`
+  and writes a `.sha256` beside it.
+- **Smoke test** (`scripts/ci/smoke-release.sh`). This runs before anything is
+  published, and simulates a machine that did not build the archive. It moves
+  the checkout's `.build` aside, so no baked build path resolves, and unpacks
+  the archive at an unrelated path. Then it checks three things:
+  - every resource bundle a shipped executable names by build path is present
+    beside that executable;
+  - every helper starts without a dyld or resource-bundle failure;
+  - the daemon, run from the unpacked tree against a scratch `TBD_HOME`,
+    applies its migrations and serves its socket.
+- **Attest.** `actions/attest-build-provenance` over the archive.
+- **Publish** (`scripts/ci/publish-release.sh`).
+  - It uploads to the rolling prerelease `main-builds`, creating the
+    prerelease on first use and marking it not-latest.
+  - It then moves the `main-builds` tag to the commit, only forward along
+    `main`, and only after the upload. The tag therefore always names a
+    published commit, and a backfill of an older commit never moves it back.
+  - Finally it prunes every asset beyond the newest 20 commits', always
+    keeping the tagged one.
 
 ### 4.2 Asset naming and keying
 
 The key is the full 40-character commit. It appears in the asset name, in
-`manifest.json`, and in the checksum file. Only the tag differs between the
-hosting options, and the recommended option (a single rolling prerelease,
-Question 3) gives each asset a stable URL:
+`manifest.json`, and in the checksum file. Each asset has a stable URL:
 
-`https://github.com/<owner>/<repo>/releases/download/<tag>/tbd-<commit>-macos-arm64.tar.gz`
+`https://github.com/<owner>/<repo>/releases/download/main-builds/tbd-<commit>-macos-arm64.tar.gz`
 
-`update.sh` builds that URL from the remote it already resolves and the
-commit it already fetched. The fetch needs no GitHub API call, so the 60
-requests per hour allowed to unauthenticated API clients never comes into it.
-Release-asset downloads are served from a CDN outside the API rate limit.
-
-A remote that is a fork without this workflow gets a 404. That case behaves
-exactly like "no asset yet" (Question 6).
+`update.sh` builds that URL from the update remote and the commit. It makes no
+GitHub API call, so the unauthenticated API rate limit never applies.
+Release-asset downloads are served outside that limit. `TBD_RELEASE_REPO`
+points a fork's updates at another repository's releases.
 
 ### 4.3 The update path
 
-`scripts/update.sh` gains a source step between `fetch_latest` and the
-install. Its default is Question 1.
+`scripts/update.sh` resolves an update source, `build` or `release`. In order
+of precedence it takes:
 
-1. Fetch and detach the clone onto `origin/main`, as today, then read the head
-   commit.
-2. **Choose the target commit.** When the head has an asset, the target is the
-   head. When it has none, walk back along `main`'s first-parent history, at
-   most a small constant number of commits (set at the top of the script), and
-   take the newest commit that has one. When none does, apply the fallback
-   (Question 6). Detach the clone onto the target commit, so the scripts,
-   `Resources/` and the build identity all describe the commit being
-   installed.
-3. **Download** into `~/tbd/updates/prebuilt/<commit>.partial/` with `curl
-   --fail --location`, and fetch the checksum.
-4. **Verify** before anything is unpacked into place. The tarball's SHA-256
-   must equal the published checksum. The attestation must verify when
-   Question 4 requires it. After unpacking, every file must match its
-   `manifest.json` hash, `manifest.json`'s commit must equal the target
-   commit, all six products must be present and executable, and `lipo
-   -archs` must report the architecture this machine needs. Any failure
-   deletes the `.partial` directory and takes the fallback. A download that
-   failed to verify is never installed, whatever the fallback says.
-5. **Normalize.** `xattr -dr com.apple.quarantine` on the unpacked tree. `curl`
-   does not set the quarantine attribute, but a browser that fetched the
-   tarball would, and Gatekeeper evaluates quarantined executables only. The
-   helper binaries keep the linker's ad-hoc signature, as local builds do.
-   The app bundle is re-signed locally as before.
-6. **Stamp the build identity locally.** Call `write_build_identity
-   "$UPDATE_SRC" <prebuilt dir>` with the clone detached at the target commit.
-   It records the commit, `sourceWorktree = ~/tbd/updates/src` and a clean
-   tree. The sidecar gains a `"provenance"` key: `"release"` plus the run URL
-   for a download, and `"local"` for a local build. Older binaries ignore
-   unknown keys (`BuildIdentity` decodes leniently), so the key costs nothing.
-   Showing it in `tbd version` is an optional compiled follow-up.
-7. **Rename** `<commit>.partial` to `<commit>`, point the release build path at
-   it (section 4.4), then continue with the unchanged tail: `assemble_app_bundle`,
-   `sign_app_bundle`, `install_and_handover`, `refresh_installed_cli`, the app
-   stage and the wake stage.
-8. **Prune.** After a successful handover, delete every
-   `~/tbd/updates/prebuilt/<commit>` except the one now running and the one it
-   replaced. The replaced one backs `~/tbd/updates/previous/TBD.app`, and its
-   daemon is what a rollback restarts.
+1. the `--from-release` flag (one run);
+2. the `TBD_UPDATE_SOURCE` environment variable;
+3. the file `~/tbd/updates/update-source` (every run, `auto` included);
+4. the `UPDATE_SOURCE_DEFAULT` constant, shipped as `build`.
 
-`--debug` always builds locally, because CI publishes release builds only.
-`--dry-run` downloads and verifies, then stops. `--check` is unchanged apart
-from Question 7.
+An edit to the constant in the update clone would not survive the next
+update's checkout, which is why the file exists. With the source at `release`,
+the fetch and detach of `~/tbd/updates/src` run as before, and then
+`acquire_release_build` (`scripts/update-release-lib.sh`) runs:
+
+1. **Architecture.** A machine that is not arm64 builds locally, in every
+   mode, because a download can never serve it.
+2. **Find the target.** Walk `main`'s first-parent history from the head,
+   at most `RELEASE_WALKBACK` (10) commits. The target is the first commit
+   whose `.sha256` downloads. When the running commit is the target or a
+   descendant of it, there is nothing to install.
+3. **Download** into `~/tbd/updates/prebuilt/download.partial/`.
+4. **Verify**, before anything is unpacked into place.
+   - The archive's SHA-256 must equal the published checksum.
+   - The attestation is then checked with `gh attestation verify --repo
+     <owner>/<repo> --signer-workflow
+     <owner>/<repo>/.github/workflows/release.yml`.
+     - If `gh` answers no, the run aborts in every mode.
+     - If `gh` is not installed or not signed in, an `--auto` run refuses,
+       and a manual run warns and continues on the checksum alone.
+   - After unpacking, `manifest.json` must name the target commit and arm64.
+     Every file must match its hash, the tree must hold no unlisted file and
+     no symlink, and all five products must be present and executable.
+   - A failure deletes the download and aborts the run. It never falls back
+     to a build.
+5. **Normalize.** Clear `com.apple.quarantine`, detach the clone at the target
+   commit, and move the tree to `~/tbd/updates/prebuilt/<commit>/`.
+
+`update.sh` then finishes the install.
+
+1. **Stamp the identity.** `write_build_identity` stamps the tree from the
+   clone. `stamp_release_provenance` adds `provenance: release`, the CI run
+   URL, CI's build time and `locallyBuiltProducts`.
+2. **Build `TBDApp` locally.** If `.build/release` currently points into the
+   prebuilt home, `update.sh` removes the link, so SwiftPM owns its own
+   directory for the build. It then builds `TBDApp` and copies it, plus any
+   resource bundle the download lacks, into the tree. A failure restores the
+   previous link and stops with the installation untouched.
+3. **Stop here on `--dry-run`**, with the previous link restored.
+4. **Point** `~/tbd/updates/src/.build/release` at the tree, by an atomic
+   rename of a symlink. The unchanged tail follows: `assemble_app_bundle`,
+   `sign_app_bundle`, `install_and_handover`, the CLI refresh, the app stage
+   and the wake. The handover starts the daemon through that link, so it runs
+   the downloaded binary.
+5. **On a failed handover**, the previous app bundle is restored as before,
+   and the link is pointed back at the tree still running.
+6. **On success**, prune `~/tbd/updates/prebuilt/` to the running tree and the
+   one it replaced.
+
+When nothing is published for the last ten commits, what happens depends on
+who is running the update. A manual run logs it and builds locally, as today.
+An `--auto` run logs it and exits zero without building, and the next check
+tries again. `--debug` always builds locally. A local build first hands
+`.build/release` back to SwiftPM if it points at a download.
 
 ### 4.4 Where the downloaded daemon lives
 
-Section 3 requires that the app's reboot respawn find the downloaded daemon.
-The proposal keeps `<sourceWorktree>/.build/release` as the one path both
-kinds of install run from, with the download reached through a symlink:
+`<sourceWorktree>/.build/release` is the one path both kinds of install run
+from. SwiftPM makes it a symlink to `.build/arm64-apple-macosx/release`. A
+download re-points it at `~/tbd/updates/prebuilt/<commit>`, and a local build
+through `update.sh` removes that link first, so SwiftPM recreates its own.
 
-- SwiftPM already makes `.build/release` a symlink, to
-  `.build/arm64-apple-macosx/release`. A download re-points that symlink at
-  `~/tbd/updates/prebuilt/<commit>`. A later local build re-points it back.
-  The updater records which of the two it did.
-- The prebuilt directory lives outside `.build`, so SwiftPM's build database
-  never sees downloaded files it did not produce, and a local fallback build
-  stays correctly incremental.
+- The prebuilt tree lives outside `.build`, so SwiftPM's build database never
+  sees files it did not produce.
 - `DaemonCandidateFinder`, the handover's `paths_match` (which resolves
-  symlinks) and `refresh_installed_cli`'s hard link all work unchanged.
+  symlinks), and `refresh_installed_cli`'s hard link all work unchanged.
   `refresh_installed_cli` works because `~/tbd` and `~/.local` share a volume.
 
-The proposal depends on SwiftPM replacing a `.build/release` symlink that
-points somewhere else, rather than refusing or building through it. That has
-to be tested on the pinned toolchain before implementation. If it fails, the
-two alternatives are in section 5, "The daemon inside the bundle" and "A new
-daemon candidate path".
+If SwiftPM turns out to mishandle a foreign `.build/release` symlink, the
+fallback is a compiled candidate for the prebuilt tree in
+`DaemonCandidateFinder` (decision 8).
 
-### 4.5 Reclaiming what this creates
+### 4.5 What the daemon compares against
 
-This design creates durable resources in two places, and each needs a named
-reconciler.
+The daemon's update checker compares the running commit against the ref
+`UpdateChecker.comparedRef` names, read fresh on every tick.
 
-- **Local prebuilt trees** under `~/tbd/updates/prebuilt/`. Step 8 of section
-  4.3 bounds them to two, in the same script that creates them. Nothing else
-  creates them. A run killed mid-download leaves a `<commit>.partial` tree,
-  and the next update deletes every `.partial` while it holds the update
-  lock. They share the reasoning of `previous/TBD.app`: an entry is never
-  created without its predecessor being pruned.
-- **Remote release assets.** The publishing job deletes every asset beyond the
-  newest N commits (Question 3). A missed prune leaves extra assets but
-  cannot grow the set without bound, because the next successful run prunes
-  again.
+- **Default:** `refs/heads/main`.
+- **Release source:** `refs/tags/main-builds`, when
+  `~/tbd/updates/check-ref` (`TBDConstants.updateCheckRefFile`, honoring
+  `TBD_HOME`) names it. `update.sh` writes that file whenever the standing
+  update source (environment, file or constant, but not a one-off
+  `--from-release`) is `release`, and removes it otherwise. `update.sh
+  --check` syncs it too.
+- **Anything else:** a value that is not a well-formed `refs/heads/…` or
+  `refs/tags/…` reads as `main`.
+
+With the release source, "update available" therefore means "an installable
+build exists". An `auto` run can no longer reach a commit before its asset is
+published. The checker records each commit it launched an update for and does
+not retry it until the ref moves, so under the old comparison such a commit
+would not have been retried until the next push.
+
+### 4.6 Reclaiming what this creates
+
+- **Local prebuilt trees** under `~/tbd/updates/prebuilt/`. The script that
+  creates them reclaims them:
+  - `prune_prebuilt` runs after every successful release install, keeping the
+    running tree and the one it replaced;
+  - `sweep_partial_downloads` removes a `.partial` left by a killed run at the
+    start of the next release run, under the update lock.
+
+  An entry is never created without its predecessors being pruned, which is
+  the same reasoning as `previous/TBD.app`.
+- **Remote assets.** `publish-release.sh` prunes to the newest 20 commits on
+  every publish. A missed prune leaves extra assets, and the next publish
+  removes them.
 
 ## 5. Rejected alternatives
 
 - **Ship a finished, signed `TBD.app`.** The bundle embeds the installing
   shell's `PATH`, and it must carry the installing machine's signing identity
-  for TCC decisions to persist. Only the bundle's contents can come from CI;
-  its assembly stays local.
+  for TCC decisions to persist.
+- **Ship `TBDApp` now by building at a fixed shared path.** CI would build at
+  a path that exists on every Mac, such as under `/Users/Shared`, and the
+  installer would link that path to the download, so the baked build path
+  resolves. `/Users/Shared` is world-writable, so another local user could
+  plant that path, and the approach assumes one TBD user per machine.
+- **Ship `TBDApp` now by patching the baked path in the binary.** An
+  equal-length rewrite followed by a local re-sign works mechanically, but it
+  is fragile and opaque.
+- **Stage resource bundles at the app bundle's root.** `codesign` rejects
+  unsealed contents in a bundle root.
 - **Workflow artifacts rather than release assets.** Downloading one needs an
-  authenticated API token, even on a public repository, and arrives wrapped in
-  a zip. That adds a `gh auth` dependency to every update, and retention caps
-  at 90 days. A release asset is fetchable with `curl` alone.
+  authenticated token even on a public repository, and arrives wrapped in a
+  zip. Retention caps at 90 days.
 - **A tagged release per commit.** At about 140 pushes to `main` per month,
   it floods the Releases page and adds a tag to every clone.
-- **The daemon inside the bundle.** Putting `TBDDaemon`, its four siblings and
-  its resource bundles in `Contents/MacOS` would let the app's first daemon
-  candidate find them, and the kept previous bundle would then be a complete
-  rollback. But it changes the layout for local builds as well, puts resource
-  bundles in a directory not meant for them, and makes `codesign --deep` sign
-  every helper with the TCC identity. That is a larger change than this
-  problem needs. It stays the fallback if the symlink in section 4.4 proves
-  unworkable.
-- **A new daemon candidate path.** A compiled `prebuilt` candidate in
-  `DaemonCandidateFinder` works, but it means a rebuild and a skew window
-  before an old app can find a new layout. The symlink needs no compiled
-  change.
-- **A self-hosted runner.** The point is to spend GitHub's CPUs rather than a
-  maintainer's, and a self-hosted runner in a public repository runs
-  contributors' workflow code on that machine.
-- **Download inside the daemon.** The daemon could fetch the asset itself. But
-  the update procedure is deliberately user-land (`scripts/update.sh`), per
-  "Compile only what user-land cannot do well". Downloading, verifying and
-  unpacking are all things a script does well.
+- **The daemon inside the bundle.** This changes the layout for local builds
+  too, puts resource bundles in a directory not meant for them, and makes
+  `codesign --deep` sign every helper with the TCC identity.
+- **A self-hosted runner.** The point is to spend GitHub's CPUs, and a
+  self-hosted runner in a public repository runs contributors' workflow code
+  on that machine.
+- **Download inside the daemon.** The update procedure is deliberately
+  user-land, per "Compile only what user-land cannot do well". Downloading,
+  verifying and unpacking are things a script does well. The daemon gained
+  only the read of the check-ref file, because the update checker is
+  compiled.
 
 ## 6. Risks
 
-- **Relocated resource lookups** (section 3). The CI smoke test and a manual
-  run of the app from a relocated tree cover these. The fix for any consumer
-  that fails is to probe `Bundle.main` explicitly, as `SQLMigrationLoader`
-  does.
-- **Toolchain skew between a local build and a download.** A machine that
-  alternates between the two runs binaries from two compilers. Both come from
-  the same source, and the daemon, app and helpers in one install always come
-  from one source, so no single install mixes compilers.
+- **Toolchain skew.** A release install runs daemon-side binaries from the
+  CI compiler and an app from the local one. Both come from the same commit
+  and talk over the same RPC types, so the skew is the same as between two
+  local toolchains.
 - **macOS compatibility.** The deployment target is macOS 15. CI links against
-  the macOS 26 SDK, as local Xcode 26 builds already do. A user on macOS 15
-  runs SDK-26-linked binaries in both cases. Nothing new here, but the
-  smoke test runs on macOS 26 only.
-- **Supply chain.** Today an update trusts the git remote. A download also
-  trusts GitHub Actions, the workflow file on `main`, and everyone with write
-  access to releases. A checksum published beside the asset proves transport
-  integrity, not origin. Only an attestation that verifies against the
-  workflow's identity binds the bytes to "built by `release.yml` from this
-  commit on `main`" (Question 4).
+  the macOS 26 SDK, as local Xcode 26 builds already do.
+- **Supply chain.** A download trusts GitHub Actions, the workflow file on
+  `main`, and everyone who can change it. The attestation binds the bytes to
+  "built by `release.yml` in this repository". An `--auto` run requires it;
+  a manual run without `gh` settles for the checksum and says so.
 - **macOS runner capacity.** GitHub allows five concurrent macOS jobs per
   account, shared with `test.yml`'s two per run and with the remote
-  verification valve. One more macOS job per push to `main` narrows that
-  headroom. Minutes are free on a public repository.
-- **Latency.** A download is only as fresh as the last finished CI build. With
-  no cache, a cold release build on the runner is unmeasured, but the debug
-  equivalent reached 1,250 s. `main` can therefore lead the newest asset by
-  tens of minutes, and Question 7 decides what the update check does in that
-  window.
+  verification valve. The release job adds one per commit that passes on
+  `main`. Minutes are free on a public repository.
+- **Latency.** A download is available only after `Test` passes and
+  `release-build` finishes. A cold release build on the runner is
+  unmeasured. With the release source, the check compares against the
+  published tag, so this latency delays updates but never produces a false
+  "update available".
 
-## 7. Verification before the flag flips
+## 7. Verification
 
-- On the pinned toolchain, SwiftPM re-points a foreign `.build/release`
-  symlink on the next local build, and that build is incremental.
-- The CI smoke test passes, and the downloaded app, launched from
-  `/Applications`, renders markdown, sidebar icons, and the Metal terminal
-  renderer. None of these may fall back to a missing resource.
-- After a reboot, the app respawns the downloaded daemon, not a stale local
-  one.
-- A deliberately corrupted tarball, a manifest naming the wrong commit, and a
-  missing product each end in the fallback and never in an install.
-- The repo's `scripts/update.test.sh` harness gains a case for each branch of
-  the source step: download, no asset, verification failure, `--debug`, and
-  the switch in each position.
+- `scripts/update.test.sh` covers every branch of the source step, with
+  stubbed `curl`, `gh` and `uname`:
+  - a verified install that builds only the app, links, stamps and prunes;
+  - the walk back to an older published commit;
+  - a missing or failing attestation in `auto` mode (refused);
+  - a missing attestation tool in a manual run (proceeds with a warning), and
+    a failing attestation in a manual run (refused);
+  - a checksum mismatch and a manifest naming another commit (aborted);
+  - nothing published: `auto` skips, a manual run builds locally;
+  - a non-arm64 machine (builds locally, downloads nothing);
+  - a dry run (leaves the running link);
+  - a failed handover (the link goes back);
+  - the link handed back to SwiftPM before a local build;
+  - the source precedence and the check-ref file.
+- `UpdateCheckRefTests` covers the check ref: no file compares against `main`,
+  a release file against the tag, and malformed contents fall back to `main`.
+- Before the default flips, three checks remain:
+  - SwiftPM on the pinned toolchain re-points a foreign `.build/release`
+    symlink on a local build, and that build is incremental (decision 8);
+  - a first `release.yml` run on `main` passes its smoke test;
+  - after a reboot, the app respawns the downloaded daemon.
 
-## 8. Open questions for Adam
+## 8. Decisions
 
-Each question lists its options and a recommendation. The recommendation is
-the drafting agent's lean, not a decision.
+The repository owner decided each of these on 2026-09-23.
 
-1. **What does `tbd update` do by default, and where does the switch live?**
-   - (a) Local build stays the default. `tbd update --from-release` opts in
-     per run, and an `update-source` switch in user-land (a constant at the
-     top of `scripts/update.sh`, overridable by an environment variable) opts
-     in for `auto` mode.
-   - (b) Download is the default, and `--build` forces a local build.
-   - (c) A daemon `config` column `update_source` (NULL/`build`/`release`),
-     shown in Settings next to `update-mode`.
-   - Recommendation: (a). Installing binaries this machine did not compile
-     replaces a load-bearing path, so it ships default-off per the repo
-     rule. Keeping the switch in user-land avoids a migration, and flipping
-     it after a soak is a one-line edit. (c) is the upgrade path if Settings
-     should show it.
-
-2. **Which commits get built?**
-   - (a) Every push to `main`, newer pushes cancelling older builds.
-   - (b) Only commits whose `test.yml` run on `main` passed, triggered by
-     `workflow_run`.
-   - Recommendation: (b). A download install should be no worse than today's
-     local build of a red `main`, and preferably better. (b) adds the test
-     run's ten or so minutes of latency but never publishes a commit its own
-     test suite rejected.
-
-3. **Where do assets live?**
-   - (a) One rolling prerelease (tag `main-builds`) holding the newest N
-     commits' assets, with older ones pruned by the workflow.
-   - (b) A tagged prerelease per commit.
-   - (c) Workflow artifacts with 90-day retention.
-   - Recommendation: (a), with N = 20. It adds one entry to the Releases page,
-     gives each asset a stable URL, and needs no API calls. (b) spams the
-     Releases page and every clone's tags. (c) needs an authenticated token
-     for every download.
-
-4. **What integrity check is required before install?**
-   - (a) A SHA-256 checksum plus the per-file manifest hashes only.
-   - (b) Also verify the GitHub build-provenance attestation when `gh` is
-     installed and authenticated, and fall back to (a) when it is not.
-   - (c) Require a verified attestation (`gh attestation verify --repo
-     <owner>/<repo> --signer-workflow <owner>/<repo>/.github/workflows/release.yml`),
-     and refuse the download without it.
-   - Recommendation: (c) for `auto` mode and (b) for a manual run. An
-     unattended install should only ever trust bytes provably built by the
-     workflow from `main`. A person running the command can see what they
-     get. A checksum alone proves only that the bytes were not corrupted in
-     transit.
-
-5. **Which architectures?**
-   - (a) arm64 only. Intel machines always build locally.
-   - (b) Universal (arm64 + x86_64), roughly doubling CI build time and asset
-     size.
-   - Recommendation: (a). The runner is arm64, and the active installations
-     are Apple silicon. The architecture check in step 4 of section 4.3 makes
-     an Intel machine fall back cleanly, so (b) can come later without a
-     format change.
-
-6. **When no usable asset exists, what happens?**
-   - (a) Fall back to the local build, as today.
-   - (b) Manual run: fall back to the local build. `auto` run: log "no asset
-     for <commit>" and exit without building, so the next check tries again.
-   - (c) Always fail with a message and build nothing.
-   - Recommendation: (b). The point of the feature is that unattended updates
-     stop spending local CPU, and a person running the command can accept a
-     local build knowingly. A verification failure is never "no asset": it
-     aborts the run and logs loudly in every mode.
-
-7. **What does the update check compare against?**
-   - (a) The head of `main`, as today. `auto` mode may then fire before an
-     asset exists, and (combined with 6b) skip that commit.
-   - (b) A ref the workflow moves after each successful publish (for example
-     `refs/tags/main-builds`, read with the same `git ls-remote`), so "update
-     available" means "an installable build exists". This is a compiled
-     change to the checker's ref, or a new user-land setting it reads.
-   - (c) (a) for `check`, (b) for `auto`.
-   - Recommendation: (b) whenever the download path is on, and (a) otherwise.
-     There is one subtlety. The checker records each commit it launched an
-     update for and does not retry it until `main` moves. Under (a) with 6b,
-     an `auto` run can reach a commit before its asset is published, and then
-     that commit is never installed until the next push. (b) removes that
-     race.
-
-8. **Where does a downloaded install live on disk?**
-   - (a) `~/tbd/updates/prebuilt/<commit>/`, with the clone's
-     `.build/release` symlink re-pointed at it (section 4.4). No compiled
-     change, and it depends on SwiftPM re-pointing a foreign symlink.
-   - (b) The daemon, helpers and resource bundles inside
-     `TBD.app/Contents/MacOS`. The previous bundle then rolls back the daemon
-     too, but the layout changes for every install.
-   - (c) `~/tbd/updates/prebuilt/<commit>/` plus a compiled new candidate in
-     `DaemonCandidateFinder`.
-   - Recommendation: (a), provided the SwiftPM check in section 7 passes, and
-     (c) if it does not. In all three, the update clone stays checked out at
-     the installed commit, so the build identity still names a real local
-     checkout. `tbd update` and the update checker both depend on that.
+1. **Default and switch.** A local build stays the default. `tbd update
+   --from-release` opts in for one run, and the user-land update source
+   (section 4.3) opts in for every run, `auto` included. Installing binaries
+   this machine did not compile replaces a load-bearing path, so it ships
+   default-off per the repository rule. Graduation flips
+   `UPDATE_SOURCE_DEFAULT` to `release`. Explicit choices, whether the file or
+   the environment, keep winning.
+2. **Which commits get built.** Only commits whose `Test` run on `main`
+   passed, triggered by `workflow_run`. Test time adds latency, but a commit
+   its own test suite rejected is never published.
+3. **Where assets live.** One rolling prerelease, `main-builds`, holding the
+   newest 20 commits' assets. It adds one entry to the Releases page, gives
+   each asset a stable URL, and needs no API call to download.
+4. **Integrity.** An `--auto` run requires a verified build-provenance
+   attestation and refuses without one. A manual run verifies the attestation
+   when `gh` is installed and signed in, and otherwise proceeds on the
+   checksum with a warning. The checksum and the per-file manifest are always
+   checked.
+5. **Architecture.** arm64 only. Other machines build locally.
+6. **No usable asset.** A manual run builds locally. An `--auto` run logs and
+   skips, and the next check tries again. A verification failure is never
+   "no asset": it aborts in every mode.
+7. **What the check compares against.** The `main-builds` tag while the update
+   source is `release`, and `main` otherwise (section 4.5).
+8. **Where a download lives.** `~/tbd/updates/prebuilt/<commit>/`, with the
+   clone's `.build/release` symlink pointed at it. If SwiftPM mishandles that
+   symlink, a compiled `DaemonCandidateFinder` candidate replaces it. Either
+   way the update clone stays at the installed commit, so the build identity
+   names a real local checkout.
