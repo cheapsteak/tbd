@@ -375,8 +375,9 @@ public struct WorktreeLifecycle: Sendable {
     /// The holder half of `captureThenKillWindow`'s capture: write a holder
     /// row's Closed Terminals entry. The one place every history-keeping holder
     /// teardown goes through — `terminal.delete`, worktree archive, reconcile's
-    /// auto-archive, and the hook-tab close — and never the hard-delete paths (forget, recovery,
-    /// scratch delete), which wipe the worktree's history right after.
+    /// auto-archive, the hook-tab close, scratch archive, and the Watch Desk
+    /// close — and never the hard-delete paths (forget, recovery, scratch
+    /// delete), which wipe the worktree's history right after.
     ///
     /// **Must run before the holder is disposed**: the capture is read from the
     /// daemon's reader, and disposal releases it. Never throws and never

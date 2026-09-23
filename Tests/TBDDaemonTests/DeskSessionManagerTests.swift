@@ -1423,6 +1423,59 @@ extension TBDHomeSerialized {
                     "the desk close reached tmux kill-window for a holder row: \(duringClose)")
         }
 
+        /// The desk is archived, not deleted, so its Closed Terminals history
+        /// stays — and a holder-backed desk terminal gets its entry before the
+        /// disposal releases the reader, as every history-keeping teardown
+        /// does. Nothing answers at the rendezvous, so the entry carries no
+        /// capture; it carries the Claude session id revive resumes by.
+        @Test("closeDeskSession writes a holder desk terminal's Closed Terminals entry")
+        func closeDeskSessionWritesHolderHistoryEntry() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-holderhist-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            let db = try TBDDatabase(inMemory: true)
+            let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
+            let registry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": "/tmp/tbd-dk-\(UUID().uuidString.prefix(8))"],
+                listTerminals: { try await db.terminals.list() })
+            var lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            lifecycle.holderRegistry = registry
+            let manager = DeskSessionManager(
+                db: db, lifecycle: lifecycle, tmux: tmux,
+                skillDir: tmpHome.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog())
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            try await db.terminals.deleteForWorktree(worktreeID: desk.id)
+            // `childPID: 0`: see `closeDeskSessionDisposesHolder`.
+            let terminal = try await db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "", tmuxPaneID: "",
+                claudeSessionID: "sess-desk-holder",
+                kind: .claude, transport: .holder, holderPID: 9101, childPID: 0)
+            _ = await registry.adoptAll()
+            let armed = await registry.lastKnownStatus(for: terminal.id)
+            #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+
+            await manager.closeDeskSession()
+
+            #expect(try await db.worktrees.get(id: desk.id)?.status == .archived)
+            #expect(try await db.terminals.list(worktreeID: desk.id).isEmpty)
+            let disposed = await registry.lastKnownStatus(for: terminal.id)
+            #expect(disposed == nil, "the desk close deleted the row without disposing of its holder")
+            let entries = try await db.terminalHistory.list(worktreeID: desk.id)
+            #expect(entries.map(\.id) == [terminal.id],
+                    "the desk close disposed a holder row without writing its Closed Terminals entry")
+            #expect(entries.first?.kind == .claude)
+            #expect(entries.first?.claudeSessionID == "sess-desk-holder")
+            #expect(entries.first?.lineCount == 0)
+        }
+
         /// The other leg. An inverted transport comparison would leave a real
         /// tmux window running while its row was deleted.
         @Test("closeDeskSession still kills an identical tmux row's window")
