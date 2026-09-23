@@ -103,6 +103,76 @@ contract should not be able to put a bearer token on a user's screen, and the
 same filter runs over registry args, which are user-authored and outside the
 contract's reach altogether.
 
+#### Redacting the command line
+
+The **Command** row shows the registry entry's args, which are user-authored
+and can carry credentials the contract never sees. They pass through an argv
+redactor before rendering. The row is display text and decides nothing, so
+every rule below fails toward redaction: an over-redacted argument costs a
+line of context, and a shown secret costs the secret.
+
+A redacted value renders as `‹redacted›`, never as a prefix of itself, because
+a prefix of a secret is still part of the secret. The redactor handles four
+shapes:
+
+- **`--flag=value`** – the value is redacted when the flag name matches the
+  secret vocabulary above. Otherwise the value is still judged on its own by
+  the positional heuristic below, so a secret cannot slip through behind an
+  unrecognized flag name such as `--bearer=`.
+- **Glued short flag** – a single-dash argument longer than two characters
+  whose letter is a short credential alias (`-tXk3…`, `-pMyPassword123`,
+  curl's `-uuser:pass`) keeps its flag letter and has the rest redacted. The
+  rule keys on the letter alone, so `-p8080` is redacted even when it is a
+  port. That is the accepted over-redaction.
+- **`--flag value`** – a flag matching the secret vocabulary, or a bare short
+  alias, redacts the next argument. A next argument that starts with `-` is a
+  flag, not the value: it is judged by these same rules in turn, so
+  `--token --password hunter2` still redacts `hunter2`.
+- **Bare positional** – an argument with no dash is redacted when it looks
+  like a secret, by the heuristic below. Dash-prefixed arguments that reach
+  this point are ordinary flags and pass through.
+
+The short credential aliases are `t`, `p`, `k` and `u`: token, password, key,
+and curl's `user:password`. They are matched exactly, never as substrings,
+because a one-letter substring would match almost every flag. The vocabulary
+substrings cannot catch them, since a one-letter flag cannot contain a word.
+The set is short on purpose. Each extra letter redacts every glued use of it,
+and these four are the ones that conventionally carry a credential.
+
+The positional heuristic checks, in order:
+
+- **Known prefixes** – 16 case-sensitive token prefixes (`sk-`, `sk_live_`,
+  `sk_test_`, five `gh?_` forms, `github_pat_`, five `xox?-` Slack forms,
+  `AKIA`, and `eyJ` for a JWT header) redact regardless of length. A vendor
+  prefix is a stronger signal than any shape test, and a short live key must
+  not escape on length.
+- **20-character floor** – shorter arguments are not treated as secrets.
+  Generated tokens without a known prefix are almost always 20+ characters,
+  while worktree names, branch names, hosts and ports sit well below that, so
+  this floor keeps ordinary args readable.
+- **500-character cap** – longer arguments are treated as pasted text or a
+  document, not a token. Real tokens, JWTs included, are far shorter than this.
+- **Paths and UUIDs pass** – anything starting with `/` or `~`, and anything
+  shaped like a UUID. Both are long and high-entropy, and neither is a
+  credential.
+- **Letters and digits both present** – a random token mixes them. An
+  all-letter or all-digit string is a word, a name, or a number.
+- **Repetition guard** – more than five identical characters in a row means
+  padding or filler, not a random token.
+- **Version strings pass** – every dot-separated segment is numeric, allowing
+  an optional leading `v`. The check looks at segment shape, not dot count,
+  because dot-segmented tokens such as Discord bot tokens and PASETO tokens are
+  just as dotted and must still be redacted.
+
+Anything that survives all of these is redacted.
+
+Rendered identity values, though not command args, are cut at 96 characters.
+Identity values are account ids, region names and box handles, so anything
+longer is either not identity or not readable, and the cut bounds the damage
+in both cases.
+It is never used to shorten a secret: a secret-keyed identity pair is dropped
+entirely, not truncated.
+
 ### 2. Attention, distinct from liveness
 
 `RemoteProviderDeskSummary` gains two derived readings over the mirror rows it
