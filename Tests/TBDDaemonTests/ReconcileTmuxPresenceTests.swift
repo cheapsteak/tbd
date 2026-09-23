@@ -202,7 +202,7 @@ struct ReconcileTmuxPresenceTests {
                 switch paneID {
                 case "%1": return .live(terminalID: rows.claude.id.uuidString)
                 case "%2": return .live(terminalID: rows.shell.id.uuidString)
-                default: return .missing
+                default: return .absent
                 }
             },
             dryRunServerPresence: { _ in .alive },

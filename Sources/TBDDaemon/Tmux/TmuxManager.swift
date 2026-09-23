@@ -46,7 +46,8 @@ public enum PaneOwnership: Sendable, Equatable {
     case owned
     /// The pane positively answers with a different terminal's id.
     case ownedByAnother(terminalID: String)
-    /// The consultation could not be run (tmux timed out or failed to spawn).
+    /// The consultation could not be run (tmux timed out or failed to spawn),
+    /// or could not reach the server (`PaneSendTarget.unreachable`).
     case unverifiable(reason: String)
 
     public var permitsTeardown: Bool { self == .owned }
@@ -121,6 +122,15 @@ public struct TmuxManager: Sendable {
     /// to `commandTimeout`; tests inject a tiny value to exercise the timeout /
     /// SIGTERM-then-SIGKILL path against a real slow command without waiting 15s.
     let subprocessTimeout: Duration
+    /// Per-instance override for the `PATH` `runTmux` resolves `tmux` against,
+    /// real mode only. Lets a test drive the actual "tmux executable is
+    /// unavailable" status-127 `TmuxError.commandFailed` that `runTmux` throws
+    /// in production when `tmuxPath()` cannot resolve a binary, without
+    /// mutating the process's real `PATH` — something a concurrently-running
+    /// test suite cannot afford. `nil` (every non-test caller) keeps today's
+    /// behavior: resolve against the daemon's own inherited PATH, exactly as
+    /// `tmuxPath()`'s own default expression already does.
+    let tmuxPathOverride: String?
     private let counter: Counter
     /// Shared by every value-copy of this manager (lifecycle, router, and
     /// hibernation coordinator) so all daemon paths use one lock domain.
@@ -248,9 +258,10 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout, tmuxPathOverride: String? = nil) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
+        self.tmuxPathOverride = tmuxPathOverride
         self.counter = Counter()
         self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
@@ -1388,10 +1399,16 @@ public struct TmuxManager: Sendable {
     ///
     /// Read-only — a query, not an actuation. Throws only when the query itself
     /// could not be *run*: a wedged server tripping the subprocess timeout
-    /// (`TmuxError.timedOut`) or a tmux that would not spawn at all, neither of
-    /// which this catch matches.
+    /// (`TmuxError.timedOut`), or `runTmux` failing to resolve a tmux binary at
+    /// all (`TmuxError.commandFailed` with status 127 — `runTmux`'s own
+    /// synthetic "tmux executable is unavailable" failure, never an answer tmux
+    /// itself gave). The catch below excludes exactly that status, the same
+    /// discriminator `TmuxPresenceClassifier` uses to keep the identical
+    /// failure out of its own `.absent` reading, so a spawn failure throws
+    /// rather than being classified at all.
     ///
-    /// A non-zero *exit* is ambiguous and is NOT read as an answer on its own.
+    /// Every other non-zero *exit* is ambiguous and is NOT read as an answer on
+    /// its own.
     /// This fixed argv can exit non-zero for two unrelated reasons — the pane
     /// could not be resolved on a server that answered, or no server answered on
     /// that socket at all — and only the first is evidence about the pane. The
@@ -1422,7 +1439,7 @@ public struct TmuxManager: Sendable {
         let args = Self.paneSendTargetQuery(server: server, paneID: paneID)
         do {
             return Self.parsePaneSendProbe(try await runTmux(args), paneID: paneID)
-        } catch TmuxError.commandFailed {
+        } catch let TmuxError.commandFailed(_, status, _) where status != 127 {
             let inventory = try? await runTmux(Self.allPaneIDsQuery(server: server))
             let verdict = Self.classifyFailedConsultation(
                 paneInventory: inventory, paneID: paneID)
@@ -1457,7 +1474,8 @@ public struct TmuxManager: Sendable {
     ///
     /// Three answers, and only `.owned` permits the teardown:
     /// - **`.owned`** – the pane answers with this terminal's id, carries no
-    ///   id at all (unstamped), or tmux positively reports it `.missing`.
+    ///   id at all (unstamped), or tmux positively reports it `.absent` — a
+    ///   reachable server answered and this pane is not on it.
     ///   Refusing on an unstamped or already-gone pane would turn an ordinary
     ///   teardown of an already-dead window into a new failure, so absence of
     ///   an identity is not treated as disagreement.
@@ -1465,8 +1483,9 @@ public struct TmuxManager: Sendable {
     ///   DIFFERENT terminal's id (checked jointly against `.live` and `.dead`,
     ///   case-insensitively — a stranger pane whose process has already
     ///   exited still answers `.dead` and must still be caught).
-    /// - **`.unverifiable`** – the consultation could not be run at all: tmux
-    ///   timed out on a wedged server, or failed to spawn. That is "we do not
+    /// - **`.unverifiable`** – the consultation could not be run at all (tmux
+    ///   timed out on a wedged server, or failed to spawn), or it ran but
+    ///   could not reach the server (`PaneSendTarget.unreachable`). That is "we do not
     ///   know", not "gone", so the teardown is refused. This is the same
     ///   policy the reconcile sweep applies (an unreadable identity is not
     ///   evidence of staleness — keep the row) and the one `AgentReaper`
@@ -1497,7 +1516,10 @@ public struct TmuxManager: Sendable {
         let paneTerminalID: String?
         switch probe {
         case .live(let id), .dead(let id): paneTerminalID = id
-        case .missing: paneTerminalID = nil
+        case .absent: paneTerminalID = nil
+        case .unreachable:
+            return .unverifiable(
+                reason: "tmux server \(server) could not be reached to read pane \(paneID)")
         }
         guard let paneTerminalID,
               paneTerminalID.caseInsensitiveCompare(terminalID.uuidString) != .orderedSame
@@ -1732,7 +1754,9 @@ public struct TmuxManager: Sendable {
         environment: [String: String]? = nil
     ) async throws -> String {
         let arguments = Self.executionArguments(arguments)
-        guard let executable = Self.tmuxPath() else {
+        guard let executable = Self.tmuxPath(
+            path: tmuxPathOverride ?? ProcessInfo.processInfo.environment["PATH"]
+        ) else {
             throw TmuxError.commandFailed(
                 command: Self.redactedCommandDescription(label: "tmux", arguments: arguments),
                 status: 127,
