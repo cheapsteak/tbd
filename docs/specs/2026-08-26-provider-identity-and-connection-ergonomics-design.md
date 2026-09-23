@@ -131,7 +131,11 @@ shapes:
   redact the next argument, with one exception: an all-lowercase name that
   matches the secret vocabulary (`-token`, `-api-key`) is also how Go-style
   single-dash long flags are written, with the value in the next argument, so
-  both are redacted.
+  both are redacted. An alias letter keeps this shape even when an `=`
+  follows, and everything after `-X` is redacted, so `-pfoo=bar` renders as
+  `-p‹redacted›`. Any other single-dash argument with an `=`, such as a JVM
+  `-Dkey=value`, is the `--flag=value` shape instead: its key and value are
+  judged there.
 - **`--flag value`** – only a bare flag name redacts the next argument:
   `--name` with no `=`, or exactly `-X`, judged on the name alone against the
   secret vocabulary and the short aliases. A next argument that starts with

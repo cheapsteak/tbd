@@ -268,6 +268,32 @@ struct ProviderIdentityTests {
         #expect(redacted == ["-H\(ProviderIdentityRedaction.redactedPlaceholder)", "main"])
     }
 
+    @Test("an alias glued flag hides everything after its letter, = included")
+    func aliasGluedFlagWithEqualsHidesEverything() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments(["-pfoo=bar", "-uuser=pass", "main"])
+
+        #expect(redacted == ["-p\(placeholder)", "-u\(placeholder)", "main"])
+    }
+
+    @Test("a non-alias single-dash key=value is judged by its key and value")
+    func nonAliasSingleDashEqualsIsJudgedByKeyAndValue() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "-Dapi.key=secretvalue",
+            "-Ddb.url=ghp_abcdef0123456789",
+            "-Dfile.encoding=UTF-8",
+            "main",
+        ])
+
+        #expect(redacted == [
+            "-Dapi.key=\(placeholder)",
+            "-Ddb.url=\(placeholder)",
+            "-Dfile.encoding=UTF-8",
+            "main",
+        ])
+    }
+
     /// `-token abc` is how Go's flag package spells a long flag, so an
     /// all-lowercase secret-vocabulary name redacts both its own remainder
     /// and the next argument.
@@ -300,6 +326,12 @@ struct ProviderIdentityTests {
             ["-token", secret],
             ["sk-\(secret)"],
             ["x9Kq2mVn8Lp4Rt6Wz1\(secret)"],
+            ["-p\(secret)=x"],
+            ["-pfoo=\(secret)"],
+            ["-t=\(secret)"],
+            ["-Dapi.key=\(secret)"],
+            ["-Dservice.password=\(secret)"],
+            ["-Ddb.url=ghp_\(secret)abcdefghij"],
         ]
         let prefixes: [[String]] = [[], ["--token"], ["-t"], ["--api-key", "--password"]]
         for shape in shapes {

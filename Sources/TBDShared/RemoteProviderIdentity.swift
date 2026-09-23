@@ -205,8 +205,11 @@ public enum ProviderIdentityRedaction {
     ///
     /// Every single-dash argument longer than two characters with no `=` is
     /// read as a glued short flag: `-X` followed by its value. `-X` is always
-    /// kept. The value is redacted when `X` is one of
-    /// `shortSecretFlagAliases`, when the value or the whole argument matches
+    /// kept. When `X` is one of `shortSecretFlagAliases` the same holds even
+    /// with an `=`, and everything after `-X` is redacted (`-pfoo=bar` renders
+    /// as `-p‹redacted›`); any other single-dash argument with an `=`
+    /// (`-Dkey=value`) takes the `=` shape. The value is redacted when `X` is
+    /// an alias, when the value or the whole argument matches
     /// the secret vocabulary, or when the value looks like a secret on its
     /// own; otherwise the argument is shown verbatim (`-v2`, `-ofile.txt`).
     /// A glued flag has consumed its value, so it does not redact the next
@@ -309,22 +312,27 @@ public enum ProviderIdentityRedaction {
         return out
     }
 
-    /// A single-dash argument longer than two characters with no `=`, read
-    /// as `-X` plus a glued value, or nil for any other shape. `redactValue`
+    /// A single-dash argument longer than two characters, read as `-X` plus a
+    /// glued value, or nil for any other shape. With an `=` it is this shape
+    /// only when `X` is an alias; otherwise it belongs to the `=` shape. `redactValue`
     /// says whether the value must be hidden; `mayBeLongFlagName` marks an
     /// all-lowercase secret-vocabulary name (`-token`), which may instead be
     /// a Go-style long flag whose value is the next argument.
     private static func gluedShortFlag(
         _ arg: String
     ) -> (letter: Character, redactValue: Bool, mayBeLongFlagName: Bool)? {
-        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--"),
-              !arg.contains("=") else { return nil }
+        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
         let name = arg.dropFirst()
         let letter = name[name.startIndex]
+        // An alias letter owns everything after it, `=` included: `-pfoo=bar`
+        // hides `foo=bar`. Any other single-dash argument with an `=`
+        // (`-Dkey=value`) is left to the `=` shape, which judges key and value.
+        let isAlias = shortSecretFlagAliases.contains(letter.lowercased())
+        if arg.contains("="), !isAlias { return nil }
         let value = String(name.dropFirst())
         let mayBeLongFlagName = isSecretKey(String(name))
             && name.allSatisfy { ("a"..."z").contains($0) || $0 == "-" || $0 == "_" }
-        let redactValue = shortSecretFlagAliases.contains(letter.lowercased())
+        let redactValue = isAlias
             || isSecretKey(value)
             || isSecretKey(arg)
             || looksLikeSecret(value)
