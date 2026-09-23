@@ -229,6 +229,35 @@ struct CodexSessionImporterTests {
         #expect(message.contains("No such file or directory"))
     }
 
+    @Test("a real child's last stderr line survives into the exit error")
+    func realChildLastStderrLineSurvives() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-import-stderr-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let script = dir.appendingPathComponent("fake-codex")
+        try "#!/bin/sh\necho early-noise >&2\necho last-line >&2\nexit 3\n"
+            .write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        // Repeat so an unordered termination/stderr delivery would show up.
+        for _ in 0..<20 {
+            let connection = try await ProcessCodexAppServerTransport().connect(
+                executablePath: script.path,
+                codexHome: dir,
+                workingDirectory: dir)
+            defer { connection.close() }
+            do {
+                _ = try await connection.receive()
+                Issue.record("expected the child's exit to end the stream")
+            } catch let CodexSessionImportError.processExited(status, stderr) {
+                #expect(status == 3)
+                #expect(stderr.contains("last-line"))
+            }
+        }
+    }
+
     @Test("an empty stderr leaves the exit message unadorned")
     func processExitedWithoutStderrStaysClean() {
         let error = CodexSessionImportError.processExited(status: 2, stderr: "   \n\n")

@@ -322,12 +322,19 @@ struct CodexSessionImporter: Sendable {
 }
 
 struct ProcessCodexAppServerTransport: CodexAppServerTransport {
+    let clock: any Clock<Duration>
+
+    init(clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
+    }
+
     func connect(executablePath: String, codexHome: URL, workingDirectory: URL)
         async throws -> any CodexAppServerConnection {
         try ProcessCodexAppServerConnection.start(
             executablePath: executablePath,
             codexHome: codexHome,
-            workingDirectory: workingDirectory)
+            workingDirectory: workingDirectory,
+            clock: clock)
     }
 }
 
@@ -399,7 +406,20 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         var buffer = Data()
         var stderr = Data()
         var closed = false
+        /// Set once the stderr pipe reports EOF: every byte the child wrote
+        /// has been captured.
+        var stderrDrained = false
+        /// Set by the termination handler. The exit is reported only once
+        /// stderr has also drained (or the drain grace has lapsed), because
+        /// the termination handler and the stderr readability handler are
+        /// independent GCD sources with no ordering between them.
+        var exitStatus: Int32?
     }
+
+    /// How long a reported exit waits for stderr to reach EOF. EOF normally
+    /// follows the exit immediately; this bound only matters when a
+    /// grandchild inherited the write end and keeps it open.
+    static let stderrDrainGrace: Duration = .seconds(1)
 
     private let process: Process
     private let stdinPipe: Pipe
@@ -408,21 +428,28 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
     private let inbox = CodexAppServerLineInbox()
     private let readState = OSAllocatedUnfairLock(initialState: ReadState())
     private let writeLock = NSLock()
+    private let clock: any Clock<Duration>
 
     private init(
         process: Process,
         stdinPipe: Pipe,
         stdoutPipe: Pipe,
-        stderrPipe: Pipe
+        stderrPipe: Pipe,
+        clock: any Clock<Duration>
     ) {
+        self.clock = clock
         self.process = process
         self.stdinPipe = stdinPipe
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
     }
 
-    static func start(executablePath: String, codexHome: URL, workingDirectory: URL) throws
-        -> ProcessCodexAppServerConnection {
+    static func start(
+        executablePath: String,
+        codexHome: URL,
+        workingDirectory: URL,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) throws -> ProcessCodexAppServerConnection {
         let process = Process()
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -431,7 +458,8 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             process: process,
             stdinPipe: stdinPipe,
             stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe)
+            stderrPipe: stderrPipe,
+            clock: clock)
 
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = ["app-server", "--stdio"]
@@ -450,7 +478,13 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak connection] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // EOF. The handler runs serially on one source, so every
+                // earlier chunk has already been captured.
+                handle.readabilityHandler = nil
+                connection?.stderrDidDrain()
+                return
+            }
             connection?.captureStderr(data)
             if let message = String(data: data, encoding: .utf8) {
                 codexImportLogger.debug(
@@ -458,7 +492,7 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             }
         }
         process.terminationHandler = { [weak connection] process in
-            connection?.finish(status: process.terminationStatus)
+            connection?.processDidExit(status: process.terminationStatus)
         }
 
         do {
@@ -530,15 +564,38 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         }
     }
 
-    private func finish(status: Int32) {
-        let outcome = readState.withLock { state -> (wasClosed: Bool, stderr: String) in
-            let previous = state.closed
+    private func stderrDidDrain() {
+        readState.withLock { $0.stderrDrained = true }
+        finishIfReady(force: false)
+    }
+
+    private func processDidExit(status: Int32) {
+        readState.withLock { $0.exitStatus = status }
+        guard !finishIfReady(force: false) else { return }
+        // Stderr has not reached EOF yet. Wait a bounded grace for it, then
+        // report the exit with whatever was captured.
+        let clock = self.clock
+        Task { [weak self] in
+            try? await clock.sleep(for: Self.stderrDrainGrace)
+            self?.finishIfReady(force: true)
+        }
+    }
+
+    /// Report the exit once it has happened and stderr has drained (or the
+    /// drain grace lapsed). Snapshots stderr and closes in one critical
+    /// section, so exactly one caller finishes the inbox.
+    @discardableResult
+    private func finishIfReady(force: Bool) -> Bool {
+        let outcome = readState.withLock { state -> (status: Int32, stderr: String)? in
+            guard !state.closed, let status = state.exitStatus,
+                  state.stderrDrained || force else { return nil }
             state.closed = true
             let stderr = String(data: state.stderr, encoding: .utf8) ?? ""
-            return (previous, stderr)
+            return (status, stderr)
         }
-        guard !outcome.wasClosed else { return }
+        guard let outcome else { return false }
         inbox.finish(CodexSessionImportError.processExited(
-            status: status, stderr: outcome.stderr))
+            status: outcome.status, stderr: outcome.stderr))
+        return true
     }
 }
