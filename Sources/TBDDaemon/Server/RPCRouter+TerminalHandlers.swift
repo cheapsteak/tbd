@@ -3029,6 +3029,8 @@ extension RPCRouter {
             return "this session moved to the new account, but TBD no longer saw it as paused and did not resume it; focus the tab to start it there"
         case .sessionGone:
             return "this session moved to the new account, but the paused session could not be found to resume; focus the tab to start it there"
+        case .paneUnreadable(_, let server):
+            return "this session moved to the new account, but TBD could not reach its tmux server (\(server)) to check it, so it was not resumed; focus the tab to start it there"
         case .notFound:
             return "this session moved to the new account, but its row could not be read back, so nothing was resumed"
         case .noSessionID:

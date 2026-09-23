@@ -2597,7 +2597,7 @@ struct HibernationCoordinatorTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
-            dryRunPaneSendTarget: { _, _ in .missing })
+            dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())

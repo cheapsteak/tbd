@@ -104,8 +104,8 @@ extension RPCRouter {
             // terminal is live; pasting into it now could hit a human session),
             // and no incarnation, because no spawn happened to name.
             return TerminalWakeResult(woken: false)
-        case .sessionGone, .notFound, .noSessionID, .respawnFailed, .worktreeMissing,
-            .profileMissing, .paneBusy:
+        case .sessionGone, .paneUnreadable, .notFound, .noSessionID, .respawnFailed,
+            .worktreeMissing, .profileMissing, .paneBusy:
             // RPC errors, not results — the caller-facing switch in
             // handleTerminalWake maps each to its own RPCResponse(error:).
             // Named explicitly (not `default:`) so a new WakeResult case must
