@@ -154,10 +154,12 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Many attempts are too many, and the cost is not the retry but the debris:
     /// every attempt that half-succeeds leaves a real tmux window and a real
     /// agent process behind, and nothing reaps them. Unbounded, an overnight
-    /// shift accumulates one per tick — the bug this rail was built to end. Three
-    /// bounds the wreckage at three abandoned sessions and then says so out loud.
+    /// shift accumulates one per tick — the bug this rail was built to end. The
+    /// cap allows at most three replacements after the desk's first spawn, so at
+    /// most four sessions in the worst case, and then says so out loud. The first
+    /// spawn is not counted because it is the desk's normal start, not a recovery.
     ///
-    /// Adam, the repo owner, confirmed the cap of three on 2026-09-23.
+    /// The repository owner confirmed the cap of three on 2026-09-23.
     ///
     /// The bound's design, the alternatives weighed against it, and why the
     /// threshold stays compiled for now:

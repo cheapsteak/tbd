@@ -56,7 +56,10 @@ themselves. Together they are the primary bound.
 
 **The count is the backstop under them.** A launch that dies every time satisfies both
 gates forever — each replacement is genuinely absent by the next tick — so a count of
-consecutive replacements that never took a nudge bounds that case. Three is the cap.
+consecutive replacements that never took a nudge bounds that case. Three is the cap: at
+most three replacements after the desk's first spawn, so at most four sessions in the
+worst case. The first spawn is not counted because it is the desk's normal start, not a
+recovery; the bound is on recoveries.
 
 **Reset belongs to the incident, not the spawn.** The count is cleared by a nudge that
 actually reached a pane, by a desk built from scratch, and by a desk closed. It is
@@ -83,10 +86,10 @@ that half-succeeds leaves a real tmux window and a real agent process behind, an
 nothing reaps them. Unbounded, an overnight shift accumulates one per tick.
 
 Three sits between them: two retries after the first failure, spanning roughly
-forty-five minutes at the desk's tick, and at most three abandoned sessions before the
-rail stops and says so.
+forty-five minutes at the desk's tick, and at most three replacements after the desk's
+first spawn (so at most four sessions in the worst case) before the rail stops and says so.
 
-**Who chose it.** Adam, the repo owner, confirmed the cap of three on 2026-09-23,
+**Who chose it.** The repository owner confirmed the cap of three on 2026-09-23,
 with the reasoning above and the rejected alternatives below in front of him.
 
 ## Rejected alternatives
@@ -120,8 +123,8 @@ desk staffing moves onto that path, the threshold moves with it and this documen
 
 ## Testing
 
-- Three successive deaths yield three replacements and the third is the last; the fourth
-  and fifth deaths spawn nothing. Verified red against the reset-inside-spawn ordering,
+- Three successive deaths after the desk's first spawn yield three replacements and the
+  third is the last; the fourth and fifth deaths spawn nothing. Verified red against the reset-inside-spawn ordering,
   where the count never leaves one and the spawns run away.
 - Exhaustion notifies exactly once per incident rather than once per tick.
 - A delivered nudge, and a desk rebuilt after a close, each restore a full budget.

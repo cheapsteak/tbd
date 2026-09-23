@@ -1802,7 +1802,7 @@ extension TBDHomeSerialized {
         /// replacements must happen, the third must be the last, and the desk must say
         /// so out loud — a Watch Desk that has quietly given up looks exactly like one
         /// that is fine.
-        @Test("the recovery budget accumulates, stops at the third spawn, and notifies")
+        @Test("the recovery budget accumulates, stops at the third replacement, and notifies")
         func testRecoveryBudgetAccumulatesAndCapsAtThree() async throws {
             let f = try makeDeskFixture(tag: "staff-budget")
             defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
