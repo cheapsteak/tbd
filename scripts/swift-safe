@@ -35,11 +35,25 @@ caller that passes its own ``-module-cache-path`` is left alone, and ``CI`` is
 left alone too — runners are ephemeral, so a shared cache saves nothing there.
 
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
-output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
-``command`` into the lock file after acquiring, and a waiter reads it back to
-say who it is queued behind; a heartbeat then repeats the wait's elapsed time
-so a human can tell a queued build from a hung one and an automated caller's
-stall watchdog sees liveness.
+output sees nothing from this wrapper.  Every line this wrapper writes is
+prefixed ``swift-safe:``, which is what lets a caller that buffers compiler
+output — ``scripts/restart-build-lib.sh`` does — separate these lines back out
+and show them live.  The holder writes ``pid``/``cwd``/``command`` into the
+lock file after acquiring, and a waiter reads it back to say who it is queued
+behind; a heartbeat then repeats the wait's elapsed time so a human can tell a
+queued build from a hung one and an automated caller's stall watchdog sees
+liveness.
+
+When the recorded identity cannot explain the wait — an empty record, or a pid
+that is no longer running — the waiter asks the process table who still has
+the lock file open and names those processes instead.  The flock rides on an
+open file description rather than on the process that recorded itself, so a
+killed build can leave an orphan holding an inherited descriptor while the
+file still names the dead pid: reporting only the record then says "not
+running", which reads as a harmless stale file, about a lock that will never
+be released.  Openers are a superset of the holder (waiters have the file open
+too), so the line says the holder is among them and never names one as the
+holder.
 
 A wait also ends when whoever requested the build goes away.  Killing a shell
 or an agent session signals only that process, so a wrapper queued behind the
@@ -117,6 +131,25 @@ DEFAULT_HEARTBEAT_SECONDS = 60.0
 # Fields the holder records; anything else in the file is ignored.
 HOLDER_FIELDS = ("pid", "cwd", "command")
 MAX_REPORTED_COMMAND_CHARACTERS = 120
+# Bounds on the fallback probe that asks the process table who still has the
+# lock file open, for when the recorded identity cannot explain the wait.  The
+# probe runs inside the wait loop, so it may cost a little and must never cost
+# the wait: it is abandoned after this long and reports at most this many.
+#
+# The budget covers the WHOLE probe — finding the openers with `lsof` and
+# naming them with `ps`, both legs — and not one leg each.  A per-leg timeout
+# is not a bound anybody can act on: two legs bounded separately are their
+# sum, so a per-heartbeat cost stated as five seconds would really have been
+# fifteen, and a number written down here is trusted precisely because nobody
+# re-derives it.
+LOCK_OPENER_PROBE_TIMEOUT_SECONDS = 5.0
+# ...of which the naming leg is guaranteed this much however slow the first
+# leg was, so a slow `lsof` cannot starve it into always timing out and
+# leaving every opener it found called "unknown" — a probe that names pids
+# without commands answers half the question.  `lsof` is capped at the
+# remainder, which is what keeps the guarantee inside the total.
+LOCK_OPENER_NAME_MINIMUM_SECONDS = 1.0
+MAX_REPORTED_LOCK_OPENERS = 4
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 # Where the shared precompiled-module cache lives, under the user's real home.
 SHARED_MODULE_CACHE_SUBPATH = "Library/Caches/tbd/swift-module-cache"
@@ -582,7 +615,147 @@ def _ancestor_pids(
     return tuple(chain)
 
 
-def _holder_description(lock_path: Path) -> str:
+def _process_command_names(
+    pids: tuple[int, ...],
+    *,
+    timeout: float = LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+) -> dict[int, str]:
+    """pid -> executable basename, from one `ps`; unknown pids are omitted.
+
+    Best effort, like every other probe here: a `ps` that is missing, slow or
+    refused leaves the caller naming pids alone, which is still the actionable
+    half.  macOS prints the full path under `comm=` and Linux the basename, so
+    the result is reduced to a basename either way.
+
+    `timeout` is a slice of a budget the caller owns, not a bound of this
+    function's own: `_lock_file_openers` hands over what is left of
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` after its own leg.  The default is the
+    whole of that, for a caller that is not sharing.
+    """
+    if not pids:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "pid=,comm=", "-p", ",".join(str(pid) for pid in pids)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    names: dict[int, str] = {}
+    for line in completed.stdout.splitlines():
+        pid_text, _, command = line.strip().partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        command = command.strip()
+        if command:
+            names[pid] = Path(command).name
+    return names
+
+
+def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
+    """(pid, name) for every *other* process that has the lock file open.
+
+    The recorded identity answers "who took the slot", and it is the answer
+    whenever it is usable.  This answers the question that is left when it is
+    not, and it is the more truthful of the two: the flock rides on an open
+    file description, so it outlives the process that recorded itself.  A
+    build whose manifest hung and was killed left an orphan holding an
+    inherited descriptor, the file still naming the long-dead pid that opened
+    it — and every waiter was told the recorded pid "is not running", which
+    reads as a harmless stale file while the lock was genuinely, permanently
+    held.  A diagnostic that points the wrong way is worse than none.
+
+    `lsof` reports openers, not lock ownership: darwin leaves its lock column
+    blank for an flock, so there is nothing to filter on.  Openers are a
+    superset of the holder — every waiter has the file open too — so callers
+    must say "the holder is among these" and never name one of them as the
+    holder.  Being a superset is what makes it useful anyway: an orphan with
+    an inherited descriptor appears in it, and the command names separate a
+    queued wrapper from a compiler at a glance.
+
+    Best effort in every direction.  No `lsof`, a timeout, a refusal, or
+    unparsable output all return `()` and the caller falls back to saying the
+    holder is unidentified, because this runs inside a wait loop and may never
+    fail one.
+
+    Both legs share one budget, `LOCK_OPENER_PROBE_TIMEOUT_SECONDS`, and that
+    is the whole cost of the probe per heartbeat.  `lsof` is capped at the
+    budget less the naming leg's guaranteed floor, so the leg that turns pids
+    into command names always gets a usable slice no matter how slow `lsof`
+    was — and the two together can never exceed the stated bound.
+    """
+    deadline = time.monotonic() + LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+    try:
+        completed = subprocess.run(
+            ["lsof", "-t", "-w", "--", str(lock_path)],
+            capture_output=True,
+            text=True,
+            timeout=(
+                LOCK_OPENER_PROBE_TIMEOUT_SECONDS - LOCK_OPENER_NAME_MINIMUM_SECONDS
+            ),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    # Our own waiter holds the file open too; naming it would describe the
+    # process doing the asking as a candidate for the thing blocking it.
+    own = os.getpid()
+    pids: list[int] = []
+    for field in completed.stdout.split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        if pid > 0 and pid != own and pid not in pids:
+            pids.append(pid)
+    names = _process_command_names(
+        tuple(pids),
+        # Whatever is left of the budget, floored so the leg is never handed
+        # a slice too small to answer in.  `lsof`'s own cap is the budget
+        # less this floor, so the floor can only be reached — never exceeded.
+        timeout=max(LOCK_OPENER_NAME_MINIMUM_SECONDS, deadline - time.monotonic()),
+    )
+    return tuple((pid, names.get(pid, "unknown")) for pid in pids)
+
+
+def _unidentified_holder(
+    preamble: str, fallback: str, lock_path: Path, openers
+) -> str:
+    """Finish a description whose recorded identity explains nothing.
+
+    `fallback` is the whole line to use when the process table can see no
+    more than the record could — it is a separate string rather than a suffix
+    because one caller has nothing to add to its own preamble.
+
+    Reached only from a contended wait, so the lock IS held by someone: the
+    one thing that must never be implied here is that it is not.
+
+    `openers` is resolved here rather than defaulted into the signature, so
+    that the name is looked up when it is called: a default argument would
+    bind the function object at definition and leave a test's substitution
+    silently ignored.
+    """
+    visible = (openers or _lock_file_openers)(lock_path)
+    if not visible:
+        return fallback
+    listed = ", ".join(
+        f"pid {pid} ({name})" for pid, name in visible[:MAX_REPORTED_LOCK_OPENERS]
+    )
+    remainder = len(visible) - MAX_REPORTED_LOCK_OPENERS
+    if remainder > 0:
+        listed += f", and {remainder} more"
+    return (
+        f"{preamble}, but the lock is still held — the holder is among the "
+        f"processes that have the lock file open: {listed}"
+    )
+
+
+def _holder_description(lock_path: Path, *, openers=None) -> str:
     """Describe the lock holder without ever claiming one we cannot see."""
     fields = _holder_fields(lock_path)
     try:
@@ -592,12 +765,20 @@ def _holder_description(lock_path: Path) -> str:
     # `os.kill(0, 0)` inspects this process's own group and would report a
     # holder that is really us, so a non-positive pid counts as unrecorded.
     if pid <= 0:
-        return "holder has not recorded its identity yet"
+        unrecorded = "holder has not recorded its identity yet"
+        return _unidentified_holder(unrecorded, unrecorded, lock_path, openers)
     if not _process_is_alive(pid):
-        return (
-            f"the lock file names pid {pid}, which is not running; "
-            "the current holder is unidentified"
+        stale = f"the lock file names pid {pid}, which is not running"
+        return _unidentified_holder(
+            stale,
+            f"{stale}; the current holder is unidentified",
+            lock_path,
+            openers,
         )
+    # A recorded pid that is alive is taken at its word, and no `lsof` runs.
+    # It is wrong only under pid reuse, which costs one misleading name; the
+    # probe would cost a subprocess on every heartbeat of every contended
+    # build to catch it.  The case that misled in the field is the one above.
 
     parts = [f"pid {pid}"]
     # The directory basename identifies the worktree; the full path is noise.
