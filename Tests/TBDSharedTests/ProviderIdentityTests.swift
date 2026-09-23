@@ -208,6 +208,42 @@ struct ProviderIdentityTests {
         ])
     }
 
+    @Test("a short credential flag with its value glued on redacts the value")
+    func redactsGluedShortFlagValues() {
+        let placeholder = ProviderIdentityRedaction.redactedPlaceholder
+        let redacted = ProviderIdentityRedaction.redactArguments([
+            "-tXk3mZ9qL2vNaB7", "-pMyPassword123", "-uuser:pass", "-kabc",
+        ])
+
+        #expect(redacted == [
+            "-t\(placeholder)", "-p\(placeholder)", "-u\(placeholder)", "-k\(placeholder)",
+        ])
+    }
+
+    @Test("a glued short-flag secret does not arm redaction of the next argument")
+    func gluedShortFlagDoesNotArmTheNextArgument() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["-pMyPassword123", "myworktree"])
+
+        #expect(redacted == ["-p\(ProviderIdentityRedaction.redactedPlaceholder)", "myworktree"])
+    }
+
+    @Test("a bare short credential flag still arms redaction of the next argument")
+    func bareShortFlagStillArmsTheNextArgument() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["-t", "abc", "-u", "user:pass"])
+
+        #expect(redacted == [
+            "-t", ProviderIdentityRedaction.redactedPlaceholder,
+            "-u", ProviderIdentityRedaction.redactedPlaceholder,
+        ])
+    }
+
+    @Test("a glued short flag outside the credential set stays verbatim")
+    func nonSecretGluedShortFlagIsVerbatim() {
+        let redacted = ProviderIdentityRedaction.redactArguments(["-v2", "-n4", "--port", "8080"])
+
+        #expect(redacted == ["-v2", "-n4", "--port", "8080"])
+    }
+
     /// The narrowness of the fix above: an ordinary short flag NOT in the
     /// reviewer-named set must not start swallowing its value. This is the
     /// regression guard against widening `shortSecretFlagAliases` too far.

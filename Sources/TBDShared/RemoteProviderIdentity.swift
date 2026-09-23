@@ -158,12 +158,13 @@ public enum ProviderIdentityRedaction {
     /// would otherwise swallow every flag with a `t` anywhere in it, like
     /// `--format`). `secretKeySubstrings` above can never catch these: a
     /// one-letter flag can't contain a five-letter word. Deliberately short
-    /// and reviewer-named rather than exhaustive — `-p` in particular
-    /// collides with "port"/"profile" in plenty of real CLIs, but per this
-    /// type's own bias (a lost display pair costs a line of context; a shown
-    /// secret costs the secret), redacting an occasional port number is the
-    /// correct side to be wrong on.
-    public static let shortSecretFlagAliases: Set<String> = ["t", "p", "k"]
+    /// rather than exhaustive: token, password, key, and `u` for curl's
+    /// `-u user:password`, whose value carries the password. `-p` in
+    /// particular collides with "port"/"profile" in plenty of real CLIs, but
+    /// per this type's own bias (a lost display pair costs a line of context;
+    /// a shown secret costs the secret), redacting an occasional port number
+    /// is the correct side to be wrong on.
+    public static let shortSecretFlagAliases: Set<String> = ["t", "p", "k", "u"]
 
     public static func isSecretKey(_ key: String) -> Bool {
         let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
@@ -192,13 +193,22 @@ public enum ProviderIdentityRedaction {
 
     /// A registry entry's argv, safe to show.
     ///
-    /// Three shapes carry a secret on a command line, and all are handled:
+    /// Four shapes carry a secret on a command line, and all are handled:
     /// `--token=abc` (the value rides the same argument as the flag),
-    /// `--token abc` (the value is the NEXT argument), and a bare positional
-    /// argument that looks like a secret (no preceding flag, but the argument
-    /// itself has characteristics of a token or API key). The second and third
-    /// are why this takes the whole list — an argument is only judged in the
-    /// company of what precedes it and in its own characteristics.
+    /// `-tabc` (a short credential flag with its value glued on, as in curl's
+    /// `-uuser:pass`), `--token abc` (the value is the NEXT argument), and a
+    /// bare positional argument that looks like a secret (no preceding flag,
+    /// but the argument itself has characteristics of a token or API key).
+    /// The last two are why this takes the whole list — an argument is only
+    /// judged in the company of what precedes it and in its own
+    /// characteristics.
+    ///
+    /// The glued shape keys on the first letter alone, so an ordinary glued
+    /// value behind one of `shortSecretFlagAliases` is redacted too: `-p8080`
+    /// renders as `-p‹redacted›` whether the `8080` is a port or a password.
+    /// That over-redaction is deliberate. This is display text, so a hidden
+    /// port costs a line of context, while a shown password costs the
+    /// password.
     ///
     /// For bare positional arguments, detection is heuristic: well-known secret
     /// prefixes (e.g. `sk-`, `github_pat_`, `AKIA`) are redacted immediately,
@@ -224,6 +234,16 @@ public enum ProviderIdentityRedaction {
                     out.append(redactedPlaceholder)
                     continue
                 }
+            }
+            // Glued short flag: `-tSECRET`, `-pMyPassword123`, `-uuser:pass`.
+            // One argv element with no `=`, so neither the `=` shape nor the
+            // arming check below can see the value inside it. Checked before
+            // both, because the whole string can itself contain a secret word
+            // (`-pMyPassword123`) and would otherwise only arm the NEXT
+            // argument while this one went out verbatim.
+            if let flag = gluedShortSecretFlag(arg) {
+                out.append("-\(flag)\(redactedPlaceholder)")
+                continue
             }
             if let separator = arg.firstIndex(of: "="), arg.hasPrefix("-") {
                 let flag = String(arg[arg.startIndex..<separator])
@@ -266,6 +286,17 @@ public enum ProviderIdentityRedaction {
             out.append(arg)
         }
         return out
+    }
+
+    /// The flag letter of a single-dash argument that is a short credential
+    /// alias with its value glued on (`-tabc` gives `t`), or nil. `--long`
+    /// flags and a bare `-t` (whose value is the next argument) are not this
+    /// shape.
+    private static func gluedShortSecretFlag(_ arg: String) -> Character? {
+        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
+        let letter = arg[arg.index(after: arg.startIndex)]
+        guard shortSecretFlagAliases.contains(letter.lowercased()) else { return nil }
+        return letter
     }
 
     /// Returns true if a bare positional argument has characteristics that
