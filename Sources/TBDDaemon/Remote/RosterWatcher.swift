@@ -930,7 +930,9 @@ public actor RosterWatcher {
     /// The discriminator is the terminal row's id rather than any transport
     /// coordinate. A holder-backed terminal has no tmux pane, so a pane would
     /// give every holder tab in a worktree the same name, and a tmux terminal
-    /// woken from a park gets a new pane and would be renamed under its peers.
+    /// woken from a park gets a new pane. A wake always re-announces the
+    /// session — new process, new socket, new handle — but with a terminal
+    /// discriminator it comes back under the name its peers already knew.
     /// The short id is
     /// the prefix of what `tbd terminal list` prints for the row on this
     /// machine, so whoever holds a name can find the terminal it names here —

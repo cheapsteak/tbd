@@ -133,7 +133,8 @@ private actor FakeSessionDirectory: LocalSessionDirectory {
 
     func spawnedSessions() async -> [TBDSpawnedSession] { sessions }
 
-    /// Replace what the directory reports, the way a wake rewrites a row.
+    /// Replace what the directory reports, the way a wake rewrites a row's
+    /// pane.
     func replace(_ sessions: [TBDSpawnedSession]) { self.sessions = sessions }
 }
 
@@ -1287,7 +1288,7 @@ struct DatabaseLocalSessionDirectoryTests {
 /// A holder-backed terminal has no tmux pane — its row carries an empty
 /// `tmuxPaneID` — so a pane discriminator gave every holder tab in a worktree
 /// the same name (`… %`), and a tmux terminal woken from a park, which gets a
-/// new pane, was renamed under its peers. Every fixture here goes through the
+/// new pane, came back under a different name. Every fixture here goes through the
 /// stores' creation paths and the production `DatabaseLocalSessionDirectory`,
 /// so the terminal ids and the empty pane are the ones a real row carries.
 @Suite("Roster watcher — the announced name")
@@ -1368,11 +1369,12 @@ struct RosterWatcherAnnouncedNameTests {
         }
     }
 
-    /// A wake gives a tmux terminal a new pane. The terminal row is the same,
-    /// so the peer's name does not change and the next scan has nothing to
-    /// tell the link: no rename, no re-announcement, no withdrawal. A
-    /// pane-derived name would re-announce the peer under a new name here.
-    @Test func aPaneChangeNeitherRenamesNorWithdrawsThePeer() async throws {
+    /// A wake resumes a parked tmux terminal as a new process, on a new socket,
+    /// in a new pane. The roster withdraws the old handle and announces a new
+    /// one — that is unavoidable — but the terminal row is the same, so the
+    /// re-announced peer carries the name its peers already knew. A
+    /// pane-derived name would come back as `… %4100`.
+    @Test func aWokenTerminalComesBackUnderTheSameName() async throws {
         try await withRegistry { directory in
             try write(registryRecord(), pid: 4242, in: directory)
             let sink = FrameSink()
@@ -1382,14 +1384,20 @@ struct RosterWatcherAnnouncedNameTests {
             let first = try #require(peers(await sink.drain()).first)
             #expect(first.name == "laptop:useful-swallow 5A1B2C3D")
 
-            // The row now names the woken pane, and so does the record.
+            // Park then wake: the old process and its record are gone, and
+            // the resumed one registers under a new pid, socket and pane.
+            try remove(pid: 4242, in: directory)
             await sessions.replace([spawnedSession(pane: "%4100")])
-            try write(registryRecord(tmux: "main:@4100.%4100"), pid: 4242, in: directory)
+            try write(
+                registryRecord(socket: "/tmp/cc-socks/4343.sock", tmux: "main:@4100.%4100"),
+                pid: 4343, in: directory)
             await subject.refresh()
 
-            #expect(await sink.drain().isEmpty)
-            let entry = try #require(await subject.currentEntries().first)
-            #expect(entry.name == first.name)
+            let frames = await sink.drain()
+            #expect(goneHandles(frames) == [first.handle])
+            let second = try #require(peers(frames).first)
+            #expect(second.handle != first.handle)
+            #expect(second.name == first.name)
         }
     }
 

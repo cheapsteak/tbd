@@ -145,7 +145,8 @@ remote peer messaging is on, a TBD session announced to another machine is named
 `<machine>:<worktree> <terminal id prefix>`, the same terminal id prefix.
 A tmux pane is not an identity: in `ListAgents` a session on the tmux transport also prints
 the legacy coordinate `tmux <server>:<window>.<pane>` (`tbd peer list` shows it
-as `tmux %<pane>`), which still tells same-named tmux rows apart, but a session
+as `tmux %<pane>`), so when several rows share that name, pick the `ListAgents`
+row whose pane matches the one `tbd peer list` shows. A session
 on the pty-holder transport has no pane at all. When several holder sessions in
 one worktree share a name, `ListAgents` offers nothing that says which is which
 — status and start time narrow the field but do not identify a row — so ask the

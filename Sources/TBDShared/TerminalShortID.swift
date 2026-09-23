@@ -7,7 +7,8 @@ import Foundation
 /// transport the terminal runs on. A tmux pane cannot serve: a holder-backed
 /// terminal has no pane, so every holder row in a worktree would name the same
 /// empty coordinate, and a tmux terminal is given a new pane when it is woken
-/// from a park, so a pane-based name would change under its peers.
+/// from a park, so a pane-based name would bring the woken session back under
+/// a different name from the one its peers knew.
 /// The terminal id is minted once, when the row is created, and carried by
 /// both transports alike — and because it is a prefix of what `tbd terminal
 /// list` prints, a reader holding the short form can find the row it names in
