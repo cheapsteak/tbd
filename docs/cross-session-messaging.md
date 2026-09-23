@@ -186,12 +186,13 @@ The terminal behind a session is what tells them apart — `tbd peer list`
 names it by its id — and the `[ref]` is how you say which one you meant.
 Carrying one over to the other is the hard part, because a `ListAgents`
 row prints no terminal id. Among rows that share a name, a session on the
-tmux transport can still be matched by its pane, which `ListAgents`,
-`tbd peer list` and `tbd terminal list` all print. A holder-backed
+tmux transport can still be matched by its pane, which `ListAgents` and
+`tbd terminal list` print, and `tbd peer list` prints for a row it joined
+to a TBD terminal. A holder-backed
 session prints no pane, so among same-named holder rows only status and
 start time are left, and they narrow the field without identifying a row.
 Rather than guess a ref there, ask the user. `tbd terminal send
---terminal <id>` with the full terminal id — from `tbd peer list --json`
+--terminal <id> --text "…" --submit` with the full terminal id — from `tbd peer list --json`
 or `tbd terminal list`; the eight-character prefix is not accepted —
 names the session exactly, but it types into that session's composer
 instead of delivering between turns, so it can answer a prompt or land

@@ -150,8 +150,8 @@ row whose pane matches the one `tbd peer list` shows. A session
 on the pty-holder transport has no pane at all. When several holder sessions in
 one worktree share a name, `ListAgents` offers nothing that says which is which
 — status and start time narrow the field but do not identify a row — so ask the
-user rather than guess a ref. `tbd terminal send --terminal <full id>` does name
-the session exactly (the full id is in `tbd peer list --json` or
+user rather than guess a ref. `tbd terminal send --terminal <full id> --text "…"
+--submit` does name the session exactly (the full id is in `tbd peer list --json` or
 `tbd terminal list`; the eight-character prefix is not accepted), but it types
 into that session's composer rather than delivering between turns, so use it
 only while `tbd peer list` shows that session `idle`.
