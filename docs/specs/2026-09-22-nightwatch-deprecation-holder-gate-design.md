@@ -102,8 +102,9 @@ All fed by the `Config` the app already reloads on the config-change delta.
 - **Holder switch while a watch mode is active.** The pty-holder Settings
   switch shows the mirror sentence as a footnote, and a refused flip surfaces
   the RPC error the way other refused settings do.
-- **CLI.** There is no set-mode subcommand. `tbd nightwatch status` prints the
-  deprecation line first.
+- **CLI.** `tbd nightwatch set` reaches the refusal through `nightwatch.setMode`
+  and prints its text. `tbd nightwatch status` prints the deprecation line
+  first.
 
 ## Documentation
 

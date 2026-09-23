@@ -20,7 +20,10 @@ then. New supervision features should ideally land in both: in the existing
 implementation where they're needed now, and in the new design's structures —
 where the new-path half is usually user-land (a playbook, sweep-program, or
 wake-program change) rather than compiled (see "Compile only what user-land
-cannot do well" below).
+cannot do well" below). Nightwatch and Daywatch are deprecated and do not run
+with the pty-holder transport; the daemon refuses to combine a watch mode with
+the holder in either direction
+([spec](docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md)).
 
 ## Main Session Agent
 
