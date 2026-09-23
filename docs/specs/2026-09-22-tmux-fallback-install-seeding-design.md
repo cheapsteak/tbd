@@ -1,6 +1,6 @@
 # Installer-seeded tmux fallback — design
 
-Status: **approved, not yet implemented**.
+Status: **implemented**.
 
 Extends [`2026-08-11-tmux-executable-resolution-design.md`](2026-08-11-tmux-executable-resolution-design.md),
 which defines how TBD resolves tmux (inherited `PATH` first, then the saved fallback

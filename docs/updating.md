@@ -61,6 +61,12 @@ these steps in order.
   and stays there — it is what a failed handover puts back, and afterwards it
   is the quickest way to return to the build you were on.
 - **Hands the daemon over.** See below.
+- **Seeds the saved tmux fallback**, with or without `--no-app`. When
+  `~/tbd/tmux-executable-path` is missing or names no usable executable, the
+  update writes the tmux its shell finds on `PATH` there. A login relaunch
+  ignores the bundle's recorded `PATH`, and this file is how that launch still
+  finds a package-manager tmux. A valid saved path is never replaced. See
+  [the design](specs/2026-09-22-tmux-fallback-install-seeding-design.md).
 - **Restarts the app**, unless you pass `--no-app`. The app is a viewer;
   nothing in it holds a session.
 - **Wakes what the handover parked**, unless you pass `--no-wake`.
