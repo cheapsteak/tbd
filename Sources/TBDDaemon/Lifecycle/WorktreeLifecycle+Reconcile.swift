@@ -347,8 +347,26 @@ extension WorktreeLifecycle {
                         recordedEveryKill = false
                         continue
                     }
-                    await captureThenKillWindow(
-                        terminal: terminal, server: current.tmuxServer)
+                    // A holder row takes the holder teardown, as in
+                    // `beginArchiveWorktree`: its tmux coordinates are empty,
+                    // so `captureThenKillWindow` would capture and kill
+                    // nothing while the holder and its job outlive the rows
+                    // deleted below. Its Closed Terminals entry is written
+                    // before the disposal releases the reader it is read from.
+                    if terminal.transport == .holder {
+                        await Self.recordHolderClosedTerminal(
+                            terminal, registry: holderRegistry, history: db.terminalHistory)
+                        if let failure = await disposeHolder(for: terminal) {
+                            logger.warning(
+                                "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
+                            await actuationLog.appendOutcome(
+                                confirms: actuationID, result: .transportFailed, error: failure)
+                            continue
+                        }
+                    } else {
+                        await captureThenKillWindow(
+                            terminal: terminal, server: current.tmuxServer)
+                    }
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .dispatched)
                 }

@@ -994,9 +994,14 @@ extension RPCRouter {
             //
             // The Closed Terminals entry is written first, from the daemon's
             // own emulator rather than a tmux pane: disposal releases the
-            // reader the capture is read from.
-            await WorktreeLifecycle.recordHolderClosedTerminal(
-                terminal, registry: holderRegistry, history: db.terminalHistory)
+            // reader the capture is read from. Only for a local worktree, as
+            // on the tmux branch: an entry under a worktree this daemon has no
+            // row for is one no history view lists and no worktree delete
+            // reclaims.
+            if worktree != nil {
+                await WorktreeLifecycle.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
+            }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
             await db.terminalHistory.captureOnClose(terminal: terminal) {
