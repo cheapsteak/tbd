@@ -116,22 +116,28 @@ public struct TerminalHistoryStore: Sendable {
     /// Revive already handles a missing file (the shell path skips the `cat`),
     /// and the viewer reads a missing file as empty.
     public func recordOnClose(terminal: Terminal, capture: String?) async {
-        let text = capture.flatMap {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
-        }
-        await persist(terminal: terminal, text: text, closedAt: Date())
+        await persist(terminal: terminal, text: capture, closedAt: Date())
     }
 
     /// Store seam (internal so tests can control `closedAt` for deterministic
     /// prune ordering). Best-effort: failures are logged, never thrown.
     func store(terminal: Terminal, text: String, closedAt: Date) async {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard Self.nonBlank(text) != nil else { return }
         await persist(terminal: terminal, text: text, closedAt: closedAt)
     }
 
-    /// Writes the content file (when there is text), the metadata row, and
-    /// prunes. `text == nil` writes the row alone.
-    private func persist(terminal: Terminal, text: String?, closedAt: Date) async {
+    /// `text` unless it is empty or whitespace-only — the one statement of
+    /// what counts as "no capture" for both close paths.
+    private static func nonBlank(_ text: String?) -> String? {
+        text.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+    }
+
+    /// Writes the content file (when there is non-blank text), the metadata
+    /// row, and prunes. Without text it writes the row alone and removes any
+    /// content file an earlier close of the same terminal left, so the row's
+    /// `lineCount` 0 and the file the viewer and revive read cannot disagree.
+    private func persist(terminal: Terminal, text rawText: String?, closedAt: Date) async {
+        let text = Self.nonBlank(rawText)
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
         do {
             if let text {
@@ -140,6 +146,8 @@ public struct TerminalHistoryStore: Sendable {
                     withIntermediateDirectories: true
                 )
                 try text.write(toFile: path, atomically: true, encoding: .utf8)
+            } else if FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.removeItem(atPath: path)
             }
 
             let entry = TerminalHistoryEntry(

@@ -131,6 +131,36 @@ import Testing
                 "a screen frozen at attach time was stored as the final screen")
     }
 
+    @Test("an entry without a capture removes an earlier close's content file")
+    func captureLessEntryRemovesStaleContentFile() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        await fx.db.terminalHistory.recordOnClose(
+            terminal: fx.terminal, capture: "an earlier capture\n")
+        #expect(FileManager.default.fileExists(atPath: fx.contentPath()))
+
+        await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: nil)
+
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
+        #expect(entries.map(\.id) == [fx.terminal.id])
+        #expect(entries.first?.lineCount == 0)
+        #expect(!FileManager.default.fileExists(atPath: fx.contentPath()),
+                "the row says no capture while the viewer and revive still read the old file")
+    }
+
+    @Test("a blank capture writes the entry without a content file")
+    func blankCaptureWritesEntryWithoutFile() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+
+        await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: " \n\n ")
+
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
+        #expect(entries.map(\.id) == [fx.terminal.id])
+        #expect(entries.first?.lineCount == 0)
+        #expect(!FileManager.default.fileExists(atPath: fx.contentPath()))
+    }
+
     @Test("no registry still writes the entry, without a capture")
     func noRegistryWritesEntryWithoutCapture() async throws {
         let fx = try await makeFixture()
