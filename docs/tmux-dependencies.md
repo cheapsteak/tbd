@@ -284,13 +284,13 @@ was written for.
   live pane owned by an unrelated session — which would then have been pasted a
   judge prompt plus Enter.
 - **Cross-session identification, outside TBD's own code.** TBD prints each
-  terminal's tmux server, window and pane (`TerminalCommands.swift`), and
+  terminal's tmux window and pane (`TerminalCommands.swift:121-130`), and
   Claude Code's `ListAgents` prints the same coordinate for a session inside
-  tmux. The shipped skill content and `docs/cross-session-messaging.md` no
-  longer teach the pane as a row's identity: they identify a peer by its TBD
-  terminal id through `tbd peer list`, and mention the pane only as a legacy
-  coordinate that still tells same-named tmux-transport rows apart in
-  `ListAgents`.
+  tmux. The shipped skill content identifies a peer by its TBD terminal id
+  through `tbd peer list`, and uses the pane only as a legacy coordinate that
+  tells same-named tmux-transport rows apart in `ListAgents`
+  (`TBDSkillContent.swift:135-156`; `docs/cross-session-messaging.md`,
+  "Addressing a peer").
 
 The last of those is the least enforced: it is a documented convention taught to
 agents, not a code path, so nothing breaks loudly if the coordinate stops being

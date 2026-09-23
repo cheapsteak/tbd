@@ -1369,8 +1369,9 @@ struct RosterWatcherAnnouncedNameTests {
     }
 
     /// A wake gives a tmux terminal a new pane. The terminal row is the same,
-    /// so the peer keeps its name and its handle: the next scan re-announces it
-    /// unchanged rather than renaming it or withdrawing it under its peers.
+    /// so the peer's name does not change and the next scan has nothing to
+    /// tell the link: no rename, no re-announcement, no withdrawal. A
+    /// pane-derived name would re-announce the peer under a new name here.
     @Test func aPaneChangeNeitherRenamesNorWithdrawsThePeer() async throws {
         try await withRegistry { directory in
             try write(registryRecord(), pid: 4242, in: directory)
@@ -1386,12 +1387,7 @@ struct RosterWatcherAnnouncedNameTests {
             try write(registryRecord(tmux: "main:@4100.%4100"), pid: 4242, in: directory)
             await subject.refresh()
 
-            let frames = await sink.drain()
-            #expect(goneHandles(frames).isEmpty)
-            for peer in peers(frames) {
-                #expect(peer.handle == first.handle)
-                #expect(peer.name == first.name)
-            }
+            #expect(await sink.drain().isEmpty)
             let entry = try #require(await subject.currentEntries().first)
             #expect(entry.name == first.name)
         }

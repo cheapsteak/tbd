@@ -290,8 +290,11 @@ struct PeerRow: Encodable, Equatable, Sendable {
     /// transport. A shadow has none: it stands in for a session on another
     /// machine and deliberately carries no local coordinates.
     let terminalID: UUID?
-    /// The tmux pane, a legacy coordinate only a tmux-transport terminal has.
-    /// Nil for a holder-backed terminal and for a shadow.
+    /// The tmux pane, a legacy coordinate. On a joined row it is the terminal's
+    /// own pane, which only a tmux-transport terminal has — nil for a
+    /// holder-backed one. On an unjoined row it is whatever pane the record
+    /// claims, which may belong to a tmux server TBD does not run, so a
+    /// non-nil value is not evidence of a TBD terminal.
     let tmuxPane: String?
 
     // Shadow rows: the provider session behind the shadow, and the link state.
