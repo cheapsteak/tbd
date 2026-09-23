@@ -1474,6 +1474,17 @@ public struct TmuxManager: Sendable {
     ///   against a server too wedged to answer a read-only `list-panes`
     ///   would most likely fail too, so refusing costs little and never
     ///   destroys a stranger on a guess.
+    ///
+    ///   The cost is real, not hypothetical: a transient probe failure
+    ///   during an ordinary close, forget, or scratch-delete refuses that
+    ///   teardown too, so a window whose process had already exited keeps
+    ///   running rather than being newly reclaimed on the spot.
+    ///   `WorktreeLifecycle+Reconcile`'s terminal arm is the reconciler that
+    ///   catches it: its next pass (startup, or on demand — not continuous)
+    ///   probes window presence itself instead of trusting this method's
+    ///   earlier answer, so once the server stops being wedged the window
+    ///   resolves as gone-or-reassigned and the row is parked or deleted
+    ///   normally. Until that pass runs, the window stays.
     public func paneOwnership(
         terminalID: UUID, server: String, paneID: String
     ) async -> PaneOwnership {
