@@ -2039,6 +2039,32 @@ extension TBDHomeSerialized {
             }
         }
 
+        /// Gate 2 waits for the previous replacement to be gone or proven absent.
+        /// A replacement that was hibernated is neither: the classification skips
+        /// hibernated rows, so nothing can ever prove it absent. Without an
+        /// exemption, one idle-hibernated replacement shuts recovery for that
+        /// desk for good, before the backstop count can reach its cap and notify.
+        @Test("a hibernated replacement does not wedge recovery shut")
+        func testHibernatedReplacementDoesNotWedgeRecovery() async throws {
+            let f = try makeDeskFixture(tag: "staff-hibernated-replacement")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = Set(try await f.db.terminals.list(worktreeID: desk.id).map(\.id))
+            let afterFirst = try await killAllAndTick(f, desk: desk.id)
+            let replacement = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { !original.contains($0.id) }),
+                "fixture check: the first tick must have spawned a replacement")
+
+            try await f.db.terminals.setHibernated(id: replacement.id, sessionID: "idle-session")
+
+            let afterSecond = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                afterSecond == afterFirst + 1,
+                "a hibernated replacement must not block the next recovery")
+        }
+
         /// A close resets the budget only because the desk it was counting against
         /// is gone. A close whose archive write throws leaves that desk active,
         /// the next `ensure` finds the very same desk by name, and the incident is

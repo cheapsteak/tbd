@@ -664,7 +664,8 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// 2. **The previous replacement.** A desk terminal row outlives its pane, so
     ///    "did the last recovery work?" cannot be answered by the row's
     ///    existence. It is answered by the same classification: spawn again only
-    ///    once that row is gone from the database or proven absent. This is what
+    ///    once that row is gone from the database, proven absent, or hibernated
+    ///    or suspended (an agent stopped on purpose). This is what
     ///    turns a repeating fault into ONE extra terminal instead of one per
     ///    tick, and it still lets a genuinely dead replacement be replaced.
     /// 3. **A backstop count.** A launch that dies every time would satisfy gate
@@ -695,7 +696,12 @@ public actor DeskSessionManager: DeskSessionManaging {
                     """)
                 return
             }
-            if previousRow != nil && !staffing.provenAbsent(previous) {
+            // A hibernated or suspended row is accounted for: its agent was
+            // stopped on purpose, and the classification never consults such a
+            // row, so it could never be proven absent. Waiting on it would shut
+            // this gate for good, before the backstop count could ever notify.
+            let parked = previousRow.map { $0.hibernatedAt != nil || $0.suspendedAt != nil } ?? false
+            if previousRow != nil && !parked && !staffing.provenAbsent(previous) {
                 logger.notice("""
                     Not spawning another Watch Desk agent: the previous recovery terminal \
                     \(previous, privacy: .public) has not been proven gone

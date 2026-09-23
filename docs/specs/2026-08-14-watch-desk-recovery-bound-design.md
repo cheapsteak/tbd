@@ -49,10 +49,13 @@ each replacement really is absent by the time the next tick looks.
 Recovery is gated on evidence first and counted second.
 
 **Evidence gates.** A replacement is spawned only when every candidate was positively
-ruled absent, and only once the previous replacement is itself gone from the database or
-proven absent. Those two rules turn a repeating fault into one extra terminal rather
-than one per tick, and they need no threshold: they are answered by the consultations
-themselves. Together they are the primary bound.
+ruled absent, and only once the previous replacement is itself gone from the database,
+proven absent, or hibernated or suspended. A hibernated or suspended row counts as
+accounted for because its agent was stopped on purpose and the consultations never look
+at such a row, so it could never be proven absent; waiting on it would close the gate
+for good, before the count below could notify. Those two rules turn a repeating fault
+into one extra terminal rather than one per tick, and they need no threshold: they are
+answered by the consultations themselves. Together they are the primary bound.
 
 **The count is the backstop under them.** A launch that dies every time satisfies both
 gates forever — each replacement is genuinely absent by the next tick — so a count of
