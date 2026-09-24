@@ -87,7 +87,7 @@ struct StageCustomSoundTests {
     }
 
     private func contents(_ url: URL) throws -> String {
-        String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        String(bytes: try Data(contentsOf: url), encoding: .utf8) ?? ""
     }
 
     @Test func copiesIntoAMissingSoundsDirectory() throws {
@@ -155,6 +155,37 @@ struct StageCustomSoundTests {
         let missing = dirs.source.appendingPathComponent("gone.aiff")
 
         #expect(NotificationSoundPlayer.stageCustomSound(atPath: missing.path, role: .standard, in: dirs.sounds) == nil)
+    }
+
+    @Test func failedReplacementKeepsThePreviousStagedFile() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let good = dirs.source.appendingPathComponent("good.aiff")
+        try write("good", to: good)
+        NotificationSoundPlayer.stageCustomSound(atPath: good.path, role: .standard, in: dirs.sounds)
+
+        let missing = dirs.source.appendingPathComponent("gone.aiff")
+        #expect(NotificationSoundPlayer.stageCustomSound(atPath: missing.path, role: .standard, in: dirs.sounds) == nil)
+
+        #expect(try contents(dirs.sounds.appendingPathComponent("TBD-notification.aiff")) == "good")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dirs.sounds.path)
+        #expect(leftovers == ["TBD-notification.aiff"])
+    }
+
+    @Test func systemSoundNameStagesFromSystemSounds() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let path = NotificationSoundPlayer.systemSoundPath(named: "Blow")
+        #expect(path == "/System/Library/Sounds/Blow.aiff")
+        // Every macOS install ships Blow.aiff; skip the copy check if a
+        // stripped-down runner does not.
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
+        let name = NotificationSoundPlayer.stageCustomSound(atPath: path, role: .error, in: dirs.sounds)
+
+        #expect(name == "TBD-error-notification.aiff")
+        #expect(FileManager.default.contentsEqual(
+            atPath: path, andPath: dirs.sounds.appendingPathComponent("TBD-error-notification.aiff").path))
     }
 
     @Test func removeStagedSoundsLeavesOtherRolesAndUserFiles() throws {

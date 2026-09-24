@@ -32,9 +32,12 @@ final class NotificationSoundPlayer {
         case .none:
             return nil
         case .named(let name):
-            // A custom sound this role staged earlier is no longer in use.
-            Self.removeStagedSounds(role: role, keeping: nil, in: soundsDir)
-            return UNNotificationSound(named: UNNotificationSoundName(name))
+            // `UNNotificationSound(named:)` is only documented to search the
+            // app bundle and Library/Sounds, not /System/Library/Sounds, so a
+            // system sound is staged exactly like a custom one.
+            let path = Self.systemSoundPath(named: name)
+            guard let staged = Self.stageCustomSound(atPath: path, role: role, in: soundsDir) else { return .default }
+            return UNNotificationSound(named: UNNotificationSoundName(staged))
         case .custom(let path):
             guard let staged = Self.stageCustomSound(atPath: path, role: role, in: soundsDir) else { return .default }
             return UNNotificationSound(named: UNNotificationSoundName(staged))
@@ -85,32 +88,49 @@ final class NotificationSoundPlayer {
             .appendingPathComponent("Library/Sounds", isDirectory: true)
     }
 
+    /// Pure: where the picker's system sound names live on disk.
+    nonisolated static func systemSoundPath(named name: String) -> String {
+        "/System/Library/Sounds/\(name).aiff"
+    }
+
     /// Pure: the file name a role's custom sound is staged under. The source
     /// extension is kept because the system uses it to decode the file.
     nonisolated static func stagedSoundFileName(role: StagedSoundRole, sourcePath: String) -> String {
         role.rawValue + "." + (sourcePath as NSString).pathExtension.lowercased()
     }
 
-    /// Copy the picked file into `soundsDir` under the role's fixed name,
+    /// Copy the sound file into `soundsDir` under the role's fixed name,
     /// replacing it whenever its contents differ from the source, and return
-    /// that name, or nil when the copy fails. The role's staged files in other
-    /// formats are removed, so each role leaves at most one file behind; the
-    /// cleanup is this function and `removeStagedSounds`, run on every post.
+    /// that name, or nil when the copy fails. The new copy is written to a
+    /// temporary name and swapped in, so a failed copy leaves the previous
+    /// staged file in place. The role's staged files in other formats are
+    /// removed, so each role leaves at most one file behind; this function is
+    /// the reconciler for those files and runs on every post.
     @discardableResult
     nonisolated static func stageCustomSound(atPath path: String, role: StagedSoundRole, in soundsDir: URL) -> String? {
         let fm = FileManager.default
         let stagedName = stagedSoundFileName(role: role, sourcePath: path)
         let destination = soundsDir.appendingPathComponent(stagedName)
         do {
-            if fm.fileExists(atPath: destination.path) {
-                if fm.contentsEqual(atPath: path, andPath: destination.path) {
-                    removeStagedSounds(role: role, keeping: stagedName, in: soundsDir)
-                    return stagedName
-                }
-                try fm.removeItem(at: destination)
+            if fm.fileExists(atPath: destination.path),
+               fm.contentsEqual(atPath: path, andPath: destination.path) {
+                removeStagedSounds(role: role, keeping: stagedName, in: soundsDir)
+                return stagedName
             }
             try fm.createDirectory(at: soundsDir, withIntermediateDirectories: true)
-            try fm.copyItem(at: URL(fileURLWithPath: path), to: destination)
+            // A dot-prefixed temporary name never matches a picker entry.
+            let temporary = soundsDir.appendingPathComponent(".\(stagedName).\(UUID().uuidString).tmp")
+            do {
+                try fm.copyItem(at: URL(fileURLWithPath: path), to: temporary)
+                if fm.fileExists(atPath: destination.path) {
+                    _ = try fm.replaceItemAt(destination, withItemAt: temporary)
+                } else {
+                    try fm.moveItem(at: temporary, to: destination)
+                }
+            } catch {
+                try? fm.removeItem(at: temporary)
+                throw error
+            }
             removeStagedSounds(role: role, keeping: stagedName, in: soundsDir)
             return stagedName
         } catch {
