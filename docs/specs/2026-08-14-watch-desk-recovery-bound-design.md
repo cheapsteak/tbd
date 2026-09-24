@@ -108,8 +108,11 @@ is the same desk terminal the desk's first spawn creates, made by the same
 worktree like every other desk terminal. The recovery gate decides only *whether* that
 call runs.
 
-No reconciler reclaims an abandoned one. `AgentReaper`'s tmux leg reaps only processes
-with no matching row, and these have one. `closeDeskSession` would kill every desk
+No reconciler reclaims an abandoned one while it holds its window. `AgentReaper`'s tmux
+leg does not consult terminal rows: it reaps children of a tmux server that are no live
+pane's process (`findStructuralOrphans`), so a replacement still sitting in its own
+live pane is outside it by construction. Only the narrower case, a replacement process
+that outlives its window, is structural debris that leg does reclaim. `closeDeskSession` would kill every desk
 row's window, but no production path calls it: stopping the mode leaves the desk
 active for review, and the generic scratch archive refuses the desk. So a replacement
 that came up wrong keeps its window and process until someone closes that terminal by
