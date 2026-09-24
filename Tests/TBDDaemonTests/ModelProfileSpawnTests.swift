@@ -1789,71 +1789,103 @@ struct ModelProfileSpawnTests {
 
     // MARK: - Login sessions (Settings → "Open login session")
 
-    /// Mutable pane-text holder so tests can drive what the auto-login pump
-    /// "sees" in the (dry-run) tmux pane.
-    final class PaneTextBox: @unchecked Sendable {
+    /// Pane text mimicking Claude's interactive, logged-out idle state — the
+    /// screen a tab that typed `/login` for the person would have acted on.
+    static let readyPaneText = "Not logged in · Run /login\n❯"
+
+    /// Counts every pane capture the dry-run tmux serves.
+    final class CaptureCounter: @unchecked Sendable {
         private let lock = NSLock()
-        private var _text = ""
-        var text: String {
+        private var _count = 0
+        var count: Int {
             lock.lock(); defer { lock.unlock() }
-            return _text
+            return _count
         }
-        func set(_ value: String) {
+        func record() {
             lock.lock(); defer { lock.unlock() }
-            _text = value
+            _count += 1
         }
     }
 
-    /// Pane text mimicking Claude's interactive, logged-out idle state.
-    static let readyPaneText = "Not logged in · Run /login\n❯"
-    /// Pane text mimicking the /login method picker.
-    static let loginDialogPaneText = "Login\nSelect login method:"
+    /// Every delta the router broadcast, decoded.
+    final class DeltaRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _deltas: [StateDelta] = []
+        var profilesChangedCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return _deltas.filter {
+                if case .modelProfilesChanged = $0 { return true }
+                return false
+            }.count
+        }
+        func record(_ delta: StateDelta) {
+            lock.lock(); defer { lock.unlock() }
+            _deltas.append(delta)
+        }
+    }
 
-    /// Fixture whose LoginSessionCoordinator delays are test-tuned (fast
-    /// pump, fast-expiring identity watcher so tests don't leave 30-minute
-    /// poll tasks behind) and whose dry-run tmux serves pane text from the
-    /// returned PaneTextBox.
-    private func makeLoginFixture() -> (RPCRouter, TBDDatabase, TmuxRecorder, PaneTextBox) {
+    private struct LoginFixture {
+        let router: RPCRouter
+        let db: TBDDatabase
+        let tmux: TmuxRecorder
+        let captures: CaptureCounter
+        let deltas: DeltaRecorder
+        let configDirManager: ClaudeProfileConfigDirManager
+    }
+
+    /// Fixture whose identity watcher is test-tuned (fast poll, bounded life so
+    /// tests don't leave 30-minute poll tasks behind), whose dry-run tmux
+    /// serves a pane that is ready for `/login` and counts every capture of
+    /// it, and whose broadcasts are recorded.
+    private func makeLoginFixture() -> LoginFixture {
         let recorder = TmuxRecorder()
-        let pane = PaneTextBox()
+        let captures = CaptureCounter()
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { args in recorder.record(args) },
-            dryRunCapturePane: { _, _ in pane.text }
+            dryRunCapturePane: { _, _ in
+                captures.record()
+                return Self.readyPaneText
+            }
         )
         let db = try! TBDDatabase(inMemory: true)
+        let configDirManager = isolatedConfigDirManager()
+        let subscriptions = StateSubscriptionManager()
+        let deltas = DeltaRecorder()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.record(delta)
+            }
+            return true
+        }
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: isolatedConfigDirManager())
+            configDirManager: configDirManager)
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
+            subscriptions: subscriptions,
             usageFetcher: StubClaudeUsageFetcher(),
-            configDirManager: isolatedConfigDirManager(),
+            configDirManager: configDirManager,
             loginSessions: LoginSessionCoordinator(delays: .init(
-                pumpInitialDelay: .zero,
-                pumpPollInterval: .milliseconds(5),
-                // Wide enough that a test can observe a send and flip the
-                // pane to the dialog BEFORE the pump's verify re-read —
-                // otherwise the happy path races into a retry.
-                pumpPostSendDelay: .milliseconds(500),
-                pumpTimeout: .seconds(5),
                 identityPollInterval: .milliseconds(5),
-                identityPollTimeout: .milliseconds(50)
+                identityPollTimeout: TestDeadlines.saturatedPass
             )),
             actuationLog: makeTestActuationLog()
         )
-        return (router, db, recorder, pane)
+        return LoginFixture(
+            router: router, db: db, tmux: recorder, captures: captures,
+            deltas: deltas, configDirManager: configDirManager)
     }
 
     /// Poll until `condition` is true or `timeout` elapses.
     ///
     /// The deadline is the shared saturated-pass budget, not a literal: what it
-    /// waits for is produced by the coordinator's own detached pump task, which
-    /// runs on the cooperative pool behind the whole fast pass regardless of
-    /// how the test was started (`gateHoldingTask` in
+    /// waits for is produced by the coordinator's own detached watcher task,
+    /// which runs on the cooperative pool behind the whole fast pass regardless
+    /// of how the test was started (`gateHoldingTask` in
     /// `Tests/TestSupport/BoundedGateSupport.swift`). Five seconds is far below
     /// that pass's healthy per-test latency.
     private func waitFor(
@@ -1882,7 +1914,8 @@ struct ModelProfileSpawnTests {
     /// profileID persisted on the DB row.
     @Test("login session: label=login, profileID persisted, config dir inline-exported")
     func loginSessionSpawn() async throws {
-        let (router, db, recorder, _) = makeLoginFixture()
+        let fixture = makeLoginFixture()
+        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Login")
@@ -1910,15 +1943,15 @@ struct ModelProfileSpawnTests {
     }
 
     /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
-    /// normal Claude Code label and does not auto-type /login even when the
-    /// pane looks ready for it.
+    /// normal Claude Code label and types nothing, even when the pane looks
+    /// ready for `/login`.
     @Test("login session flag off: label stays Claude Code, no /login typed")
     func loginSessionFlagOff() async throws {
-        let (router, db, recorder, pane) = makeLoginFixture()
+        let fixture = makeLoginFixture()
+        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Plain")
-        pane.set(Self.readyPaneText)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -1930,14 +1963,15 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.label == TerminalLabel.claudeCode)
 
-        // No pump was armed — nothing may type /login.
+        // Nothing may type /login.
         try? await Task.sleep(for: .milliseconds(100))
         #expect(!recorder.joinedAll.contains("/login"))
     }
 
     @Test("login session: missing/unknown profile fails loud, no window spawned")
     func loginSessionUnknownProfile() async throws {
-        let (router, db, recorder, _) = makeLoginFixture()
+        let fixture = makeLoginFixture()
+        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -1957,7 +1991,8 @@ struct ModelProfileSpawnTests {
 
     @Test("login session: requires overrideProfileID")
     func loginSessionRequiresProfile() async throws {
-        let (router, db, _, _) = makeLoginFixture()
+        let fixture = makeLoginFixture()
+        let (router, db) = (fixture.router, fixture.db)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -1969,78 +2004,72 @@ struct ModelProfileSpawnTests {
         #expect(resp.error?.contains("require a profile") == true)
     }
 
-    /// End-to-end pump behavior through the handler: the spawn arms the
-    /// verified auto-login pump, which waits for the pane to become
-    /// interactive, types `/login` + Enter, and stops once the login dialog
-    /// is visible — exactly one send in the happy path.
-    @Test("login session: pump types /login + Enter once the pane is ready, exactly once")
-    func loginSessionAutoTypesWhenReady() async throws {
-        let (router, db, recorder, pane) = makeLoginFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let profile = try await seedOAuthProfile(db, name: "AutoLogin")
+    /// A login tab is left to the person: the daemon neither reads the pane
+    /// nor types into it, even when the pane already shows the logged-out
+    /// footer hint. The badge-flip test below is the positive leg — the same
+    /// spawn does arm the identity watcher.
+    @Test("login session: the pane is never read and nothing is typed into it")
+    func loginSessionTypesNothing() async throws {
+        let fixture = makeLoginFixture()
+        defer { Task { await cleanup(fixture.db) } }
+        let (_, wt) = try await seedRepoAndWorktree(fixture.db)
+        let profile = try await seedOAuthProfile(fixture.db, name: "Manual")
 
-        let createResp = await router.handle(try RPCRequest(
+        let resp = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(
                 worktreeID: wt.id, type: .claude,
                 overrideProfileID: profile.id, loginSession: true
             )
         ))
-        let term = try createResp.decodeResult(Terminal.self)
+        #expect(resp.success, "\(resp.error ?? "")")
+        let term = try resp.decodeResult(Terminal.self)
+        #expect(term.label == TerminalLabel.login)
 
-        // Pane still booting — no sends yet.
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(!recorder.joinedAll.contains("send-keys"))
-
-        // Claude becomes interactive → the pump types /login + Enter.
-        pane.set(Self.readyPaneText)
-        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -l -t \(term.tmuxPaneID) /login") }))
-        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -t \(term.tmuxPaneID) Enter") }))
-
-        // The dialog appears → verified; the pump must stop at one send.
-        pane.set(Self.loginDialogPaneText)
-        try? await Task.sleep(for: .milliseconds(100))
-        let loginSends = recorder.calls.filter { $0.contains("/login") && $0.contains("send-keys") }.count
-        #expect(loginSends == 1)
+        // Anything armed by the spawn has had the whole window to act on a
+        // pane that is ready for it.
+        #expect(!(await waitFor({
+            fixture.captures.count > 0
+                || fixture.tmux.calls.contains { $0.contains("send-keys") || $0.contains("paste-buffer") }
+        }, timeout: .milliseconds(300))))
+        #expect(fixture.captures.count == 0, "the login pane was read")
+        #expect(
+            !fixture.tmux.calls.contains { $0.contains("send-keys") },
+            "keys were sent into the login pane: \(fixture.tmux.calls)")
+        #expect(!fixture.tmux.joinedAll.contains("/login"))
     }
 
-    /// If the first /login lands before Claude's input loop consumes pty
-    /// input (send swallowed, dialog never appears), the pump verifies and
-    /// re-sends instead of giving up — the exact failure observed live with
-    /// fixed-delay sends.
-    @Test("login session: pump re-sends when the first /login is swallowed")
-    func loginSessionPumpRetries() async throws {
-        let (router, db, recorder, pane) = makeLoginFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let profile = try await seedOAuthProfile(db, name: "Retry")
-        pane.set(Self.readyPaneText)  // ready, but sends get "swallowed"
+    /// The identity watcher is what a login tab still arms: once the profile's
+    /// isolated `.claude.json` gains an `oauthAccount`, the daemon broadcasts
+    /// `.modelProfilesChanged` so the Settings badge flips to "Logged in as …".
+    @Test("login session: the badge refresh fires when the profile's credential appears")
+    func loginSessionIdentityWatcherBroadcasts() async throws {
+        let fixture = makeLoginFixture()
+        defer { Task { await cleanup(fixture.db) } }
+        let (_, wt) = try await seedRepoAndWorktree(fixture.db)
+        let profile = try await seedOAuthProfile(fixture.db, name: "Badge")
 
-        let createResp = await router.handle(try RPCRequest(
+        let resp = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(
                 worktreeID: wt.id, type: .claude,
                 overrideProfileID: profile.id, loginSession: true
             )
         ))
-        let term = try createResp.decodeResult(Terminal.self)
-        let sendMarker = "send-keys -l -t \(term.tmuxPaneID) /login"
+        #expect(resp.success, "\(resp.error ?? "")")
+        let baseline = fixture.deltas.profilesChangedCount
 
-        // First send happens…
-        #expect(await waitFor({ recorder.joinedAll.contains(sendMarker) }))
-        // …dialog still absent → the pump retries.
-        #expect(await waitFor({
-            recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count >= 2
-        }))
+        // Not logged in yet — the watcher is polling and has nothing to say.
+        #expect(fixture.configDirManager.loginIdentity(forProfileID: profile.id) == nil)
 
-        // Once the dialog shows, the pump stops retrying.
-        pane.set(Self.loginDialogPaneText)
-        try? await Task.sleep(for: .milliseconds(100))
-        let after = recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count
-        try? await Task.sleep(for: .milliseconds(100))
-        let final = recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count
-        #expect(final == after)
+        // The person completes `/login`: Claude writes the account into the
+        // profile's isolated config dir.
+        let configDir = fixture.configDirManager.configDirectory(forProfileID: profile.id)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let claudeJSON = #"{"oauthAccount":{"emailAddress":"person@acme.example"}}"#
+        try Data(claudeJSON.utf8).write(to: configDir.appendingPathComponent(".claude.json"))
+
+        #expect(await waitFor({ fixture.deltas.profilesChangedCount > baseline }))
     }
 }
 }

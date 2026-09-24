@@ -14,11 +14,6 @@ import TBDShared
 //    the Escape/C-c and the SIGTERM inside a hibernate, the interrupt inside
 //    a profile swap, the paste-then-Enter inside a send — one row per
 //    actuation-level intent, at the moment the intent is acted on.
-//    The auto-`/login` pump a login spawn arms (`armLoginSession`) is a
-//    sub-step too, even though its `/login` paste lands seconds later: the
-//    operator asked for one thing — a session logged into this profile — and
-//    the typing is how the spawn finishes, not a second intent. When the
-//    observed rung lands it will confirm that spawn's row, not open a new one.
 //
 // Two layers write, and only two: the **RPC handler** for anything a caller
 // asked for, and a **rail's own entry point** for anything the daemon started

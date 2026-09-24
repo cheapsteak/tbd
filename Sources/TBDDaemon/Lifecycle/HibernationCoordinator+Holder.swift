@@ -180,10 +180,9 @@ extension HibernationCoordinator {
     /// says which store is rendering live, and `contentObserved` says whether
     /// that store's grid was ever painted by this child.
     ///
-    /// The decision itself lives in `HolderScreenEvidence`, so the park, the
-    /// idle sweep and the auto-`/login` pump cannot disagree about which
-    /// screens are judgeable; what this method adds is the hibernation wording
-    /// for each answer.
+    /// The decision itself lives in `HolderScreenEvidence`, so the park and the
+    /// idle sweep cannot disagree about which screens are judgeable; what this
+    /// method adds is the hibernation wording for each answer.
     static func holderRefusal(
         forScreenSource source: TerminalScreen.Source, contentObserved: Bool
     ) -> String? {

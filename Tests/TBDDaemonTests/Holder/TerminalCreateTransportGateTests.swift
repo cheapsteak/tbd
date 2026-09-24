@@ -104,14 +104,9 @@ struct TerminalCreateTransportGateTests {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
-            // The login-session case below arms the auto-`/login` pump against
-            // the dry-run tmux; on the router's default delays it would poll
-            // an empty pane for the rest of the run.
+            // The login-session case below arms the identity watcher; on the
+            // router's default delays it would poll for half an hour.
             loginSessions: LoginSessionCoordinator(delays: .init(
-                pumpInitialDelay: .zero,
-                pumpPollInterval: .milliseconds(5),
-                pumpPostSendDelay: .milliseconds(5),
-                pumpTimeout: .milliseconds(50),
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50))),
             actuationLog: makeTestActuationLog())
@@ -262,9 +257,7 @@ struct TerminalCreateTransportGateTests {
     // MARK: - The login tab takes the decided transport
 
     /// The profile login tab is not pinned: with the flag on it takes the
-    /// holder path like every other spawn, and its auto-`/login` pump reads
-    /// the daemon's emulator and types through the injection courier instead
-    /// of capturing a pane.
+    /// holder path like every other spawn.
     ///
     /// With a spawner that cannot start anything, the failure IS the proof:
     /// a login tab that had stayed on tmux would have succeeded here.

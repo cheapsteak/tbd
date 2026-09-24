@@ -167,7 +167,7 @@ struct ModelProfileRow: View {
                         .disabled(appState.selectedWorktree == nil)
                         .help(appState.selectedWorktree == nil
                               ? "Select a worktree in the main window first"
-                              : "Open a Claude session with this profile — /login is typed for you")
+                              : "Open a Claude session with this profile, then run /login in it")
                     }
                 } else {
                     Text(caption)

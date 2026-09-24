@@ -109,8 +109,7 @@ public struct TmuxManager: Sendable {
     public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
     /// Optional test hook consulted by `capturePaneOutput` and
     /// `capturePaneWithAnsi` in dryRun mode:
-    /// (server, paneID) → pane text. Without it, dryRun captures return "",
-    /// which reads as "pane not ready" to the auto-login pump.
+    /// (server, paneID) → pane text. Without it, dryRun captures return "".
     public let dryRunCapturePane: (@Sendable (String, String) -> String)?
     /// Optional test hook consulted by `listWindows` in dryRun mode:
     /// `(server, session)` → the window/pane pairs to report. Without it,
