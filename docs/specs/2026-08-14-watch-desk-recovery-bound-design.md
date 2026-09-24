@@ -118,8 +118,8 @@ that names it.
 
 That gap is not introduced by the bound. Without it the same call ran on every tick
 with no limit. The bound turns that unbounded accumulation into at most three per
-incident, and the exhaustion notification is what tells a human there is debris to
-close. A reconciler for desk replacements that have been proven absent is deliberately
+incident, and the exhaustion notification brings a human to the desk, where the
+leftover terminals are visible and can be closed. A reconciler for desk replacements that have been proven absent is deliberately
 deferred as follow-up work; this design does not provide one.
 
 ## Rejected alternatives
