@@ -72,9 +72,11 @@ source is absent:
   known keys first (`account`, `environment`, `region`, `box`, `host`,
   `endpoint`) in that order, then every other key alphabetically. Rendered
   opaquely: TBD interprets nothing but the ordering.
-- **Command** — the registry entry's `exec` (tilde-abbreviated) and args.
-  This is the disambiguator that is always available with no contract change:
-  two entries pointing at the same binary almost always differ in their flags.
+- **Command** — the registry entry's `exec` (tilde-abbreviated) and its
+  first argument, with every later argument redacted (see "Redacting the
+  command line"). A reminder of what the entry runs, not a disambiguator: the
+  registry key already tells two entries apart, and `describe.identity` names
+  the backend each one is pointed at.
 - **Version** — `provider_version` and the negotiated contract major.
 
 #### `describe.identity` (new, optional, additive)
@@ -99,113 +101,53 @@ the secret vocabulary (`token`, `secret`, `password`, `passwd`, `key`,
 `credential`, `auth`, `session_token`, `signature`, `cookie`) is dropped
 entirely rather than shown, and a rendered value is truncated to 96
 characters. The filter is TBD's, not the contract's — a provider violating the
-contract should not be able to put a bearer token on a user's screen, and the
-same filter runs over registry args, which are user-authored and outside the
-contract's reach altogether.
+contract should not be able to put a bearer token on a user's screen. Registry
+args, which are user-authored and outside the contract's reach altogether, get
+a stricter rule of their own, below.
 
 #### Redacting the command line
 
 The **Command** row shows the registry entry's args, which are user-authored
-and can carry credentials the contract never sees. They pass through an argv
-redactor before rendering. The row is display text and decides nothing, so
-every rule below fails toward redaction: an over-redacted argument costs a
-line of context, and a shown secret costs the secret.
+and can carry credentials the contract never sees. The rule is positional: the
+row shows the command name and the first argument, and redacts every argument
+after it, one `‹redacted›` marker per argument, so the count of arguments stays
+visible while none of their contents do. A redacted value never renders as a
+prefix of itself, because a prefix of a secret is still part of the secret.
 
-A redacted value renders as `‹redacted›`, never as a prefix of itself, because
-a prefix of a secret is still part of the secret. The redactor handles four
-shapes:
+The first argument is the one position where a flag name can be shown safely,
+because nothing precedes it whose value it could be. It still hides a value
+riding inside it:
 
-- **`--flag=value`** – the value is redacted when the flag name matches the
-  secret vocabulary above. Otherwise the value is still judged on its own by
-  the positional heuristic below, so a secret cannot slip through behind an
-  unrecognized flag name such as `--bearer=`.
-- **Glued short flag** – every single-dash argument longer than two
-  characters with no `=` is read as `-X` followed by its value, and `-X` is
-  always kept. The value is redacted when `X` is a short credential alias,
-  when the value or the whole argument matches the secret vocabulary, or when
-  the value passes the positional heuristic below; otherwise the argument is
-  shown verbatim (`-v2`, `-ofile.txt`). So `-uuser:pass`, `-oMyApiToken123`
-  and `-Hghp_…` all render as `-X‹redacted›`, and an alias letter redacts any
-  glued value, so `-p8080` is redacted even when it is a port. That is the
-  accepted over-redaction. A glued flag has consumed its value and does not
-  redact the next argument, with one exception: a name made only of letters,
-  `-` and `_` that matches the secret vocabulary, in any case (`-token`,
-  `-api-key`, `-Token`, `-API-KEY`), is also how Go-style single-dash long
-  flags are written, with the value in the next argument, so both are
-  redacted. Case is ignored here as it is for the vocabulary match itself.
-  Because a single-dash name read as a Go-style long flag also redacts the
-  next argument, a glued secret after a capital letter (`-AghSecretValue`)
-  can over-redact its neighbour; that is deliberate, since over-redaction
-  costs context and never leaks. An alias letter keeps this shape even when an `=`
-  follows, and everything after `-X` is redacted, so `-pfoo=bar` renders as
-  `-p‹redacted›`. Any other single-dash argument with an `=`, such as a JVM
-  `-Dkey=value`, is the `--flag=value` shape instead: its key and value are
-  judged there.
-- **`--flag value`** – only a bare flag name redacts the next argument:
-  `--name` with no `=`, or exactly `-X`, judged on the name alone against the
-  secret vocabulary and the short aliases. A next argument that starts with
-  `-` is a flag, not the value: it is judged by these same rules in turn, so
-  `--token --password hunter2` still redacts `hunter2`.
-- **Bare positional** – an argument with no dash is redacted when it looks
-  like a secret, by the heuristic below. A dash-less `KEY=value`, such as an
-  env-style `TOKEN=abc123`, is first judged like `--flag=value`: its value is
-  redacted when the key matches the secret vocabulary or the value passes the
-  heuristic, and the key is kept. Dash-prefixed arguments that reach
-  this point are ordinary flags such as `--use-http2-multiplexing` and pass
-  through.
+- **`=` shape** – with an `=` (`--token=abc`, `-Dkey=value`, an env-style
+  `TOKEN=abc`), the part before the first `=` is kept and the rest is
+  redacted, whatever the name.
+- **Glued short flag** – a single-dash argument longer than two characters
+  (`-tabc`, `-uuser:pass`) is read as `-X` with its value glued on; `-X` is
+  kept and the rest is redacted.
 
-The short credential aliases are `t`, `p`, `k` and `u`: token, password, key,
-and curl's `user:password`. They are matched exactly, never as substrings,
-because a one-letter substring would match almost every flag. The vocabulary
-substrings cannot catch them, since a one-letter flag cannot contain a word.
-The set is short on purpose. Each extra letter redacts every glued use of it,
-and these four are the ones that conventionally carry a credential. A glued
-flag under any other letter is still caught by its value or its whole
-argument, so the set does not need to grow to close a leak.
+Anything else in first position, a bare flag name or a bare word such as a
+subcommand, is shown verbatim. So `agentbox --control-plane staging` renders
+as `agentbox --control-plane ‹redacted›`.
 
-The positional heuristic checks, in order:
+**The trade.** The argv display is a convenience, and a leak is its only real
+cost. Telling two registrations of the same kind apart is the registry key's
+job, which is unique by construction, and "which backend is this entry
+pointed at" is what `describe.identity` exists to answer. What the rule gives
+up is reading a value such as `staging` off the desk. It deliberately does not
+try to tell a secret from an ordinary value: no argv rule can decide that in
+general, since a flag's value may itself begin with `-`, may be letters-only,
+or may be any length, and any rule that judges shape is one shape away from
+showing a credential. The rule does not show flag names after the first
+argument either, because by position alone a flag name cannot be told apart
+from a dash-prefixed value. This follows the fixed-position approach the
+daemon already takes for tmux argv in `TmuxManager.redactedArguments`, which
+hides the operand of tmux's `-e` by structure rather than by what the value
+looks like.
 
-- **Known prefixes** – 16 case-sensitive token prefixes (`sk-`, `sk_live_`,
-  `sk_test_`, five `gh?_` forms, `github_pat_`, five `xox?-` Slack forms,
-  `AKIA`, and `eyJ` for a JWT header) redact regardless of length. A vendor
-  prefix is a stronger signal than any shape test, and a short live key must
-  not escape on length.
-- **20-character floor** – shorter arguments are not treated as secrets.
-  Generated tokens without a known prefix are almost always 20+ characters,
-  while worktree names, branch names, hosts and ports sit well below that, so
-  this floor keeps ordinary args readable.
-- **500-character cap** – longer arguments are treated as pasted text or a
-  document, not a token. Real tokens, JWTs included, are far shorter than this.
-- **Paths and UUIDs pass** – anything starting with `/` or `~`, and anything
-  shaped like a UUID. Both are long and high-entropy, and neither is a
-  credential.
-- **Letters and digits both present** – a random token mixes them. An
-  all-letter or all-digit string is a word, a name, or a number.
-- **Repetition guard** – more than five identical characters in a row means
-  padding or filler, not a random token.
-- **Version strings pass** – every dot-separated segment is numeric, allowing
-  an optional leading `v`. The check looks at segment shape, not dot count,
-  because dot-segmented tokens such as Discord bot tokens and PASETO tokens are
-  just as dotted and must still be redacted.
-
-Anything that survives all of these is redacted.
-
-These checks leave four documented limits. A secret with no known prefix is
-shown when it matches none of the flag rules above and is:
-
-- **All letters** – letters-only strings are ordinary words and subcommands,
-  and redacting them would hide most of a readable command line.
-- **All digits** – digits-only strings are ports, counts and ids, and
-  redacting them would hide those too.
-- **Under 20 characters** – below the floor, branch names, worktree names and
-  other short args would be redacted too.
-- **Over 500 characters** – past the cap, pasted blobs and long paths would be
-  redacted too.
-
-A credential of one of these shapes is caught only when a secret-named flag
-carries it, so the redactor keeps every credential it recognizes off the
-screen, not every credential. The tests pin these limits so they cannot widen
-unnoticed.
+One residual remains by construction: a credential placed bare in first
+position, with no flag before it, is shown. A registry entry whose first
+argument is a secret should move it behind a flag or into the provider's own
+configuration.
 
 Rendered identity values, though not command args, are cut at 96 characters.
 Identity values are account ids, region names and box handles, so anything

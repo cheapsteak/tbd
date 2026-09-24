@@ -121,9 +121,9 @@ public struct ProviderIdentityPair: Sendable, Equatable, Identifiable {
 /// The contract already says `describe.identity` carries display identity and
 /// never credential material, and this filter does not exist because that
 /// rule is doubted — it exists because the rule cannot be enforced from
-/// TBD's side of the process boundary, and because the SAME filter runs over
-/// the registry entry's own argv, which is user-authored and outside the
-/// contract's reach altogether.
+/// TBD's side of the process boundary. The registry entry's own argv is
+/// user-authored and outside the contract's reach altogether, so it gets the
+/// stricter positional rule in `redactArguments` instead of this key filter.
 ///
 /// Fail-safe by design: a key is dropped on a substring match, so `monkey`
 /// loses to `key`. Losing a display pair costs one line of context; showing a
@@ -153,22 +153,8 @@ public enum ProviderIdentityRedaction {
     /// prefix: a prefix of a secret is still a piece of a secret.
     public static let redactedPlaceholder = "‹redacted›"
 
-    /// Single-letter short-flag aliases that conventionally take a credential
-    /// as their value, matched EXACTLY (never as a substring — `t` alone
-    /// would otherwise swallow every flag with a `t` anywhere in it, like
-    /// `--format`). `secretKeySubstrings` above can never catch these: a
-    /// one-letter flag can't contain a five-letter word. Deliberately short
-    /// rather than exhaustive: token, password, key, and `u` for curl's
-    /// `-u user:password`, whose value carries the password. `-p` in
-    /// particular collides with "port"/"profile" in plenty of real CLIs, but
-    /// per this type's own bias (a lost display pair costs a line of context;
-    /// a shown secret costs the secret), redacting an occasional port number
-    /// is the correct side to be wrong on.
-    public static let shortSecretFlagAliases: Set<String> = ["t", "p", "k", "u"]
-
     public static func isSecretKey(_ key: String) -> Bool {
         let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
-        if shortSecretFlagAliases.contains(normalized) { return true }
         return secretKeySubstrings.contains { normalized.contains($0) }
     }
 
@@ -191,334 +177,47 @@ public enum ProviderIdentityRedaction {
         return kept
     }
 
-    /// A registry entry's argv, safe to show.
+    /// A registry entry's argv, safe to show: the first argument, and one
+    /// `redactedPlaceholder` for every argument after it.
     ///
-    /// Four shapes carry a secret on a command line, and all are handled:
-    /// `--token=abc` (the value rides the same argument as the flag),
-    /// `-tabc` (a short flag with its value glued on, as in curl's
-    /// `-uuser:pass`), `--token abc` (the value is the NEXT argument), and a
-    /// bare positional argument that looks like a secret (no preceding flag,
-    /// but the argument itself has characteristics of a token or API key).
-    /// The last two are why this takes the whole list — an argument is only
-    /// judged in the company of what precedes it and in its own
-    /// characteristics.
+    /// Positional, not a judgement of what a secret looks like. No argv rule
+    /// can decide in general whether `--env x` or `-Xk3mZ9…` is a value or a
+    /// credential, and every heuristic that tried was one argument shape away
+    /// from a leak. What this line is for — telling two registrations apart —
+    /// the registry key already does, and "which backend is this pointed at"
+    /// is `describe.identity`'s job, so the argv display is a convenience and
+    /// a leak is its only real cost. `TmuxManager.redactedArguments` takes the
+    /// same stance for tmux argv: a structural rule, never a scan for shapes.
     ///
-    /// Every single-dash argument longer than two characters with no `=` is
-    /// read as a glued short flag: `-X` followed by its value. `-X` is always
-    /// kept. When `X` is one of `shortSecretFlagAliases` the same holds even
-    /// with an `=`, and everything after `-X` is redacted (`-pfoo=bar` renders
-    /// as `-p‹redacted›`); any other single-dash argument with an `=`
-    /// (`-Dkey=value`) takes the `=` shape. The value is redacted when `X` is
-    /// an alias, when the value or the whole argument matches
-    /// the secret vocabulary, or when the value looks like a secret on its
-    /// own; otherwise the argument is shown verbatim (`-v2`, `-ofile.txt`).
-    /// A glued flag has consumed its value, so it does not redact the next
-    /// argument. The one exception is a letters-only name, in any case, that
-    /// matches the secret vocabulary (`-token`, `-API-KEY`): that is also how Go-style
-    /// single-dash long flags are spelled, whose value is the NEXT argument,
-    /// so both the remainder and the next argument are redacted.
+    /// The first argument is the one place a flag name can be shown, because
+    /// only there is it certainly not the previous flag's value. It still
+    /// hides any value riding inside it:
     ///
-    /// These rules over-redact by design. An alias letter redacts any glued
-    /// value, so `-p8080` renders as `-p‹redacted›` whether the `8080` is a
-    /// port or a password. This is display text, so a hidden port costs a
-    /// line of context, while a shown password costs the password.
+    /// - With an `=` (`--token=abc`, `-Dkey=value`, `TOKEN=abc`), the part
+    ///   before the first `=` is kept and everything after it is redacted.
+    /// - A single-dash argument longer than two characters (`-tabc`,
+    ///   `-uuser:pass`) is read as a short flag `-X` with its value glued on:
+    ///   `-X` is kept and the rest is redacted.
     ///
-    /// Only a bare flag name redacts the next argument: `--name` with no
-    /// `=`, or exactly `-X`, judged on the flag name alone.
-    ///
-    /// A dash-less `KEY=value` (`TOKEN=abc123`) is judged like `--flag=value`
-    /// first: a secret-named key or a secret-shaped value hides the value.
-    ///
-    /// For bare positional arguments, detection is heuristic: well-known secret
-    /// prefixes (e.g. `sk-`, `github_pat_`, `AKIA`) are redacted immediately,
-    /// and other arguments are redacted if they are long and high-entropy
-    /// enough to plausibly be a token. The heuristic is conservative (biased
-    /// toward redacting) to avoid leaking real credentials. Ordinary short
-    /// identifiers, paths, branch names, port numbers, and semver strings are
-    /// not redacted.
+    /// Anything else in first position — a bare flag name or a bare word such
+    /// as a subcommand — is shown verbatim.
     ///
     /// Never used to decide anything; the result is display text only.
     public static func redactArguments(_ args: [String]) -> [String] {
-        var out: [String] = []
-        var redactNext = false
-        for arg in args {
-            if redactNext {
-                redactNext = false
-                // A flag never counts as the previous flag's value: `--token
-                // --verbose` means the token was simply not supplied here.
-                // Such a flag is then judged like any other argument, so the
-                // checks below still catch `--token --password hunter2` and
-                // `--token --secret=…`.
-                if !arg.hasPrefix("-") {
-                    out.append(redactedPlaceholder)
-                    continue
-                }
-            }
-            // Glued short flag: `-tSECRET`, `-oMyApiToken123`, `-uuser:pass`.
-            // One argv element with no `=`, so neither the `=` shape nor the
-            // arming check below can see the value inside it. Checked before
-            // both, because the whole string can itself contain a secret word
-            // and would otherwise arm the NEXT argument while this one went
-            // out verbatim.
-            if let glued = gluedShortFlag(arg) {
-                if glued.redactValue {
-                    out.append("-\(glued.letter)\(redactedPlaceholder)")
-                } else {
-                    out.append(arg)
-                }
-                redactNext = glued.mayBeLongFlagName
-                continue
-            }
-            if let separator = arg.firstIndex(of: "="), arg.hasPrefix("-") {
-                let flag = String(arg[arg.startIndex..<separator])
-                if isSecretKey(flag) {
-                    out.append("\(flag)=\(redactedPlaceholder)")
-                    continue
-                }
-                // The flag name itself isn't a recognized secret key
-                // (--bearer=…, --pat=…), but the bare-positional and
-                // space-separated shapes below both still judge an
-                // unrecognized value on its own merits — this shape must
-                // too, or a secret-shaped value only ever escapes redaction
-                // by riding an `=`. The flag name is never itself
-                // secret-shaped, so only the value is checked.
-                let value = String(arg[arg.index(after: separator)...])
-                if looksLikeSecret(value) {
-                    out.append("\(flag)=\(redactedPlaceholder)")
-                    continue
-                }
-                out.append(arg)
-                continue
-            }
-            // Only a bare flag name reaches this point with a dash: `--name`
-            // or exactly `-X`. Judged on the name alone, it redacts the next
-            // argument.
-            if arg.hasPrefix("-"), isSecretKey(arg) {
-                out.append(arg)
-                redactNext = true
-                continue
-            }
-            // Last shape: a BARE POSITIONAL argument that looks like a
-            // secret — never one that starts with `-`. An argument this
-            // point is reached for already failed the known-secret-flag
-            // check above, so a dash-prefixed one here is an ordinary flag
-            // this registry entry happens to pass (`--use-http2-multiplexing`
-            // is exactly this shape: long, has a digit, no reason to hide
-            // it). Excluding it is what keeps this heuristic scoped to
-            // values, matching its own doc comment.
-            if !arg.hasPrefix("-") {
-                // A dash-less `KEY=value` (`TOKEN=abc123`, an env-style
-                // assignment) carries the same key-name signal as the
-                // `--flag=value` shape, so it is judged the same way: a
-                // secret-named key hides its value whatever the value's
-                // length, and otherwise the value is judged on its own.
-                if let separator = arg.firstIndex(of: "="), separator != arg.startIndex {
-                    let key = String(arg[arg.startIndex..<separator])
-                    let value = String(arg[arg.index(after: separator)...])
-                    if isSecretKey(key) || looksLikeSecret(value) {
-                        out.append("\(key)=\(redactedPlaceholder)")
-                        continue
-                    }
-                }
-                if looksLikeSecret(arg) {
-                    out.append(redactedPlaceholder)
-                    continue
-                }
-            }
-            out.append(arg)
-        }
-        return out
+        guard let first = args.first else { return [] }
+        let rest = Array(repeating: redactedPlaceholder, count: args.count - 1)
+        return [redactedFirstArgument(first)] + rest
     }
 
-    /// A single-dash argument longer than two characters, read as `-X` plus a
-    /// glued value, or nil for any other shape. With an `=` it is this shape
-    /// only when `X` is an alias; otherwise it belongs to the `=` shape. `redactValue`
-    /// says whether the value must be hidden; `mayBeLongFlagName` marks a
-    /// secret-vocabulary name made only of letters, `-` and `_` (`-token`,
-    /// `-Token`, `-API-KEY`), which may instead be a Go-style long flag whose
-    /// value is the next argument. Case is ignored, as `isSecretKey` ignores it.
-    private static func gluedShortFlag(
-        _ arg: String
-    ) -> (letter: Character, redactValue: Bool, mayBeLongFlagName: Bool)? {
-        guard arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
-        let name = arg.dropFirst()
-        let letter = name[name.startIndex]
-        // An alias letter owns everything after it, `=` included: `-pfoo=bar`
-        // hides `foo=bar`. Any other single-dash argument with an `=`
-        // (`-Dkey=value`) is left to the `=` shape, which judges key and value.
-        let isAlias = shortSecretFlagAliases.contains(letter.lowercased())
-        if arg.contains("="), !isAlias { return nil }
-        let value = String(name.dropFirst())
-        let mayBeLongFlagName = isSecretKey(String(name))
-            && name.lowercased().allSatisfy { ("a"..."z").contains($0) || $0 == "-" || $0 == "_" }
-        let redactValue = isAlias
-            || isSecretKey(value)
-            || isSecretKey(arg)
-            || looksLikeSecret(value)
-        return (letter, redactValue, mayBeLongFlagName)
-    }
-
-    /// Returns true if a bare positional argument has characteristics that
-    /// suggest it is a secret (token, API key, etc.).
-    ///
-    /// Matches well-known secret prefixes (case-sensitive) first, then falls
-    /// back to heuristics for unknown secrets: length, entropy, and character
-    /// composition. Conservative (biased toward redacting) to avoid leaking
-    /// real credentials; false positives cost only display clarity.
-    ///
-    /// Does not redact: short words, paths (starting with / or ~), pure
-    /// lowercase alphabetic strings under ~20 characters, plain numbers,
-    /// semver-looking strings, or UUIDs. UUIDs are not credentials by nature,
-    /// so they are identified and skipped explicitly.
-    ///
-    /// Documented limits (see the spec's "Redacting the command line"): an
-    /// unprefixed secret that is all letters, all digits, under 20
-    /// characters, or over 500 characters is not caught — words, numbers,
-    /// branch names, and blobs or paths.
-    private static func looksLikeSecret(_ arg: String) -> Bool {
-        // Well-known secret prefixes (case-sensitive). These are strong signals
-        // that an argument is a credential, regardless of length or composition.
-        let knownSecretPrefixes = [
-            "sk-",         // Stripe secret key
-            "sk_live_",    // Stripe live secret
-            "sk_test_",    // Stripe test secret
-            "ghp_",        // GitHub personal access token
-            "gho_",        // GitHub OAuth token
-            "ghs_",        // GitHub server-to-server token
-            "ghu_",        // GitHub user-to-server token
-            "ghr_",        // GitHub refresh token
-            "github_pat_", // GitHub PAT (alternative form)
-            "xoxb-",       // Slack bot token
-            "xoxp-",       // Slack user token
-            "xoxa-",       // Slack app token
-            "xoxr-",       // Slack refresh token
-            "xoxs-",       // Slack xoxs token
-            "AKIA",        // AWS access key ID
-            "eyJ",         // JWT (base64url header typically starts with eyJ)
-        ]
-
-        for prefix in knownSecretPrefixes {
-            if arg.hasPrefix(prefix) {
-                return true
-            }
+    /// `arg` with any value riding inside it replaced by the placeholder; see
+    /// `redactArguments` for the two shapes.
+    private static func redactedFirstArgument(_ arg: String) -> String {
+        if let separator = arg.firstIndex(of: "=") {
+            return "\(arg[arg.startIndex..<separator])=\(redactedPlaceholder)"
         }
-
-        // Fallback heuristic for unknown secrets. Be conservative.
-        // A secret typically: is long, contains a mix of letters and digits,
-        // and does not have excessive repetition or look like a normal identifier.
-
-        // Skip short words and common short identifiers
-        if arg.count < 20 {
-            return false // Argument is too short to plausibly be a secret
+        if arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") {
+            return "\(arg.prefix(2))\(redactedPlaceholder)"
         }
-
-        // An implausibly long argument is more likely a path, a pasted
-        // document, or free-form text than a token, so it skips the rest of
-        // the heuristic entirely rather than being judged by it.
-        if arg.count > 500 {
-            return false // Likely a path or document, not a secret
-        }
-
-        // Paths should never be redacted
-        if arg.hasPrefix("/") || arg.hasPrefix("~") {
-            return false
-        }
-
-        // UUIDs are not credentials and should not be redacted. They have a
-        // distinctive pattern: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX where X is
-        // a hex digit. While they satisfy the "high entropy" heuristic, they are
-        // legitimate identifiers, not secrets. Identify via pattern: exactly 36
-        // chars, 4 internal dashes at positions 8, 13, 18, 23, and all other
-        // chars are hex digits.
-        if arg.count == 36 && isUUIDPattern(arg) {
-            return false
-        }
-
-        // Check for basic entropy: needs both letters and digits
-        let hasLetter = arg.contains { $0.isLetter }
-        let hasDigit = arg.contains { $0.isNumber }
-
-        // At least one letter and one digit suggests random composition
-        if !hasLetter || !hasDigit {
-            return false
-        }
-
-        // Check for no excessive repetition of the same character
-        // (tokens often have varied content; padding or repetition suggests otherwise)
-        var maxConsecutive = 1
-        var lastChar: Character? = nil
-        var consecutiveCount = 1
-        for char in arg {
-            if char == lastChar {
-                consecutiveCount += 1
-                maxConsecutive = max(maxConsecutive, consecutiveCount)
-            } else {
-                consecutiveCount = 1
-                lastChar = char
-            }
-        }
-
-        // If more than 5 consecutive identical characters, probably not a secret
-        // (e.g. "aaaaaaa" or "111111" looks more like padding or bad input)
-        if maxConsecutive > 5 {
-            return false
-        }
-
-        // Semver-style version strings (X.Y.Z) are the one common dotted,
-        // long, letter-and-digit-bearing shape that isn't a secret — but
-        // several real dot-segmented token formats are just as dotted and
-        // must NOT get the same pass: a Discord bot token
-        // (`id.timestamp.hmac`) and a PASETO token (`v2.local.payload`)
-        // both carry 2+ dots with no known prefix. The distinguishing
-        // property is that every segment of a real version string is
-        // digits-only (optionally with a leading "v"); a token's segments
-        // are base64/hex-ish and contain letters a version segment never
-        // does. So the carve-out checks segment shape, not just dot count.
-        if isVersionLike(arg) {
-            return false
-        }
-
-        // At this point: 20+ chars, has letters and digits, no excessive repetition,
-        // not a UUID, not a version string. Looks like a plausible secret.
-        return true
-    }
-
-    /// Whether `arg` is shaped like a semantic-version string: at least two
-    /// dot-separated segments, every one of them numeric once an optional
-    /// leading `v`/`V` is stripped from the first. Deliberately stricter than
-    /// "contains dots" — see the comment at its call site for the dotted
-    /// secret formats that distinction exists to keep unredacted.
-    private static func isVersionLike(_ arg: String) -> Bool {
-        var segments = arg.split(separator: ".", omittingEmptySubsequences: false)
-        guard segments.count >= 2 else { return false }
-        if let first = segments.first, first.hasPrefix("v") || first.hasPrefix("V") {
-            segments[0] = first.dropFirst()
-        }
-        return segments.allSatisfy { segment in
-            !segment.isEmpty && segment.allSatisfy(\.isNumber)
-        }
-    }
-
-    /// Returns true if the argument looks like a UUID pattern
-    /// (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX, where X is a hex digit).
-    private static func isUUIDPattern(_ arg: String) -> Bool {
-        let chars = Array(arg)
-        guard chars.count == 36 else { return false }
-
-        // Dashes at positions 8, 13, 18, 23 (0-indexed)
-        let dashPositions = [8, 13, 18, 23]
-        for pos in dashPositions {
-            guard chars[pos] == "-" else { return false }
-        }
-
-        // All other characters must be hex digits (0-9, a-f, A-F)
-        for (index, char) in chars.enumerated() {
-            if dashPositions.contains(index) {
-                continue // Already checked dashes
-            }
-            guard char.isHexDigit else { return false }
-        }
-
-        return true
+        return arg
     }
 }

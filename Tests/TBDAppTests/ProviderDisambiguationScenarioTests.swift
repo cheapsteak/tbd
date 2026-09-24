@@ -79,10 +79,9 @@ struct ProviderDisambiguationScenarioTests {
         #expect(RemoteProviderIdentityPresentation.kindSubtitle(staging) == "reports as agentbox")
     }
 
-    /// Scoped to credentials the redactor recognizes — a secret-named flag or
-    /// key, or a secret-shaped value. The positional heuristic's documented
-    /// limits are pinned in `ProviderIdentityTests`.
-    @Test("no credential the redactor recognizes reaches the identity block")
+    /// Identity pairs are filtered by key name; registry args are redacted by
+    /// position, every argument after the first (`ProviderIdentityTests`).
+    @Test("no credential reaches the identity block")
     func identityCarriesNoCredentials() {
         let leaky = provider(
             registryName: managementName,
@@ -191,7 +190,7 @@ struct ProviderDisambiguationScenarioTests {
 
         #expect(diagnosis == .executableMissing(
             provider: stagingName,
-            command: "/opt/agentbox/bin/agentbox --control-plane staging"))
+            command: "/opt/agentbox/bin/agentbox --control-plane \(ProviderIdentityRedaction.redactedPlaceholder)"))
         #expect(diagnosis.detail.contains("does not exist on this machine"))
         // And it does not quietly attach through the registration that IS
         // installed.

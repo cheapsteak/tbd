@@ -75,8 +75,8 @@ struct RemoteProviderIdentityPresentationTests {
         #expect(rows.last?.value == "0.4.2 · contract v2")
     }
 
-    @Test("without an identity block the command line is what distinguishes two registrations")
-    func commandCarriesTheDistinctionWithoutIdentity() {
+    @Test("without an identity block the command line is emphasised, its values redacted")
+    func commandIsEmphasisedWithoutIdentity() {
         let management = status(
             registryName: "agentbox", kind: "agentbox", args: ["--control-plane", "management"])
         let staging = status(
@@ -86,8 +86,12 @@ struct RemoteProviderIdentityPresentationTests {
         let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/me")
 
         #expect(managementRows.map(\.label) == ["Command", "Version"])
-        #expect(managementRows[0].value == "/opt/agentbox/bin/agentbox --control-plane management")
-        #expect(stagingRows[0].value == "/opt/agentbox/bin/agentbox --control-plane staging")
+        // The flag name shows; its value does not. The registry key is what
+        // tells the two apart, and `describe.identity` is what names the
+        // backend — the command row never has to.
+        let redacted = ProviderIdentityRedaction.redactedPlaceholder
+        #expect(managementRows[0].value == "/opt/agentbox/bin/agentbox --control-plane \(redacted)")
+        #expect(stagingRows[0].value == "/opt/agentbox/bin/agentbox --control-plane \(redacted)")
         // Emphasised only while nothing better exists to tell them apart.
         #expect(managementRows[0].isDistinguishing == true)
     }
@@ -112,9 +116,8 @@ struct RemoteProviderIdentityPresentationTests {
         let command = RemoteProviderIdentityPresentation.commandLine(
             provider.config, homeDirectory: "/Users/me")
 
-        #expect(command.contains("sk-live-1") == false)
-        #expect(command.contains(ProviderIdentityRedaction.redactedPlaceholder))
-        #expect(command.hasSuffix("--profile acme"))
+        let redacted = ProviderIdentityRedaction.redactedPlaceholder
+        #expect(command == "/opt/agentbox/bin/agentbox --token=\(redacted) \(redacted) \(redacted)")
     }
 
     @Test("a credential-named identity pair is dropped rather than rendered")
