@@ -2093,8 +2093,10 @@ extension RPCRouter {
         /// Session has prior content — `claude --resume <id>` and recapture
         /// the forked session ID after a brief delay.
         case resume(sessionID: String)
-        /// Session JSONL is missing or has no conversation — start a new
-        /// session with the system prompt, no recapture needed.
+        /// Session JSONL has no conversation (or, for `.inPlace` only, is
+        /// missing — a `.fork` of a missing transcript is refused before a
+        /// plan is made) — start a new session with the system prompt, no
+        /// recapture needed.
         case fresh(sessionID: String)
     }
 
@@ -2248,12 +2250,15 @@ extension RPCRouter {
         // loads the row's profile via loadByID and resolves that profile's config
         // dir, so a wake after this resumes under the new account automatically.
         if oldTerminal.isParked {
-            let blank = ClaudeSessionScanner.isSessionBlank(
+            // Parked rows are re-homed whatever the mode asks, and a re-home
+            // with no transcript simply wakes fresh later — so missing and
+            // blank are the same answer here.
+            let state = ClaudeSessionScanner.transcriptState(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 transcriptFilePath: oldTerminal.transcriptPath
             )
-            if !blank {
+            if state == .hasConversation {
                 let sourceConfigDir: URL
                 if let oldProfileID = oldTerminal.profileID {
                     sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
@@ -2345,12 +2350,53 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
-        let blank = ClaudeSessionScanner.isSessionBlank(
+        var transcriptState = ClaudeSessionScanner.transcriptState(
             sessionID: sessionID,
             worktreePath: worktree.path,
             transcriptFilePath: oldTerminal.transcriptPath
         )
-        let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+        // A fork is about to be refused on `missing`, so make sure the answer
+        // is not an artifact of where the scanner looked: the scan above
+        // searches the host store's `projects/`, and the transcript carry
+        // below searches the SOURCE profile's config dir. If the carry's
+        // lookup finds the file, classify that file instead.
+        if mode == .fork, case .missing = transcriptState,
+           let sourceTranscript = Self.resolveSwapSourceTranscript(
+               transcriptPath: oldTerminal.transcriptPath,
+               sessionID: sessionID,
+               worktreePath: worktree.path,
+               sourceConfigDir: oldTerminal.profileID.map {
+                   configDirManager.configDirectory(forProfileID: $0)
+               } ?? configDirManager.ambientConfigDirectory) {
+            transcriptState = ClaudeSessionScanner.transcriptState(
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                transcriptFilePath: sourceTranscript.path)
+        }
+
+        // A fork of a session with NO transcript on disk is refused rather
+        // than planned fresh: a fresh spawn would open a blank tab that the
+        // user asked for as a fork of a conversation, and nothing about that
+        // tab says the conversation did not come with it. A BLANK transcript
+        // (file present, no turns yet) still forks fresh — there is genuinely
+        // nothing to carry. `.inPlace` is deliberately unchanged: it replaces
+        // the session on the row the user is already looking at, so a fresh
+        // start under the new account is the visible result either way.
+        if mode == .fork, case .missing(let lookedFor) = transcriptState {
+            let actuationID = try await beginActuation(
+                .terminalSwapProfile, actor: actor,
+                target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+                agent: TerminalKind.claude.rawValue,
+                profile: resolved?.profileID.uuidString)
+            let message = "Fork refused: session \(sessionID) has no transcript to fork "
+                + "(looked for \(lookedFor))"
+            logger.warning("\(message, privacy: .public)")
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        }
+
+        let plan = Self.planTerminalSwap(
+            oldSessionID: sessionID, isBlank: transcriptState != .hasConversation)
 
         // The two facts the plan decides that are not the command itself. A
         // resume keeps the session id and wants the post-resume recapture; a

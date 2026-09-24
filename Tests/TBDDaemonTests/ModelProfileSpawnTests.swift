@@ -962,13 +962,16 @@ struct ModelProfileSpawnTests {
         try await db.config.setDefaultProfileID(a.id)
 
         // Spawn original claude terminal with token A. The session is "blank" —
-        // no JSONL exists on disk for it — so swap should pick the fresh path.
+        // its JSONL exists but holds no conversation — so swap should pick the
+        // fresh path. (A MISSING JSONL refuses a fork instead; see
+        // `forkOverMissingTranscriptIsRefused`.)
         let createResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
         #expect(createResp.success)
         let oldTerm = try createResp.decodeResult(Terminal.self)
+        try await seedBlankTranscript(db, oldTerm)
         #expect(oldTerm.profileID == a.id)
         let oldSessionID = oldTerm.claudeSessionID
 
@@ -1324,6 +1327,175 @@ struct ModelProfileSpawnTests {
                 "in-place swap must NOT fork the session; got: \(joined)")
     }
 
+    /// Give `term`'s session a BLANK transcript on disk: the file exists and
+    /// carries only a metadata line, so the scanner answers `.blank` (not
+    /// `.missing`) and a fork plans a fresh spawn rather than being refused.
+    private func seedBlankTranscript(_ db: TBDDatabase, _ term: Terminal) async throws {
+        let sessionID = try #require(term.claudeSessionID)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-swap-blank-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("\(sessionID).jsonl")
+        try #"{"type":"permission-mode","permissionMode":"default"}"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(id: term.id, sessionID: sessionID, transcriptPath: file.path)
+    }
+
+    // MARK: - Fork over a MISSING transcript: refused
+
+    /// A fork of a session with NO transcript on disk must be refused, not
+    /// quietly turned into a blank fresh tab presented as a fork. The refusal
+    /// names the session and the path that was looked for, spawns nothing,
+    /// creates no row, and is recorded as a refused actuation.
+    @Test("fork over a missing transcript: refused, nothing spawned, no row, refusal recorded")
+    func forkOverMissingTranscriptIsRefused() async throws {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try TBDDatabase(inMemory: true)
+        defer { Task { await cleanup(db) } }
+        let logDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-fork-missing-log-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: logDir) }
+        let logPath = logDir.appendingPathComponent("actuations.jsonl").path
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            startTime: Date(),
+            usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: ActuationLog(path: logPath))
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let b = try await seedOAuthProfile(db, name: "B")
+
+        // A freshly created session: no JSONL anywhere, no transcriptPath.
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        #expect(createResp.success)
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        #expect(oldTerm.transcriptPath == nil)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
+        ))
+
+        #expect(!swapResp.success)
+        let error = try #require(swapResp.error)
+        #expect(error.contains(sessionID), "refusal must name the session: \(error)")
+        #expect(error.contains("no transcript to fork"), "refusal must say why: \(error)")
+        #expect(error.contains("\(sessionID).jsonl"), "refusal must name the looked-for path: \(error)")
+
+        // Nothing spawned, and the only row in the worktree is the source.
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(!joined.contains("new-window"), "a refused fork spawned a window: \(joined)")
+        #expect(!joined.contains("claude --session-id"), "a refused fork composed a spawn: \(joined)")
+        let rows = try await db.terminals.list(worktreeID: wt.id)
+        #expect(rows.map(\.id) == [oldTerm.id], "a refused fork left a row behind")
+        #expect(try await db.terminals.get(id: oldTerm.id)?.profileID == oldTerm.profileID)
+
+        // The actuation record: one request, one refused outcome naming why.
+        let contents = try String(contentsOfFile: logPath, encoding: .utf8)
+        let records = try contents.split(separator: "\n", omittingEmptySubsequences: true).map {
+            try #require(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        let swapRecords = records.filter { ($0["method"] as? String) == RPCMethod.terminalSwapProfile }
+        #expect(swapRecords.count == 1, "the refused fork should open one request row: \(records)")
+        let outcome = try #require(records.last)
+        #expect(outcome["result"] as? String == "refused", "outcome: \(outcome)")
+        #expect(outcome["reason"] as? String == "not-found", "outcome: \(outcome)")
+        #expect((outcome["error"] as? String)?.contains(sessionID) == true, "outcome: \(outcome)")
+    }
+
+    /// The transcript scan looks in the host store; a session whose transcript
+    /// lives only under the SOURCE config dir (the one the transcript carry
+    /// searches) must not be refused as missing — it has a conversation, so the
+    /// fork resumes it with `--fork-session`.
+    @Test("fork: transcript found only under the source config dir is resumed, not refused")
+    func forkFindsTranscriptUnderSourceConfigDir() async throws {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try TBDDatabase(inMemory: true)
+        defer { Task { await cleanup(db) } }
+        let manager = isolatedConfigDirManager()
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: manager),
+            tmux: tmux,
+            startTime: Date(),
+            usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: manager,
+            actuationLog: makeTestActuationLog())
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        // Ambient session (no default profile), transcriptPath nil, transcript
+        // only under the router's ambient config dir's projects/ tree.
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.profileID == nil)
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        let projectDir = ClaudeProjectDirectory.expectedDirectory(
+            worktreePath: wt.localPath,
+            projectsBase: manager.ambientConfigDirectory.appendingPathComponent("projects", isDirectory: true))
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
+            .write(to: projectDir.appendingPathComponent("\(sessionID).jsonl"), atomically: true, encoding: .utf8)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil, mode: .fork)
+        ))
+        #expect(swapResp.success, "\(swapResp.error ?? "")")
+        let joined = Array(recorder.calls.dropFirst(beforeSwap))
+            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
+        #expect(joined.contains("--fork-session"), "got: \(joined)")
+    }
+
+    /// `.inPlace` on the tmux transport is deliberately unchanged: a session
+    /// with NO transcript on disk still plans fresh and lands on the new
+    /// account — the refusal is `.fork`'s alone.
+    @Test("in-place swap over a missing transcript: still spawns fresh on the new account")
+    func inPlaceOverMissingTranscriptStillSpawnsFresh() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let b = try await seedOAuthProfile(db, name: "B")
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.transcriptPath == nil)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success, "\(swapResp.error ?? "")")
+        let after = try #require(try await db.terminals.get(id: oldTerm.id))
+        #expect(after.profileID == b.id)
+        let joined = Array(recorder.calls.dropFirst(beforeSwap))
+            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("claude --session-id"), "got: \(joined)")
+        #expect(!joined.contains("claude --resume"), "got: \(joined)")
+    }
+
     // MARK: - Swap: to nil
 
     @Test("fork: to nil forks new tab with no env prefix; old tab untouched")
@@ -1340,6 +1512,7 @@ struct ModelProfileSpawnTests {
         ))
         let oldTerm = try createResp.decodeResult(Terminal.self)
         #expect(oldTerm.profileID == a.id)
+        try await seedBlankTranscript(db, oldTerm)
 
         let beforeSwap = recorder.calls.count
 

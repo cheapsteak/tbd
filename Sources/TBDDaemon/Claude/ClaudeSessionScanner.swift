@@ -83,9 +83,23 @@ enum ClaudeProjectDirectory {
 
     // MARK: Private
 
+    /// The project directory Claude itself would create for `worktreePath` —
+    /// the tier-1 exact encoding under `projectsBase` (or the host store's
+    /// `projects/`). Whether it exists is not checked: this names where a
+    /// transcript was looked for when `resolve` found nothing at all.
+    static func expectedDirectory(worktreePath: String, projectsBase: URL? = nil) -> URL {
+        let base = projectsBase ?? ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
+            .appendingPathComponent("projects", isDirectory: true)
+        return base.appendingPathComponent(exactEncode(worktreePath))
+    }
+
+    private static func exactEncode(_ path: String) -> String {
+        path.map { "/." .contains($0) ? "-" : String($0) }.joined()
+    }
+
     private static func resolveUncached(worktreePath: String, projectsBase: URL) -> URL? {
         // Tier 1: exact (/ and . → -)
-        let exact = worktreePath.map { "/." .contains($0) ? "-" : String($0) }.joined()
+        let exact = exactEncode(worktreePath)
         let tier1 = projectsBase.appendingPathComponent(exact)
         if FileManager.default.fileExists(atPath: tier1.path) {
             logger.debug("Session dir via exact: \(tier1.path, privacy: .public)")
@@ -295,10 +309,44 @@ enum ClaudeSessionScanner {
         )
     }
 
+    /// What is on disk for one Claude session's transcript.
+    enum TranscriptState: Equatable, Sendable {
+        /// The transcript carries at least one user or assistant turn with
+        /// text — there is a conversation to resume or fork.
+        case hasConversation
+        /// The transcript exists but holds no conversation: empty, or only
+        /// metadata lines (permission-mode, file-history-snapshot, …).
+        case blank
+        /// No transcript file was found. `lookedFor` is the path that was
+        /// checked last — the per-worktree project dir's `<sessionID>.jsonl`,
+        /// or, when that project dir could not be resolved at all, the path
+        /// Claude would have written it to.
+        case missing(lookedFor: String)
+    }
+
     /// Returns true if the session JSONL for `sessionID` (resolved within the
     /// per-worktree project dir) is missing, empty, or contains no
-    /// user/assistant entries with text content. Metadata-only files
-    /// (permission-mode, file-history-snapshot, etc.) are considered blank.
+    /// user/assistant entries with text content. A thin wrapper over
+    /// `transcriptState` for callers that do not need to tell a missing
+    /// transcript from a blank one.
+    static func isSessionBlank(
+        sessionID: String,
+        worktreePath: String,
+        transcriptFilePath: String? = nil,
+        projectsBase: URL? = nil
+    ) -> Bool {
+        transcriptState(
+            sessionID: sessionID,
+            worktreePath: worktreePath,
+            transcriptFilePath: transcriptFilePath,
+            projectsBase: projectsBase
+        ) != .hasConversation
+    }
+
+    /// Classify the session JSONL for `sessionID` (resolved within the
+    /// per-worktree project dir) as having a conversation, blank, or missing.
+    /// Metadata-only files (permission-mode, file-history-snapshot, etc.) are
+    /// blank; an unresolvable project dir counts as missing.
     ///
     /// If `transcriptFilePath` is provided and the file exists, it takes
     /// precedence over project directory resolution. This bypasses stale
@@ -313,12 +361,12 @@ enum ClaudeSessionScanner {
     /// this scan the attachment shape would cost a JSON decode of every
     /// attachment row on a path whose whole point is to stop at the first
     /// content-bearing line.
-    static func isSessionBlank(
+    static func transcriptState(
         sessionID: String,
         worktreePath: String,
         transcriptFilePath: String? = nil,
         projectsBase: URL? = nil
-    ) -> Bool {
+    ) -> TranscriptState {
         let file: URL
         if let path = transcriptFilePath,
            FileManager.default.fileExists(atPath: path) {
@@ -328,16 +376,21 @@ enum ClaudeSessionScanner {
                 worktreePath: worktreePath,
                 projectsBase: projectsBase
             ) else {
-                logger.debug("isSessionBlank: project dir unresolved for \(worktreePath, privacy: .public) — treating as blank")
-                return true
+                let expected = ClaudeProjectDirectory.expectedDirectory(
+                    worktreePath: worktreePath, projectsBase: projectsBase
+                ).appendingPathComponent("\(sessionID).jsonl").path
+                logger.debug("transcriptState: project dir unresolved for \(worktreePath, privacy: .public) — missing, expected \(expected, privacy: .public)")
+                return .missing(lookedFor: expected)
             }
             file = projectDir.appendingPathComponent("\(sessionID).jsonl")
             guard FileManager.default.fileExists(atPath: file.path) else {
-                logger.debug("isSessionBlank: file missing \(file.path, privacy: .public)")
-                return true
+                logger.debug("transcriptState: file missing \(file.path, privacy: .public)")
+                return .missing(lookedFor: file.path)
             }
         }
-        guard let handle = FileHandle(forReadingAtPath: file.path) else { return true }
+        // Present but unreadable: there is a file, so this is not `missing`,
+        // and nothing readable in it, so it is not a conversation either.
+        guard let handle = FileHandle(forReadingAtPath: file.path) else { return .blank }
         defer { try? handle.close() }
 
         var buffer = Data()
@@ -378,7 +431,7 @@ enum ClaudeSessionScanner {
         }
         if !hasContent && !buffer.isEmpty { processLine(buffer) }
 
-        return !hasContent
+        return hasContent ? .hasConversation : .blank
     }
 
 }

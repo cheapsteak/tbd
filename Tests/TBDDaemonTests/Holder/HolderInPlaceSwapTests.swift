@@ -147,10 +147,17 @@ struct HolderInPlaceSwapTests {
     ///
     /// A parked row names no processes — that is what a park leaves behind —
     /// so the two shapes differ in their pids as well as in their park columns.
-    private static func holderRow(_ fixture: Fixture, parked: Bool) async throws -> Terminal {
+    ///
+    /// `withTranscript: false` leaves the session with NO transcript on disk
+    /// at all — the shape a `.fork` refuses and `.inPlace` must not.
+    private static func holderRow(
+        _ fixture: Fixture, parked: Bool, withTranscript: Bool = true
+    ) async throws -> Terminal {
         let transcript = "\(fixture.home)/\(UUID().uuidString).jsonl"
-        try #"{"type":"user","message":{"content":"switch me"}}"#
-            .write(toFile: transcript, atomically: true, encoding: .utf8)
+        if withTranscript {
+            try #"{"type":"user","message":{"content":"switch me"}}"#
+                .write(toFile: transcript, atomically: true, encoding: .utf8)
+        }
         let created = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id,
             tmuxWindowID: "",
@@ -237,6 +244,25 @@ struct HolderInPlaceSwapTests {
                 "the swap did not open and close exactly one actuation: \(rows)")
         #expect(rows.last?["result"] as? String == "transport-failed",
                 "a refused park was recorded as something other than transport-failed")
+    }
+
+    /// A holder row whose session has NO transcript on disk is still swapped
+    /// in place: the missing-transcript refusal belongs to `.fork` alone, so
+    /// this swap must reach the holder arm's park (and stop there, for the
+    /// same no-reader reason as above) rather than being refused up front.
+    @Test("an in-place swap of a holder row with no transcript still reaches the park")
+    func swapWithoutATranscriptStillReachesThePark() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: false, withTranscript: false)
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(response.error == HibernationCoordinator.holderNoReaderRefusal,
+                "the swap stopped somewhere other than the park: \(response.error ?? "success")")
+        let rows = try fixture.actuationRows()
+        #expect(rows.last?["result"] as? String == "transport-failed",
+                "the swap was recorded as something other than the park's failure: \(rows)")
     }
 
     /// A park already mid-ladder for this row is a REFUSAL, not a park: the
