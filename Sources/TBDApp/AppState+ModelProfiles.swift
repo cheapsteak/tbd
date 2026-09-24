@@ -778,9 +778,9 @@ extension AppState {
 
     /// Open (or focus) a Claude *login session* pinned to `profileID` so the
     /// user can complete `/login` there — the daemon labels the terminal as a
-    /// login session, auto-types `/login` once Claude is up, and pushes a
-    /// `modelProfilesChanged` delta when the profile's isolated config dir
-    /// gains an account, flipping the Settings badge live.
+    /// login session and pushes a `modelProfilesChanged` delta when the
+    /// profile's isolated config dir gains an account, flipping the Settings
+    /// badge live.
     ///
     /// Duplicate-safe: if a live login session for this profile already
     /// exists, it is focused instead of spawning another; while a spawn RPC

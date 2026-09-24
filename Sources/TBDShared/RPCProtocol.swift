@@ -2347,8 +2347,8 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let overrideProfileID: UUID?
     /// True for a profile *login session* (Settings → "Open login session"):
     /// requires `overrideProfileID`; the daemon labels the terminal
-    /// `TerminalLabel.login`, auto-types `/login` once Claude is up, and
-    /// watches the profile's config dir so the UI badge flips on completion.
+    /// `TerminalLabel.login` and watches the profile's config dir so the UI
+    /// badge flips on completion. The person types `/login` themselves.
     /// Optional so older clients/params decode unchanged (nil = false).
     public let loginSession: Bool?
     /// Initial tmux window size in cells (see WorktreeCreateParams).

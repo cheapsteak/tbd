@@ -541,8 +541,8 @@ extension WorktreeLifecycle {
     /// delete the terminal + tab rows, broadcast `.terminalRemoved`.
     ///
     /// Deliberately NOT reusing `RPCRouter.handleTerminalDelete`: that handler
-    /// also cancels scheduled resumes, clears pending questions, cancels
-    /// auto-login, and reclaims a per-session `ClaudeHookOverlay` — all Claude
+    /// also cancels scheduled resumes, clears pending questions, and reclaims
+    /// a per-session `ClaudeHookOverlay` — all Claude
     /// concerns, all no-ops for this `.shell` tab, and several reach for
     /// `RPCRouter` state the lifecycle doesn't hold.
     ///
