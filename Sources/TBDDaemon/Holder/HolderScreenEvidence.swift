@@ -3,15 +3,14 @@ import TBDShared
 /// Whether a holder session's typed screen is something this daemon may judge,
 /// and if not, which of the two refusals it earns.
 ///
-/// One decision, in one place, because two callers ask it and a disagreement
-/// between them would be invisible: the hibernation park refuses to check a
-/// screen for unsent input, and the idle sweep decides in advance which rows
-/// the park could act on. Both turn on the same two facts and must answer the
-/// same way.
+/// Its one caller is `HibernationCoordinator.holderRefusal`, which serves two
+/// hibernation paths whose disagreement would be invisible: the park refuses
+/// to check a screen for unsent input, and the idle sweep decides in advance
+/// which rows the park could act on. Both turn on the same two facts and must
+/// answer the same way.
 ///
-/// It carries no wording. Each caller says what a refusal means in its own
-/// terms, and those sentences have nothing in common but the fact underneath
-/// them.
+/// It carries no wording: `holderRefusal` says what each refusal means in
+/// hibernation terms, and this type holds only the fact underneath.
 enum HolderScreenEvidence {
     /// Why a screen is not evidence.
     enum Refusal: Equatable, Sendable {

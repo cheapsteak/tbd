@@ -172,7 +172,7 @@ them classify what they read, and both are named exceptions.
   (`HibernationCoordinator.swift:375`), which uses it twice over. The capture is
   stored as the parked pane's display snapshot (verbatim), *and* it is fed to
   `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #1**,
-  exempted at `.swiftlint.yml:329`, the rail that refuses to park a session with
+  exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
   unsent text in its composer. The `-e` is load-bearing: dimness is the only
   thing distinguishing a ghost suggestion from typed input.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
@@ -183,7 +183,7 @@ them classify what they read, and both are named exceptions.
   `terminal.delete` (`RPCRouter+TerminalHandlers.swift:735`).
 - **The supervision tick's own capture** — `NightwatchSkillContent.swift:954`
   runs `capture-pane -p -e` per fleet pane and regex-classifies the result.
-  **Sanctioned scraper #2**, exempted at `.swiftlint.yml:332` with an explicit
+  **Sanctioned scraper #2**, exempted at `.swiftlint.yml:337` with an explicit
   debt marker. Path: **default** (it shells out directly; control mode is
   irrelevant to it).
 

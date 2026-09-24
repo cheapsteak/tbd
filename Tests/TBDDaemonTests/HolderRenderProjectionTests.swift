@@ -11,8 +11,8 @@ import Testing
 /// a cell that no program ever wrote holds `CharData.Null` — code 0. Rendering
 /// that cell literally puts `U+0000` into the string. Nothing displays it,
 /// nothing in a diff shows it, and every consumer that matches on the text —
-/// fleet supervision, the hibernation pending-input rail, the interactive
-/// login driver — silently fails to find the characters on either side of it.
+/// fleet supervision, the hibernation pending-input rail — silently fails to
+/// find the characters on either side of it.
 ///
 /// The holes are not rare and they are not stationary. A TUI like Claude Code
 /// paints differentially: instead of overwriting a run of cells with blanks it

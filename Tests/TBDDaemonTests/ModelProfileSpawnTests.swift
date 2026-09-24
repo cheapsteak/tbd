@@ -1833,11 +1833,16 @@ struct ModelProfileSpawnTests {
         let configDirManager: ClaudeProfileConfigDirManager
     }
 
-    /// Fixture whose identity watcher is test-tuned (fast poll, bounded life so
-    /// tests don't leave 30-minute poll tasks behind), whose dry-run tmux
+    /// Fixture whose identity watcher is test-tuned (50 ms poll, bounded life
+    /// so tests don't leave 30-minute poll tasks behind), whose dry-run tmux
     /// serves a pane that is ready for `/login` and counts every capture of
     /// it, and whose broadcasts are recorded.
-    private func makeLoginFixture() -> LoginFixture {
+    ///
+    /// `identityPollTimeout` is short by default: only the badge test needs the
+    /// watcher alive long enough to see a credential appear.
+    private func makeLoginFixture(
+        identityPollTimeout: Duration = .milliseconds(250)
+    ) -> LoginFixture {
         let recorder = TmuxRecorder()
         let captures = CaptureCounter()
         let tmux = TmuxManager(
@@ -1870,8 +1875,8 @@ struct ModelProfileSpawnTests {
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: configDirManager,
             loginSessions: LoginSessionCoordinator(delays: .init(
-                identityPollInterval: .milliseconds(5),
-                identityPollTimeout: TestDeadlines.saturatedPass
+                identityPollInterval: .milliseconds(50),
+                identityPollTimeout: identityPollTimeout
             )),
             actuationLog: makeTestActuationLog()
         )
@@ -1943,12 +1948,11 @@ struct ModelProfileSpawnTests {
     }
 
     /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
-    /// normal Claude Code label and types nothing, even when the pane looks
-    /// ready for `/login`.
-    @Test("login session flag off: label stays Claude Code, no /login typed")
+    /// normal Claude Code label.
+    @Test("login session flag off: label stays Claude Code")
     func loginSessionFlagOff() async throws {
         let fixture = makeLoginFixture()
-        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
+        let (router, db) = (fixture.router, fixture.db)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Plain")
@@ -1962,10 +1966,6 @@ struct ModelProfileSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.label == TerminalLabel.claudeCode)
-
-        // Nothing may type /login.
-        try? await Task.sleep(for: .milliseconds(100))
-        #expect(!recorder.joinedAll.contains("/login"))
     }
 
     @Test("login session: missing/unknown profile fails loud, no window spawned")
@@ -2027,11 +2027,17 @@ struct ModelProfileSpawnTests {
         #expect(term.label == TerminalLabel.login)
 
         // Anything armed by the spawn has had the whole window to act on a
-        // pane that is ready for it.
+        // pane that is ready for it. Three seconds is sized against the pump
+        // this replaces, whose first read came after a 2 s settle and whose
+        // poll cadence was 1 s: a pump of that shape restored on the spawn path
+        // would read and type inside this window. Wall time rather than a
+        // virtual clock because nothing on the spawn path now sleeps for a
+        // test to advance past — a clock-driven window would only cover a
+        // restored pump that happened to sleep on the same clock.
         #expect(!(await waitFor({
             fixture.captures.count > 0
                 || fixture.tmux.calls.contains { $0.contains("send-keys") || $0.contains("paste-buffer") }
-        }, timeout: .milliseconds(300))))
+        }, timeout: .seconds(3))))
         #expect(fixture.captures.count == 0, "the login pane was read")
         #expect(
             !fixture.tmux.calls.contains { $0.contains("send-keys") },
@@ -2044,7 +2050,7 @@ struct ModelProfileSpawnTests {
     /// `.modelProfilesChanged` so the Settings badge flips to "Logged in as …".
     @Test("login session: the badge refresh fires when the profile's credential appears")
     func loginSessionIdentityWatcherBroadcasts() async throws {
-        let fixture = makeLoginFixture()
+        let fixture = makeLoginFixture(identityPollTimeout: TestDeadlines.saturatedPass)
         defer { Task { await cleanup(fixture.db) } }
         let (_, wt) = try await seedRepoAndWorktree(fixture.db)
         let profile = try await seedOAuthProfile(fixture.db, name: "Badge")
