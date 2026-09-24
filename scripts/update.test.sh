@@ -2022,6 +2022,35 @@ test_release_failed_app_build_leaves_no_new_tree() {
         "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
 }
 
+test_release_failed_link_restores_the_running_link() {
+    local case_dir out live real_python
+    case_dir="$(mkcase_release_live release-link-fails)"
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    # point_release_link swaps the link with a python3 os.replace. A python3
+    # that refuses that swap for any target but the live tree makes pointing
+    # the link at the download fail, and pointing it back succeed.
+    real_python="$(command -v python3)"
+    cat > "$case_dir/bin/python3" << EOF
+#!/bin/sh
+case "\$2" in
+    *os.replace*)
+        [ "\$(readlink "\$3")" = "$live" ] || exit 1
+        ;;
+esac
+exec "$real_python" "\$@"
+EOF
+    chmod +x "$case_dir/bin/python3"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    rm -f "$case_dir/bin/python3"
+    assert_contains "a failed link fails the run" "rc=1" "$out"
+    assert_not_contains "a failed link hands nothing over" "handover-daemon" "$out"
+    assert_eq "a failed link points .build/release back at the running build" "$live" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    assert_eq "a failed link leaves no new tree" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+}
+
 test_release_failed_runs_never_grow_the_prebuilt_home() {
     local case_dir home i ok=true
     case_dir="$(mkcase_release_live release-failed-runs)"
@@ -2381,6 +2410,7 @@ test_release_non_arm64_builds_locally
 test_release_failed_handover_restores_the_link
 test_release_dry_run_keeps_nothing_it_downloaded
 test_release_failed_app_build_leaves_no_new_tree
+test_release_failed_link_restores_the_running_link
 test_release_failed_runs_never_grow_the_prebuilt_home
 test_release_completed_install_keeps_the_replaced_tree_as_rollback
 test_local_build_takes_the_link_back_from_a_download

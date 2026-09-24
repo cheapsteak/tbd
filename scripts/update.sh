@@ -1362,9 +1362,10 @@ main() {
         # Installing the download on disk is pointing .build/release at it:
         # the handover, the app's reboot respawn and the CLI link all look
         # there already. What it pointed at before is kept above, so a failed
-        # handover can put it back and a completed one knows which tree to keep.
+        # link or a failed handover can put it back.
         if ! point_release_link "$release_link" "$RELEASE_TREE"; then
-            log_error "$release_link is a real directory, not a link — refusing to replace a local build's output"
+            restore_release_link "$release_link" "$previous_release_target"
+            log_error "could not point $release_link at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
             return 1
         fi
         log "pointed $release_link at $RELEASE_TREE"
