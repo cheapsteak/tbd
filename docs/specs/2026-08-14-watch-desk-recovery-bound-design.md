@@ -37,8 +37,9 @@ each replacement really is absent by the time the next tick looks.
 
 ## Non-goals
 
-- Reaping abandoned agent sessions. Nothing reaps them today; that is a separate
-  concern and the bound exists partly because nothing does.
+- Reaping abandoned agent sessions while the desk stays open. No background sweep
+  covers them (see "Who reclaims the replacements" below); that is a separate concern,
+  and the bound exists partly because no sweep does.
 - Fixing the underlying tmux fault that produced the false negatives. It is specific to
   a long-running daemon process and is not reproducible out-of-process.
 - Moving desk supervision into the fleet-supervision redesign's user-land path. See
@@ -88,7 +89,7 @@ until a human toggled the mode off and on.
 
 Many attempts are too many, and the cost is not the retry but the debris. Every attempt
 that half-succeeds leaves a real tmux window and a real agent process behind, and
-nothing reaps them. Unbounded, an overnight shift accumulates one per tick.
+nothing reaps them while the desk stays open. Unbounded, an overnight shift accumulates one per tick.
 
 Three sits between them: two retries after the first failure, spanning roughly
 forty-five minutes at the desk's tick, and at most three replacements after the desk's
@@ -98,6 +99,29 @@ Three is this design's choice, not a measured optimum: it is enough replacements
 out a transient failure, few enough that a wedged desk cannot spawn sessions
 indefinitely, and after the third the rail stops and notifies a human rather than
 guessing further.
+
+## Who reclaims the replacements
+
+A replacement is not a new kind of resource and does not take a new creation path. It
+is the same desk terminal the desk's first spawn creates, made by the same
+`WorktreeLifecycle.spawnPrimaryTerminals` call, and it gets a `Terminal` row in the desk
+worktree like every other desk terminal. The recovery gate decides only *whether* that
+call runs.
+
+That row is what reclaims it. Closing the desk (`closeDeskSession`, run when the mode
+is switched off or changed) walks every terminal row in the desk worktree, kills its
+tmux window or disposes its holder, deletes the rows and archives the desk. An
+abandoned replacement therefore lives at most until the desk closes, and a daemon
+restart does not orphan it, because the row persists.
+
+What no reconciler covers is the interval while the desk stays open. `AgentReaper`'s
+tmux leg reaps only processes with no matching row, and these have one, so a replacement
+that came up wrong keeps its window and process until the close. That gap is not
+introduced by the bound: without it the same call ran on every tick with no limit. The
+bound turns an unbounded accumulation into at most three per incident, and the
+exhaustion notification is what prompts the close that reclaims them. A sweep that reaps
+open-desk replacements the desk has proven absent is follow-up work and outside this
+design.
 
 ## Rejected alternatives
 
