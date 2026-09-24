@@ -2093,8 +2093,10 @@ extension RPCRouter {
         /// Session has prior content — `claude --resume <id>` and recapture
         /// the forked session ID after a brief delay.
         case resume(sessionID: String)
-        /// Session JSONL is missing or has no conversation — start a new
-        /// session with the system prompt, no recapture needed.
+        /// Session JSONL has no conversation (or, for `.inPlace` only, is
+        /// missing — a `.fork` of a missing transcript is refused before a
+        /// plan is made) — start a new session with the system prompt, no
+        /// recapture needed.
         case fresh(sessionID: String)
     }
 
@@ -2201,6 +2203,50 @@ extension RPCRouter {
         return fm.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
+    /// The last look a fork takes before refusing a session as having no
+    /// transcript. Tries, in order: `resolveSwapSourceTranscript` against each
+    /// of `searchConfigDirs` (the row's `transcriptPath`, then the worktree's
+    /// slug dir under that config dir's `projects/`), then a shallow
+    /// by-session-ID scan of each config dir's `projects/` tree
+    /// (`TranscriptProjectDirSync.locateSessionTranscript`). The scan is what
+    /// the resume path's own sync falls back to; it lists directories
+    /// directly, so neither a moved worktree (the slug no longer matches) nor
+    /// a stale cached miss in `ClaudeProjectDirectory.resolve` can hide a
+    /// transcript from it. Runs detached: the scan is filesystem work an RPC
+    /// handler must not block its executor on.
+    static func locateForkSourceTranscript(
+        transcriptPath: String?,
+        sessionID: String,
+        worktreePath: String,
+        searchConfigDirs: [URL]
+    ) async -> URL? {
+        return await Task.detached {
+            // De-duplicate on the RESOLVED `projects/` root: a profile's
+            // `projects` slot is normally a symlink into the host store, so
+            // the source and ambient dirs often name one physical tree.
+            var seen = Set<String>()
+            let dirs = searchConfigDirs.filter {
+                seen.insert($0.appendingPathComponent("projects", isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL.path).inserted
+            }
+            for dir in dirs {
+                if let hit = resolveSwapSourceTranscript(
+                    transcriptPath: transcriptPath, sessionID: sessionID,
+                    worktreePath: worktreePath, sourceConfigDir: dir) {
+                    return hit
+                }
+            }
+            for dir in dirs {
+                if let hit = TranscriptProjectDirSync.locateSessionTranscript(
+                    sessionID: sessionID,
+                    projectsRoot: dir.appendingPathComponent("projects", isDirectory: true)) {
+                    return hit
+                }
+            }
+            return nil
+        }.value
+    }
+
     func handleTerminalSwapProfile(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2248,12 +2294,15 @@ extension RPCRouter {
         // loads the row's profile via loadByID and resolves that profile's config
         // dir, so a wake after this resumes under the new account automatically.
         if oldTerminal.isParked {
-            let blank = ClaudeSessionScanner.isSessionBlank(
+            // Parked rows are re-homed whatever the mode asks, and a re-home
+            // with no transcript simply wakes fresh later — so missing and
+            // blank are the same answer here.
+            let state = ClaudeSessionScanner.transcriptState(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 transcriptFilePath: oldTerminal.transcriptPath
             )
-            if !blank {
+            if state == .hasConversation {
                 let sourceConfigDir: URL
                 if let oldProfileID = oldTerminal.profileID {
                     sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
@@ -2345,12 +2394,69 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
-        let blank = ClaudeSessionScanner.isSessionBlank(
+        var transcriptState = ClaudeSessionScanner.transcriptState(
             sessionID: sessionID,
             worktreePath: worktree.path,
             transcriptFilePath: oldTerminal.transcriptPath
         )
-        let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+        // A fork is about to be refused on `missing`, so make sure the answer
+        // is not an artifact of where or how the scanner looked: the scan
+        // above searches only the host store's `projects/`, by the current
+        // worktree path's slug, through a resolver that caches misses for 30
+        // seconds. `locateForkSourceTranscript` also searches the SOURCE
+        // profile's config dir and falls back to a by-session-ID scan, which
+        // neither the slug nor the miss cache can defeat. If it finds the
+        // file, classify that file instead, and hand the same file to the
+        // transcript carry below so the resume sees what this check saw.
+        var forkSourceTranscript: URL?
+        if mode == .fork, case .missing = transcriptState {
+            forkSourceTranscript = await Self.locateForkSourceTranscript(
+                transcriptPath: oldTerminal.transcriptPath,
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                searchConfigDirs: [
+                    oldTerminal.profileID.map {
+                        configDirManager.configDirectory(forProfileID: $0)
+                    } ?? configDirManager.ambientConfigDirectory,
+                    configDirManager.ambientConfigDirectory,
+                ])
+            if let forkSourceTranscript {
+                transcriptState = ClaudeSessionScanner.transcriptState(
+                    sessionID: sessionID,
+                    worktreePath: worktree.path,
+                    transcriptFilePath: forkSourceTranscript.path)
+            }
+        }
+
+        // A fork of a session with NO transcript on disk is refused rather
+        // than planned fresh: a fresh spawn would open a blank tab that the
+        // user asked for as a fork of a conversation, and nothing about that
+        // tab says the conversation did not come with it. A BLANK transcript
+        // (file present, no turns yet) still forks fresh — there is genuinely
+        // nothing to carry. `.inPlace` is deliberately unchanged: it replaces
+        // the session on the row the user is already looking at, so a fresh
+        // start under the new account is the visible result either way.
+        if mode == .fork, case .missing(let lookedFor) = transcriptState {
+            let actuationID = try await beginActuation(
+                .terminalSwapProfile, actor: actor,
+                target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+                agent: TerminalKind.claude.rawValue,
+                profile: resolved?.profileID.uuidString)
+            // Name every place a user could expect the file: the scan's own
+            // path, the row's recorded path when it has one, and the fact
+            // that the source config dir was searched by session id too.
+            let recorded = oldTerminal.transcriptPath.flatMap { $0.isEmpty || $0 == lookedFor ? nil : $0 }
+            let message = "Fork refused: session \(sessionID) has no transcript to fork "
+                + "(looked for \(lookedFor)"
+                + (recorded.map { " and the recorded \($0)" } ?? "")
+                + ", and searched the source config dir's projects by session id)"
+            logger.warning("\(message, privacy: .public)")
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        }
+
+        let plan = Self.planTerminalSwap(
+            oldSessionID: sessionID, isBlank: transcriptState != .hasConversation)
 
         // The two facts the plan decides that are not the command itself. A
         // resume keeps the session id and wants the post-resume recapture; a
@@ -2411,7 +2517,7 @@ extension RPCRouter {
                 destConfigDir = configDirManager.ambientConfigDirectory
             }
 
-            if let sourceTranscript = Self.resolveSwapSourceTranscript(
+            if let sourceTranscript = forkSourceTranscript ?? Self.resolveSwapSourceTranscript(
                 transcriptPath: oldTerminal.transcriptPath,
                 sessionID: sessionID,
                 worktreePath: worktree.path,
@@ -2434,7 +2540,9 @@ extension RPCRouter {
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 projectsRoot: destProjectsRoot,
-                storedTranscriptPath: oldTerminal.transcriptPath
+                // A fork that had to search for its transcript syncs the file
+                // it classified, not whatever a fresh lookup would pick.
+                storedTranscriptPath: forkSourceTranscript?.path ?? oldTerminal.transcriptPath
             )
             resumeProjectsRoot = destProjectsRoot
         }
