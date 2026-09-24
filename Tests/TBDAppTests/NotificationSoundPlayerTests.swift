@@ -164,8 +164,10 @@ struct StageCustomSoundTests {
         try write("good", to: good)
         NotificationSoundPlayer.stageCustomSound(atPath: good.path, role: .standard, in: dirs.sounds)
 
+        // The copy step fails; the last good copy is kept and still played.
         let missing = dirs.source.appendingPathComponent("gone.aiff")
-        #expect(NotificationSoundPlayer.stageCustomSound(atPath: missing.path, role: .standard, in: dirs.sounds) == nil)
+        #expect(NotificationSoundPlayer.stageCustomSound(atPath: missing.path, role: .standard, in: dirs.sounds)
+            == "TBD-notification.aiff")
 
         #expect(try contents(dirs.sounds.appendingPathComponent("TBD-notification.aiff")) == "good")
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: dirs.sounds.path)

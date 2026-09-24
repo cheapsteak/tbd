@@ -755,7 +755,7 @@ struct GeneralSettingsTab: View {
 
     private func pickCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -768,7 +768,7 @@ struct GeneralSettingsTab: View {
 
     private func pickErrorCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false

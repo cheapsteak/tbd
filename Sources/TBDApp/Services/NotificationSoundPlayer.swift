@@ -101,9 +101,10 @@ final class NotificationSoundPlayer {
 
     /// Copy the sound file into `soundsDir` under the role's fixed name,
     /// replacing it whenever its contents differ from the source, and return
-    /// that name, or nil when the copy fails. The new copy is written to a
-    /// temporary name and swapped in, so a failed copy leaves the previous
-    /// staged file in place. The role's staged files in other formats are
+    /// that name. The new copy is written to a temporary name and swapped in,
+    /// so a failed copy leaves the previous staged file in place, and that
+    /// last good copy is what the notification plays; nil only when the copy
+    /// fails and nothing was staged before. The role's staged files in other formats are
     /// removed, so each role leaves at most one file behind; this function is
     /// the reconciler for those files and runs on every post.
     @discardableResult
@@ -135,7 +136,7 @@ final class NotificationSoundPlayer {
             return stagedName
         } catch {
             logger.error("Could not stage custom notification sound: \(error.localizedDescription, privacy: .public)")
-            return nil
+            return fm.fileExists(atPath: destination.path) ? stagedName : nil
         }
     }
 
