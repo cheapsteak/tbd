@@ -323,7 +323,7 @@ struct WorktreeRowView: View {
         } else if !providers.isEmpty {
             Menu("New Remote Session…") {
                 ForEach(providers, id: \.config.name) { provider in
-                    Button(provider.describe?.name ?? provider.config.name) {
+                    Button(RemoteProviderIdentityPresentation.headline(provider)) {
                         remoteCreateSheetProvider = provider
                     }
                     .disabled(provider.hasStaleSnapshot)

@@ -225,4 +225,38 @@ struct RemoteSessionOrderingTests {
         #expect(merged.agentStateAt == later)
         #expect(merged.agentStateReason == nil)
     }
+
+    @Test("the merge helper keeps the mirrored pending question with the mirrored agent state")
+    func mergedPayloadKeepsThePendingQuestionWithTheAxis() throws {
+        let question = RemotePendingQuestion(questions: [
+            RemotePendingQuestionItem(
+                prompt: "Apply the migration?",
+                options: [RemotePendingQuestionOption(label: "Yes"), RemotePendingQuestionOption(label: "No")]),
+        ])
+        let blocked = RemoteSessionPayload(
+            id: "a", state: .running, agentState: .waitingInput,
+            agentStateReason: "question", agentStateAt: later, pendingQuestion: question)
+        let storedPayload = String(data: try JSONEncoder().encode(blocked), encoding: .utf8) ?? "{}"
+
+        let merged = RemoteSessionStore.withFreshestAgentAxis(
+            incoming: payload("a", agent: .working, at: earlier),
+            storedPayload: storedPayload, provider: "p", now: now)
+
+        #expect(merged.agentState == .waitingInput)
+        #expect(merged.pendingQuestion == question)
+
+        // And the reverse: a stale sighting's question does not ride onto a
+        // newer mirrored state that has none.
+        let unblocked = String(
+            data: try JSONEncoder().encode(payload("a", agent: .working, at: later)),
+            encoding: .utf8) ?? "{}"
+        let staleQuestion = RemoteSessionPayload(
+            id: "a", state: .running, agentState: .waitingInput,
+            agentStateAt: earlier, pendingQuestion: question)
+        let kept = RemoteSessionStore.withFreshestAgentAxis(
+            incoming: staleQuestion, storedPayload: unblocked, provider: "p", now: now)
+
+        #expect(kept.agentState == .working)
+        #expect(kept.pendingQuestion == nil)
+    }
 }
