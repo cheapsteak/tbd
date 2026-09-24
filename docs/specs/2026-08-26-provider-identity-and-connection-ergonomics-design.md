@@ -73,7 +73,8 @@ source is absent:
   `endpoint`) in that order, then every other key alphabetically. Rendered
   opaquely: TBD interprets nothing but the ordering.
 - **Command** — the registry entry's `exec` (tilde-abbreviated) and its
-  first argument, with every later argument redacted (see "Redacting the
+  first argument when that is a subcommand or path, with every later argument
+  redacted (see "Redacting the
   command line"). A reminder of what the entry runs, not a disambiguator: the
   registry key already tells two entries apart, and `describe.identity` names
   the backend each one is pointed at.
@@ -109,25 +110,25 @@ a stricter rule of their own, below.
 
 The **Command** row shows the registry entry's args, which are user-authored
 and can carry credentials the contract never sees. The rule is positional: the
-row shows the command name and the first argument, and redacts every argument
-after it, one `‹redacted›` marker per argument, so the count of arguments stays
-visible while none of their contents do. A redacted value never renders as a
-prefix of itself, because a prefix of a secret is still part of the secret.
+row shows the command name, the first argument under the rule below, and one
+`‹redacted›` marker for every argument after it, so the count of arguments
+stays visible while none of their contents do. A redacted value never renders
+as a prefix of itself, because a prefix of a secret is still part of the
+secret.
 
-The first argument is the one position where a flag name can be shown safely,
-because nothing precedes it whose value it could be. It still hides a value
-riding inside it:
+The first argument is judged by one exhaustive rule, never by its content:
 
-- **`=` shape** – with an `=` (`--token=abc`, `-Dkey=value`, an env-style
-  `TOKEN=abc`), the part before the first `=` is kept and the rest is
-  redacted, whatever the name.
-- **Glued short flag** – a single-dash argument longer than two characters
-  (`-tabc`, `-uuser:pass`) is read as `-X` with its value glued on; `-X` is
-  kept and the rest is redacted.
+- **Contains `=`** – `--token=abc`, `-Dkey=value`, an env-style `TOKEN=abc`:
+  the part before the first `=` is kept and the rest is redacted, whatever
+  the name.
+- **Starts with `-`, no `=`** – redacted whole, whether it is `--verbose`,
+  `-t`, or `--tokenSECRET`. A value can be glued onto a flag of any length,
+  and hiding a harmless flag costs only context.
+- **Anything else** – shown verbatim: a subcommand or a path.
 
-Anything else in first position, a bare flag name or a bare word such as a
-subcommand, is shown verbatim. So `agentbox --control-plane staging` renders
-as `agentbox --control-plane ‹redacted›`.
+So `agentbox serve --control-plane staging` renders as
+`agentbox serve ‹redacted› ‹redacted›`, and `agentbox --control-plane staging`
+as `agentbox ‹redacted› ‹redacted›`.
 
 **The trade.** The argv display is a convenience, and a leak is its only real
 cost. Telling two registrations of the same kind apart is the registry key's
@@ -139,13 +140,14 @@ general, since a flag's value may itself begin with `-`, may be letters-only,
 or may be any length, and any rule that judges shape is one shape away from
 showing a credential. The rule does not show flag names after the first
 argument either, because by position alone a flag name cannot be told apart
-from a dash-prefixed value. This follows the fixed-position approach the
+from a dash-prefixed value, and it hides a dash-prefixed first argument whole
+for the same reason: a flag glued to its value has no separator to split on. This follows the fixed-position approach the
 daemon already takes for tmux argv in `TmuxManager.redactedArguments`, which
 hides the operand of tmux's `-e` by structure rather than by what the value
 looks like.
 
 One residual remains by construction: a credential placed bare in first
-position, with no flag before it, is shown. A registry entry whose first
+position, with no dash and no `=`, is shown. A registry entry whose first
 argument is a secret should move it behind a flag or into the provider's own
 configuration.
 

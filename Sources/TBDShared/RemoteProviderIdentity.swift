@@ -189,18 +189,18 @@ public enum ProviderIdentityRedaction {
     /// a leak is its only real cost. `TmuxManager.redactedArguments` takes the
     /// same stance for tmux argv: a structural rule, never a scan for shapes.
     ///
-    /// The first argument is the one place a flag name can be shown, because
-    /// only there is it certainly not the previous flag's value. It still
-    /// hides any value riding inside it:
+    /// The first argument is judged by one exhaustive rule, never by what
+    /// its content looks like:
     ///
     /// - With an `=` (`--token=abc`, `-Dkey=value`, `TOKEN=abc`), the part
     ///   before the first `=` is kept and everything after it is redacted.
-    /// - A single-dash argument longer than two characters (`-tabc`,
-    ///   `-uuser:pass`) is read as a short flag `-X` with its value glued on:
-    ///   `-X` is kept and the rest is redacted.
+    /// - Otherwise, starting with `-`, it is redacted whole — `--verbose`,
+    ///   `-t`, and `--tokenSECRET` alike, since a value can be glued onto a
+    ///   flag of any length and hiding a harmless flag costs only context.
+    /// - Otherwise it is shown verbatim: a subcommand or a path.
     ///
-    /// Anything else in first position — a bare flag name or a bare word such
-    /// as a subcommand — is shown verbatim.
+    /// The one residual is a bare credential in first position with no flag
+    /// or `=` before it.
     ///
     /// Never used to decide anything; the result is display text only.
     public static func redactArguments(_ args: [String]) -> [String] {
@@ -209,15 +209,13 @@ public enum ProviderIdentityRedaction {
         return [redactedFirstArgument(first)] + rest
     }
 
-    /// `arg` with any value riding inside it replaced by the placeholder; see
-    /// `redactArguments` for the two shapes.
+    /// `arg` as the first argument renders; see `redactArguments` for the
+    /// rule.
     private static func redactedFirstArgument(_ arg: String) -> String {
         if let separator = arg.firstIndex(of: "=") {
             return "\(arg[arg.startIndex..<separator])=\(redactedPlaceholder)"
         }
-        if arg.count > 2, arg.hasPrefix("-"), !arg.hasPrefix("--") {
-            return "\(arg.prefix(2))\(redactedPlaceholder)"
-        }
+        if arg.hasPrefix("-") { return redactedPlaceholder }
         return arg
     }
 }

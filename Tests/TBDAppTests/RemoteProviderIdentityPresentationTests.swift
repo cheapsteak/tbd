@@ -86,12 +86,12 @@ struct RemoteProviderIdentityPresentationTests {
         let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/me")
 
         #expect(managementRows.map(\.label) == ["Command", "Version"])
-        // The flag name shows; its value does not. The registry key is what
-        // tells the two apart, and `describe.identity` is what names the
-        // backend — the command row never has to.
+        // Neither flag nor value shows. The registry key is what tells the
+        // two apart, and `describe.identity` is what names the backend — the
+        // command row never has to.
         let redacted = ProviderIdentityRedaction.redactedPlaceholder
-        #expect(managementRows[0].value == "/opt/agentbox/bin/agentbox --control-plane \(redacted)")
-        #expect(stagingRows[0].value == "/opt/agentbox/bin/agentbox --control-plane \(redacted)")
+        #expect(managementRows[0].value == "/opt/agentbox/bin/agentbox \(redacted) \(redacted)")
+        #expect(stagingRows[0].value == "/opt/agentbox/bin/agentbox \(redacted) \(redacted)")
         // Emphasised only while nothing better exists to tell them apart.
         #expect(managementRows[0].isDistinguishing == true)
     }

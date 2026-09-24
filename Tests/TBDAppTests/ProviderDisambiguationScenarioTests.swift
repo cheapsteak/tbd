@@ -190,7 +190,7 @@ struct ProviderDisambiguationScenarioTests {
 
         #expect(diagnosis == .executableMissing(
             provider: stagingName,
-            command: "/opt/agentbox/bin/agentbox --control-plane \(ProviderIdentityRedaction.redactedPlaceholder)"))
+            command: "/opt/agentbox/bin/agentbox \(ProviderIdentityRedaction.redactedPlaceholder) \(ProviderIdentityRedaction.redactedPlaceholder)"))
         #expect(diagnosis.detail.contains("does not exist on this machine"))
         // And it does not quietly attach through the registration that IS
         // installed.

@@ -140,8 +140,8 @@ struct ProviderIdentityTests {
     @Test("every argument after the first is redacted, one marker each")
     func redactsEveryArgumentAfterTheFirst() {
         #expect(ProviderIdentityRedaction.redactArguments(
-            ["--control-plane", "staging", "--region", "us-east-1", "main"])
-            == ["--control-plane", placeholder, placeholder, placeholder, placeholder])
+            ["serve", "--control-plane", "staging", "--region", "us-east-1"])
+            == ["serve", placeholder, placeholder, placeholder, placeholder])
     }
 
     @Test("no arguments render as none")
@@ -149,11 +149,20 @@ struct ProviderIdentityTests {
         #expect(ProviderIdentityRedaction.redactArguments([]) == [])
     }
 
-    @Test("a bare first argument is shown verbatim")
-    func bareFirstArgumentIsShown() {
+    @Test("a dash-less first argument is shown verbatim")
+    func dashlessFirstArgumentIsShown() {
         #expect(ProviderIdentityRedaction.redactArguments(["serve"]) == ["serve"])
-        #expect(ProviderIdentityRedaction.redactArguments(["--verbose"]) == ["--verbose"])
-        #expect(ProviderIdentityRedaction.redactArguments(["-v"]) == ["-v"])
+        #expect(ProviderIdentityRedaction.redactArguments(["/opt/acme/config.toml", "x"])
+            == ["/opt/acme/config.toml", placeholder])
+    }
+
+    @Test("a dash-prefixed first argument with no = is redacted whole")
+    func dashFirstArgumentWithoutEqualsIsRedacted() {
+        // A value can be glued onto a flag of any length, so no flag in first
+        // position is shown unless an `=` separates its name from its value.
+        for arg in ["--verbose", "-t", "--tokenSECRETVALUE123", "-tabc", "-uuser:pass", "-p8080"] {
+            #expect(ProviderIdentityRedaction.redactArguments([arg]) == [placeholder])
+        }
     }
 
     @Test("a first argument carrying an = keeps its name and hides its value")
@@ -166,22 +175,15 @@ struct ProviderIdentityTests {
         #expect(ProviderIdentityRedaction.redactArguments(["TOKEN=abc123"]) == ["TOKEN=\(placeholder)"])
     }
 
-    @Test("a first argument with a glued short-flag value keeps the flag and hides the value")
-    func firstArgumentGluedShortFlagHidesValue() {
-        #expect(ProviderIdentityRedaction.redactArguments(["-tabc"]) == ["-t\(placeholder)"])
-        #expect(ProviderIdentityRedaction.redactArguments(["-uuser:pass"]) == ["-u\(placeholder)"])
-        #expect(ProviderIdentityRedaction.redactArguments(["-p8080"]) == ["-p\(placeholder)"])
-    }
-
     @Test("a dash-prefixed value after a secret flag never goes out verbatim")
     func dashPrefixedValueAfterSecretFlagIsRedacted() {
         // Position, not shape: the argument after the first is hidden whether
         // or not it starts with a dash, so a token that happens to begin with
         // `-` cannot be mistaken for a harmless flag.
-        #expect(ProviderIdentityRedaction.redactArguments(["--token", "-Xk3mZ9qL2vNaB7wQ2"])
-            == ["--token", placeholder])
-        #expect(ProviderIdentityRedaction.redactArguments(["-t", "--k3mZ9qL2vNaB7wQ2"])
-            == ["-t", placeholder])
+        #expect(ProviderIdentityRedaction.redactArguments(["serve", "--token", "-Xk3mZ9qL2vNaB7wQ2"])
+            == ["serve", placeholder, placeholder])
+        #expect(ProviderIdentityRedaction.redactArguments(["serve", "-t", "--k3mZ9qL2vNaB7wQ2"])
+            == ["serve", placeholder, placeholder])
     }
 
     @Test("no secret shape survives past the first argument")
