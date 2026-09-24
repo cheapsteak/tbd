@@ -971,7 +971,8 @@ struct ModelProfileSpawnTests {
         ))
         #expect(createResp.success)
         let oldTerm = try createResp.decodeResult(Terminal.self)
-        try await seedBlankTranscript(db, oldTerm)
+        let blankDir = try await seedBlankTranscript(db, oldTerm)
+        defer { try? FileManager.default.removeItem(at: blankDir) }
         #expect(oldTerm.profileID == a.id)
         let oldSessionID = oldTerm.claudeSessionID
 
@@ -1330,7 +1331,8 @@ struct ModelProfileSpawnTests {
     /// Give `term`'s session a BLANK transcript on disk: the file exists and
     /// carries only a metadata line, so the scanner answers `.blank` (not
     /// `.missing`) and a fork plans a fresh spawn rather than being refused.
-    private func seedBlankTranscript(_ db: TBDDatabase, _ term: Terminal) async throws {
+    /// Returns the directory holding it, for the caller to remove.
+    private func seedBlankTranscript(_ db: TBDDatabase, _ term: Terminal) async throws -> URL {
         let sessionID = try #require(term.claudeSessionID)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-swap-blank-\(UUID().uuidString)", isDirectory: true)
@@ -1339,6 +1341,7 @@ struct ModelProfileSpawnTests {
         try #"{"type":"permission-mode","permissionMode":"default"}"#
             .write(to: file, atomically: true, encoding: .utf8)
         try await db.terminals.updateSession(id: term.id, sessionID: sessionID, transcriptPath: file.path)
+        return dir
     }
 
     // MARK: - Fork over a MISSING transcript: refused
@@ -1425,6 +1428,7 @@ struct ModelProfileSpawnTests {
         let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
         let manager = isolatedConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -1449,6 +1453,69 @@ struct ModelProfileSpawnTests {
         let projectDir = ClaudeProjectDirectory.expectedDirectory(
             worktreePath: wt.localPath,
             projectsBase: manager.ambientConfigDirectory.appendingPathComponent("projects", isDirectory: true))
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
+            .write(to: projectDir.appendingPathComponent("\(sessionID).jsonl"), atomically: true, encoding: .utf8)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil, mode: .fork)
+        ))
+        #expect(swapResp.success, "\(swapResp.error ?? "")")
+        let joined = Array(recorder.calls.dropFirst(beforeSwap))
+            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
+        #expect(joined.contains("--fork-session"), "got: \(joined)")
+    }
+
+    /// The slug lookup is not the last word before a refusal. A transcript
+    /// the slug cannot reach — written under a project dir named for a path
+    /// the worktree no longer has, or hidden behind a cached miss — is still
+    /// found by the by-session-ID scan, so the fork resumes it.
+    @Test("fork: transcript under a stale slug or behind a cached miss is resumed, not refused",
+          arguments: [false, true])
+    func forkFindsTranscriptTheSlugLookupMisses(cachedMiss: Bool) async throws {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try TBDDatabase(inMemory: true)
+        defer { Task { await cleanup(db) } }
+        let manager = isolatedConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: manager),
+            tmux: tmux,
+            startTime: Date(),
+            usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: manager,
+            actuationLog: makeTestActuationLog())
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.profileID == nil)
+        #expect(oldTerm.transcriptPath == nil)
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        let projectsBase = manager.ambientConfigDirectory.appendingPathComponent("projects", isDirectory: true)
+
+        let projectDir: URL
+        if cachedMiss {
+            // Resolve before the project dir exists: the resolver caches the
+            // miss for 30 s, and the dir created next is the CURRENT slug.
+            try FileManager.default.createDirectory(at: projectsBase, withIntermediateDirectories: true)
+            #expect(ClaudeProjectDirectory.resolve(worktreePath: wt.localPath, projectsBase: projectsBase) == nil)
+            projectDir = ClaudeProjectDirectory.expectedDirectory(
+                worktreePath: wt.localPath, projectsBase: projectsBase)
+        } else {
+            // A slug no tier of the resolver maps the current path to.
+            projectDir = projectsBase.appendingPathComponent("-old-home-of-this-worktree-\(UUID().uuidString.prefix(8))")
+        }
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
             .write(to: projectDir.appendingPathComponent("\(sessionID).jsonl"), atomically: true, encoding: .utf8)
@@ -1512,7 +1579,8 @@ struct ModelProfileSpawnTests {
         ))
         let oldTerm = try createResp.decodeResult(Terminal.self)
         #expect(oldTerm.profileID == a.id)
-        try await seedBlankTranscript(db, oldTerm)
+        let blankDir = try await seedBlankTranscript(db, oldTerm)
+        defer { try? FileManager.default.removeItem(at: blankDir) }
 
         let beforeSwap = recorder.calls.count
 

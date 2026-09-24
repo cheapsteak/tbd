@@ -83,10 +83,11 @@ enum ClaudeProjectDirectory {
 
     // MARK: Private
 
-    /// The project directory Claude itself would create for `worktreePath` —
-    /// the tier-1 exact encoding under `projectsBase` (or the host store's
+    /// The tier-1 (exact-encoding) project directory `resolve` checks first
+    /// for `worktreePath`, under `projectsBase` (or the host store's
     /// `projects/`). Whether it exists is not checked: this names where a
-    /// transcript was looked for when `resolve` found nothing at all.
+    /// transcript was looked for when `resolve` found nothing at all — it is
+    /// a diagnostic, not a promise of where Claude would write.
     static func expectedDirectory(worktreePath: String, projectsBase: URL? = nil) -> URL {
         let base = projectsBase ?? ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
             .appendingPathComponent("projects", isDirectory: true)
