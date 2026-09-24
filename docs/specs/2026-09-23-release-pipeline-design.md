@@ -15,10 +15,10 @@ that non-goal and nothing else. The commit is still the identity; a download
 is another way to get that commit's binaries onto disk.
 
 The repository owner decided the design questions on 2026-09-23; section 8
-records them. One question remains open: how the app gets its resource
-bundles on a machine that did not compile it. Section 3.1 states it and its
-options. The implementation that accompanies this spec is option C, and it is
-held until the repository owner records a choice.
+records them. That includes how the app gets its resource bundles on a machine
+that did not compile it: section 3.1 records the options and the choice, which
+is to ship every product but the app now (C) and make the app's resource
+lookups relocatable next (A).
 
 ## 1. What is wrong today
 
@@ -110,26 +110,27 @@ Non-goals:
     diff highlighter and `CodeHighlightService` all construct `Highlightr()`.
   - So a CI-built `TBDApp` would stop at its first resource lookup on any
     user's machine.
-- **So the app cannot simply join the asset.** Section 3.1 lists the ways
-  around that; the rest of this spec describes option C.
+- **So the app cannot simply join the asset.** Section 3.1 records the ways
+  around that and the choice; the rest of this spec describes option C.
 
-### 3.1 The app-bundle choice (open)
+### 3.1 The app-bundle choice
 
-This choice is pending the repository owner. The planned sequence is C now and
-A next.
+The repository owner chose C, then A. C is the implementation that
+accompanies this spec. A is the next change, made once C has landed. B and D
+are rejected for the reasons given with each.
 
-- **A – relocatable `Bundle.module`.** A resolver that checks
+- **A – relocatable `Bundle.module` (next).** A resolver that checks
   `Bundle.main.resourceURL` before the generated accessor, used at TBDApp's
   four `Bundle.module` sites, and the same change in a Highlightr fork,
   following the SwiftTerm fork precedent. With it, `TBDApp` joins the asset
   and an update compiles nothing. It touches compiled app code and adds a
   forked dependency.
-- **B – build at a fixed shared path.** CI builds under a path that exists on
+- **B – build at a fixed shared path (rejected).** CI builds under a path that exists on
   every Mac, such as `/Users/Shared`, and the installer links that path to the
   download so the baked build path resolves. `/Users/Shared` is
   world-writable, so another local user could plant that path, and the
   approach assumes one TBD user per machine.
-- **C – ship every product but the app.** The asset carries `TBDDaemon`,
+- **C – ship every product but the app (this design).** The asset carries `TBDDaemon`,
   `TBDCLI`, `TBDHolder`, `TBDPeerHelper` and `TBDModelProxy` with their
   resource bundles. The update compiles `TBDApp` alone (about 30% of a cold
   build, measured in
@@ -137,7 +138,7 @@ A next.
   and adds it to the downloaded tree. It needs no change to compiled app code,
   and A later removes the remaining local compile without changing anything C
   builds.
-- **D – patch the baked path in the binary.** An equal-length rewrite followed
+- **D – patch the baked path in the binary (rejected).** An equal-length rewrite followed
   by a local re-sign works mechanically, but it is fragile and opaque.
 
 ## 4. Design
@@ -443,3 +444,7 @@ The repository owner decided each of these on 2026-09-23.
    clone's `.build/release` symlink pointed at it (section 4.4 records the
    SwiftPM check this rests on). The update clone stays at the installed commit, so the build identity
    names a real local checkout.
+9. **How the app gets its resources.** Ship every product but the app now
+   (C), and make the app's `Bundle.module` lookups relocatable next (A), after
+   which the app joins the asset. Building at a fixed shared path (B) and
+   patching the binary (D) are rejected (section 3.1).
