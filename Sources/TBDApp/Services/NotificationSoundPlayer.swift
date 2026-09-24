@@ -26,15 +26,20 @@ final class NotificationSoundPlayer {
             defaultName: soundName, defaultCustomPath: customPath,
             errorName: errorSoundName, errorCustomPath: errorCustomPath
         )
+        let role: StagedSoundRole = type == .error ? .error : .standard
+        let soundsDir = Self.userSoundsDirectory
         switch Self.notificationSoundSource(enabled: enabled, name: config.name, customPath: config.customPath) {
         case .none:
             return nil
         case .named(let name):
+            // A custom sound this role staged earlier is no longer in use.
+            Self.removeStagedSounds(role: role, keeping: nil, in: soundsDir)
             return UNNotificationSound(named: UNNotificationSoundName(name))
         case .custom(let path):
-            guard let staged = Self.stageCustomSound(atPath: path) else { return .default }
+            guard let staged = Self.stageCustomSound(atPath: path, role: role, in: soundsDir) else { return .default }
             return UNNotificationSound(named: UNNotificationSoundName(staged))
         case .systemDefault:
+            Self.removeStagedSounds(role: role, keeping: nil, in: soundsDir)
             return .default
         }
     }
@@ -52,6 +57,13 @@ final class NotificationSoundPlayer {
         case systemDefault
     }
 
+    /// Which setting a staged custom sound belongs to. Each role owns exactly
+    /// one staged file, so two picked files that share a name never collide.
+    enum StagedSoundRole: String, CaseIterable {
+        case standard = "TBD-notification"
+        case error = "TBD-error-notification"
+    }
+
     /// Formats `UNNotificationSound` accepts; MP3 and M4A are not among them.
     nonisolated static let notificationCenterSoundExtensions: Set<String> = ["aiff", "aif", "wav", "caf"]
 
@@ -67,24 +79,39 @@ final class NotificationSoundPlayer {
     }
 
     /// The notification center only plays files it can find by name, and an
-    /// app outside the sandbox finds them in ~/Library/Sounds. Copy the picked
-    /// file there under a TBD-prefixed name (refreshing it when the source is
-    /// newer) and return that name, or nil when the copy fails.
-    private static func stageCustomSound(atPath path: String) -> String? {
+    /// app outside the sandbox finds them in ~/Library/Sounds.
+    nonisolated static var userSoundsDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Sounds", isDirectory: true)
+    }
+
+    /// Pure: the file name a role's custom sound is staged under. The source
+    /// extension is kept because the system uses it to decode the file.
+    nonisolated static func stagedSoundFileName(role: StagedSoundRole, sourcePath: String) -> String {
+        role.rawValue + "." + (sourcePath as NSString).pathExtension.lowercased()
+    }
+
+    /// Copy the picked file into `soundsDir` under the role's fixed name,
+    /// replacing it whenever its contents differ from the source, and return
+    /// that name, or nil when the copy fails. The role's staged files in other
+    /// formats are removed, so each role leaves at most one file behind; the
+    /// cleanup is this function and `removeStagedSounds`, run on every post.
+    @discardableResult
+    nonisolated static func stageCustomSound(atPath path: String, role: StagedSoundRole, in soundsDir: URL) -> String? {
         let fm = FileManager.default
-        let source = URL(fileURLWithPath: path)
-        let stagedName = stagedSoundFileName(forSourcePath: path)
-        let soundsDir = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Sounds", isDirectory: true)
+        let stagedName = stagedSoundFileName(role: role, sourcePath: path)
         let destination = soundsDir.appendingPathComponent(stagedName)
         do {
-            let sourceDate = try source.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
             if fm.fileExists(atPath: destination.path) {
-                let destDate = try destination.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-                if let sourceDate, let destDate, destDate >= sourceDate { return stagedName }
+                if fm.contentsEqual(atPath: path, andPath: destination.path) {
+                    removeStagedSounds(role: role, keeping: stagedName, in: soundsDir)
+                    return stagedName
+                }
                 try fm.removeItem(at: destination)
             }
             try fm.createDirectory(at: soundsDir, withIntermediateDirectories: true)
-            try fm.copyItem(at: source, to: destination)
+            try fm.copyItem(at: URL(fileURLWithPath: path), to: destination)
+            removeStagedSounds(role: role, keeping: stagedName, in: soundsDir)
             return stagedName
         } catch {
             logger.error("Could not stage custom notification sound: \(error.localizedDescription, privacy: .public)")
@@ -92,9 +119,18 @@ final class NotificationSoundPlayer {
         }
     }
 
-    /// Pure: the ~/Library/Sounds file name a custom sound is staged under.
-    nonisolated static func stagedSoundFileName(forSourcePath path: String) -> String {
-        "TBD-" + (path as NSString).lastPathComponent
+    /// Delete the role's staged files other than `keeping` (all of them when
+    /// nil). Only exact `<role>.<playable extension>` names are touched.
+    nonisolated static func removeStagedSounds(role: StagedSoundRole, keeping: String?, in soundsDir: URL) {
+        let fm = FileManager.default
+        for ext in notificationCenterSoundExtensions {
+            let name = role.rawValue + "." + ext
+            guard name != keeping else { continue }
+            let url = soundsDir.appendingPathComponent(name)
+            if fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     func playTest() {

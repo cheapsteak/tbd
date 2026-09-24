@@ -62,7 +62,114 @@ struct NotificationSoundSourceTests {
         }
     }
 
-    @Test func stagedNameIsPrefixedBasename() {
-        #expect(NotificationSoundPlayer.stagedSoundFileName(forSourcePath: "/Users/acme/alarm.aiff") == "TBD-alarm.aiff")
+    @Test func stagedNameIsFixedPerRole() {
+        #expect(NotificationSoundPlayer.stagedSoundFileName(role: .standard, sourcePath: "/Users/acme/alarm.AIFF")
+            == "TBD-notification.aiff")
+        #expect(NotificationSoundPlayer.stagedSoundFileName(role: .error, sourcePath: "/Users/acme/alarm.wav")
+            == "TBD-error-notification.wav")
+    }
+}
+
+@Suite("NotificationSoundPlayer.stageCustomSound")
+struct StageCustomSoundTests {
+
+    private func makeDirs() throws -> (source: URL, sounds: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-sound-staging-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let sounds = root.appendingPathComponent("Sounds", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        return (source, sounds)
+    }
+
+    private func write(_ text: String, to url: URL) throws {
+        try Data(text.utf8).write(to: url)
+    }
+
+    private func contents(_ url: URL) throws -> String {
+        String(decoding: try Data(contentsOf: url), as: UTF8.self)
+    }
+
+    @Test func copiesIntoAMissingSoundsDirectory() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let file = dirs.source.appendingPathComponent("alarm.aiff")
+        try write("one", to: file)
+
+        let name = NotificationSoundPlayer.stageCustomSound(atPath: file.path, role: .standard, in: dirs.sounds)
+
+        #expect(name == "TBD-notification.aiff")
+        #expect(try contents(dirs.sounds.appendingPathComponent("TBD-notification.aiff")) == "one")
+    }
+
+    @Test func sameBasenameForBothRolesDoesNotCollide() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let a = dirs.source.appendingPathComponent("a", isDirectory: true)
+        let b = dirs.source.appendingPathComponent("b", isDirectory: true)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
+        try write("standard", to: a.appendingPathComponent("alarm.aiff"))
+        try write("error", to: b.appendingPathComponent("alarm.aiff"))
+
+        NotificationSoundPlayer.stageCustomSound(atPath: a.appendingPathComponent("alarm.aiff").path, role: .standard, in: dirs.sounds)
+        NotificationSoundPlayer.stageCustomSound(atPath: b.appendingPathComponent("alarm.aiff").path, role: .error, in: dirs.sounds)
+
+        #expect(try contents(dirs.sounds.appendingPathComponent("TBD-notification.aiff")) == "standard")
+        #expect(try contents(dirs.sounds.appendingPathComponent("TBD-error-notification.aiff")) == "error")
+    }
+
+    @Test func changedSourceReplacesTheStagedCopy() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let first = dirs.source.appendingPathComponent("first.wav")
+        let second = dirs.source.appendingPathComponent("second.wav")
+        try write("first", to: first)
+        try write("second", to: second)
+
+        NotificationSoundPlayer.stageCustomSound(atPath: first.path, role: .standard, in: dirs.sounds)
+        NotificationSoundPlayer.stageCustomSound(atPath: second.path, role: .standard, in: dirs.sounds)
+
+        #expect(try contents(dirs.sounds.appendingPathComponent("TBD-notification.wav")) == "second")
+    }
+
+    @Test func switchingFormatRemovesTheOldStagedFile() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let aiff = dirs.source.appendingPathComponent("x.aiff")
+        let wav = dirs.source.appendingPathComponent("x.wav")
+        try write("aiff", to: aiff)
+        try write("wav", to: wav)
+
+        NotificationSoundPlayer.stageCustomSound(atPath: aiff.path, role: .standard, in: dirs.sounds)
+        NotificationSoundPlayer.stageCustomSound(atPath: wav.path, role: .standard, in: dirs.sounds)
+
+        let fm = FileManager.default
+        #expect(!fm.fileExists(atPath: dirs.sounds.appendingPathComponent("TBD-notification.aiff").path))
+        #expect(fm.fileExists(atPath: dirs.sounds.appendingPathComponent("TBD-notification.wav").path))
+    }
+
+    @Test func missingSourceReturnsNil() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        let missing = dirs.source.appendingPathComponent("gone.aiff")
+
+        #expect(NotificationSoundPlayer.stageCustomSound(atPath: missing.path, role: .standard, in: dirs.sounds) == nil)
+    }
+
+    @Test func removeStagedSoundsLeavesOtherRolesAndUserFiles() throws {
+        let dirs = try makeDirs()
+        defer { try? FileManager.default.removeItem(at: dirs.source.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: dirs.sounds, withIntermediateDirectories: true)
+        for name in ["TBD-notification.aiff", "TBD-error-notification.aiff", "Mine.aiff"] {
+            try write(name, to: dirs.sounds.appendingPathComponent(name))
+        }
+
+        NotificationSoundPlayer.removeStagedSounds(role: .standard, keeping: nil, in: dirs.sounds)
+
+        let fm = FileManager.default
+        #expect(!fm.fileExists(atPath: dirs.sounds.appendingPathComponent("TBD-notification.aiff").path))
+        #expect(fm.fileExists(atPath: dirs.sounds.appendingPathComponent("TBD-error-notification.aiff").path))
+        #expect(fm.fileExists(atPath: dirs.sounds.appendingPathComponent("Mine.aiff").path))
     }
 }
