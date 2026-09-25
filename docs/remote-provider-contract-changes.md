@@ -10,7 +10,8 @@ they should do about it.
 ## Nothing breaks
 
 **A v1 provider is a valid v2 provider with no code changes at all.** Read that
-first and stop worrying about the rest.
+first, then check the one exception below if you declare any transcript
+operation.
 
 v2 is purely additive:
 
@@ -24,6 +25,15 @@ v2 is purely additive:
 - **Every new verb is gated behind a capability string.** A caller invokes it
   only when you declare it, so an undeclared verb is never called.
 - **No field is removed, renamed, or given different semantics.**
+- **One exception: the transcript operations are namespaced.** They are
+  `transcript read`, `transcript retain`, `transcript import`, and
+  `transcript recall`, declared as `transcript.read`, `transcript.retain`,
+  `transcript.import`, and `transcript.recall`. A provider that declares an
+  earlier bare spelling (`transcript`, `retain`, `import`, `recall`) keeps
+  working in every other respect, but a caller no longer recognizes those
+  strings, so it offers none of those operations until the provider declares
+  the namespaced strings and moves the verbs under `transcript`. The contract's
+  Versioning section explains why this rename is made in place.
 
 So adoption implements nothing new. It is a two-field edit to `describe`:
 declare `"contract_versions": [1, 2]`, **and — if you implement `stop` — make
@@ -581,11 +591,56 @@ name from another machine. Declaring `peer_messaging` without declaring
 `messages` is the one half-adoption to avoid: it describes sessions the caller
 has no channel to reach, so it buys nothing.
 
+## 10. `send --submit` — submitting a message rather than typing keystrokes
+
+**What it is.** A new declared capability, `send-submit`, which admits one flag
+on the existing `send` verb.
+
+```sh
+p send <id> --submit
+```
+
+stdin is the message as UTF-8 text, not keystrokes. You place it in the agent's
+input as a single paste, so newlines inside it belong to the message rather
+than pressing Enter, and then submit it with a separate Enter. Exit 0 means the
+message was delivered and submitted, not that the agent has acted on it. `send`
+without the flag is unchanged: raw keystrokes, nothing appended.
+
+**Required?** No. A caller never passes `--submit` to a provider that has not
+declared `send-submit`, so a provider that ignores it is unaffected. Declare it
+only alongside `send`.
+
+**Not a v2 delta either.** Like sections 8 and 9, it was added after v2 was
+published. A capability string a caller does not recognize is never invoked, so
+it is readable at contract major 1 and 2 alike, and declaring it obliges no
+change to `contract_versions`.
+
+**What you gain.** The caller can offer a message composer for your sessions —
+TBD's transcript pane shows one — that submits reliably whatever the message's
+length or shape. Over raw `send`, a caller has to compose the paste itself: it
+cannot see whether the remote terminal has bracketed paste on or when the input
+box is ready, it depends on your keystroke path passing escape bytes through
+untouched, and it gets no evidence the message landed. With `--submit`, those
+mechanics are yours, because you own the transport and can see the terminal.
+
+**What it costs.** Whatever reliable paste-and-submit costs on your transport:
+for a Claude Code session in tmux, typically a bracketed paste
+(`paste-buffer -p`) followed by Enter as a separate keystroke, plus any wait
+your agent needs before its input box accepts text. Report failure honestly: a
+message left unsent in the input box is a failed `--submit`, not a success, and
+a caller that retries after such a failure pastes the text a second time. The
+machine-interface rule applies unchanged — confirm delivery however you like,
+but the caller reads only your exit status.
+
+**If you ignore it.** Nothing changes. Callers keep sending raw keystrokes
+through `send`, or through `attach`, exactly as they do today.
+
 ## What to do if you maintain a v1 provider
 
 In order, most value per unit of effort:
 
-1. **Do nothing. You still work.** No v2 change breaks a v1 provider. Verify
+1. **Do nothing. You still work.** No v2 change breaks a v1 provider, apart
+   from the transcript namespace in "Nothing breaks" above. Verify
    this by re-reading section headings above if you want; there is no deadline
    and no deprecation.
 
