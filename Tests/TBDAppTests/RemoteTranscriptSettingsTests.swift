@@ -148,12 +148,12 @@ struct RemoteTranscriptSettingsTests {
         #expect(state.remoteTranscriptSyncDrivers[Self.selection]?.driver === driver)
 
         driver.setActive(true)
-        #expect(await syncs.next() == 1)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 1)
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
 
         // No virtual time passes: only the request can explain a second sync.
         state.requestRemoteTranscriptSync(Self.selection)
-        #expect(await syncs.next() == 2)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 2)
 
         // Newer-wins: a stale driver unregistering leaves the live one.
         let stale = RemoteTranscriptSyncDriver(

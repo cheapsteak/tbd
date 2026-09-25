@@ -9,7 +9,7 @@ import TestSupport
 /// `RemoteTranscriptSyncSession`: what the live pane decides from what it
 /// observes — sync only while on screen and the app is active, and on a
 /// selection change stop the old session's driver before starting the new
-/// one's. Positive assertions go through `syncs.next()`; negative ones read
+/// one's. Positive assertions go through `syncs.next(timeout: TestDeadlines.saturatedPass)`; negative ones read
 /// the recorder after `settle()`.
 @MainActor
 @Suite("Remote transcript sync session", .clockDriven, .serialized)
@@ -68,7 +68,7 @@ struct RemoteTranscriptSyncSessionTests {
         let h = Harness()
         defer { h.session.stop() }
         h.session.start(Self.first, agentState: nil)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
         try await h.armed()
 
         h.session.setOnScreen(false)
@@ -78,7 +78,7 @@ struct RemoteTranscriptSyncSessionTests {
         #expect(h.syncs.values == ["s1"], "a hidden pane must not sync")
 
         h.session.setOnScreen(true)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
     }
 
     @Test("an inactive app stops syncing; becoming active again syncs at once")
@@ -86,7 +86,7 @@ struct RemoteTranscriptSyncSessionTests {
         let h = Harness()
         defer { h.session.stop() }
         h.session.start(Self.first, agentState: nil)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
         try await h.armed()
 
         h.session.setAppActive(false)
@@ -96,7 +96,7 @@ struct RemoteTranscriptSyncSessionTests {
         #expect(h.syncs.values == ["s1"], "an inactive app must not sync")
 
         h.session.setAppActive(true)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
     }
 
     @Test("starting hidden or inactive makes a driver but does not sync")
@@ -120,12 +120,12 @@ struct RemoteTranscriptSyncSessionTests {
         let h = Harness()
         defer { h.session.stop() }
         h.session.start(Self.first, agentState: nil)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
         try await h.armed()
         let firstDriver = h.session.driver
 
         h.session.start(Self.second, agentState: nil)
-        #expect(await h.syncs.next() == "s2", "the new session syncs at once")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s2", "the new session syncs at once")
         #expect(h.stopped == [Self.first])
         #expect(h.started == [Self.first, Self.second])
         #expect(h.session.driver !== firstDriver)
@@ -138,7 +138,7 @@ struct RemoteTranscriptSyncSessionTests {
         // fire on the advance below and put an "s1" in the recorder.
         try await h.armed()
         await h.clock.advance(by: Self.interval)
-        #expect(await h.syncs.next() == "s2")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s2")
         await settle()
         #expect(h.syncs.values == ["s1", "s2", "s2"])
     }
@@ -147,7 +147,7 @@ struct RemoteTranscriptSyncSessionTests {
     func stopEnds() async throws {
         let h = Harness()
         h.session.start(Self.first, agentState: nil)
-        #expect(await h.syncs.next() == "s1")
+        #expect(await h.syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
         try await h.armed()
 
         h.session.stop()

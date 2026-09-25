@@ -11,7 +11,7 @@ import TestSupport
 /// immediate syncs a send or an agent-state change asks for.
 ///
 /// The clock is `EventDrivenTestClock`, so every positive assertion goes
-/// through `syncs.next()` and every negative one reads the recorder after an
+/// through `syncs.next(timeout: TestDeadlines.saturatedPass)` and every negative one reads the recorder after an
 /// explicit `settle()`.
 @MainActor
 @Suite("Remote transcript sync driver", .clockDriven, .serialized)
@@ -58,7 +58,7 @@ struct RemoteTranscriptSyncDriverTests {
         defer { driver.stop() }
 
         driver.setActive(true)
-        #expect(await syncs.next() == 1, "the first sync does not wait for a tick")
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 1, "the first sync does not wait for a tick")
 
         // Short of the interval: nothing.
         try await Self.armed(clock)
@@ -68,11 +68,11 @@ struct RemoteTranscriptSyncDriverTests {
 
         // Crossing it: the second sync.
         await clock.advance(by: .seconds(1))
-        #expect(await syncs.next() == 2)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 2)
 
         try await Self.armed(clock)
         await clock.advance(by: Self.interval)
-        #expect(await syncs.next() == 3)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 3)
     }
 
     @Test("each sync publishes path, generation and caughtUp, and bumps the refresh token")
@@ -87,13 +87,13 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(driver.snapshot == RemoteTranscriptSyncSnapshot())
 
         driver.setActive(true)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
         #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(
             path: "/cache/s1.jsonl", generation: 1, caughtUp: false, refreshToken: 1))
 
         await clock.advance(by: Self.interval)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
         #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(
             path: "/cache/s1.jsonl", generation: 2, caughtUp: true, refreshToken: 2))
@@ -113,17 +113,17 @@ struct RemoteTranscriptSyncDriverTests {
         defer { driver.stop() }
 
         driver.setActive(true)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
         await clock.advance(by: Self.interval)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
         #expect(driver.snapshot.path == "/p")
         #expect(driver.snapshot.refreshToken == 1, "a failed sync read nothing new")
         #expect(driver.snapshot.error == "not implemented")
 
         await clock.advance(by: Self.interval)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
         #expect(driver.snapshot.error == nil)
         #expect(driver.snapshot.refreshToken == 2)
@@ -137,7 +137,7 @@ struct RemoteTranscriptSyncDriverTests {
         defer { driver.stop() }
 
         driver.setActive(true)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
 
         driver.setActive(false)
@@ -147,7 +147,7 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(syncs.values == [1], "a hidden pane or an inactive app must not sync")
 
         driver.setActive(true)
-        #expect(await syncs.next() == 2)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 2)
     }
 
     @Test("syncNow runs a sync without waiting for the tick, and restarts the cadence")
@@ -158,15 +158,15 @@ struct RemoteTranscriptSyncDriverTests {
         defer { driver.stop() }
 
         driver.setActive(true)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
 
         driver.syncNow()
-        #expect(await syncs.next() == 2, "no virtual time passed, so only the trigger can explain it")
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 2, "no virtual time passed, so only the trigger can explain it")
 
         try await Self.armed(clock)
         await clock.advance(by: Self.interval)
-        #expect(await syncs.next() == 3)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 3)
     }
 
     @Test("syncNow while inactive does nothing")
@@ -191,7 +191,7 @@ struct RemoteTranscriptSyncDriverTests {
         let idle = RemoteTranscriptSyncDriver.AgentStateMark(state: .idle, at: "t2")
 
         driver.setActive(true)
-        _ = await syncs.next()
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         try await Self.armed(clock)
 
         driver.noteAgentState(working)
@@ -199,7 +199,7 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(syncs.values == [1], "the first sighting only records")
 
         driver.noteAgentState(idle)
-        #expect(await syncs.next() == 2)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 2)
 
         try await Self.armed(clock)
         driver.noteAgentState(idle)
@@ -209,6 +209,6 @@ struct RemoteTranscriptSyncDriverTests {
         // The same state at a later time is a change: the agent went
         // somewhere and came back between two reads.
         driver.noteAgentState(.init(state: .idle, at: "t3"))
-        #expect(await syncs.next() == 3)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 3)
     }
 }
