@@ -10,6 +10,11 @@ import TBDShared
 /// `agent_state` the provider reported through `list` and `events`. Nothing
 /// here reads rendered terminal text.
 ///
+/// It fails closed: only a session the provider reports as `running` can get
+/// an enabled composer. A `starting` session has no agent to read a message
+/// yet, and an `unknown` state — which is also what a raw value this build
+/// does not know decodes to — is not evidence of a running process.
+///
 /// Exited outranks blocked for the reason the local composer gives: a session
 /// whose process is gone cannot be sitting on a prompt, and telling somebody
 /// to answer it in the terminal would send them nowhere. Unlike the local
@@ -23,6 +28,10 @@ enum RemoteComposerState: Equatable {
     case running
     /// The provider reports the session, or its agent, as exited.
     case exited
+    /// The provider reports the session as `starting`.
+    case starting
+    /// The provider reports the session's state as `unknown`.
+    case stateUnknown
     /// `agent_state` is `waiting_input`: the agent is blocked on a prompt, and
     /// a pasted body plus Enter would choose its highlighted option. The
     /// daemon refuses the send in this state too.
@@ -36,6 +45,8 @@ enum RemoteComposerState: Equatable {
     var disabledMessage: String? {
         switch self {
         case .exited: return "Session has exited"
+        case .starting: return "Session is starting"
+        case .stateUnknown: return "Session state is unknown"
         case .blocked: return "Waiting on a prompt — answer it in the terminal"
         case .hidden, .running: return nil
         }
@@ -56,6 +67,12 @@ enum RemoteComposerState: Equatable {
 
         if session.state == .exited || session.agentState == .exited {
             return .exited
+        }
+        switch session.state {
+        case .running: break
+        case .starting: return .starting
+        case .unknown: return .stateUnknown
+        case .exited: return .exited
         }
         if session.agentState == .waitingInput {
             return .blocked

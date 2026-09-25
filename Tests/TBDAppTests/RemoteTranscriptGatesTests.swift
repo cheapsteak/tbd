@@ -97,6 +97,25 @@ struct RemoteTranscriptGatesTests {
         #expect(resolve(session: session(agentState: .working)).isEnabled)
     }
 
+    /// Fail closed: only a session the provider reports as `running` gets an
+    /// enabled composer. `starting` has no agent to read the message yet, and
+    /// `unknown` (including a raw value this build does not know) is not
+    /// evidence of a running process.
+    @Test func composerDisabledUntilTheSessionReportsRunning() {
+        #expect(resolve(session: session(state: .starting)) == .starting)
+        #expect(resolve(session: session(state: .unknown)) == .stateUnknown)
+        #expect(!RemoteComposerState.starting.isEnabled)
+        #expect(!RemoteComposerState.stateUnknown.isEnabled)
+        #expect(RemoteComposerState.starting.disabledMessage == "Session is starting")
+        #expect(RemoteComposerState.stateUnknown.disabledMessage
+                == "Session state is unknown")
+        // Exited and blocked keep their precedence over the fail-closed cases
+        // only where they apply: an exited agent in a starting session is exited.
+        #expect(resolve(session: session(state: .starting, agentState: .exited)) == .exited)
+        #expect(resolve(session: session(state: .unknown, agentState: .waitingInput))
+                == .stateUnknown)
+    }
+
     @Test func composerHiddenWithoutSendSubmit() {
         #expect(resolve(capabilities: ["send"], session: session()) == .hidden)
     }
