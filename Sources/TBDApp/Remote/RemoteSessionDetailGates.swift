@@ -31,6 +31,12 @@ enum RemoteSessionDetailGates {
     private static let attachCapability = "attach"
     private static let logCapability = "log"
     private static let sendCapability = "send"
+    /// The remote-transcript capabilities
+    /// (docs/specs/2026-09-25-remote-session-transcript-design.md). Kept here,
+    /// private and in one place, so they can be swapped for the shared
+    /// `RemoteCapability` namespace in a single edit once it lands.
+    private static let transcriptReadCapability = "transcript.read"
+    private static let sendSubmitCapability = "send-submit"
 
     /// Whether a live attach terminal can be offered for the session.
     ///
@@ -79,5 +85,34 @@ enum RemoteSessionDetailGates {
     /// withholds Stop under the same condition.
     static func showsStop(sessionExists: Bool, gone: Bool, snapshotFresh: Bool) -> Bool {
         sessionExists && !gone && snapshotFresh
+    }
+
+    // MARK: - Remote transcript
+
+    /// Whether the window toolbar offers the Transcript toggle for a remote
+    /// session: the provider declares `transcript.read` and
+    /// `remote_transcript_enabled` is on. The flag is a parameter, not read
+    /// here, so this stays a pure function of its inputs.
+    static func showsTranscriptToggle(capabilities: [String], featureEnabled: Bool) -> Bool {
+        featureEnabled && capabilities.contains(transcriptReadCapability)
+    }
+
+    /// Whether the detail pane shows the transcript half of its split: the
+    /// toggle is offered and the shared `remoteTranscriptOpen` preference
+    /// says open. A hidden toggle hides the pane too, so a provider that
+    /// stops declaring `transcript.read` never leaves a pane nothing can
+    /// close.
+    static func showsTranscriptPane(capabilities: [String], featureEnabled: Bool, open: Bool) -> Bool {
+        open && showsTranscriptToggle(capabilities: capabilities, featureEnabled: featureEnabled)
+    }
+
+    /// Whether a remote session can have a submitting composer at all:
+    /// the provider declares `send-submit`, and both
+    /// `remote_transcript_enabled` and `transcript_composer_enabled` are on.
+    /// The composer's finer states live in `RemoteComposerState`.
+    static func offersComposer(
+        capabilities: [String], remoteTranscriptEnabled: Bool, composerEnabled: Bool
+    ) -> Bool {
+        remoteTranscriptEnabled && composerEnabled && capabilities.contains(sendSubmitCapability)
     }
 }
