@@ -191,6 +191,82 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         ])
     }
 
+    /// A dismissed session is refused before the provider is invoked, so an
+    /// open pane cannot rebuild a cache the dismiss discarded.
+    @Test func syncIsRefusedForADismissedSession() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        _ = try await db.remoteSessions.dismiss(provider: "agentbox", sessionID: "s-1")
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+        ])
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: ["TBD_HOME": home.path])
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false)
+    }
+
+    /// A dismiss that lands while a sync is already past its first check —
+    /// before the sync reached the actor, so the dismiss's discard had no lane
+    /// to mark — must not leave the pages that sync writes behind. Here the
+    /// row turns dismissed mid-fetch with no discard at all, the strictest
+    /// form of that race: the sync still refuses and removes what it wrote.
+    @Test func aSessionDismissedDuringItsSyncKeepsNoCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor": "c-1"}"#),
+        ])
+        let db = self.db
+        invoker.onCall = { verb in
+            guard verb.first == "transcript" else { return }
+            _ = try? await db.remoteSessions.dismiss(provider: "agentbox", sessionID: "s-1")
+        }
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"], RemoteVerb.transcriptRead(sessionID: "s-1")])
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: ["TBD_HOME": home.path])
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false,
+                "a sync that raced a dismiss left its cache behind")
+    }
+
+    /// The other branch: the same mirror row, not dismissed, syncs.
+    @Test func syncProceedsForAMirroredSessionThatIsNotDismissed() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor": "c-1"}"#),
+        ])
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success)
+        #expect(invoker.callsSnapshot() == [["describe"], RemoteVerb.transcriptRead(sessionID: "s-1")])
+    }
+
     @Test func syncSurfacesAProviderFailure() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         try await db.config.setRemoteTranscriptEnabled(true)
@@ -535,5 +611,76 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
             if opened { return }
             await withCheckedContinuation { waiters.append($0) }
         }
+    }
+
+    // MARK: - Eager cache removal on delete and dismiss
+
+    /// A cache directory for the session, with a transcript in it, at the path
+    /// `remote.transcriptSync` writes.
+    private func seedCache(_ sessionID: String) throws -> String {
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: sessionID, environment: ["TBD_HOME": home.path])
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{}\n".utf8).write(
+            to: directory.appendingPathComponent(TBDConstants.remoteTranscriptFileName))
+        return directory.path
+    }
+
+    @Test func aSuccessfulDeleteRemovesOnlyThatSessionsCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            providerOK(#"{"id": "s-1", "deleted": true}"#),
+        ])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+        let other = try seedCache("s-2")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDelete,
+            params: #"{"provider": "agentbox", "sessionID": "s-1", "retain": false}"#))
+
+        #expect(response.success)
+        #expect(FileManager.default.fileExists(atPath: cache) == false)
+        #expect(FileManager.default.fileExists(atPath: other))
+    }
+
+    /// A delete the provider refused leaves the cache: the session still exists.
+    @Test func aFailedDeleteKeepsTheCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "permission_denied", "message": "no"}}"#.utf8),
+                stderr: ""),
+        ])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDelete,
+            params: #"{"provider": "agentbox", "sessionID": "s-1", "retain": false}"#))
+
+        #expect(response.success == false)
+        #expect(FileManager.default.fileExists(atPath: cache))
+    }
+
+    @Test func dismissRemovesOnlyThatSessionsCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([])])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+        let other = try seedCache("s-2")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDismiss,
+            params: #"{"provider": "agentbox", "sessionID": "s-1"}"#))
+
+        #expect(response.success)
+        #expect(FileManager.default.fileExists(atPath: cache) == false)
+        #expect(FileManager.default.fileExists(atPath: other))
     }
 }

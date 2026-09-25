@@ -96,7 +96,7 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
 ### RPCs
 
-- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless `remote_transcript_enabled` is on and the provider declares `transcript.read`.
+- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless `remote_transcript_enabled` is on and the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
 - **`remote.sendMessage {provider, sessionID, text}`** invokes `send <id> --submit` with `text` on stdin and a 30-second timeout. It is refused:
   - unless both `remote_transcript_enabled` and `transcript_composer_enabled` are on — the daemon checks the flags itself, so a direct RPC call cannot send input the hidden composer would not;
   - unless the provider declares `send-submit`;
@@ -119,7 +119,7 @@ The existing `remote.transcript` RPC and `tbd remote transcript` keep their full
 The cache directory is a new kind of durable resource, and `OrphanGC` reclaims it in a new leg under `gcEnabled`:
 
 - A session directory is reclaimed when TBD no longer tracks its `(provider, sessionID)` and nothing has been written to it within `gcGraceSeconds`, the grace window every other leg uses. A session is tracked while a `remote_session` row for it has `dismissed = 0` or a `worktree` row for it has a status other than `archived`. Row absence alone would not do: dismissing sets `dismissed = 1` and keeps the row, and archiving keeps the worktree row, so a sweep that waited for rows to disappear would never reclaim a dismissed or archived session's cache. A session un-dismissed or unarchived after its cache was reclaimed simply refetches. The window keeps a sync that raced a dismiss from losing its file mid-write.
-- A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. The sweep is the guarantee; the eager removal is only prompt cleanup.
+- A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. A sync already in flight for that session drops what it fetched instead of writing it back into a recreated directory. The sweep is the guarantee; the eager removal is only prompt cleanup.
 
 The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install that never enabled `remote_transcript_enabled` has no such directories, so the leg finds nothing. The leg walks the whole cache root against the rows rather than a record of what it created, so it also reclaims directories written before it existed.
 
@@ -173,12 +173,12 @@ Each gate is tested on both branches.
   - a `transcript.jsonl` longer than `state.json`'s `length` is truncated on load;
   - paths follow `TBD_HOME`.
 - **RPC gates**:
-  - `remote.transcriptSync` refused with the flag off or without `transcript.read`;
+  - `remote.transcriptSync` refused with the flag off, without `transcript.read`, or for a dismissed session;
   - `remote.sendMessage` refused with either flag off, without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
   - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
-- **OrphanGC leg** – keeps a directory whose session has an undismissed `remote_session` row or an unarchived `worktree` row, keeps one written within `gcGraceSeconds`, reclaims one outside the window whose only rows are dismissed or archived, reclaims one with no rows at all, and does nothing with `gcEnabled` off.
+- **OrphanGC leg** – keeps a directory whose session has an undismissed `remote_session` row or an unarchived `worktree` row, keeps one written within `gcGraceSeconds`, reclaims one outside the window whose only rows are dismissed or archived, reclaims one with no rows at all, and does nothing with `gcEnabled` off; a successful `remote.delete` and `remote.dismiss` remove only their own session's directory, and a failed delete removes nothing.
 - **App gates** – toolbar toggle visibility against the capability and flag; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
 - **Config column** – a pre-migration row reads NULL and follows the default constant; an explicit `false` survives a change to it.
 

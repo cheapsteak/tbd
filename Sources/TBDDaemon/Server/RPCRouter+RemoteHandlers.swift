@@ -895,17 +895,43 @@ extension RPCRouter {
                 provider: params.provider, capability: RemoteCapability.transcriptRead,
                 section: "transcript read <id> [--since <cursor>]")
         }
+        // A dismissed session's cache is discarded and reclaimed by the orphan
+        // sweep; syncing it would rebuild a directory nothing will show.
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        let response: RPCResponse
         do {
             let result = try await sync.sync(provider: params.provider, sessionID: params.sessionID)
-            return try RPCResponse(result: result)
+            response = try RPCResponse(result: result)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error(
                 "remote.transcriptSync provider=\(params.provider, privacy: .public) timed out")
-            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+            response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
         } catch let error as RemoteTranscriptSyncError {
-            return RPCResponse(error: error.localizedDescription)
+            response = RPCResponse(error: error.localizedDescription)
         }
+        // Checked again once the sync has written. A dismiss that landed after
+        // the check above — its discard finding no lane to mark yet, because
+        // this sync had not reached the actor — would otherwise leave the pages
+        // this sync wrote in a directory the dismiss already removed. The
+        // dismiss writes its row before it discards, so either its discard ran
+        // after these writes and removed them, or this read sees the row and
+        // discards them here.
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            await sync.discard(provider: params.provider, sessionID: params.sessionID)
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        return response
     }
+
+    private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
+        try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
+    }
+
+    /// What `remote.transcriptSync` answers for a dismissed session.
+    static let transcriptSyncDismissedRefusal =
+        "this session is dismissed; its transcript is no longer kept"
 
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
@@ -1300,6 +1326,11 @@ extension RPCRouter {
         // row is dropped.
         await deletion.restamp(at: now())
         await recordDeleteAftermath(outcome, params: params, now: now)
+        // Prompt cleanup only; `OrphanGC`'s remote-transcript leg is the
+        // guarantee, and the archived lane this leaves behind does not pin the
+        // cache against it. A retained copy, if one was asked for, lives on the
+        // provider and in `~/tbd/transcripts/`, never here.
+        await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: outcome)
     }
@@ -1369,6 +1400,13 @@ extension RPCRouter {
         if changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
+        // Dismissing hides the session, so its transcript cache goes with it —
+        // even when the row was already dismissed, which is how a retry after a
+        // failed removal gets a second chance. Prompt cleanup only: a dismissed
+        // row does not pin the cache, so the orphan sweep reclaims whatever
+        // this misses, and `remote.transcriptSync` refuses a dismissed session
+        // so an open pane cannot rebuild it.
+        await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         return .ok()
     }
 

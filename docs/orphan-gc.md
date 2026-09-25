@@ -319,7 +319,10 @@ expiry, and `tbd remote recall <key>` fetches it again.
 `state.json`), and a directory outlives the request that created it. `OrphanGC` is its
 named reconciler — see
 [`docs/specs/2026-09-25-remote-session-transcript-design.md`](specs/2026-09-25-remote-session-transcript-design.md),
-"Reclaiming the cache".
+"Reclaiming the cache". A successful `remote.delete` or `remote.dismiss` removes the
+session's directory at once (`RemoteTranscriptSync.discard`, which also stops a fetch in
+flight for that session from writing its page back); that is prompt cleanup, best effort,
+and the sweep is the guarantee behind it.
 
 **Under `gcEnabled` alone**, with no soak flag of its own: the cache is a rebuildable copy of
 the provider's transcript, so a session un-dismissed or unarchived after its cache was
@@ -342,7 +345,10 @@ A session is tracked while a `remote_session` row for it has `dismissed = 0` or 
 
 Row absence alone would not do. Dismissing sets `dismissed = 1` and keeps the row, and
 archiving keeps the worktree row, so a sweep that waited for rows to disappear would never
-reclaim a dismissed or archived session's cache.
+reclaim a dismissed or archived session's cache — which is what a dismiss whose eager
+removal failed, or a delete that timed out after the provider acted, leaves behind.
+`remote.transcriptSync` refuses a dismissed session, so a pane still open after a dismiss
+cannot rebuild its cache.
 
 Directory names are the escaped components `TBDConstants.remoteTranscriptDir` writes, so
 the leg compares each row by the path that helper gives it under the same root the walk
