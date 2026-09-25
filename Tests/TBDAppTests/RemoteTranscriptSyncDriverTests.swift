@@ -333,7 +333,7 @@ struct RemoteTranscriptSyncDriverTests {
         // Hidden while sync 2 is in flight; then let it answer.
         driver.setActive(false)
         gate.releaseOne()
-        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
             await MainActor.run { driver.snapshot.refreshToken == 2 }
         }
         #expect(published == .satisfied,
@@ -363,7 +363,7 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(await starts.next(timeout: TestDeadlines.saturatedPass)?.ordinal == 1)
         driver.setActive(false)
         gate.releaseOne()
-        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
             await MainActor.run { driver.snapshot.refreshToken == 1 }
         }
         #expect(published == .satisfied)
