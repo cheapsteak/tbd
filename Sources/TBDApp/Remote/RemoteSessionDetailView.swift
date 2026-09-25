@@ -98,7 +98,9 @@ enum RemoteSessionSendPayload {
 /// toolbar (`ContentView`). The only chrome here is a compact warning strip,
 /// rendered only while a warning actually applies, and — only while no live
 /// attached terminal is showing — a send footer (see
-/// `RemoteSessionDetailGates.showsSendFooter`).
+/// `RemoteSessionDetailGates.showsSendFooter`). When the transcript is
+/// available and open, the session's conversation sits beside the terminal in
+/// a horizontal split (`RemoteTranscriptPaneView`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
 /// this view hosts `RemoteAttachPager`, which keeps recently-viewed
@@ -276,8 +278,31 @@ struct RemoteSessionDetailView: View {
 
     // MARK: - Content
 
-    @ViewBuilder
+    /// A horizontal split: the terminal side on the left, and — when the
+    /// provider declares `transcript.read`, the flag is on and the shared
+    /// `remoteTranscriptOpen` preference says open — the transcript on the
+    /// right. The split is always the container, even with one child, so
+    /// opening or closing the transcript only adds or removes the second
+    /// child and never restructures the left one: `RemoteAttachPager` stays
+    /// mounted either way (see `terminalArea`).
     private var contentArea: some View {
+        HSplitView {
+            terminalArea
+                .frame(minWidth: 240)
+            if appState.remoteSessionShowsTranscriptPane(selection) {
+                // Nothing drives `remote.transcriptSync` in this build, so
+                // the pane has no cache file yet and shows its loading state.
+                // The flag gating it reads off until that driver lands.
+                RemoteTranscriptPaneView(
+                    selection: selection, path: nil, generation: 0, caughtUp: false)
+                    .frame(minWidth: 280, idealWidth: 420)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var terminalArea: some View {
         ZStack {
             // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
             // nested inside a check scoped to the CURRENT selection's
