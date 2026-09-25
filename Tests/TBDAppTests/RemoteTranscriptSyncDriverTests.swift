@@ -371,6 +371,54 @@ struct RemoteTranscriptSyncDriverTests {
             path: "/cache/s1.jsonl", generation: 1, caughtUp: true, refreshToken: 1))
     }
 
+    /// Going inactive does not wait for the sync in flight, so going active
+    /// again starts a second sync while the first is still out. When the
+    /// newer one publishes first, the older one's late answer must not move
+    /// the snapshot backwards.
+    @Test("an older sync finishing after a newer one has published is dropped")
+    func olderResultNeverOverwritesNewer() async throws {
+        let clock = EventDrivenTestClock()
+        let starts = FireRecorder<Int>()
+        let olderGate = RemoteTranscriptSyncGate()
+        let newerGate = RemoteTranscriptSyncGate()
+        var count = 0
+        let driver = RemoteTranscriptSyncDriver(
+            selection: Self.selection,
+            sync: { _ in
+                count += 1
+                let ordinal = count
+                starts.record(ordinal)
+                await (ordinal == 1 ? olderGate : newerGate).wait()
+                return RemoteTranscriptSyncResult(
+                    path: "/cache/s1.jsonl", generation: ordinal, caughtUp: true)
+            },
+            interval: Self.interval,
+            clock: clock)
+        defer {
+            driver.stop()
+            olderGate.open()
+            newerGate.open()
+        }
+
+        driver.setActive(true)
+        #expect(await starts.next(timeout: TestDeadlines.saturatedPass) == 1)
+        driver.setActive(false)
+        driver.setActive(true)
+        #expect(await starts.next(timeout: TestDeadlines.saturatedPass) == 2,
+                "going active again starts a sync while the first is still in flight")
+
+        newerGate.releaseOne()
+        try await Self.armed(clock)
+        #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(
+            path: "/cache/s1.jsonl", generation: 2, caughtUp: true, refreshToken: 1))
+
+        olderGate.releaseOne()
+        await settle()
+        #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(
+            path: "/cache/s1.jsonl", generation: 2, caughtUp: true, refreshToken: 1),
+                "the older sync's late answer replaced the newer one")
+    }
+
     @Test("a sync that finishes after stop() publishes nothing")
     func inFlightSyncAfterStopIsDropped() async throws {
         let clock = EventDrivenTestClock()
