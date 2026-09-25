@@ -249,6 +249,10 @@ struct RemoteComposerSendTests {
                 == .blocked(message: "Waiting on a prompt — answer it in the terminal"))
         #expect(RemoteComposerState.exited.composerState
                 == .unavailable(message: "Session has exited"))
+        #expect(RemoteComposerState.starting.composerState
+                == .unavailable(message: "Session is starting"))
+        #expect(RemoteComposerState.stateUnknown.composerState
+                == .unavailable(message: "Session state is unknown"))
         #expect(!ComposerState.unavailable(message: "x").isEnabled)
     }
 }

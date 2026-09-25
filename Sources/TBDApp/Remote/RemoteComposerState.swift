@@ -62,7 +62,8 @@ enum RemoteComposerState: Equatable {
         case .hidden: return .hidden
         case .running: return .running
         case .blocked: return .blocked(message: disabledMessage ?? "")
-        case .exited: return .unavailable(message: disabledMessage ?? "")
+        case .exited, .starting, .stateUnknown:
+            return .unavailable(message: disabledMessage ?? "")
         }
     }
 
