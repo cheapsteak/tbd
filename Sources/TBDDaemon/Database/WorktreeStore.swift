@@ -253,6 +253,12 @@ public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     public var errorDescription: String? { description }
 }
 
+/// A provider session some row names — `(provider, sessionID)` as stored.
+public struct RemoteSessionReference: Sendable, Hashable {
+    public let provider: String
+    public let sessionID: String
+}
+
 /// Provides CRUD operations for worktrees.
 public struct WorktreeStore: Sendable {
     let writer: any DatabaseWriter
@@ -606,6 +612,27 @@ public struct WorktreeStore: Sendable {
                 .filter(Column("providerSessionID") == sessionID)
                 .fetchOne(db)?
                 .toModel()
+        }
+    }
+
+    /// The `(providerName, providerSessionID)` pair of every worktree row that
+    /// is not archived, whatever its location. An archived lane does not pin
+    /// its session's transcript cache: the cache is a rebuildable copy, and a
+    /// revived lane resyncs. Read as raw columns rather than through `list()`,
+    /// so a live row whose other columns fail to decode still counts as a
+    /// reference — `OrphanGC`'s remote-transcript leg reclaims whatever is NOT
+    /// referenced, and a dropped row must never read as "nothing refers to it".
+    public func remoteSessionReferences() async throws -> [RemoteSessionReference] {
+        try await writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT providerName, providerSessionID FROM worktree
+                WHERE providerName IS NOT NULL AND providerSessionID IS NOT NULL
+                  AND status != ?
+                """, arguments: [WorktreeStatus.archived.rawValue])
+            return rows.map { row in
+                RemoteSessionReference(
+                    provider: row["providerName"], sessionID: row["providerSessionID"])
+            }
         }
     }
 

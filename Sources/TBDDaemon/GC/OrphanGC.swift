@@ -73,6 +73,11 @@ public actor OrphanGC {
     /// the process-global one.
     private let attachmentsBase: URL
     private let rowlessHolderCollector: RowlessHolderCollector
+    /// Resolves the remote-transcript cache root AND each row's cache path
+    /// through `TBDConstants`, so the walk and the reference set cannot
+    /// disagree on where a session's directory is. The process environment in
+    /// production; tests pass a temp `TBD_HOME`.
+    private let remoteTranscriptsEnvironment: [String: String]
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -167,6 +172,7 @@ public actor OrphanGC {
         modelProxyBase: URL? = nil,
         streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
+        remoteTranscriptsEnvironment: [String: String]? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -227,6 +233,8 @@ public actor OrphanGC {
         self.attachmentsCollector = AttachmentsCollector(
             base: resolvedAttachmentsBase, now: resolvedNow)
         self.hangStackCollector = HangStackCollector(base: resolvedHangStackBase)
+        self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
+            ?? ProcessInfo.processInfo.environment
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -343,6 +351,10 @@ public actor OrphanGC {
         )
 
         await reclaimRetainedTranscripts(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimRemoteTranscriptCaches(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
@@ -1091,6 +1103,163 @@ public actor OrphanGC {
                 """)
             }
         }
+    }
+
+    // MARK: - Remote transcript caches
+
+    /// Reclaims `~/tbd/remote-transcripts/<provider>/<sessionID>/` directories
+    /// whose session TBD no longer tracks — the named reconciler for the
+    /// remote transcript cache (`docs/specs/2026-09-25-remote-session-transcript-design.md`,
+    /// "Reclaiming the cache").
+    ///
+    /// A session is tracked while a `remote_session` row for it has
+    /// `dismissed = 0` or a `worktree` row for it has a status other than
+    /// `archived`. Row absence alone would not do: dismissing keeps the row
+    /// with `dismissed = 1`, and archiving keeps the worktree row, so a sweep
+    /// that waited for rows to disappear would never reclaim a dismissed or
+    /// archived session's cache. An undismissed `gone` row is still tracked:
+    /// the session is still listed, and its transcript may come back.
+    ///
+    /// Under `gcEnabled` alone, with no soak flag of its own: the cache is a
+    /// rebuildable copy of the provider's transcript, so a session un-dismissed
+    /// or unarchived after its cache was reclaimed simply refetches. `dryRun`
+    /// plans without touching disk, as everywhere in `sweep`.
+    ///
+    /// A directory is reclaimed only when all three hold, and every doubt
+    /// keeps:
+    ///
+    ///   - **No unarchived `worktree` row refers to it** by `providerName` /
+    ///     `providerSessionID`.
+    ///   - **No undismissed `remote_session` row refers to it.**
+    ///   - **Nothing in it was written within `gcGraceSeconds`**, the grace
+    ///     window every other leg uses, measured by the date seam against the
+    ///     newest creation or modification date of the directory and its
+    ///     entries. The window keeps a sync that raced a dismiss from losing
+    ///     its file mid-write. An unreadable date keeps.
+    ///
+    /// Either row list failing to read skips the whole leg, rather than
+    /// reading an empty list as "nothing is referenced".
+    ///
+    /// Directory names are the escaped components `TBDConstants` writes, so
+    /// rows are compared by the path `TBDConstants.remoteTranscriptDir` gives
+    /// them under the same root the walk reads — never by unescaping a name
+    /// found on disk. Only `<root>/<provider>/<session>` directories are
+    /// candidates; stray files and emptied provider directories are left alone
+    /// (one per provider ever used, bounded by hand-registered providers).
+    ///
+    /// No `ReapRecord`: nothing here could be restored that a sync would not
+    /// rebuild.
+    private func reclaimRemoteTranscriptCaches(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let environment = remoteTranscriptsEnvironment
+        let root = TBDConstants.remoteTranscriptsDir(environment: environment).path
+        let candidates = Self.remoteTranscriptCacheDirectories(root: root)
+        guard !candidates.isEmpty else { return }
+
+        let referenced: Set<String>
+        do {
+            let lanes = try await db.worktrees.remoteSessionReferences()
+            let sessions = try await db.remoteSessions.list()
+                .filter { !$0.dismissed }
+            let references = lanes + sessions.map {
+                RemoteSessionReference(provider: $0.provider, sessionID: $0.sessionID)
+            }
+            referenced = Set(references.map {
+                TBDConstants.remoteTranscriptDir(
+                    provider: $0.provider, sessionID: $0.sessionID, environment: environment).path
+            })
+        } catch {
+            logger.error("""
+            gc: rows unreadable this sweep (\(error.localizedDescription, privacy: .public)) \
+            — skipping the remote-transcript cache phase
+            """)
+            planned.append("KEEP rows-unreadable remote-transcript-caches")
+            return
+        }
+
+        let asOf = now()
+        for directory in candidates {
+            guard !referenced.contains(directory) else {
+                planned.append("KEEP tracked-session \(directory)")
+                continue
+            }
+            if let reason = Self.youngRemoteTranscriptCacheKeepReason(
+                directory: directory, asOf: asOf, graceSeconds: config.gcGraceSeconds) {
+                planned.append("KEEP \(reason) \(directory)")
+                logger.debug("gc: keep \(reason, privacy: .public) \(directory, privacy: .public)")
+                continue
+            }
+            planned.append("REAP remote-transcript-cache \(directory)")
+            // The outer `gcEnabled || dryRun` guard means every line below
+            // runs only with gcEnabled == true.
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: directory)
+                reaped += 1
+                logger.info("gc: reclaimed remote transcript cache \(directory, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(directory)")
+                logger.warning("""
+                gc: could not remove \(directory, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    /// Every `<root>/<provider>/<session>` directory, as a path string composed
+    /// from the root exactly as `TBDConstants.remoteTranscriptDir` composes
+    /// one, so the two compare as strings. An unreadable or absent root yields
+    /// nothing, which classifies nothing.
+    private static func remoteTranscriptCacheDirectories(root: String) -> [String] {
+        let fm = FileManager.default
+        func isDirectory(_ path: String) -> Bool {
+            var flag: ObjCBool = false
+            return fm.fileExists(atPath: path, isDirectory: &flag) && flag.boolValue
+        }
+        guard let providers = try? fm.contentsOfDirectory(atPath: root) else { return [] }
+        var directories: [String] = []
+        for provider in providers where !provider.hasPrefix(".") {
+            let providerPath = "\(root)/\(provider)"
+            guard isDirectory(providerPath),
+                  let sessions = try? fm.contentsOfDirectory(atPath: providerPath)
+            else { continue }
+            for session in sessions where !session.hasPrefix(".") {
+                let sessionPath = "\(providerPath)/\(session)"
+                if isDirectory(sessionPath) { directories.append(sessionPath) }
+            }
+        }
+        return directories.sorted()
+    }
+
+    /// A keep reason when anything in the directory — the directory itself or
+    /// one of its entries — was created or modified within the grace window, or
+    /// when a date cannot be read; `nil` when it is old enough to reclaim.
+    /// The directory's own dates move when a reset renames a file into it, and
+    /// an entry's move when a page is appended, so together they cover every
+    /// write the cache makes.
+    private static func youngRemoteTranscriptCacheKeepReason(
+        directory: String, asOf: Date, graceSeconds: Int
+    ) -> String? {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: directory) else {
+            return "unknown-age"
+        }
+        var newest: Date?
+        for path in [directory] + entries.map({ "\(directory)/\($0)" }) {
+            guard let attributes = try? fm.attributesOfItem(atPath: path) else {
+                return "unknown-age"
+            }
+            let dates = [
+                attributes[.creationDate] as? Date,
+                attributes[.modificationDate] as? Date,
+            ].compactMap { $0 }
+            guard let latest = dates.max() else { return "unknown-age" }
+            newest = max(newest ?? latest, latest)
+        }
+        guard let newest else { return "unknown-age" }
+        return asOf.timeIntervalSince(newest) < Double(graceSeconds) ? "grace" : nil
     }
 
     // MARK: - Composer attachments

@@ -30,6 +30,9 @@ These get reaped:
 - **Unreferenced retained transcripts** — JSONL files under `~/tbd/transcripts/` that no
   `retained_transcript` row points at, and receipt rows whose provider-stated expiry has
   passed (see below).
+- **Untracked remote transcript caches** — `~/tbd/remote-transcripts/<provider>/<session>/`
+  directories that no undismissed `remote_session` row or unarchived `worktree` row refers
+  to and that nothing has written to within `gcGraceSeconds` (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -308,6 +311,48 @@ reason:
 by the worktree a reap removed, and neither half here has one. Nothing is lost that a
 restore could return either: the transcript still lives on the provider until its own
 expiry, and `tbd remote recall <key>` fetches it again.
+
+## Remote transcript caches
+
+`remote.transcriptSync` keeps a remote session's conversation in
+`~/tbd/remote-transcripts/<provider>/<session>/` (`transcript.jsonl` beside
+`state.json`), and a directory outlives the request that created it. `OrphanGC` is its
+named reconciler — see
+[`docs/specs/2026-09-25-remote-session-transcript-design.md`](specs/2026-09-25-remote-session-transcript-design.md),
+"Reclaiming the cache".
+
+**Under `gcEnabled` alone**, with no soak flag of its own: the cache is a rebuildable copy of
+the provider's transcript, so a session un-dismissed or unarchived after its cache was
+reclaimed simply refetches.
+A dry run plans without touching disk, as every leg does.
+
+A session is tracked while a `remote_session` row for it has `dismissed = 0` or a
+`worktree` row for it has a status other than `archived`. A directory is reclaimed
+(`REAP remote-transcript-cache`) only when all three hold:
+
+- **No unarchived `worktree` row refers to it** by `providerName` / `providerSessionID`.
+  The pairs are read as raw columns, so an unarchived row that fails to decode still
+  counts.
+- **No undismissed `remote_session` row refers to it.** An undismissed `gone` row still
+  counts: the session is still listed.
+- **Nothing in it was written within `gcGraceSeconds`** (default 3600s / 1h), the grace
+  window every other leg uses — the newest creation or modification date of the directory
+  and its entries, against the date seam. The window keeps a sync that raced a dismiss
+  from losing its file mid-write.
+
+Row absence alone would not do. Dismissing sets `dismissed = 1` and keeps the row, and
+archiving keeps the worktree row, so a sweep that waited for rows to disappear would never
+reclaim a dismissed or archived session's cache.
+
+Directory names are the escaped components `TBDConstants.remoteTranscriptDir` writes, so
+the leg compares each row by the path that helper gives it under the same root the walk
+reads, never by unescaping a name found on disk. Every doubt keeps: a tracked session
+(`tracked-session`), a directory inside the grace window or undatable (`grace`,
+`unknown-age`), unreadable
+rows (`rows-unreadable`, which skips the leg), and a failed removal (`remove-failed`).
+Only `<root>/<provider>/<session>` directories are candidates; stray files and emptied
+provider directories are left alone. No reap record is written: nothing here could be
+restored that a sync would not rebuild.
 
 ## Cadence and the `gcEnabled` gate
 
