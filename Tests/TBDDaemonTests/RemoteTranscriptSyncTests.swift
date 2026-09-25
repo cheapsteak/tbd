@@ -137,6 +137,57 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         #expect(result.caughtUp)
     }
 
+    // MARK: - A --since answer without a real envelope
+
+    /// A `--since` answer is only the delta, so an envelope that is absent or
+    /// malformed must never turn it into a whole-conversation reset: the sync
+    /// discards that output, drops the cursor, and refetches from the
+    /// beginning, keeping everything held until the full answer arrives.
+    @Test(arguments: [
+        #"{"cursor": 42}"#,      // an envelope that fails the strict decode
+        #"{"reset": "yes"}"#,
+        "",                      // no envelope at all
+    ])
+    func aSinceAnswerWithoutAValidEnvelopeRefetchesFromTheBeginning(stderr: String) async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor": "c-1"}"#),
+            Self.page("{\"n\":2}\n", stderr),
+            Self.page("{\"n\":1}\n{\"n\":2}\n", #"{"cursor": "c-2"}"#),
+            Self.page("{\"n\":3}\n", #"{"cursor": "c-3"}"#),
+        ])
+        let sync = makeSync(provider)
+        let first = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        let second = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+
+        #expect(await provider.calls == [read(), read(since: "c-1"), read()])
+        #expect(try fileText(second) == "{\"n\":1}\n{\"n\":2}\n")
+        #expect(second.caughtUp)
+        #expect(second.generation == first.generation + 1)
+
+        // The refetch's cursor is the one stored.
+        let third = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls.last == read(since: "c-2"))
+        #expect(try fileText(third) == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
+    }
+
+    /// The refetch counts toward the page cap. With a cap of one, the
+    /// discarded delta is the whole sync: nothing held is touched, and the
+    /// sync reports it is not caught up.
+    @Test func theRefetchCountsTowardThePageCap() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor": "c-1"}"#),
+            Self.page("{\"n\":2}\n", #"{"cursor": 42}"#),
+        ])
+        let sync = makeSync(provider, pageCap: 1)
+        let first = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        let second = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+
+        #expect(await provider.calls == [read(), read(since: "c-1")])
+        #expect(try fileText(second) == "{\"n\":1}\n")
+        #expect(second.generation == first.generation)
+        #expect(!second.caughtUp)
+    }
+
     // MARK: - Paging
 
     @Test func pagesWhileMoreAndStopsWhenCaughtUp() async throws {

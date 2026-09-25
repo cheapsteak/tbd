@@ -38,6 +38,11 @@ enum RemoteTranscriptSyncError: Error, Equatable, LocalizedError {
 /// provider that never clears `more` cannot hold the lane forever; the next
 /// sync resumes from the stored cursor.
 ///
+/// **A `--since` answer without a valid envelope is discarded.** That output
+/// is only the delta after the cursor, so writing it as a reset would wipe the
+/// history held before it. The sync drops the cursor and refetches from the
+/// beginning within the same sync; the refetch counts toward `pageCap`.
+///
 /// No clock: nothing here sleeps, polls, debounces or times out. The app owns
 /// the refresh cadence (the daemon runs no transcript timers), and each
 /// provider call's timeout is enforced by the invoker it goes through.
@@ -164,9 +169,9 @@ actor RemoteTranscriptSync {
     private func fetchPages(_ key: LaneKey) async throws -> RemoteTranscriptSyncResult {
         let cache = self.cache(provider: key.provider, sessionID: key.sessionID)
         var state = try cache.load()
+        var since = state.cursor
         var caughtUp = false
         for _ in 0..<pageCap {
-            let since = state.cursor
             let result = try await invoke(
                 key.provider, RemoteVerb.transcriptRead(sessionID: key.sessionID, since: since))
             if result.failureClass != nil {
@@ -181,11 +186,22 @@ actor RemoteTranscriptSync {
             }
             let envelope = RemoteTranscriptEnvelope.parse(
                 stderr: result.stderr, requestedSince: since != nil, provider: key.provider)
+            if since != nil, envelope.source != .envelope {
+                syncLogger.error(
+                    """
+                    transcript read provider=\(key.provider, privacy: .public) \
+                    session=\(key.sessionID, privacy: .public): a --since answer came without a valid \
+                    envelope; discarding it and refetching from the beginning
+                    """)
+                since = nil
+                continue
+            }
             if envelope.reset {
                 state = try cache.reset(to: result.stdout, cursor: envelope.cursor, from: state)
             } else {
                 state = try cache.append(result.stdout, cursor: envelope.cursor, to: state)
             }
+            since = state.cursor
             if !envelope.more {
                 caughtUp = true
                 break

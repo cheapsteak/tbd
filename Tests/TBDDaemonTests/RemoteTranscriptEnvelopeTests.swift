@@ -61,9 +61,9 @@ struct RemoteTranscriptEnvelopeTests {
         #expect(envelope.source == .envelope)
     }
 
-    /// A malformed envelope reads as no envelope: a whole-conversation reset.
+    /// A malformed envelope — an object naming an envelope key that fails the
+    /// strict decode — reads as no envelope: a whole-conversation reset.
     @Test(arguments: [
-        #"{"cursor": "c-2""#,          // truncated JSON
         #"{"cursor": 42}"#,             // cursor not a string
         #"{"cursor": "c-2", "more": 1}"#, // flag not a boolean
         #"{"reset": "yes"}"#,
@@ -85,6 +85,24 @@ struct RemoteTranscriptEnvelopeTests {
             """
         let envelope = parse(stderr)
         #expect(envelope == RemoteTranscriptEnvelope(cursor: "c-9", reset: false, more: true, source: .envelope))
+    }
+
+    /// A `{`-prefixed line that is not valid JSON is a diagnostic, not an
+    /// envelope: it is passed over, so it cannot hide the envelope before it.
+    @Test func aNonJSONBraceLineAfterTheEnvelopeKeepsTheCursor() {
+        let stderr = """
+            {"cursor": "c-9", "more": true}
+            {retrying transport: connection reset}
+
+            """
+        let envelope = parse(stderr)
+        #expect(envelope == RemoteTranscriptEnvelope(cursor: "c-9", reset: false, more: true, source: .envelope))
+    }
+
+    /// Alone, a line that is not valid JSON leaves no envelope at all.
+    @Test func truncatedJSONAloneIsNoEnvelope() {
+        let envelope = parse(#"{"cursor": "c-2""#)
+        #expect(envelope == RemoteTranscriptEnvelope(cursor: nil, reset: true, more: false, source: .absent))
     }
 
     /// A structured log line alone is not an envelope.

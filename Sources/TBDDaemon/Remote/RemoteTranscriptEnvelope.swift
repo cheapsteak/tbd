@@ -21,9 +21,12 @@ private let envelopeLogger = Logger(subsystem: "com.tbd.daemon", category: "remo
 ///   set, because the provider answered from the beginning.
 /// - **`more` without a cursor is read as though `more` were absent** — there
 ///   is nothing to continue from.
-/// - **A malformed envelope reads as no envelope**, plus a log line. Treating
-///   the output as a whole-conversation reset is the reading that cannot
-///   duplicate or splice records; the cost is one full rewrite.
+/// - **A malformed envelope reads as no envelope**, plus a log line. On a call
+///   without `--since` the output is the whole conversation, so a reset is the
+///   reading that cannot duplicate or splice records. On a `--since` call the
+///   output is only a delta and must never be written as a reset: the caller
+///   checks `source` and refetches from the beginning instead
+///   (`RemoteTranscriptSync`).
 ///
 /// Pure: no IO beyond the log line.
 struct RemoteTranscriptEnvelope: Equatable, Sendable {
@@ -66,7 +69,9 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
     ///     diagnostics beside it, so the envelope is the **last** line that is
     ///     a JSON object naming at least one of `cursor`, `reset`, `more`. A
     ///     JSON object naming none of them is a diagnostic (a structured log
-    ///     line), not an envelope, and is passed over.
+    ///     line), not an envelope, and is passed over, as is a `{`-prefixed
+    ///     line that is not valid JSON at all. Only an object naming an
+    ///     envelope key that then fails the strict decode is malformed.
     ///   - requestedSince: whether the call carried `--since`. Without it the
     ///     answer is a reset by definition.
     ///   - provider: named in the malformed-envelope log line only.
@@ -81,7 +86,7 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
         for line in lines.reversed() {
             let data = Data(line.utf8)
             guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return malformed(line: line, provider: provider)
+                continue
             }
             guard !envelopeKeys.isDisjoint(with: object.keys) else { continue }
             guard let wire = try? JSONDecoder().decode(Wire.self, from: data) else {
@@ -100,7 +105,7 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
 
     private static func malformed(line: String, provider: String) -> RemoteTranscriptEnvelope {
         envelopeLogger.error(
-            "transcript read provider=\(provider, privacy: .public): malformed stderr envelope \(line, privacy: .public); treating the output as a whole-conversation reset")
+            "transcript read provider=\(provider, privacy: .public): malformed stderr envelope \(line, privacy: .public); reading as no envelope")
         return RemoteTranscriptEnvelope(cursor: nil, reset: true, more: false, source: .malformed)
     }
 }
