@@ -26,7 +26,7 @@ struct BashCardBody: View {
         return try? Self.decoder.decode(Input.self, from: data)
     }
 
-    private var fullBodySource: TranscriptFullBodySource? {
+    var fullBodySource: TranscriptFullBodySource? {
         TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
     }
 
@@ -87,18 +87,6 @@ struct BashCardBody: View {
     }
 
     private func fetchFullBody(itemID: String) async -> String? {
-        switch fullBodySource {
-        case .daemon(let terminalID):
-            let path = appState.transcriptPath(forTerminal: terminalID)
-            return try? await appState.daemonClient.terminalTranscriptItemFullBody(
-                terminalID: terminalID, itemID: itemID, path: path).text
-        case .file(let path):
-            // A bounded one-shot file read; kept off the main actor.
-            return await Task.detached(priority: .userInitiated) {
-                TranscriptDetailReader.fullBody(path: path, itemID: itemID, includeBody: true).text
-            }.value
-        case nil:
-            return nil
-        }
+        await fullBodySource?.fetch(itemID: itemID, appState: appState)?.text
     }
 }

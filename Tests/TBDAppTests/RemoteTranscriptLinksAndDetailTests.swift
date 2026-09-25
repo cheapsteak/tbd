@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDShared
 
 /// The remote transcript pane's link and "Show full output" rules: file paths
 /// never act (they name files on another machine), and a card with no
@@ -48,6 +49,32 @@ struct RemoteTranscriptLinksAndDetailTests {
             subdirectory: "Fixtures")).path
         let result = TranscriptDetailReader.fullBody(path: path, itemID: "toolu_remote_1", includeBody: true)
         #expect(result.text.contains("Package.swift"))
+    }
+
+    // MARK: - A non-Bash card routes through the shared helper
+
+    @Test func grepCard_withNoTerminalButAPath_readsItsFullBodyFromTheFile() async throws {
+        let path = try #require(Bundle.module.url(
+            forResource: "remote-transcript-sample", withExtension: "jsonl",
+            subdirectory: "Fixtures")).path
+        let truncated = ToolResult(text: "Sources/App", truncatedTo: 11, isError: false)
+        let card = GrepCardBody(id: "toolu_remote_2", result: truncated, terminalID: nil, detailPath: path)
+        // The footer's condition and the fetch's route are the same value.
+        #expect(card.fullBodySource == .file(path: path))
+
+        let suiteName = "TBDAppTests.RemoteGrepCard.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let full = await card.fullBodySource?.fetch(
+            itemID: card.id, appState: AppState(userDefaults: defaults))
+        #expect(full?.text.contains("let fixtureMarker = 1") == true)
+    }
+
+    @Test func grepCard_withNeitherTerminalNorPath_withholdsTheFooter() {
+        let card = GrepCardBody(
+            id: "toolu_remote_2", result: ToolResult(text: "x", truncatedTo: 1, isError: false),
+            terminalID: nil, detailPath: nil)
+        #expect(card.fullBodySource == nil)
     }
 
     // MARK: - Overlay frames carry the path

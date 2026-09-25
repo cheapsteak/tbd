@@ -267,14 +267,16 @@ struct TranscriptOverlayView: View {
                         id: toolID,
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, let name, let inputJSON, _, let toolResult, _, _, _) where name == "Read":
                     ReadCardBody(
                         id: toolID,
                         inputJSON: inputJSON,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Edit" || name == "MultiEdit":
                     EditCardBody(
@@ -283,19 +285,22 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Grep":
                     GrepCardBody(
                         id: toolID,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Glob":
                     GlobCardBody(
                         id: toolID,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
                     GenericToolCardBody(
@@ -303,7 +308,8 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .systemReminder(_, let kind, let text, _, _, _) where kind == .skillBody:
                     SkillBodyRowBody(text: text)
@@ -315,7 +321,8 @@ struct TranscriptOverlayView: View {
                         kind: kind,
                         text: text,
                         truncatedTo: truncatedTo,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .peerMessage:
                     if let peer = Self.peerBody(item: item) {
