@@ -1405,7 +1405,7 @@ actor DaemonClient {
 
     /// Put a transcript from anywhere — including this machine — into a
     /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `import`). `jsonl` is Claude Code transcript JSONL.
+    /// `transcript import`). `jsonl` is Claude Code transcript JSONL.
     func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
         try await callAsync(
             method: RPCMethod.remoteImport,
