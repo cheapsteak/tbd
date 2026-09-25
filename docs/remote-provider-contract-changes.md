@@ -10,7 +10,8 @@ they should do about it.
 ## Nothing breaks
 
 **A v1 provider is a valid v2 provider with no code changes at all.** Read that
-first and stop worrying about the rest.
+first, then check the one exception below if you declare any transcript
+operation.
 
 v2 is purely additive:
 
@@ -24,6 +25,15 @@ v2 is purely additive:
 - **Every new verb is gated behind a capability string.** A caller invokes it
   only when you declare it, so an undeclared verb is never called.
 - **No field is removed, renamed, or given different semantics.**
+- **One exception: the transcript operations are namespaced.** They are
+  `transcript read`, `transcript retain`, `transcript import`, and
+  `transcript recall`, declared as `transcript.read`, `transcript.retain`,
+  `transcript.import`, and `transcript.recall`. A provider that declares an
+  earlier bare spelling (`transcript`, `retain`, `import`, `recall`) keeps
+  working in every other respect, but a caller no longer recognizes those
+  strings, so it offers none of those operations until the provider declares
+  the namespaced strings and moves the verbs under `transcript`. The contract's
+  Versioning section explains why this rename is made in place.
 
 So adoption implements nothing new. It is a two-field edit to `describe`:
 declare `"contract_versions": [1, 2]`, **and — if you implement `stop` — make
@@ -238,17 +248,18 @@ genuinely cannot terminate sessions and wants to omit the verb must declare
 `contract_versions: [2]` only. Every other provider should keep `[1, 2]`. This
 is the sole place in v2 where the two majors differ in what a caller may assume.
 
-## 5. `transcript` — the conversation as structured messages
+## 5. `transcript read` — the conversation as structured messages
 
-**What it is.** A new declared capability:
+**What it is.** A new verb, declared by the `transcript.read` capability:
 
 ```sh
-p transcript <id> [--since <cursor>]
+p transcript read <id> [--since <cursor>]
 ```
 
 stdout is Claude Code transcript JSONL. The cursor for the next call is returned
 in a JSON envelope on **stderr**, not as a trailing line of the data stream —
-a single object, `{"cursor": "<opaque-provider-string>"}`. (For every other verb
+a single object, `{"cursor": "<opaque-provider-string>"}`, which may also carry the
+optional booleans `reset` and `more`. (For every other verb
 stderr remains diagnostic and unparsed; this verb is the one exception.)
 
 The reason the cursor does not ride in the data stream is worth internalizing:
@@ -263,7 +274,7 @@ token.
 
 **Required?** No.
 
-**Relationship to `log`.** `transcript` is not a replacement for `log`, and
+**Relationship to `log`.** `transcript read` is not a replacement for `log`, and
 neither one supersedes the other. `log` remains raw ANSI scrollback bytes for a
 read-only terminal pane, for providers that host a terminal. Structured messages
 rendered into a scrollback view would lose every tool card; ANSI bytes fed to a
@@ -272,7 +283,7 @@ transcript renderer produce garbage. Implement either, both, or neither.
 **What you gain — this is the highest-value item in v2 for most providers.**
 The verb is not vendor-specific in any way that should scare you off: **any
 provider running Claude Code already has transcript JSONL sitting on disk.**
-Declaring `transcript` and streaming files you can already reach upgrades your
+Declaring `transcript.read` and streaming files you can already reach upgrades your
 sessions from raw ANSI scrollback to a structured conversation view with tool
 cards — the same rendering a caller gives its own local sessions. For most
 providers this is a small change reading files they already have access to, and
@@ -284,6 +295,13 @@ Two details worth knowing when you implement it:
   appends each cursor-tailed response to what it already has. Returning a stable
   cursor therefore saves real work on every refresh, but not returning one is
   merely less efficient, never incorrect.
+- Because the caller appends, you MUST set `"reset": true` whenever you answer
+  a `--since` from the beginning — a cursor you can no longer honor, or a
+  conversation that moved to a new transcript after `/clear` or a resume — so
+  the caller replaces what it holds instead of duplicating or splicing it. If
+  your transport caps output per call, stop at your own size limit and set
+  `"more": true` alongside the cursor; the caller calls again at once, so a long
+  transcript arrives in pages instead of exceeding the timeout.
 - File paths inside your transcript refer to a machine the caller cannot reach,
   and the caller knows this — it suppresses local file linking for remote
   transcript rows rather than opening an unrelated local file. You do not need
@@ -395,7 +413,7 @@ covered below.
   "contract_versions": [1, 2],
   "name": "example-provider",
   "provider_version": "0.5.0",
-  "capabilities": ["log", "send", "attach", "events", "stop", "transcript"]
+  "capabilities": ["log", "send", "attach", "events", "stop", "transcript.read"]
 }
 ```
 
@@ -435,7 +453,7 @@ code path serves both, because of how v2 was shaped:
   they don't recognize, so emitting them unconditionally is safe at either
   major.
 - New verbs are gated behind capability strings a v1 caller doesn't recognize,
-  so it never invokes them. Declaring `transcript`, `land`, `archive`, or
+  so it never invokes them. Declaring `transcript.read`, `land`, `archive`, or
   `unarchive` is harmless at v1.
 - The forward-compatibility rule is symmetric, and unchanged: **you must ignore
   fields you don't recognize in structured stdin** rather than fail on them.
@@ -520,7 +538,7 @@ line announcing it on the `messages` stream, so populating the field turns
 nothing on and omitting it turns nothing off.
 
 **Required?** No, on both halves. This is a capability-gated verb plus an
-optional response field — the same additive shape as `transcript` or `land` —
+optional response field — the same additive shape as `transcript read` or `land` —
 so a provider that ignores it is unaffected in every other respect.
 
 **Not a v2 delta either.** Like the worktree identity keys in section 8,
@@ -573,11 +591,56 @@ name from another machine. Declaring `peer_messaging` without declaring
 `messages` is the one half-adoption to avoid: it describes sessions the caller
 has no channel to reach, so it buys nothing.
 
+## 10. `send --submit` — submitting a message rather than typing keystrokes
+
+**What it is.** A new declared capability, `send-submit`, which admits one flag
+on the existing `send` verb.
+
+```sh
+p send <id> --submit
+```
+
+stdin is the message as UTF-8 text, not keystrokes. You place it in the agent's
+input as a single paste, so newlines inside it belong to the message rather
+than pressing Enter, and then submit it with a separate Enter. Exit 0 means the
+message was delivered and submitted, not that the agent has acted on it. `send`
+without the flag is unchanged: raw keystrokes, nothing appended.
+
+**Required?** No. A caller never passes `--submit` to a provider that has not
+declared `send-submit`, so a provider that ignores it is unaffected. Declare it
+only alongside `send`.
+
+**Not a v2 delta either.** Like sections 8 and 9, it was added after v2 was
+published. A capability string a caller does not recognize is never invoked, so
+it is readable at contract major 1 and 2 alike, and declaring it obliges no
+change to `contract_versions`.
+
+**What you gain.** The caller can offer a message composer for your sessions —
+TBD's transcript pane shows one — that submits reliably whatever the message's
+length or shape. Over raw `send`, a caller has to compose the paste itself: it
+cannot see whether the remote terminal has bracketed paste on or when the input
+box is ready, it depends on your keystroke path passing escape bytes through
+untouched, and it gets no evidence the message landed. With `--submit`, those
+mechanics are yours, because you own the transport and can see the terminal.
+
+**What it costs.** Whatever reliable paste-and-submit costs on your transport:
+for a Claude Code session in tmux, typically a bracketed paste
+(`paste-buffer -p`) followed by Enter as a separate keystroke, plus any wait
+your agent needs before its input box accepts text. Report failure honestly: a
+message left unsent in the input box is a failed `--submit`, not a success, and
+a caller that retries after such a failure pastes the text a second time. The
+machine-interface rule applies unchanged — confirm delivery however you like,
+but the caller reads only your exit status.
+
+**If you ignore it.** Nothing changes. Callers keep sending raw keystrokes
+through `send`, or through `attach`, exactly as they do today.
+
 ## What to do if you maintain a v1 provider
 
 In order, most value per unit of effort:
 
-1. **Do nothing. You still work.** No v2 change breaks a v1 provider. Verify
+1. **Do nothing. You still work.** No v2 change breaks a v1 provider, apart
+   from the transcript namespace in "Nothing breaks" above. Verify
    this by re-reading section headings above if you want; there is no deadline
    and no deprecation.
 
@@ -598,7 +661,7 @@ In order, most value per unit of effort:
    `"complete": true` to the rest. Getting this wrong causes live sessions to be
    wrongly retired, which is the worst failure available in this contract.
 
-4. **If you run Claude Code, declare `transcript`.** Highest payoff of anything
+4. **If you run Claude Code, declare `transcript.read`.** Highest payoff of anything
    here. You almost certainly already have the JSONL on disk; streaming it turns
    a raw ANSI scrollback pane into a structured conversation with tool cards.
    Start without incremental support (return no cursor) and add the stderr
