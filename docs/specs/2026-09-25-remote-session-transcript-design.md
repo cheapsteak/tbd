@@ -75,7 +75,8 @@ A new actor under `Sources/TBDDaemon/Remote/` gives each `(provider, sessionID)`
 
 - One `transcript read` runs per session at a time. A request arriving while one is in flight waits for it, plus at most one follow-up, so a burst of requests costs at most two fetches.
 - It pages while the envelope says `more`, writing each page before fetching the next, so a slow first load fills the pane progressively. A sync stops after a fixed number of pages and reports that it is not caught up, so a provider that never clears `more` cannot hold the lane forever; the next sync resumes from the stored cursor.
-- Delays and timeouts take an injected clock.
+- A `--since` answer that comes without a valid envelope, absent or malformed, is discarded rather than written: that output is only the delta after the cursor, so reading it as a reset would wipe the history held before it. The sync drops the cursor and refetches from the beginning within the same sync, and the refetch counts toward the page cap. On the envelope's own side, a `{`-prefixed stderr line that is not valid JSON is a diagnostic and is passed over; only an object naming `cursor`, `reset`, or `more` that then fails the strict decode is malformed.
+- The sync actor and the `remote.sendMessage` serializer never sleep, poll, or time out on their own. Each provider call's timeout is enforced by `ProviderRunner` through `RemoteProviderManager.invoke(timeout:)`, and the refresh cadence lives in the app's sync driver, which takes the injected clock.
 
 ### Cache
 
@@ -160,11 +161,12 @@ The existing send footer is unchanged: it still appears only when no terminal is
 
 Each gate is tested on both branches.
 
-- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope.
-- **Sync actor**, against the mock provider invoker and an injected clock:
+- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope; a non-JSON `{` diagnostic beside a valid envelope.
+- **Sync actor**, against a scripted provider invoker:
   - append and cursor round-trip;
   - reset rewrites the file and increments `generation`;
   - paging continues while `more`, stops at the page cap without being caught up, and persists each page;
+  - a `--since` answer with an absent or malformed envelope keeps what is held and ends in a full refetch, and that refetch counts toward the page cap;
   - concurrent requests coalesce;
   - a `transcript.jsonl` longer than `state.json`'s `length` is truncated on load;
   - paths follow `TBD_HOME`.
