@@ -76,10 +76,26 @@ extension WorktreeLifecycle {
                         "forget left a holder running: \(failure, privacy: .public)")
                 }
             } else {
-                try? await tmux.killWindow(
-                    server: worktree.tmuxServer,
-                    windowID: terminal.tmuxWindowID
-                )
+                // Refuse to kill a window whose pane belongs to a DIFFERENT
+                // terminal — see `TmuxManager.paneOwnership`. The row is
+                // gone from the DB either way (below); only the tmux-side
+                // teardown is gated, the same asymmetry `handleTerminalDelete`
+                // uses.
+                let ownership = await tmux.paneOwnership(
+                    terminalID: terminal.id, server: worktree.tmuxServer,
+                    paneID: terminal.tmuxPaneID)
+                if ownership.permitsTeardown {
+                    try? await tmux.killWindow(
+                        server: worktree.tmuxServer,
+                        windowID: terminal.tmuxWindowID
+                    )
+                } else {
+                    forgetLogger.warning("""
+                        forget: leaving window \(terminal.tmuxWindowID, privacy: .public) \
+                        untouched for terminal \(terminal.id, privacy: .public) — \
+                        \(ownership.refusalDetail ?? "", privacy: .public)
+                        """)
+                }
             }
         }
 

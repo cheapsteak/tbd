@@ -138,6 +138,87 @@ struct ReconcileTmuxPresenceTests {
         #expect(try await run.db.terminals.get(id: run.shell) == nil)
     }
 
+    // MARK: - Pane-identity mismatch (recycled window/pane coordinates)
+
+    /// After a reboot, tmux numbering for a server restarts from `@1`/`%1`, and
+    /// several worktrees of one repo can share a server — so a pre-reboot row's
+    /// recorded coordinate can collide with a DIFFERENT, freshly-spawned live
+    /// terminal's. Window-alive and pane-alive checks alone cannot see that;
+    /// only asking the pane who it is (`@tbd_terminal_id`) can. A row whose
+    /// pane answers with someone else's id must be treated exactly like a
+    /// window that is actually gone — parked, not left claiming a pane that
+    /// belongs to a live stranger.
+    @Test("a live row whose pane answers with a different terminal's id is parked, not left claiming it")
+    func mismatchedPaneIdentityIsParkedLikeAGoneWindow() async throws {
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) },
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .alive })
+        let run = try await runReconcile(tmux: tmux)
+        defer { run.cleanup() }
+
+        let parked = try #require(
+            try await run.db.terminals.get(id: run.claude),
+            "a resumable Claude row was deleted instead of parked")
+        #expect(parked.hibernatedAt != nil,
+                "a pane answering with a stranger's id must not be left claiming it as live")
+    }
+
+    /// The positive control, in two parts. Without either, the guard above
+    /// could be satisfied by a reconcile pass that parks everything regardless
+    /// of pane identity.
+    ///
+    /// A pane with NO identity to compare (unstamped — predates
+    /// `@tbd_terminal_id`, or a pre-#901 daemon build) falls back to today's
+    /// liveness-only behavior rather than being treated as a mismatch.
+    @Test("a pane with no identity to compare falls back to liveness-only behavior")
+    func noPaneIdentityFallsBackToLivenessOnly() async throws {
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .alive })
+        let run = try await runReconcile(tmux: tmux)
+        defer { run.cleanup() }
+
+        let claude = try #require(try await run.db.terminals.get(id: run.claude))
+        #expect(claude.hibernatedAt == nil,
+                "a pane with no identity to compare must fall back to today's liveness-only behavior")
+    }
+
+    /// A pane that answers with THIS row's own id is left alone.
+    @Test("a pane answering with the row's own id is left alone")
+    func matchingPaneIdentityIsLeftAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let rows = try await seedTerminals(db: db, worktree: main)
+
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, paneID in
+                switch paneID {
+                case "%1": return .live(terminalID: rows.claude.id.uuidString)
+                case "%2": return .live(terminalID: rows.shell.id.uuidString)
+                default: return .absent
+                }
+            },
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .alive })
+        let lifecycle = makeLifecycle(db: db, tmux: tmux)
+        try await lifecycle.reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        let claude = try #require(try await db.terminals.get(id: rows.claude.id))
+        #expect(claude.hibernatedAt == nil,
+                "a pane answering with its own row's id must not be treated as a mismatch")
+        #expect(try await db.terminals.get(id: rows.shell.id) != nil,
+                "a pane answering with its own row's id must not be treated as a mismatch")
+    }
+
     // MARK: - The stale-server self-heal
 
     /// The self-heal that renames a worktree's non-canonical `tmuxServer`, and

@@ -272,6 +272,46 @@ extension TBDHomeSerialized {
             #expect(archived?.status == .archived)
         }
 
+        /// `closeDeskSession`'s per-terminal kill loop has the same
+        /// pane-ownership guard as `handleTerminalDelete`/`forgetWorktree`/
+        /// `closeScratchTerminals` — see PR #902. A tmux server restart can
+        /// hand the desk terminal's recorded coordinate to a DIFFERENT, live
+        /// stranger terminal; closing the desk must not destroy it.
+        @Test("closeDeskSession leaves a window untouched when its pane is not provably its own",
+              arguments: RefusingPaneAnswer.allCases)
+        func testCloseDeskSessionLeavesAWindowUntouchedOnPaneMismatch(
+            _ refusal: RefusingPaneAnswer
+        ) async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-close-mismatch-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            let db = try TBDDatabase(inMemory: true)
+            let recorder = RecordedTmuxArgs()
+            let tmux = TmuxManager(
+                dryRun: true,
+                dryRunRecorder: { recorder.append($0) },
+                dryRunPaneSendTarget: { _, _ in try refusal.answer() })
+            let lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            let skillDir = tmpHome.appendingPathComponent("skills/nightwatch").path
+            let manager = DeskSessionManager(
+                db: db, lifecycle: lifecycle, tmux: tmux, skillDir: skillDir,
+                actuationLog: makeTestActuationLog())
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            await manager.closeDeskSession()
+
+            let archived = try await db.worktrees.get(id: desk.id)
+            #expect(archived?.status == .archived, "the desk row must still be archived")
+            #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                    "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+        }
+
         @Test("mode switch reuses desk (daywatch → nightwatch)")
         func testModeSwitchReuses() async throws {
             let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
