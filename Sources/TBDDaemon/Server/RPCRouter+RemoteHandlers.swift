@@ -897,20 +897,36 @@ extension RPCRouter {
         }
         // A dismissed session's cache is discarded and reclaimed by the orphan
         // sweep; syncing it would rebuild a directory nothing will show.
-        if try await db.remoteSessions.row(
-            provider: params.provider, sessionID: params.sessionID)?.dismissed == true {
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
             return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
         }
+        let response: RPCResponse
         do {
             let result = try await sync.sync(provider: params.provider, sessionID: params.sessionID)
-            return try RPCResponse(result: result)
+            response = try RPCResponse(result: result)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error(
                 "remote.transcriptSync provider=\(params.provider, privacy: .public) timed out")
-            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+            response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
         } catch let error as RemoteTranscriptSyncError {
-            return RPCResponse(error: error.localizedDescription)
+            response = RPCResponse(error: error.localizedDescription)
         }
+        // Checked again once the sync has written. A dismiss that landed after
+        // the check above — its discard finding no lane to mark yet, because
+        // this sync had not reached the actor — would otherwise leave the pages
+        // this sync wrote in a directory the dismiss already removed. The
+        // dismiss writes its row before it discards, so either its discard ran
+        // after these writes and removed them, or this read sees the row and
+        // discards them here.
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            await sync.discard(provider: params.provider, sessionID: params.sessionID)
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        return response
+    }
+
+    private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
+        try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
     }
 
     /// What `remote.transcriptSync` answers for a dismissed session.

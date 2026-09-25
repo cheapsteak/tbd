@@ -215,6 +215,39 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(FileManager.default.fileExists(atPath: directory.path) == false)
     }
 
+    /// A dismiss that lands while a sync is already past its first check —
+    /// before the sync reached the actor, so the dismiss's discard had no lane
+    /// to mark — must not leave the pages that sync writes behind. Here the
+    /// row turns dismissed mid-fetch with no discard at all, the strictest
+    /// form of that race: the sync still refuses and removes what it wrote.
+    @Test func aSessionDismissedDuringItsSyncKeepsNoCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor": "c-1"}"#),
+        ])
+        let db = self.db
+        invoker.onCall = { verb in
+            guard verb.first == "transcript" else { return }
+            _ = try? await db.remoteSessions.dismiss(provider: "agentbox", sessionID: "s-1")
+        }
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"], RemoteVerb.transcriptRead(sessionID: "s-1")])
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: ["TBD_HOME": home.path])
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false,
+                "a sync that raced a dismiss left its cache behind")
+    }
+
     /// The other branch: the same mirror row, not dismissed, syncs.
     @Test func syncProceedsForAMirroredSessionThatIsNotDismissed() async throws {
         try await db.config.setRemoteBackendsEnabled(true)

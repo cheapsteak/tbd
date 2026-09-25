@@ -389,4 +389,41 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         let again = try await sync.sync(provider: "agentbox", sessionID: "s-1")
         #expect(try fileText(again) == "{\"n\":2}\n")
     }
+
+    /// A follow-up queued behind the held fetch when the discard lands is in
+    /// the same marked lane: it persists nothing either and throws
+    /// `.discarded`, so neither fetch recreates the directory.
+    @Test func aDiscardAlsoDropsAQueuedFollowUp() async throws {
+        let gate = Gate()
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor": "c-1"}"#),
+            Self.page("{\"n\":2}\n", #"{"cursor": "c-2"}"#),
+        ], holdFirst: gate)
+        let sync = makeSync(provider)
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: environment)
+
+        async let first = sync.sync(provider: "agentbox", sessionID: "s-1")
+        let started = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await provider.calls.count == 1
+        }
+        async let second = sync.sync(provider: "agentbox", sessionID: "s-1")
+        let queued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await sync.hasQueuedFollowUp(provider: "agentbox", sessionID: "s-1")
+        }
+        await sync.discard(provider: "agentbox", sessionID: "s-1")
+        await gate.open()
+
+        var firstThrown: RemoteTranscriptSyncError?
+        do { _ = try await first } catch let error as RemoteTranscriptSyncError { firstThrown = error }
+        var secondThrown: RemoteTranscriptSyncError?
+        do { _ = try await second } catch let error as RemoteTranscriptSyncError { secondThrown = error }
+        #expect(started == .satisfied)
+        #expect(queued == .satisfied)
+        #expect(firstThrown == .discarded)
+        #expect(secondThrown == .discarded)
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false,
+                "a queued follow-up recreated the discarded cache")
+        #expect(await sync.activeLaneCount == 0)
+    }
 }
