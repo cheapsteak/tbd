@@ -32,6 +32,11 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "composer.send")
 /// hold releases on the `SessionStart` carrying that id and on no other. A
 /// `SessionStart` with a different id, or with none at all (a worktree's first
 /// spawn, an archive restore), leaves it held.
+///
+/// **Remote.** A remote target (`ComposerTarget.remote`) takes neither path:
+/// one `remote.sendMessage` carries the text, a failure keeps it in the box
+/// with the daemon's sentence as the banner, and a success asks for an
+/// immediate transcript sync.
 @MainActor
 final class ComposerSendCoordinator {
     enum Outcome: Equatable {
@@ -74,21 +79,48 @@ final class ComposerSendCoordinator {
     /// like a measurement rather than a deadline.
     static var wakeHoldTimeoutSeconds: Int { Int(wakeHoldTimeout.components.seconds) }
 
+    /// selection, message text → `remote.sendMessage`. Throws what the daemon
+    /// refused with.
+    typealias RemoteSender = @Sendable @MainActor (RemoteSessionSelection, String) async throws -> Void
+    /// Told after a remote send succeeded, so the transcript syncs at once
+    /// rather than on its next tick.
+    typealias RemoteSentHandler = @MainActor (RemoteSessionSelection) -> Void
+
     private let sendParams: Sender
     private let wake: Waker
     private let awaitSessionStart: SessionStartWaiter
+    private let sendRemote: RemoteSender?
+    private let onRemoteSent: RemoteSentHandler?
     private let clock: any Clock<Duration>
 
     init(
         send: @escaping Sender,
         wake: @escaping Waker,
         awaitSessionStart: @escaping SessionStartWaiter,
+        sendRemote: RemoteSender? = nil,
+        onRemoteSent: RemoteSentHandler? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sendParams = send
         self.wake = wake
         self.awaitSessionStart = awaitSessionStart
+        self.sendRemote = sendRemote
+        self.onRemoteSent = onRemoteSent
         self.clock = clock
+    }
+
+    /// Send to whichever kind of target the composer is bound to.
+    func send(
+        text: String, paths: [Int: String], state: ComposerState, target: ComposerTarget
+    ) async -> Outcome {
+        switch target {
+        case .terminal(let terminal, let worktree):
+            return await send(
+                text: text, paths: paths, state: state,
+                terminalID: terminal.id, worktreeID: worktree.id)
+        case .remote(let selection):
+            return await sendToRemote(text: text, state: state, selection: selection)
+        }
     }
 
     func send(
@@ -113,7 +145,7 @@ final class ComposerSendCoordinator {
         switch state {
         case .hidden:
             return .failed(message: "This terminal has no composer.")
-        case .blocked(let message):
+        case .blocked(let message), .unavailable(let message):
             return .failed(message: message)
         case .running:
             return await sendToRunningSession(parts: parts, terminalID: terminalID)
@@ -121,6 +153,48 @@ final class ComposerSendCoordinator {
             return await wakeWith(
                 text: text, paths: paths, terminalID: terminalID, worktreeID: worktreeID)
         }
+    }
+
+    // MARK: - Remote
+
+    /// One `remote.sendMessage`, which the provider delivers as a paste plus
+    /// Enter. No parts list — a remote target stages no images, so the text is
+    /// the whole message, sent exactly as typed — and no wake: a remote session
+    /// that has exited stays exited (spec non-goal). The caller keeps the text
+    /// until this answers `.sent`.
+    private func sendToRemote(
+        text: String, state: ComposerState, selection: RemoteSessionSelection
+    ) async -> Outcome {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed(message: "Nothing to send.")
+        }
+        switch state {
+        case .hidden:
+            return .failed(message: "This session has no composer.")
+        case .blocked(let message), .unavailable(let message):
+            return .failed(message: message)
+        case .notRunning:
+            // The local resolver's state; a remote target never resolves to it,
+            // and there is no wake path to take if one somehow did.
+            return .failed(message: "This session is not running.")
+        case .running:
+            break
+        }
+        guard let sendRemote else {
+            return .failed(message: "This composer cannot reach remote sessions.")
+        }
+        do {
+            try await sendRemote(selection, text)
+        } catch {
+            logger.warning("""
+            composer send failed for remote session \
+            \(selection.provider, privacy: .public)/\(selection.sessionID, privacy: .public): \
+            \(error, privacy: .public)
+            """)
+            return .failed(message: Self.bannerMessage(for: error))
+        }
+        onRemoteSent?(selection)
+        return .sent
     }
 
     // MARK: - Running

@@ -861,17 +861,21 @@ final class AppState {
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
-    /// Per-terminal composer drafts. `@ObservationIgnored` because each
+    /// Composer drafts, keyed by target. `@ObservationIgnored` because each
     /// `ComposerDraft` is itself `@Observable` — an observable registry would
     /// republish every composer in the app whenever any one of them appeared.
-    @ObservationIgnored var composerDrafts: [UUID: ComposerDraft] = [:]
-    /// Weak composer text views keyed by terminal, so Cmd+/ can move focus into
+    @ObservationIgnored var composerDrafts: [ComposerKey: ComposerDraft] = [:]
+    /// Weak composer text views keyed by target, so Cmd+/ can move focus into
     /// one. `@ObservationIgnored` for the same reason `terminalFocusTargets` is:
     /// focus is not state anything renders from.
-    @ObservationIgnored var composerFocusTargets: [UUID: ComposerFocusTarget] = [:]
-    /// Weak transcript tables keyed by terminal, so Escape in the composer can
+    @ObservationIgnored var composerFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// Weak transcript tables keyed by composer target, so Escape in the composer can
     /// hand focus back to what the person was reading.
-    @ObservationIgnored var transcriptFocusTargets: [UUID: ComposerFocusTarget] = [:]
+    @ObservationIgnored var transcriptFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// The sync driver behind each remote transcript pane on screen, held
+    /// weakly — the pane owns it — so a composer send can ask for an
+    /// immediate sync without a reference to the pane.
+    @ObservationIgnored var remoteTranscriptSyncDrivers: [RemoteSessionSelection: WeakRemoteTranscriptSyncDriver] = [:]
     /// Suspended callers waiting for one spawn's `SessionStart`, keyed by
     /// terminal. `@ObservationIgnored` for the same reason as the two above:
     /// nothing renders from it.
@@ -1839,6 +1843,22 @@ final class AppState {
     lazy var transcriptComposerFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
+        }
+    /// How `setRemoteTranscriptEnabled` persists the remote-transcript gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored
+    lazy var remoteTranscriptFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in
+            try await daemonClient.setRemoteTranscriptEnabled(enabled: enabled)
+        }
+    /// How a remote transcript pane runs `remote.transcriptSync` — injectable
+    /// so the pane can be driven in a test with no daemon.
+    @ObservationIgnored
+    lazy var remoteTranscriptSyncer:
+        @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult =
+        { [daemonClient] selection in
+            try await daemonClient.remoteTranscriptSync(
+                provider: selection.provider, sessionID: selection.sessionID)
         }
     /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
     /// for the same reason as `controlModeSetter`.

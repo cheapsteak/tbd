@@ -18,10 +18,25 @@ import TBDShared
 /// This type owns the **wiring** only. Every decision it makes — which key means
 /// what, what the button says, where a staged image lands — is a static function
 /// below, tested without mounting SwiftUI.
+///
+/// It serves both kinds of `ComposerTarget`. A remote target gets the same
+/// field, banner and send button, and none of what depends on the local
+/// machine: no completion menu (the inventory is probed from a local
+/// terminal's Claude Code; a typed `/command` still goes as text), no image
+/// staging (an attachment is a path on this disk), and no Reveal Terminal (the
+/// attached terminal is already beside the transcript).
 struct MessageComposerView: View {
-    let terminal: Terminal
-    let worktree: LocalWorktree
+    let target: ComposerTarget
     let state: ComposerState
+
+    init(target: ComposerTarget, state: ComposerState) {
+        self.target = target
+        self.state = state
+    }
+
+    init(terminal: Terminal, worktree: LocalWorktree, state: ComposerState) {
+        self.init(target: .terminal(terminal, worktree), state: state)
+    }
 
     @Environment(AppState.self) private var appState
     @State private var controller: CompletionController?
@@ -33,7 +48,9 @@ struct MessageComposerView: View {
     @State private var hoveredAttachment: Int?
     @State private var handle = ComposerViewHandle()
 
-    private var draft: ComposerDraft { appState.composerDraft(for: terminal.id) }
+    private var key: ComposerKey { target.key }
+
+    private var draft: ComposerDraft { appState.composerDraft(for: key) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -47,6 +64,14 @@ struct MessageComposerView: View {
             }
             if case .blocked(let message) = state {
                 blockedBanner(message)
+            }
+            if case .unavailable(let message) = state {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier(ComposerAccessibility.note)
             }
             if case .notRunning(let exited) = state {
                 Text(Self.notRunningNoteText(exited: exited))
@@ -78,7 +103,7 @@ struct MessageComposerView: View {
                                 commands: controller?.inventoryCommands ?? [])
                     },
                     onSubmit: { text in submit(text) },
-                    onEscape: { appState.focusTranscript(terminalID: terminal.id) },
+                    onEscape: { appState.focusTranscript(key) },
                     onImageData: { stage($0) },
                     menuIsOpen: { controller?.isOpen ?? false },
                     onMenuAction: { handleMenu($0) },
@@ -134,10 +159,10 @@ struct MessageComposerView: View {
             // dead view as this terminal's focus target.
             handle.isGone = true
             guard let view = handle.view else { return }
-            appState.unregisterComposerView(view, for: terminal.id)
+            appState.unregisterComposerView(view, for: key)
             handle.view = nil
         }
-        .task(id: terminal.id) { await setUp() }
+        .task(id: key) { await setUp() }
     }
 
     // MARK: - Set-up
@@ -160,7 +185,7 @@ struct MessageComposerView: View {
         handle.isGone = false
         Task { @MainActor in
             guard !handle.isGone, view.window != nil else { return }
-            appState.registerComposerView(view, for: terminal.id)
+            appState.registerComposerView(view, for: key)
         }
     }
 
@@ -168,7 +193,9 @@ struct MessageComposerView: View {
         // A banner belongs to the terminal it was raised for; carrying it across
         // a switch would blame the new session for the old one's refusal.
         errorMessage = nil
-        if controller == nil {
+        // No completion controller for a remote target: with none, `/` opens
+        // no menu and the text goes as typed.
+        if controller == nil, target.supportsLocalAffordances {
             controller = CompletionController(
                 frecency: FrecencyStore(defaults: appState.userDefaults))
         }
@@ -188,6 +215,14 @@ struct MessageComposerView: View {
                 awaitSessionStart: { [appState] terminalID, incarnationID in
                     await appState.awaitSessionStart(
                         terminalID: terminalID, incarnationID: incarnationID)
+                },
+                sendRemote: { [appState] selection, text in
+                    try await appState.daemonClient.remoteSendMessage(
+                        provider: selection.provider, sessionID: selection.sessionID,
+                        text: text)
+                },
+                onRemoteSent: { [appState] selection in
+                    appState.requestRemoteTranscriptSync(selection)
                 })
         }
         // Restore the draft into the view — the one write the one-way contract
@@ -196,6 +231,7 @@ struct MessageComposerView: View {
         // The inventory is warmed when the composer first appears, never on a
         // keystroke: the probe is a process spawn, and paying it on `/` would put
         // half a second between the sigil and the list.
+        guard case .terminal(let terminal, _) = target else { return }
         controller?.adopt(inventory: await appState.fetchCompletions(terminalID: terminal.id))
     }
 
@@ -386,6 +422,10 @@ struct MessageComposerView: View {
     }
 
     private func stage(_ data: Data) {
+        guard case .terminal(_, let worktree) = target else {
+            errorMessage = Self.remoteImageRefusal
+            return
+        }
         do {
             let prepared = try ComposerImagePreparer.preparePNG(from: data)
             // A write that fails prevents the send — the token would otherwise
@@ -397,6 +437,10 @@ struct MessageComposerView: View {
             errorMessage = "That image could not be attached: \(error.localizedDescription)"
         }
     }
+
+    /// Why a pasted or dropped image did not attach to a remote target.
+    static let remoteImageRefusal =
+        "Images can't be sent to a remote session — the remote machine can't read files on this Mac."
 
     private func insertToken(_ number: Int) {
         issue(.insertAtCaret(ComposerTokens.text(for: number)))
@@ -450,7 +494,7 @@ struct MessageComposerView: View {
         guard let kind = Self.caretCommand(text: currentText(), number: number)
         else { return }
         issue(kind)
-        appState.focusComposer(terminalID: terminal.id)
+        appState.focusComposer(key)
     }
 
     private func removeAttachment(_ number: Int) {
@@ -480,8 +524,7 @@ struct MessageComposerView: View {
         Task { @MainActor in
             defer { isSending = false }
             let outcome = await coordinator.send(
-                text: text, paths: draft.pathsByNumber, state: state,
-                terminalID: terminal.id, worktreeID: worktree.id)
+                text: text, paths: draft.pathsByNumber, state: state, target: target)
             switch outcome {
             case .sent, .woke:
                 draft.clear()
@@ -503,7 +546,7 @@ struct MessageComposerView: View {
             if isSending {
                 ProgressView().controlSize(.small)
             } else {
-                Text(Self.sendButtonLabel(state: state, terminalLabel: terminal.label))
+                Text(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
             }
         }
         // **No key equivalent.** `ComposerKeyRouter` already maps Cmd+Return to
@@ -519,12 +562,21 @@ struct MessageComposerView: View {
         .accessibilityIdentifier(ComposerAccessibility.send)
     }
 
+    /// What the send button calls the target: a terminal's label, or a
+    /// remote session's display name.
+    private var targetLabel: String? {
+        switch target {
+        case .terminal(let terminal, _): return terminal.label
+        case .remote(let selection): return appState.remoteSessionDisplayName(for: selection)
+        }
+    }
+
     /// The button names the target, so an injection is never anonymous.
     static func sendButtonLabel(state: ComposerState, terminalLabel: String?) -> String {
         let name = terminalLabel ?? "Claude"
         switch state {
         case .notRunning: return "Resume \(name)"
-        case .running, .blocked, .hidden: return "Send to \(name)"
+        case .running, .blocked, .hidden, .unavailable: return "Send to \(name)"
         }
     }
 
@@ -534,7 +586,7 @@ struct MessageComposerView: View {
             return "Claude is not running here. Sending resumes the session with this "
                 + "message as its first prompt. Images are sent as file paths for Claude to "
                 + "read, not as attachments."
-        case .running, .blocked, .hidden:
+        case .running, .blocked, .hidden, .unavailable:
             return "Return sends, Shift+Return breaks the line."
         }
     }
@@ -556,11 +608,13 @@ struct MessageComposerView: View {
                 .lineLimit(2)
                 .accessibilityIdentifier(ComposerAccessibility.blockedMessage)
             Spacer(minLength: 0)
-            Button("Reveal Terminal") {
-                appState.revealTerminal(terminalID: terminal.id)
+            if case .terminal(let terminal, _) = target {
+                Button("Reveal Terminal") {
+                    appState.revealTerminal(terminalID: terminal.id)
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier(ComposerAccessibility.blockedReveal)
             }
-            .controlSize(.small)
-            .accessibilityIdentifier(ComposerAccessibility.blockedReveal)
         }
         .padding(.horizontal, 10)
         .padding(.top, 6)

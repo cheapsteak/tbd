@@ -284,19 +284,12 @@ struct RemoteSessionDetailView: View {
     /// right. The split is always the container, even with one child, so
     /// opening or closing the transcript only adds or removes the second
     /// child and never restructures the left one: `RemoteAttachPager` stays
-    /// mounted either way (see `terminalArea`).
+    /// mounted either way (see `terminalArea` and `RemoteDetailSplit`).
     private var contentArea: some View {
-        HSplitView {
+        RemoteDetailSplit(showsTrailing: appState.remoteSessionShowsTranscriptPane(selection)) {
             terminalArea
-                .frame(minWidth: 240)
-            if appState.remoteSessionShowsTranscriptPane(selection) {
-                // Nothing drives `remote.transcriptSync` in this build, so
-                // the pane has no cache file yet and shows its loading state.
-                // The flag gating it reads off until that driver lands.
-                RemoteTranscriptPaneView(
-                    selection: selection, path: nil, generation: 0, caughtUp: false)
-                    .frame(minWidth: 280, idealWidth: 420)
-            }
+        } trailing: {
+            RemoteTranscriptLivePane(selection: selection)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

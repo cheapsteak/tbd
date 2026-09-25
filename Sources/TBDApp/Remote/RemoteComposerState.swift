@@ -52,6 +52,20 @@ enum RemoteComposerState: Equatable {
         }
     }
 
+    /// The shared composer's state for this remote state. `MessageComposerView`
+    /// renders one vocabulary for both kinds of target: a blocked remote
+    /// session shows the blocked banner (without Reveal Terminal — the attached
+    /// terminal is already beside it), and an exited one a disabled note, since
+    /// there is no wake path to offer.
+    var composerState: ComposerState {
+        switch self {
+        case .hidden: return .hidden
+        case .running: return .running
+        case .blocked: return .blocked(message: disabledMessage ?? "")
+        case .exited: return .unavailable(message: disabledMessage ?? "")
+        }
+    }
+
     static func resolve(
         capabilities: [String],
         session: RemoteSessionPayload?,
