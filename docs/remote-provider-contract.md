@@ -379,7 +379,7 @@ Malformed JSONL on `transcript import` is a permanent error with `code: "invalid
 
 Providers SHOULD expire retained transcripts nobody recalls. Retention is storage a caller asked for, and a store with no expiry policy grows without bound.
 
-**These are two subcommands and two capabilities rather than one subcommand with an operand or a `--stdin` flag.** Every capability string but the three that gate a field or a flag names the verb or `transcript` subcommand it admits, and the two acts have genuinely different prerequisites: a backend may be able to snapshot its own sessions while being unable to accept a foreign blob, and one capability cannot say that. Separately, stdin is a property of a verb here — `create`, `send`, and `set-profile` read it unconditionally, and nothing else reads it at all — so a flag that switched it on would be the only one of its kind. Detecting a tty instead would be worse: TBD always invokes providers without one, so the heuristic would be constant-true in the caller that matters.
+**These are two subcommands and two capabilities rather than one subcommand with an operand or a `--stdin` flag.** Every capability string but the three that gate a field or a flag names the verb or `transcript` subcommand it admits, and the two acts have genuinely different prerequisites: a backend may be able to snapshot its own sessions while being unable to accept a foreign blob, and one capability cannot say that. Separately, stdin is a property of a verb here — `create`, `send`, `set-profile`, and `transcript import` read it unconditionally, and nothing else reads it at all — so a flag that switched it on would be the only one of its kind. Detecting a tty instead would be worse: TBD always invokes providers without one, so the heuristic would be constant-true in the caller that matters.
 
 Failure follows the standard error model below — for example, exit 1 with `code: "not_found"` if `transcript retain`'s `<id>` no longer exists.
 
@@ -457,6 +457,7 @@ The `send-submit` capability admits one flag on `send`, which submits a message 
 
 - stdin is the message as UTF-8 text, not keystrokes. The provider places it in the agent's input as a single paste, so embedded newlines belong to the message, and then submits it with a separate Enter.
 - Exit 0 means the message was delivered and submitted; it does not mean the agent has acted on it.
+- A non-zero exit carrying the standard error object means the message was not submitted. A caller that never receives an exit status — its timeout fired, or the provider process died — MUST treat the outcome as unknown, because the provider may already have pressed Enter, and MUST NOT resubmit the message automatically.
 - A caller MUST NOT pass `--submit` to a provider that has not declared `send-submit`. `send` without the flag is unchanged: raw keystrokes, nothing appended.
 - `send-submit` is meaningful only alongside `send`, and a provider SHOULD NOT declare it without also declaring `send`.
 

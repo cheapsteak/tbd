@@ -102,6 +102,8 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
   Sends to one session are serialized, and each is recorded in the actuation log, as `remote.send` is.
 
+  The result has three outcomes, not two. **Sent** is exit 0. **Not sent** is a non-zero exit with the provider's error object. **Unknown** is a call that ended without an exit status: the 30-second timeout fired or the provider process died, and the provider may already have pressed Enter. The daemon never retries a send, and reports unknown as its own outcome rather than as a failure.
+
 The existing `remote.transcript` RPC and `tbd remote transcript` keep their full-fetch behavior and invoke `transcript read`. `remote.retain`, `remote.import`, `remote.recall`, and `remote.delete`'s retain path check the namespaced capabilities and invoke the namespaced verbs.
 
 ### Flag
@@ -147,7 +149,7 @@ For a remote target:
 - **Visibility** – shown only when the provider declares `send-submit` and both flags are on.
 - **Disabled states** – "Session has exited" when it has; "Waiting on a prompt — answer it in the terminal" while `agent_state` is `waiting_input`.
 - **Omissions** – no slash-command menu, since the completion inventory comes from a local terminal (a typed `/command` is still sent as text); no image attachments, since staged images are local paths the remote machine cannot read; no wake path for an exited session.
-- **Submission** – submit calls `remote.sendMessage`. The text stays in the composer until the call succeeds, a failure shows the composer's banner, and success triggers a sync.
+- **Submission** – submit calls `remote.sendMessage`. The text stays in the composer until the call succeeds, and success triggers a sync. Not sent shows the composer's failure banner. Unknown shows a distinct banner — "May have been sent — check the transcript before sending again" — triggers a sync so the transcript can answer the question, and keeps the text without offering a one-keystroke resend: the user must edit the text or confirm before it can be sent again. Neither outcome resubmits automatically.
 
 The attached terminal and the composer are independent writers to the same session. Text left unsent in the agent's own input box is prefixed to the composer's message. This is the limitation the local composer already accepts.
 
@@ -168,7 +170,8 @@ Each gate is tested on both branches.
 - **RPC gates**:
   - `remote.transcriptSync` refused with the flag off or without `transcript.read`;
   - `remote.sendMessage` refused without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
-  - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized.
+  - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
+  - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
 - **OrphanGC leg** – keeps a directory whose session has a row, keeps one written within `gcGraceSeconds`, reclaims one with no row outside the window, and does nothing with `gcEnabled` off.
 - **App gates** – toolbar toggle visibility against the capability and flag; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
