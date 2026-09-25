@@ -32,11 +32,10 @@ enum RemoteSessionDetailGates {
     private static let logCapability = "log"
     private static let sendCapability = "send"
     /// The remote-transcript capabilities
-    /// (docs/specs/2026-09-25-remote-session-transcript-design.md). Kept here,
-    /// private and in one place, so they can be swapped for the shared
-    /// `RemoteCapability` namespace in a single edit once it lands.
-    private static let transcriptReadCapability = "transcript.read"
-    private static let sendSubmitCapability = "send-submit"
+    /// (docs/specs/2026-09-25-remote-session-transcript-design.md), spelled
+    /// once in the shared `RemoteCapability` namespace.
+    private static let transcriptReadCapability = RemoteCapability.transcriptRead
+    private static let sendSubmitCapability = RemoteCapability.sendSubmit
 
     /// Whether a live attach terminal can be offered for the session.
     ///

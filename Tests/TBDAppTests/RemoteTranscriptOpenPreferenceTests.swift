@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDShared
 
 /// The shared `remoteTranscriptOpen` preference. Every test drives a fresh
 /// `AppState` over its own `UserDefaults(suiteName:)` and removes that domain
@@ -55,14 +56,35 @@ struct RemoteTranscriptOpenPreferenceTests {
         }
     }
 
-    @Test("the transcript flag reads off until its config column is wired")
-    func flagOffInThisBuild() {
+    @Test("the transcript flag reads off until the daemon's capabilities say otherwise")
+    func flagFollowsDaemonCapabilities() {
         withIsolatedDefaults { defaults in
             let state = AppState(userDefaults: defaults)
             let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            state.remoteProviders = [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/nonexistent"),
+                describe: ProviderDescribe(
+                    contractVersions: [1], name: "acme",
+                    capabilities: [RemoteCapability.transcriptRead]),
+                health: .ok, errorMessage: nil,
+                remediationLabel: nil, remediationCommand: nil)]
+
+            // Unfetched capabilities read as the shipped default (off).
             #expect(state.remoteTranscriptEnabled == false)
             #expect(state.remoteSessionShowsTranscriptToggle(selection) == false)
             #expect(state.remoteSessionShowsTranscriptPane(selection) == false)
+
+            var off = DaemonCapabilitiesResult(controlModeEnabled: false)
+            off.remoteTranscriptEnabled = false
+            state.daemonCapabilities = off
+            #expect(state.remoteSessionShowsTranscriptToggle(selection) == false)
+
+            var on = DaemonCapabilitiesResult(controlModeEnabled: false)
+            on.remoteTranscriptEnabled = true
+            state.daemonCapabilities = on
+            #expect(state.remoteTranscriptEnabled == true)
+            #expect(state.remoteSessionShowsTranscriptToggle(selection) == true)
+            #expect(state.remoteSessionShowsTranscriptPane(selection) == true)
         }
     }
 }
