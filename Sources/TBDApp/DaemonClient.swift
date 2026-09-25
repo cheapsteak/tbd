@@ -1354,11 +1354,18 @@ actor DaemonClient {
     /// (`remote.sendMessage` → `send <id> --submit`). Unlike `remoteSend`, the
     /// text is a message, not keystrokes: the provider pastes it and presses
     /// Enter. Refused by the daemon unless the provider declares `send-submit`.
-    func remoteSendMessage(provider: String, sessionID: String, text: String) async throws {
-        try await callVoidAsync(
+    ///
+    /// Returns `.sent` or `.unknown`; "not sent" (the provider exited non-zero)
+    /// throws with the provider's message. `.unknown` means the message may
+    /// have been delivered — never resubmit it automatically.
+    func remoteSendMessage(
+        provider: String, sessionID: String, text: String
+    ) async throws -> RemoteSendOutcome {
+        try await callAsync(
             method: RPCMethod.remoteSendMessage,
-            params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text)
-        )
+            params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text),
+            resultType: RemoteSendMessageResult.self
+        ).outcome
     }
 
     /// Fetch recent log lines for a remote session. `lines` nil == provider default.

@@ -1854,7 +1854,8 @@ public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
 
 /// Params for `remote.sendMessage` — submit `text` as one message through
 /// `send <id> --submit` (`docs/remote-provider-contract.md` § `--submit`).
-/// Embedded newlines belong to the message. The result is empty.
+/// Embedded newlines belong to the message. The result is a
+/// `RemoteSendMessageResult`.
 public struct RemoteSendMessageParams: Codable, Sendable {
     public let provider: String
     public let sessionID: String
@@ -1862,6 +1863,37 @@ public struct RemoteSendMessageParams: Codable, Sendable {
     public init(provider: String, sessionID: String, text: String) {
         self.provider = provider; self.sessionID = sessionID; self.text = text
     }
+}
+
+/// How a `remote.sendMessage` call ended, when it did not end in "not sent".
+///
+/// A send has three outcomes, not two
+/// (`docs/specs/2026-09-25-remote-session-transcript-design.md`):
+/// - `sent` – the provider exited 0.
+/// - not sent – a non-zero exit with the provider's error object. That one is
+///   not a case here: it is an RPC error carrying the provider's message, like
+///   every other refused remote call.
+/// - `unknown` – the call ended without an exit status: the timeout fired or
+///   the provider process died, and the provider may already have pressed
+///   Enter. The daemon never retries, and a caller must not treat this as a
+///   failure it can safely resubmit.
+///
+/// Decoding is forward-compatible: a raw value this build does not know reads
+/// as `unknown`, the only reading that never invites a duplicate send.
+public enum RemoteSendOutcome: String, Codable, Sendable, Equatable {
+    case sent
+    case unknown
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = RemoteSendOutcome(rawValue: raw) ?? .unknown
+    }
+}
+
+/// Result of `remote.sendMessage`. See `RemoteSendOutcome`.
+public struct RemoteSendMessageResult: Codable, Sendable, Equatable {
+    public let outcome: RemoteSendOutcome
+    public init(outcome: RemoteSendOutcome) { self.outcome = outcome }
 }
 
 /// Params for `remote.delete` — destroy a provider-hosted session

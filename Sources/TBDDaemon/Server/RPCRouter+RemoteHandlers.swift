@@ -867,7 +867,9 @@ extension RPCRouter {
     /// `remote.sendMessage` — submit a message through `send <id> --submit`.
     /// Same shape as `handleRemoteTranscriptSync` for now: the shared gates,
     /// then a refusal. The send, its serializer and its own refusals
-    /// (`send-submit`, stale snapshot, `waiting_input`, exited) land later.
+    /// (`send-submit`, stale snapshot, `waiting_input`, exited) land later;
+    /// once they do, success answers with a `RemoteSendMessageResult`
+    /// (`sent` or `unknown`) and "not sent" with an RPC error.
     func handleRemoteSendMessage(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
             return Self.remoteBackendsDisabledResponse

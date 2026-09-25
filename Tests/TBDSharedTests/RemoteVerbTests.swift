@@ -103,4 +103,34 @@ struct RemoteTranscriptSyncWireTests {
         #expect(decoded.sessionID == "s-1")
         #expect(decoded.text == "line one\nline two")
     }
+
+    @Test(arguments: [RemoteSendOutcome.sent, .unknown])
+    func sendMessageResultRoundTrips(_ outcome: RemoteSendOutcome) throws {
+        let data = try JSONEncoder().encode(RemoteSendMessageResult(outcome: outcome))
+        let decoded = try JSONDecoder().decode(RemoteSendMessageResult.self, from: data)
+        #expect(decoded.outcome == outcome)
+    }
+
+    @Test func sendMessageResultDecodesTheDocumentedKeys() throws {
+        let sent = try JSONDecoder().decode(
+            RemoteSendMessageResult.self, from: Data(#"{"outcome":"sent"}"#.utf8))
+        #expect(sent.outcome == .sent)
+        let unknown = try JSONDecoder().decode(
+            RemoteSendMessageResult.self, from: Data(#"{"outcome":"unknown"}"#.utf8))
+        #expect(unknown.outcome == .unknown)
+    }
+
+    /// An outcome a newer daemon adds must never read as `sent` to an older
+    /// app — `unknown` is the reading that cannot invite a duplicate send.
+    @Test func anUnrecognizedOutcomeDecodesAsUnknown() throws {
+        let decoded = try JSONDecoder().decode(
+            RemoteSendMessageResult.self, from: Data(#"{"outcome":"queued"}"#.utf8))
+        #expect(decoded.outcome == .unknown)
+    }
+
+    @Test func aMissingOutcomeIsADecodeError() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(RemoteSendMessageResult.self, from: Data("{}".utf8))
+        }
+    }
 }
