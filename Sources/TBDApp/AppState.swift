@@ -744,6 +744,14 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
+    /// Whether a remote session's detail pane shows its transcript beside the
+    /// terminal. One standing preference for every remote session, not a
+    /// per-session fact, so a newly viewed session follows it. Unset reads as
+    /// open, so the first remote session a user views shows its transcript;
+    /// the toolbar toggle stores an explicit `true`/`false`.
+    var remoteTranscriptOpen: Bool = true {
+        didSet { userDefaults.set(remoteTranscriptOpen, forKey: Self.remoteTranscriptOpenKey) }
+    }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -2126,6 +2134,8 @@ final class AppState {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    /// Named in the remote-transcript spec; left unprefixed to match it.
+    static let remoteTranscriptOpenKey = "remoteTranscriptOpen"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     /// Emits a debounced event when the network path changes or the machine
@@ -2160,6 +2170,7 @@ final class AppState {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
+        remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()

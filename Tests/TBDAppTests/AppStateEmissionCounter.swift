@@ -121,6 +121,7 @@ final class AppStateEmissionTracker {
         _ = state.isInitialStateLoaded
         _ = state.dockRatio
         _ = state.skipAccountPicker
+        _ = state.remoteTranscriptOpen
         _ = state.mainAreaSize
         _ = state.isConnected
         _ = state.layouts
@@ -238,6 +239,7 @@ final class AppStateEmissionTracker {
         "isInitialStateLoaded",
         "dockRatio",
         "skipAccountPicker",
+        "remoteTranscriptOpen",
         "mainAreaSize",
         "isConnected",
         "layouts",
