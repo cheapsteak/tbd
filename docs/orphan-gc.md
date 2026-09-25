@@ -240,17 +240,17 @@ the CLI is where a quarantine path is read.
 
 ## Retained transcripts
 
-A provider that declares `retain`, `import` or `recall` can hold a conversation in its
-own durable store and hand back an opaque key; TBD records the receipt in
-`retained_transcript` and a `recall` writes the JSONL under
+A provider that declares `transcript.retain`, `transcript.import` or
+`transcript.recall` can hold a conversation in its own durable store and hand back an opaque key; TBD records the receipt in
+`retained_transcript` and a `transcript recall` writes the JSONL under
 `~/tbd/transcripts/<provider>/<key>.jsonl`. Both halves are durable resources with no
 owner once the thing that motivated them is gone, so `OrphanGC` is their named
 reconciler — see
 [`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`](specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md),
 "Reclamation".
 
-**Why it is load-bearing rather than tidiness.** The teleport flow calls `import` and
-then `create`. A `create` that fails after a successful `import` leaves a retained blob
+**Why it is load-bearing rather than tidiness.** The teleport flow calls `transcript import`
+and then `create`. A `create` that fails after a successful `transcript import` leaves a retained blob
 on the provider and a row here that nothing will ever use, because the session it was
 going to seed was never made. No creation path can close that window — the provider
 commits its side before TBD learns whether the second call will succeed — so the standing
@@ -294,8 +294,8 @@ reason:
   because the contract gives no way to enumerate a provider's keys. Dropping such a row
   strands the blob forever.
 - **Grace window** (`grace`) — a file whose newer of creation and modification is younger
-  than `gcGraceSeconds` (default 3600s / 1h) is kept. `recall` writes the file before it
-  records the path on the row, and this is the window that covers it. A file whose dates
+  than `gcGraceSeconds` (default 3600s / 1h) is kept. `transcript recall` writes the file
+  before it records the path on the row, and this is the window that covers it. A file whose dates
   cannot be read keeps as `unknown-age`.
 - **Unreadable rows skip the leg** (`rows-unreadable`) — never read as "no file is
   referenced".

@@ -4,7 +4,7 @@ This document specifies the contract a **provider** must implement to plug a rem
 
 ## Overview & invocation model
 
-TBD invokes the provider executable as `<exec> [args...] <verb> [flags]`. Depending on the verb, TBD may pass structured input on stdin and reads either a single JSON object or an NDJSON stream from stdout. stderr is diagnostic only — TBD logs it but never parses it — with exactly one exception: `transcript` returns its continuation cursor as a JSON envelope on stderr, and that envelope is the only stderr content any verb defines (see `transcript` below).
+TBD invokes the provider executable as `<exec> [args...] <verb> [flags]`. A verb is one word or, for `transcript`, one word and a subcommand — `transcript read`, `transcript retain`, `transcript import`, `transcript recall` — and its arguments and flags follow it. Each `transcript` subcommand is a verb in its own right, with its own capability string, row in the verb table, and section below. Depending on the verb, TBD may pass structured input on stdin and reads either a single JSON object or an NDJSON stream from stdout. stderr is diagnostic only — TBD logs it but never parses it — with exactly one exception: `transcript read` returns its continuation cursor as a JSON envelope on stderr, and that envelope is the only stderr content any verb defines (see `transcript read` below).
 
 Every invocation carries a contract major in `TBD_CONTRACT_VERSION` (see Versioning below), and the provider inherits the caller's full login environment. On every verb except `describe` this is the negotiated major. `describe` is the call that produces the negotiation, so no negotiated value exists yet when it runs: it carries the **caller's own highest supported major** instead. A provider MUST NOT vary its `describe` response based on that value — `describe` answers from static local data and MUST report every major the provider supports, so that a caller supporting a newer major than the provider still negotiates down correctly rather than being told only what it asked about.
 
@@ -21,12 +21,13 @@ Three verbs are **required**: `describe`, `create`, and `list`. Every other verb
 | `archive` | capability `archive` | `<exec> archive <id>` | — | JSON session | 30s |
 | `unarchive` | capability `unarchive` | `<exec> unarchive <id>` | — | JSON session | 30s |
 | `delete` | capability `delete` | `<exec> delete <id> [--retain]` | — | JSON result | 30s |
-| `retain` | capability `retain` | `<exec> retain <id>` | — | JSON receipt | 60s |
-| `import` | capability `import` | `<exec> import` | JSONL | JSON receipt | 60s |
-| `recall` | capability `recall` | `<exec> recall <key>` | — | JSONL | 60s |
+| `transcript retain` | capability `transcript.retain` | `<exec> transcript retain <id>` | — | JSON receipt | 60s |
+| `transcript import` | capability `transcript.import` | `<exec> transcript import` | JSONL | JSON receipt | 60s |
+| `transcript recall` | capability `transcript.recall` | `<exec> transcript recall <key>` | — | JSONL | 60s |
 | `log` | capability `log` | `<exec> log <id> [--lines N]` | — | raw bytes | 30s |
-| `transcript` | capability `transcript` | `<exec> transcript <id> [--since <cursor>]` | — | JSONL bytes | 60s |
+| `transcript read` | capability `transcript.read` | `<exec> transcript read <id> [--since <cursor>]` | — | JSONL bytes | 60s |
 | `send` | capability `send` | `<exec> send <id>` | raw bytes | JSON `{}` | 30s |
+| `send --submit` | capability `send-submit` | `<exec> send <id> --submit` | UTF-8 text | JSON `{}` | 30s |
 | `rename` | capability `rename` | `<exec> rename <id> <title>` | — | JSON session | 30s |
 | `set-profile` | capability `set-profile` | `<exec> set-profile <id>` | JSON profile | JSON session | 60s |
 | `land` | capability `land` | `<exec> land <id>` | — | JSON land object | 30s |
@@ -223,7 +224,7 @@ Why credentials never travel, by kind:
   "contract_versions": [1, 2],
   "name": "example-provider",
   "provider_version": "0.4.2",
-  "capabilities": ["stop", "log", "transcript", "send", "attach", "events", "messages", "rename", "profile", "set-profile", "archive", "unarchive", "delete", "retain", "import", "recall", "seed", "land"],
+  "capabilities": ["stop", "log", "transcript.read", "send", "send-submit", "attach", "events", "messages", "rename", "profile", "set-profile", "archive", "unarchive", "delete", "transcript.retain", "transcript.import", "transcript.recall", "seed", "land"],
   "create_params": [
     {"name": "repo",   "type": "string", "label": "Repository", "required": true},
     {"name": "branch", "type": "string", "label": "Branch", "default": "main"},
@@ -237,7 +238,7 @@ Why credentials never travel, by kind:
 
 - `contract_versions` — every contract major version this provider supports (see Versioning).
 - `name` — a stable machine identifier for the provider (used, along with each session id, as the caller's key for this provider's sessions).
-- `capabilities` — which optional verbs/features (`stop`, `log`, `transcript`, `send`, `attach`, `events`, `messages`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `delete`, `retain`, `import`, `recall`, `seed`, `land`) this provider implements. Every capability string except `profile` and `seed` names the verb of the same name: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` and `seed` are the two exceptions — each gates whether `create` honors the stdin field of the same name (see `create` and Format scope below, and the Profile object above) rather than admitting a verb — while `set-profile` gates the verb of the same name.
+- `capabilities` — which optional verbs/features (`stop`, `log`, `transcript.read`, `send`, `send-submit`, `attach`, `events`, `messages`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `delete`, `transcript.retain`, `transcript.import`, `transcript.recall`, `seed`, `land`) this provider implements. Every capability string except `profile`, `seed`, and `send-submit` names the verb of the same name, and a `transcript.<sub>` string names the `transcript <sub>` subcommand: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` and `seed` are two of the exceptions — each gates whether `create` honors the stdin field of the same name (see `create` and Format scope below, and the Profile object above) rather than admitting a verb — while `set-profile` gates the verb of the same name. `send-submit` is the third: it gates the `--submit` flag on `send` (see `send` below) rather than admitting a verb.
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `slug`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present, and for `slug` a caller may generate a lane identifier of its own choosing. Well-known is a caller-side prefill convention and nothing more: it obliges a provider to nothing, changes no validation, and a provider that declares any of these names is simply one whose form a caller can fill in without asking. A caller that can answer every `required` field this way may skip the form entirely and create straight away; one that cannot must ask rather than guess.
 - `profile_kinds` and `credential_ref_hint` are meaningful only when `capabilities` includes `profile`; a provider without that capability SHOULD omit both, and a caller MUST ignore them if present without it. `profile_kinds` lists which `kind` values (from the Profile object above) this provider can actually realize. `credential_ref_hint` is placeholder text — not validation — describing the shape of a `credential_ref` this provider expects; a caller shows it as placeholder text in its credential-reference input.
 
@@ -258,7 +259,7 @@ stdin:
 
 `profile` (optional) is a Profile object (see above) selecting the identity the new session's agent should run as. It is meaningful only when the provider declares the `profile` capability; a provider that doesn't declare it MUST ignore the field — per the ignore-unknown-fields rule in Versioning — and create the session against its own default identity rather than error. An absent `profile` always means the provider's default identity, regardless of capability.
 
-`seed` (optional) names a retained transcript the new session begins with as its history: `{"retained_key": "<key>"}`, where the key came from a `retain` or `import` receipt this same provider issued (see Keys below). It is a top-level sibling of `profile` and `idempotency_key`, never a member of the provider-defined `params`, and the payload it names is Claude Code transcript JSONL (see Format scope below).
+`seed` (optional) names a retained transcript the new session begins with as its history: `{"retained_key": "<key>"}`, where the key came from a `transcript retain` or `transcript import` receipt this same provider issued (see Keys below). It is a top-level sibling of `profile` and `idempotency_key`, never a member of the provider-defined `params`, and the payload it names is Claude Code transcript JSONL (see Format scope below).
 
 `seed` is gated by the `seed` capability, which names the field it gates rather than a verb — the same shape `profile` has. A provider that has not declared `seed` MUST ignore the field, per the ignore-unknown-fields rule in Versioning, and a caller MUST NOT send it to such a provider. That obligation is the whole point of gating the field: because an unrecognized stdin field is dropped silently rather than refused, an ungated `seed` sent to a provider that does not implement it would produce an unseeded session the caller believed carried a conversation, with nothing on either side to say so. `idempotency_key` dedupe covers a seeded create unchanged — replaying a key that already produced a session returns that same session rather than seeding a second one.
 
@@ -348,7 +349,7 @@ Response:
 
 **A provider that declares `events` MUST emit `{"event": "removed", "id": ...}` after a successful delete.** `removed` already means "stop tracking this at all", which is exactly the fact a delete establishes.
 
-**`--retain` retains the session's transcript before destroying it**, and is valid only where the provider also declares the `retain` capability. When the flag is passed — and only then — the response carries the same receipt `retain` returns:
+**`--retain` retains the session's transcript before destroying it**, and is valid only where the provider also declares the `transcript.retain` capability. When the flag is passed — and only then — the response carries the same receipt `transcript retain` returns:
 
 ```json
 {"id": "fix-flaky-ci", "deleted": true, "retained": {"key": "opaque-provider-string", "expires_at": "2026-10-01T00:00:00Z", "bytes": 148213}}
@@ -360,51 +361,51 @@ There is no `--force` at this layer. Refusing to destroy live or dirty work is c
 
 Failure follows the standard error model below.
 
-## `retain <id>` / `import` (optional)
+## `transcript retain <id>` / `transcript import` (optional)
 
-Both verbs put a transcript into the provider's own durable store and return the same receipt:
+Both subcommands put a transcript into the provider's own durable store and return the same receipt:
 
 ```json
 {"key": "opaque-provider-string", "expires_at": "2026-10-01T00:00:00Z", "bytes": 148213}
 ```
 
-`retain <id>` stores the transcript of a session this provider owns. `import` reads Claude Code transcript JSONL on stdin and stores it, with no session on this provider involved at all — that is how a conversation from somewhere else, including one that ran on the caller's own machine, enters the store.
+`transcript retain <id>` stores the transcript of a session this provider owns. `transcript import` reads Claude Code transcript JSONL on stdin and stores it, with no session on this provider involved at all — that is how a conversation from somewhere else, including one that ran on the caller's own machine, enters the store.
 
-- `key` (required) — the opaque handle `recall` and `create`'s `seed` field take. See Keys below.
-- `bytes` (required) — the count of transcript bytes stored. It is how a caller detects a truncated `recall`, so a provider MUST emit it.
+- `key` (required) — the opaque handle `transcript recall` and `create`'s `seed` field take. See Keys below.
+- `bytes` (required) — the count of transcript bytes stored. It is how a caller detects a truncated `transcript recall`, so a provider MUST emit it.
 - `expires_at` (optional) — when the provider intends to drop the record. **An absent `expires_at` means the provider makes no claim, never "kept forever".** A caller MUST NOT render its absence as a guarantee of permanence.
 
-Malformed JSONL on `import` is a permanent error with `code: "invalid_params"`.
+Malformed JSONL on `transcript import` is a permanent error with `code: "invalid_params"`.
 
 Providers SHOULD expire retained transcripts nobody recalls. Retention is storage a caller asked for, and a store with no expiry policy grows without bound.
 
-**These are two verbs and two capabilities rather than one verb with an operand or a `--stdin` flag.** Every capability string but the two that gate a `create` field names the verb of the same name, and the two acts have genuinely different prerequisites: a backend may be able to snapshot its own sessions while being unable to accept a foreign blob, and one capability cannot say that. Separately, stdin is a property of a verb here — `create`, `send`, and `set-profile` read it unconditionally, and nothing else reads it at all — so a flag that switched it on would be the only one of its kind. Detecting a tty instead would be worse: TBD always invokes providers without one, so the heuristic would be constant-true in the caller that matters.
+**These are two subcommands and two capabilities rather than one subcommand with an operand or a `--stdin` flag.** Every capability string but the three that gate a field or a flag names the verb or `transcript` subcommand it admits, and the two acts have genuinely different prerequisites: a backend may be able to snapshot its own sessions while being unable to accept a foreign blob, and one capability cannot say that. Separately, stdin is a property of a verb here — `create`, `send`, and `set-profile` read it unconditionally, and nothing else reads it at all — so a flag that switched it on would be the only one of its kind. Detecting a tty instead would be worse: TBD always invokes providers without one, so the heuristic would be constant-true in the caller that matters.
 
-Failure follows the standard error model below — for example, exit 1 with `code: "not_found"` if `retain`'s `<id>` no longer exists.
+Failure follows the standard error model below — for example, exit 1 with `code: "not_found"` if `transcript retain`'s `<id>` no longer exists.
 
-## `recall <key>` (optional)
+## `transcript recall <key>` (optional)
 
-Writes a retained transcript to stdout as Claude Code transcript JSONL, in the same format `transcript` returns (see `transcript` below). It works for any key the provider issued, whether or not the session that produced the transcript still exists — which is the point of retaining one.
+Writes a retained transcript to stdout as Claude Code transcript JSONL, in the same format `transcript read` returns (see `transcript read` below). It works for any key the provider issued, whether or not the session that produced the transcript still exists — which is the point of retaining one.
 
-**`recall` writes nothing to stderr**, so this contract keeps exactly one stderr exception. `recall` does not inherit `transcript`'s cursor envelope: a cursor exists because a live transcript grows and is fetched incrementally, while a retained transcript is immutable, so `--since` would have nothing to mean. Truncation — the cursor's other job — is detected against the `bytes` the receipt carried.
+**`transcript recall` writes nothing to stderr**, so this contract keeps exactly one stderr exception. `transcript recall` does not inherit `transcript read`'s cursor envelope: a cursor exists because a live transcript grows and is fetched incrementally, while a retained transcript is immutable, so `--since` would have nothing to mean. Truncation — the cursor's other job — is detected against the `bytes` the receipt carried.
 
 - Unknown key: exit 1 with `code: "not_found"`.
 - A key the provider issued and has since aged out: exit 1 with `code: "expired"` (see Error model below), so a caller can say that a record lapsed rather than claim it never existed.
 
 Both are permanent errors.
 
-**It is a separate verb rather than `transcript --key`.** The operand is a different identifier namespace — a key is not a session id — and the `transcript` capability must keep meaning "live transcripts work" rather than becoming ambiguous about which of two paths a provider implements.
+**It is a separate subcommand with its own capability rather than `transcript read --key`.** The operand is a different identifier namespace — a key is not a session id — and the `transcript.read` capability must keep meaning "live transcripts work" rather than becoming ambiguous about which of two paths a provider implements. The prerequisites differ too: a provider may serve live transcripts without keeping a durable store at all, and separate capabilities are how it says so.
 
 ### Keys
 
-A key is an opaque provider-issued string, on the same terms as a `transcript` cursor or a `credential_ref`. A caller MUST NOT parse, order, compare, construct, or pattern-match one; it stores whatever a receipt gave it and passes that value back verbatim.
+A key is an opaque provider-issued string, on the same terms as a `transcript read` cursor or a `credential_ref`. A caller MUST NOT parse, order, compare, construct, or pattern-match one; it stores whatever a receipt gave it and passes that value back verbatim.
 
 - **Keys are provider-scoped.** A key is meaningful only to the provider that issued it, so a caller keys every key by the pair `(provider name, key)` and MUST NOT present one to a different provider.
-- **A key is an identifier, not an authorization.** `recall` authenticates exactly as every other verb does, and holding a key grants nothing on its own. A key is therefore not a bearer secret — which is what lets a caller log it, print it, and store it beside the rest of its inventory rather than treating it as credential material.
+- **A key is an identifier, not an authorization.** `transcript recall` authenticates exactly as every other verb does, and holding a key grants nothing on its own. A key is therefore not a bearer secret — which is what lets a caller log it, print it, and store it beside the rest of its inventory rather than treating it as credential material.
 
 ### Format scope
 
-`import`, `recall`, and `create`'s `seed` field all fix the payload as Claude Code transcript JSONL, the same format `transcript` returns. The rest of this contract assumes no particular agent, so these three are a real narrowing of it: a provider whose sessions are not Claude Code sessions simply declines these capabilities and remains fully conformant, and other agents' transcript formats are out of scope.
+`transcript import`, `transcript recall`, and `create`'s `seed` field all fix the payload as Claude Code transcript JSONL, the same format `transcript read` returns. The rest of this contract assumes no particular agent, so these three are a real narrowing of it: a provider whose sessions are not Claude Code sessions simply declines these capabilities and remains fully conformant, and other agents' transcript formats are out of scope.
 
 ## `log <id> [--lines N]`
 
@@ -414,31 +415,52 @@ Writes raw scrollback bytes to stdout: the last `N` lines (default 2000), with A
 
 Rendering scrollback to a human is not the thing the machine-interface rule (above) forbids — that rule is about *inferring `agent_state`* from rendered text. Showing the same text to a human to read is fine.
 
-## `transcript <id> [--since <cursor>]` (optional)
+## `transcript read <id> [--since <cursor>]` (optional)
 
 Writes the session's conversation to stdout as Claude Code transcript JSONL — one JSON record per line, in the record format the agent itself writes: user turns, agent responses, and tool activity as structured data. Records only; no framing, no envelope, no trailing summary.
 
 `--since <cursor>` requests only what accumulated after `<cursor>`. Invoked without it, the provider returns the transcript from the beginning.
 
+The transcript is the session's *current* conversation. When the agent moves to a new transcript within the same session — a `/clear` or a resume — `transcript read` follows it, and reports the switch with `reset` (below).
+
 **The continuation cursor is returned in a JSON envelope on stderr, not on stdout:**
 
 ```json
-{"cursor": "opaque-provider-string"}
+{"cursor": "opaque-provider-string", "reset": true, "more": true}
 ```
 
 This is the single exception to "stderr is diagnostic only", and the split is deliberate. stdout carries data records and nothing else, so a response cut short by a dropped transport is recognizable as a truncated data stream. Were the cursor a trailing control record on stdout, its absence would have two indistinguishable causes — the stream ended early, or the provider has no incremental support and never emits one — and a caller with no way to tell those apart would either discard good data or silently accept a truncated transcript as the whole conversation.
 
 **Cursors are opaque to the caller.** It stores whatever the provider last returned and passes that value back verbatim on the next call. A caller MUST NOT parse, order, compare, arithmetically manipulate, or construct a cursor, and MUST NOT carry one across providers or sessions.
 
-A provider without incremental support emits no cursor envelope and remains fully conformant; the caller then refetches the whole transcript each time. A provider that emits a cursor MUST accept its own most recently issued cursor on a subsequent `--since`, and SHOULD treat a cursor it can no longer honor as a request to return the transcript from the beginning rather than as an error.
+The envelope's fields:
 
-**`transcript` and `log` are different data, not two encodings of the same data.** `log` is raw ANSI scrollback bytes for a read-only terminal view; `transcript` is structured conversation records for a message-level view. Structured records poured into a scrollback view lose every tool card; ANSI bytes fed to a transcript renderer produce garbage. A provider MAY implement either, both, or neither, and a caller MUST NOT substitute one for the other.
+- **`cursor`** — the continuation cursor, passed back on the next call's `--since`.
+- **`reset`** (optional boolean) — this output starts from the beginning of the session's current conversation, and the caller discards anything it holds from earlier calls. A provider MUST set it whenever it answers a `--since` request from the beginning: a cursor it can no longer honor, or a conversation that has moved to a new transcript (`/clear`, a resume). A call without `--since` is a reset by definition, whether or not the flag is set. Without this signal a caller that appends each response to what it holds would duplicate records on a replay, or splice two conversations together on a switch.
+- **`more`** (optional boolean) — the provider stopped at its own size limit before reaching the end, and the caller calls again with the returned cursor at once. This lets a provider whose transport caps output per call return a long transcript in pages instead of exceeding the 60-second timeout. `more` requires a cursor; `more` without one is a contract violation, read as though `more` were absent.
+
+An absent `reset` or `more` reads as `false`, apart from the rule above that a call without `--since` is always a reset.
+
+A provider without incremental support emits no envelope and remains fully conformant. The caller then refetches the whole transcript each time, treats each response as a reset, and considers itself caught up. A provider that emits a cursor MUST accept its own most recently issued cursor on a subsequent `--since`, and SHOULD treat a cursor it can no longer honor as a request to return the transcript from the beginning, with `reset` set, rather than as an error.
+
+**`transcript read` and `log` are different data, not two encodings of the same data.** `log` is raw ANSI scrollback bytes for a read-only terminal view; `transcript read` returns structured conversation records for a message-level view. Structured records poured into a scrollback view lose every tool card; ANSI bytes fed to a transcript renderer produce garbage. A provider MAY implement either, both, or neither, and a caller MUST NOT substitute one for the other.
 
 The machine-interface rule applies here as everywhere: transcript records MUST come from the agent's own transcript data and MUST NEVER be reconstructed by parsing rendered terminal output.
 
-## `send <id>`
+## `send <id> [--submit]`
 
-stdin bytes are delivered verbatim to the session as keystrokes. The provider does not add a terminator. When a caller means the terminal Enter key, it MUST append carriage return (`\r`, byte `0x0D`); line feed (`\n`, byte `0x0A`) is not equivalent in a raw PTY and may fail to submit the line. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
+Without `--submit`, stdin bytes are delivered verbatim to the session as keystrokes. The provider does not add a terminator. When a caller means the terminal Enter key, it MUST append carriage return (`\r`, byte `0x0D`); line feed (`\n`, byte `0x0A`) is not equivalent in a raw PTY and may fail to submit the line. Exit 0 means the bytes were handed to the transport, not that the agent has acted on them.
+
+### `--submit` (optional)
+
+The `send-submit` capability admits one flag on `send`, which submits a message rather than typing keystrokes:
+
+- stdin is the message as UTF-8 text, not keystrokes. The provider places it in the agent's input as a single paste, so embedded newlines belong to the message, and then submits it with a separate Enter.
+- Exit 0 means the message was delivered and submitted; it does not mean the agent has acted on it.
+- A caller MUST NOT pass `--submit` to a provider that has not declared `send-submit`. `send` without the flag is unchanged: raw keystrokes, nothing appended.
+- `send-submit` is meaningful only alongside `send`, and a provider SHOULD NOT declare it without also declaring `send`.
+
+Paste mechanics belong to the provider because the provider owns the transport and can see the terminal: whether bracketed paste is on, when the input box is ready, how long to wait before Enter. A caller composing a bracketed paste over raw `send` would encode one TUI's timing across a hop it cannot observe, would depend on the provider's keystroke path passing escape bytes through untouched, and would have no evidence that the message landed. The machine-interface rule applies unchanged: a provider may verify delivery however it likes, and a caller reads only the exit status.
 
 ## `rename <id> <title>` (optional)
 
@@ -660,7 +682,7 @@ On a nonzero exit, the provider SHOULD emit one JSON error object on stdout:
 
 Well-known `code` values: `auth_expired`, `auth_missing`, `not_found`, `expired`, `already_exists`, `unreachable`, `invalid_params`, `credential_unresolvable`. Providers may return other codes; callers should treat unrecognized codes as opaque strings and still show `message`.
 
-`expired` means the thing named existed and has since lapsed — `recall` returns it for a key the provider issued and has since aged out (see `recall` above). It is distinct from `not_found` because the two say different things to a human: `not_found` claims the identifier was never issued, which for a key a caller is holding a receipt for is simply false, and hides the fact that the record lapsed on a schedule the provider declared.
+`expired` means the thing named existed and has since lapsed — `transcript recall` returns it for a key the provider issued and has since aged out (see `transcript recall` above). It is distinct from `not_found` because the two say different things to a human: `not_found` claims the identifier was never issued, which for a key a caller is holding a receipt for is simply false, and hides the fact that the record lapsed on a schedule the provider declared.
 
 `credential_unresolvable` means a `credential_ref` in a `profile` object didn't resolve against the provider's own secret store. It's distinct from `invalid_params` because the remedy is provisioning — registering or fixing the secret on the provider side — not correcting the shape of the request. It carries the same `remediation` shape as any other code:
 
@@ -705,7 +727,9 @@ Within a major version: providers may add new response fields at any time — a 
 
 **A caller's silence is not confirmation.** That ignore-unknown-fields rule, read from the sending end, means an optional field a caller does not consume is dropped at decode rather than rejected: nothing is returned, nothing is logged on the sender's side, and a run in which a field was understood is indistinguishable from one in which it was never looked at. A provider therefore MUST NOT read the absence of an error, or the absence of any complaint at all, as evidence that a caller consumes a field it sends. Where this document states what TBD's own caller does with an optional field, that statement sits at the field; where it makes no such statement, a provider that needs to know has to ask the caller's implementers rather than infer it from a quiet run. Adding a new optional verb — gated behind a new entry in `capabilities`, as `rename`, `set-profile`, and `messages` were — is likewise additive within a major version: a caller that doesn't recognize the capability string simply never invokes the verb, so no version bump is needed for it either. **A provider declaring `contract_versions: [1]` may implement any capability-gated verb this document specifies, `messages` included.** The capability string is what admits a verb at either major — a caller invokes one because the provider declared it, never because a major was negotiated — and the optional response fields such a verb arrives with are readable at either major under the rule above. Declaring one therefore obliges nobody to add `2`, and adding `2` for a verb alone is the expensive mistake: it carries the `stop` pairing above with it. `messages` is the worked example of both halves at once: a capability-gated verb plus one optional response field (`peer_messaging`), added within major 2 and requiring no bump, no change to any existing verb, and nothing at all from a provider that declines it.
 
-**`delete`, `retain`, `import`, `recall`, and `seed` are additive within major 2 on exactly those terms, and require no bump.** Four are capability-gated verbs, admitted by their capability strings the way `rename` and `messages` are; `seed` is a capability-gated field on `create`, admitted the way `profile` is. No required verb changes, no existing field is removed or renamed, and no existing verb's semantics move, so a provider that declares none of the five behaves precisely as it always has. **None of this changes `stop`'s status.** `delete`'s obligation to end a running session's compute is a statement about `delete` alone: it neither requires nor implies the `stop` capability, and the pairing rule above — a provider that implements `stop` and declares major 2 MUST declare the `stop` capability — is untouched by it.
+**`delete`, `transcript retain`, `transcript import`, `transcript recall`, and `seed` are additive within major 2 on exactly those terms, and require no bump.** Four are capability-gated verbs, admitted by their capability strings the way `rename` and `messages` are; `seed` is a capability-gated field on `create`, admitted the way `profile` is. No required verb changes, no existing field is removed or renamed, and no existing verb's semantics move, so a provider that declares none of the five behaves precisely as it always has. `send --submit` and the `reset` and `more` fields of the `transcript read` envelope are additive on the same terms: the flag is admitted only by the `send-submit` capability and leaves `send` without it untouched, and both envelope fields are optional, an absent one reading as `false`. **None of this changes `stop`'s status.** `delete`'s obligation to end a running session's compute is a statement about `delete` alone: it neither requires nor implies the `stop` capability, and the pairing rule above — a provider that implements `stop` and declares major 2 MUST declare the `stop` capability — is untouched by it.
+
+**The `transcript` subcommand names are an exception to the rename rule.** `transcript read`, `transcript retain`, `transcript import`, and `transcript recall`, with their `transcript.<sub>` capability strings, are adopted in place within the current majors, although a rename ordinarily requires a new major. The rule protects implementers the contract's owner cannot coordinate with, and this contract has none: every provider that implements it is maintained alongside TBD, and that alone is what justifies the exception. A provider that still declares the bare `transcript`, `retain`, `import`, or `recall` strings keeps working in every other respect; those operations are simply not offered, because a caller ignores capability strings it does not recognize. A major bump would cost more, since a provider declaring only an older major would fail negotiation and become unusable rather than losing only these operations. This is not a precedent: any later rename requires a new major, as the rule says.
 
 ## Identity & drift
 
