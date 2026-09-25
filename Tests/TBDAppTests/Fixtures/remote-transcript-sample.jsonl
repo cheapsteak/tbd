@@ -1,0 +1,5 @@
+{"type":"user","uuid":"r-u1","timestamp":"2026-09-25T10:00:00.000Z","message":{"role":"user","content":"List the files in the repo root."}}
+{"type":"assistant","uuid":"r-a1","timestamp":"2026-09-25T10:00:01.000Z","message":{"id":"msg_r1","type":"message","role":"assistant","content":[{"type":"text","text":"Listing them now."}]}}
+{"type":"assistant","uuid":"r-a2","timestamp":"2026-09-25T10:00:02.000Z","message":{"id":"msg_r1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_remote_1","name":"Bash","input":{"command":"ls","description":"List the repo root"}}]}}
+{"type":"user","uuid":"r-u2","timestamp":"2026-09-25T10:00:03.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_remote_1","type":"tool_result","content":"README.md\nPackage.swift\nSources\nTests","is_error":false}]}}
+{"type":"assistant","uuid":"r-a3","timestamp":"2026-09-25T10:00:04.000Z","message":{"id":"msg_r2","type":"message","role":"assistant","content":[{"type":"text","text":"The root holds README.md, Package.swift, Sources and Tests."}]}}

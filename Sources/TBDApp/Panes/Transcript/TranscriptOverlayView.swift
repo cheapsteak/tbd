@@ -259,7 +259,8 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: f?.terminalID
+                        terminalID: f?.terminalID,
+                        detailPath: f?.detailPath
                     )
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, _, _, _, _) where name == "Write":
                     WriteCardBody(

@@ -43,6 +43,21 @@ enum TranscriptLinkDestination {
         }
     }
 
+    /// The remote transcript pane's decision: a URL to open in the browser,
+    /// or nil for nothing at all.
+    ///
+    /// File paths in a remote transcript name files on another machine, so
+    /// none is ever acted on — not revealed, not opened, not routed. The pane
+    /// also hands the renderer no path resolver, so path tokens are never
+    /// minted as links in the first place; this covers the one route left,
+    /// a `file://` URL the message's own markdown carried.
+    static func remote(_ target: TranscriptLinkTarget) -> URL? {
+        switch target {
+        case .file: return nil
+        case .web(let url): return url
+        }
+    }
+
     /// The resolver a pane hands to the compose step: the shared path rules,
     /// bound to this pane's worktree root and memoized per pane.
     ///
