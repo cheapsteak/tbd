@@ -339,7 +339,8 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(firstEntered == .satisfied)
         #expect(secondQueued == .satisfied)
         #expect(eventsWhileHeld == ["in"])
-        #expect(responses.allSatisfy(\.success))
+        let allSucceeded = responses.allSatisfy { $0.success }
+        #expect(allSucceeded)
         #expect(await trace.events == ["in", "out", "in", "out"])
         let stdins = invoker.stdinsSnapshot().dropFirst().map { $0.flatMap { String(data: $0, encoding: .utf8) } }
         #expect(stdins == ["one", "two"])
