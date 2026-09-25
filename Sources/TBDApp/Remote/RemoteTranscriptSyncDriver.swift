@@ -24,6 +24,12 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
 ///
 /// - **Cadence** – while active (pane visible *and* app active), one sync at
 ///   once and then one every `interval` (3 s).
+/// - **Catch-up** – a sync that succeeds with `caughtUp == false` is followed
+///   by the next one at once, with no wait. The daemon returns after every
+///   page, so a long first load publishes (and the pane renders) each page as
+///   it lands; the cadence resumes once a sync reports it is caught up. A
+///   failed sync always waits the interval, so a refusing daemon is not
+///   hammered.
 /// - **Stop** – going inactive ends the loop; no sync runs until it is active
 ///   again, and a sync in flight when it stops publishes nothing.
 /// - **Immediate triggers** – `syncNow()` (after a successful composer send)
@@ -128,9 +134,15 @@ final class RemoteTranscriptSyncDriver {
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                await self.runSync()
+                let catchingUp = await self.runSync()
                 guard !Task.isCancelled else { return }
-                await self.waitForNextTick()
+                if catchingUp {
+                    // The next sync starts now, so it also answers any
+                    // trigger that arrived during this one.
+                    self.pendingTrigger = false
+                } else {
+                    await self.waitForNextTick()
+                }
             }
         }
     }
@@ -145,26 +157,31 @@ final class RemoteTranscriptSyncDriver {
         }
     }
 
-    private func runSync() async {
+    /// Runs one sync and publishes it. Returns true when it succeeded without
+    /// catching up, i.e. the next sync should start without waiting.
+    private func runSync() async -> Bool {
         let loopTask = loop
         do {
             let result = try await sync(selection)
             // A sync that was in flight when the loop stopped (or restarted)
             // publishes nothing: its pane is not the one on screen any more.
-            guard loopTask == loop, !Task.isCancelled else { return }
+            guard loopTask == loop, !Task.isCancelled else { return false }
             snapshot = RemoteTranscriptSyncSnapshot(
                 path: result.path, generation: result.generation,
                 caughtUp: result.caughtUp, refreshToken: snapshot.refreshToken &+ 1,
                 error: nil)
+            completedSyncs += 1
+            return !result.caughtUp
         } catch {
-            guard loopTask == loop, !Task.isCancelled else { return }
+            guard loopTask == loop, !Task.isCancelled else { return false }
             logger.debug("""
             transcript sync failed for \(self.selection.provider, privacy: .public)/\
             \(self.selection.sessionID, privacy: .public): \(error, privacy: .public)
             """)
             snapshot.error = ComposerSendCoordinator.bannerMessage(for: error)
+            completedSyncs += 1
+            return false
         }
-        completedSyncs += 1
     }
 
     /// Sleep `interval`, or less if a trigger arrives. A trigger that already
