@@ -95,6 +95,7 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
 - **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless `remote_transcript_enabled` is on and the provider declares `transcript.read`.
 - **`remote.sendMessage {provider, sessionID, text}`** invokes `send <id> --submit` with `text` on stdin and a 30-second timeout. It is refused:
+  - unless both `remote_transcript_enabled` and `transcript_composer_enabled` are on — the daemon checks the flags itself, so a direct RPC call cannot send input the hidden composer would not;
   - unless the provider declares `send-submit`;
   - when the provider's snapshot is stale, as `remote.send` is;
   - while the mirrored `agent_state` is `waiting_input`, because the agent is blocked on a prompt and an Enter would choose its highlighted option — the refusal says to answer the prompt in the terminal;
@@ -169,7 +170,7 @@ Each gate is tested on both branches.
   - paths follow `TBD_HOME`.
 - **RPC gates**:
   - `remote.transcriptSync` refused with the flag off or without `transcript.read`;
-  - `remote.sendMessage` refused without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
+  - `remote.sendMessage` refused with either flag off, without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
   - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
