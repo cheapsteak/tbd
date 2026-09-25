@@ -79,11 +79,20 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
             params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: text)))
     }
 
-    private func seedSession(state: RemoteProcessState = .running, agentState: RemoteAgentState) async throws {
-        _ = try await db.remoteSessions.applySnapshot(
-            provider: "agentbox",
-            sessions: [RemoteSessionPayload(id: "s-1", state: state, agentState: agentState)],
-            now: Date())
+    /// A `list` answer naming session `s-1` in the given state. Mirrored
+    /// through the manager's own poll rather than written to the store
+    /// directly: a store-only snapshot with no poll behind it reads as an
+    /// inventory that has not refreshed since restart, which is stale.
+    private func listing(state: RemoteProcessState = .running, agentState: RemoteAgentState) -> ProviderResult {
+        providerOK(#"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"}]}"#)
+    }
+
+    private func poll(_ manager: RemoteProviderManager) async {
+        await manager.pollOnce(provider: RemoteProviderConfig(name: "agentbox", exec: "/nonexistent"))
+    }
+
+    private static func sends(_ invoker: FakeProviderInvoker) -> [[String]] {
+        invoker.callsSnapshot().filter { $0.first == "send" }
     }
 
     private func actuationRows() throws -> [[String: Any]] {
@@ -224,13 +233,16 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     @Test func sendIsRefusedWhileTheAgentWaitsOnAPrompt() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await seedSession(agentState: .waitingInput)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
-        let r = router(await manager(invoker))
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(agentState: .waitingInput),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let r = router(m)
         let response = try await send(r)
         #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal)
         #expect(response.error?.contains("answer it in the terminal") == true)
-        #expect(invoker.callsSnapshot() == [["describe"]])
+        #expect(Self.sends(invoker).isEmpty)
     }
 
     @Test(arguments: [
@@ -240,20 +252,27 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     ])
     func sendIsRefusedAfterTheSessionExited(state: RemoteProcessState, agentState: RemoteAgentState) async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await seedSession(state: state, agentState: agentState)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
-        let r = router(await manager(invoker))
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(state: state, agentState: agentState),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let r = router(m)
         #expect(try await send(r).error == RPCRouter.sendMessageExitedRefusal)
-        #expect(invoker.callsSnapshot() == [["describe"]])
+        #expect(Self.sends(invoker).isEmpty)
     }
 
     @Test func aGoneSessionReadsAsExited() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await seedSession(agentState: .idle)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(agentState: .idle),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
         try await db.remoteSessions.markGone(provider: "agentbox", sessionID: "s-1")
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
-        let r = router(await manager(invoker))
+        let r = router(m)
         #expect(try await send(r).error == RPCRouter.sendMessageExitedRefusal)
+        #expect(Self.sends(invoker).isEmpty)
     }
 
     // MARK: - remote.sendMessage delivery
@@ -263,16 +282,18 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     @Test(arguments: [RemoteAgentState.working, RemoteAgentState.idle, nil])
     func sendInvokesSendSubmitWithTheTextOnStdin(agentState: RemoteAgentState?) async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        if let agentState { try await seedSession(agentState: agentState) }
-        let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["send", RemoteCapability.sendSubmit]),
-            providerOK("{}"),
-        ])
-        let r = router(await manager(invoker))
+        let invoker = FakeProviderInvoker(script:
+            [describeDeclaring(["send", RemoteCapability.sendSubmit])]
+            + (agentState.map { [listing(agentState: $0)] } ?? [])
+            + [providerOK("{}")])
+        let m = await manager(invoker)
+        if agentState != nil { await poll(m) }
+        let r = router(m)
         let text = "fix the flaky test\nthen push"
         let response = try await send(r, text)
         #expect(response.success)
-        #expect(invoker.callsSnapshot() == [["describe"], ["send", "s-1", "--submit"]])
+        #expect(Self.sends(invoker) == [["send", "s-1", "--submit"]])
+        #expect(invoker.callsSnapshot().last == ["send", "s-1", "--submit"])
         #expect(invoker.stdinsSnapshot().last ?? nil == Data(text.utf8))
 
         let rows = try actuationRows()
