@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings surface for `remote_transcript_enabled`, and the AppState
 /// wiring a remote transcript pane reads through: the composer gate, and the
@@ -11,7 +12,7 @@ import TBDShared
 /// `.standard` on this unbundled executable is the developer's real
 /// `TBDApp.plist`.
 @MainActor
-@Suite("Remote transcript settings and wiring")
+@Suite("Remote transcript settings and wiring", .clockDriven)
 struct RemoteTranscriptSettingsTests {
     private static let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
 
@@ -125,31 +126,48 @@ struct RemoteTranscriptSettingsTests {
 
     // MARK: - Sync driver registry
 
-    @Test("a send's sync request reaches the registered driver, and only while registered")
-    func syncRequestReachesRegisteredDriver() async {
-        await withAppState { state in
-            var syncs = 0
-            let driver = RemoteTranscriptSyncDriver(
-                selection: Self.selection,
-                sync: { _ in
-                    syncs += 1
-                    return RemoteTranscriptSyncResult(path: "/p", generation: 1, caughtUp: true)
-                })
-            state.registerRemoteTranscriptSyncDriver(driver)
-            #expect(state.remoteTranscriptSyncDrivers[Self.selection]?.driver === driver)
+    @Test("a send's sync request reaches the registered, active driver at once")
+    func syncRequestReachesRegisteredDriver() async throws {
+        let name = "tbd-remote-transcript-registry-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let state = AppState(userDefaults: defaults)
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        var count = 0
+        let driver = RemoteTranscriptSyncDriver(
+            selection: Self.selection,
+            sync: { _ in
+                count += 1
+                syncs.record(count)
+                return RemoteTranscriptSyncResult(path: "/p", generation: 1, caughtUp: true)
+            },
+            clock: clock)
+        defer { driver.stop() }
+        state.registerRemoteTranscriptSyncDriver(driver)
+        #expect(state.remoteTranscriptSyncDrivers[Self.selection]?.driver === driver)
 
-            // Newer-wins: a stale driver unregistering leaves the live one.
-            let stale = RemoteTranscriptSyncDriver(
-                selection: Self.selection, sync: { _ in throw CancellationError() })
-            state.unregisterRemoteTranscriptSyncDriver(stale)
-            #expect(state.remoteTranscriptSyncDrivers[Self.selection]?.driver === driver)
+        driver.setActive(true)
+        #expect(await syncs.next() == 1)
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
 
-            state.unregisterRemoteTranscriptSyncDriver(driver)
-            #expect(state.remoteTranscriptSyncDrivers[Self.selection] == nil)
+        // No virtual time passes: only the request can explain a second sync.
+        state.requestRemoteTranscriptSync(Self.selection)
+        #expect(await syncs.next() == 2)
 
-            // With nothing registered the request is a quiet no-op.
-            state.requestRemoteTranscriptSync(Self.selection)
-            #expect(syncs == 0)
-        }
+        // Newer-wins: a stale driver unregistering leaves the live one.
+        let stale = RemoteTranscriptSyncDriver(
+            selection: Self.selection, sync: { _ in throw CancellationError() })
+        state.unregisterRemoteTranscriptSyncDriver(stale)
+        #expect(state.remoteTranscriptSyncDrivers[Self.selection]?.driver === driver)
+
+        // Unregistered, the same request reaches nothing, though the driver
+        // is still active and waiting on its tick.
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        state.unregisterRemoteTranscriptSyncDriver(driver)
+        #expect(state.remoteTranscriptSyncDrivers[Self.selection] == nil)
+        state.requestRemoteTranscriptSync(Self.selection)
+        await settle()
+        #expect(syncs.values == [1, 2])
     }
 }

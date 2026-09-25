@@ -50,31 +50,49 @@ struct RemoteDetailSplitTests {
     private struct Root: View {
         let model: Model
         let counts: Counts
+        let trailingCounts: Counts
 
         var body: some View {
             RemoteDetailSplit(showsTrailing: model.showsTrailing) {
                 Probe(counts: counts)
             } trailing: {
-                Color.blue
+                Probe(counts: trailingCounts)
             }
         }
     }
 
+    /// Two halves of one claim. The trailing probe proves the toggles really
+    /// happened: made and dismantled once per show/hide, so the test cannot
+    /// pass against a split that never renders its trailing half. The leading
+    /// probe is the property: made once, never dismantled.
     @Test("toggling the trailing half never remakes or dismantles the leading one")
     func leadingSurvivesToggle() async throws {
         let model = Model()
         let counts = Counts()
+        let trailingCounts = Counts()
         let host = OffscreenHost(
-            root: Root(model: model, counts: counts), size: NSSize(width: 900, height: 400))
+            root: Root(model: model, counts: counts, trailingCounts: trailingCounts),
+            size: NSSize(width: 900, height: 400))
         defer { host.tearDown() }
 
         try #require(await host.settle { counts.made == 1 }, "the leading half never mounted")
+        #expect(trailingCounts.made == 0, "the trailing half mounted while hidden")
 
-        for show in [true, false, true, false] {
+        for (step, show) in [true, false, true, false].enumerated() {
             model.showsTrailing = show
-            await host.pump(times: 5)
+            let shows = step / 2 + 1
+            let hides = (step + 1) / 2
+            let settled = await host.settle {
+                trailingCounts.made == shows && trailingCounts.dismantled == hides
+            }
+            #expect(settled, """
+                step \(step): the trailing half was made \(trailingCounts.made) and dismantled \
+                \(trailingCounts.dismantled) times, expected \(shows) and \(hides)
+                """)
         }
 
+        #expect(trailingCounts.made == 2)
+        #expect(trailingCounts.dismantled == 2)
         #expect(counts.made == 1, "the leading half was rebuilt when the trailing half changed")
         #expect(counts.dismantled == 0, "the leading half was torn down when the trailing half changed")
     }
