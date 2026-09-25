@@ -55,6 +55,9 @@ HANDOVER_STOP_GRACE=5
 
 UPDATE_SRC="$UPDATE_HOME/src"
 UPDATE_LOG="$UPDATE_HOME/update.log"
+# The full compiler output of the latest run's builds, overwritten per run.
+# update.log carries only the first errors and a pointer here.
+UPDATE_BUILD_LOG="$UPDATE_HOME/build.log"
 UPDATE_LOCK="$UPDATE_HOME/update.lock"
 TBD_HOME_DIR="${TBD_HOME:-$HOME/tbd}"
 DAEMON_PID_FILE="$TBD_HOME_DIR/tbdd.pid"
@@ -486,6 +489,36 @@ maybe_reexec() {
 
 # MARK: - Build
 
+# Explain a failed build in update.log (and on stderr when a person is
+# watching), then point at the full output in $UPDATE_BUILD_LOG. The compiler's
+# first `error:` lines are the part a reader needs; the last lines of SwiftPM's
+# output rarely are. Status 75 is scripts/swift-safe's "never got the
+# machine-wide build slot" — nothing was compiled, so it is reported as a wait
+# that ran out, not as a compile failure.
+report_build_failure() {
+    local product="$1" status="$2" build_out="$3"
+    local excerpt line
+    if [ "$status" -eq 75 ]; then
+        excerpt="$(printf '%s\n' "$build_out" | tail -3)"
+        log_error "build of $product timed out waiting for the build slot (scripts/swift-safe exited 75): nothing was compiled; another build held the slot. Retry once it is free"
+    else
+        excerpt="$(printf '%s\n' "$build_out" | grep -m 10 'error:')"
+        [ -n "$excerpt" ] || excerpt="$(printf '%s\n' "$build_out" | tail -20)"
+        log_error "build of $product failed (exit $status)"
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # Into update.log only; a watching person gets the line on stderr.
+        OPT_AUTO=true log "  $line"
+        if [ "$OPT_AUTO" = false ]; then
+            printf '  %s\n' "$line" >&2
+        fi
+    done <<< "$excerpt"
+    log "full build output: $UPDATE_BUILD_LOG"
+    log_error "the running installation is untouched"
+    return 0
+}
+
 build_products() {
     local repo_root="${1-}"
     local product build_out
@@ -503,14 +536,22 @@ build_products() {
     # with scripts/restart.sh; it includes TBDCLI because `tbd update` is run
     # through that binary, and an update that leaves the CLI behind reports a
     # version it is not.
+    local status
+    mkdir -p "$UPDATE_HOME" 2>/dev/null || true
+    : > "$UPDATE_BUILD_LOG" 2>/dev/null || true
     for product in "${RUNTIME_PRODUCTS[@]}"; do
         log "building $product ($BUILD_CONFIG)"
         # Capture the status, THEN print. Piping the build into `tail` would
         # make the pipeline's status tail's, which is always zero.
-        if ! build_out="$( (cd "$repo_root" && scripts/swift-safe build \
-                -c "$BUILD_CONFIG" --product "$product") 2>&1 )"; then
-            printf '%s\n' "$build_out" | tail -20 >&2
-            log_error "build of $product failed — the running installation is untouched"
+        status=0
+        build_out="$( (cd "$repo_root" && scripts/swift-safe build \
+                -c "$BUILD_CONFIG" --product "$product") 2>&1 )" || status=$?
+        {
+            printf '=== %s (%s) ===\n' "$product" "$BUILD_CONFIG"
+            printf '%s\n' "$build_out"
+        } >> "$UPDATE_BUILD_LOG" 2>/dev/null || true
+        if [ "$status" -ne 0 ]; then
+            report_build_failure "$product" "$status" "$build_out"
             return 1
         fi
         printf '%s\n' "$build_out" | tail -2 | while IFS= read -r line; do
