@@ -528,7 +528,7 @@ line announcing it on the `messages` stream, so populating the field turns
 nothing on and omitting it turns nothing off.
 
 **Required?** No, on both halves. This is a capability-gated verb plus an
-optional response field — the same additive shape as `transcript` or `land` —
+optional response field — the same additive shape as `transcript read` or `land` —
 so a provider that ignores it is unaffected in every other respect.
 
 **Not a v2 delta either.** Like the worktree identity keys in section 8,
