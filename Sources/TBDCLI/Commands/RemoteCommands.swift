@@ -96,6 +96,15 @@ struct RemoteFleetSnapshot {
         Set(providers.first { $0.config.name == provider }?.describe?.capabilities ?? [])
     }
 
+    /// The refusal text when `provider` has not declared `capability`, nil when
+    /// it has. Capability strings match exactly, so a provider still declaring
+    /// a bare pre-namespace spelling (`retain` for `transcript.retain`) is
+    /// refused rather than admitted.
+    func missingCapability(_ capability: String, provider: String) -> String? {
+        capabilities(of: provider).contains(capability)
+            ? nil : remoteMissingCapability(capability, provider: provider)
+    }
+
     func isKnown(provider: String) -> Bool {
         providers.contains { $0.config.name == provider }
     }
@@ -203,8 +212,8 @@ struct RemoteRetain: AsyncParsableCommand {
             remoteNote("Error: could not resolve '\(session)' to a remote session")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: target.provider).contains("retain") else {
-            remoteNote(remoteMissingCapability("retain", provider: target.provider))
+        if let refusal = fleet.missingCapability(RemoteCapability.transcriptRetain, provider: target.provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let receipt = try client.call(
@@ -259,8 +268,8 @@ struct RemoteImport: AsyncParsableCommand {
             remoteNote("Error: no provider named '\(provider)' is registered")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: provider).contains("import") else {
-            remoteNote(remoteMissingCapability("import", provider: provider))
+        if let refusal = fleet.missingCapability(RemoteCapability.transcriptImport, provider: provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let jsonl = try readTranscriptOperand(path)
@@ -328,8 +337,8 @@ struct RemoteRecall: AsyncParsableCommand {
             remoteNote("Error: no provider named '\(provider)' is registered")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: provider).contains("recall") else {
-            remoteNote(remoteMissingCapability("recall", provider: provider))
+        if let refusal = fleet.missingCapability(RemoteCapability.transcriptRecall, provider: provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let result = try client.call(
@@ -544,8 +553,8 @@ struct RemoteDelete: AsyncParsableCommand {
 
             With --retain the provider stores the transcript first and the key is \
             printed, so the conversation survives the session. Without it, \
-            nothing survives. --retain needs the provider to declare `retain` as \
-            well as `delete`.
+            nothing survives. --retain needs the provider to declare \
+            `transcript.retain` as well as `delete`.
 
             Refuses without --force when the session is running or reports \
             uncommitted work, naming which.
@@ -580,12 +589,13 @@ struct RemoteDelete: AsyncParsableCommand {
             remoteNote(remoteMissingCapability("delete", provider: target.provider))
             throw ExitCode.failure
         }
-        // The contract makes --retain valid only where `retain` is declared, so
-        // this is refused here rather than sent and hoped for: a provider that
-        // ignored the flag would destroy a session the caller believed was
-        // being preserved.
-        if retain, !capabilities.contains("retain") {
-            remoteNote(remoteMissingCapability("retain", provider: target.provider))
+        // The contract makes --retain valid only where `transcript.retain` is
+        // declared, so this is refused here rather than sent and hoped for: a
+        // provider that ignored the flag would destroy a session the caller
+        // believed was being preserved.
+        if retain,
+           let refusal = fleet.missingCapability(RemoteCapability.transcriptRetain, provider: target.provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let mirrored = fleet.sessions.first {
@@ -986,8 +996,9 @@ struct RemoteCreate: AsyncParsableCommand {
             remoteNote(remoteMissingCapability("seed", provider: provider))
             throw ExitCode.failure
         }
-        if continueTerminal != nil || fromFile != nil, !capabilities.contains("import") {
-            remoteNote(remoteMissingCapability("import", provider: provider))
+        if continueTerminal != nil || fromFile != nil,
+           let refusal = fleet.missingCapability(RemoteCapability.transcriptImport, provider: provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
 
@@ -1368,8 +1379,8 @@ struct RemoteTranscript: AsyncParsableCommand {
             remoteNote("Error: could not resolve '\(session)' to a remote session")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: target.provider).contains("transcript") else {
-            remoteNote(remoteMissingCapability("transcript", provider: target.provider))
+        if let refusal = fleet.missingCapability(RemoteCapability.transcriptRead, provider: target.provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let result = try client.call(

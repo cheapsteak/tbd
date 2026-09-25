@@ -599,7 +599,7 @@ struct RemoteAppStateTests {
     /// gesture goes straight through without asking.
     @Test func deleteSkipsTheConfirmWhenNothingIsAtStake() async {
         await withStateAsync { state in
-            seedForDelete(state, capabilities: ["delete", "retain"], sessionState: .exited)
+            seedForDelete(state, capabilities: ["delete", RemoteCapability.transcriptRetain], sessionState: .exited)
             let probe = DeleteProbe()
             attachDeleteProbe(state, probe)
 
@@ -618,7 +618,7 @@ struct RemoteAppStateTests {
     /// discriminating half is the deleter never being called.
     @Test func decliningTheConfirmDeletesNothing() async {
         await withStateAsync { state in
-            seedForDelete(state, capabilities: ["delete", "retain"], sessionState: .running)
+            seedForDelete(state, capabilities: ["delete", RemoteCapability.transcriptRetain], sessionState: .running)
             let probe = DeleteProbe()
             probe.confirmAnswer = false
             attachDeleteProbe(state, probe)
@@ -647,13 +647,30 @@ struct RemoteAppStateTests {
         }
     }
 
+    /// The hard cutover: the bare pre-namespace `retain` admits nothing, so a
+    /// provider still declaring it is treated exactly like one that cannot
+    /// retain — no `--retain` request, and the no-record confirmation.
+    @Test func aProviderDeclaringOnlyBareRetainIsNotAskedToRetain() async {
+        await withStateAsync { state in
+            seedForDelete(state, capabilities: ["delete", "retain"], sessionState: .exited)
+            let probe = DeleteProbe()
+            probe.confirmAnswer = true
+            attachDeleteProbe(state, probe)
+
+            await state.deleteRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(probe.confirmed, "a delete that keeps no record always confirms")
+            #expect(probe.deleteCalls.first?.retain == false)
+        }
+    }
+
     /// A session claiming `workspace_dirty` confirms even though it has exited
     /// and a receipt is coming — the uncommitted work is on the provider's
     /// machine and goes with the session.
     @Test func aDirtyWorkspaceConfirmsEvenWhenExitedAndRetaining() async {
         await withStateAsync { state in
             seedForDelete(
-                state, capabilities: ["delete", "retain"], sessionState: .exited,
+                state, capabilities: ["delete", RemoteCapability.transcriptRetain], sessionState: .exited,
                 meta: [RemoteSessionPayload.dirtyWorkspaceMetaKey: "true"])
             let probe = DeleteProbe()
             probe.confirmAnswer = false

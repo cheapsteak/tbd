@@ -2827,8 +2827,8 @@ public struct TabState: Codable, Sendable, Equatable, Identifiable {
 // MARK: - Retained transcripts
 
 /// TBD's own record of one transcript a provider has retained in its own
-/// durable store (`docs/remote-provider-contract.md` § `retain <id>` /
-/// `import`).
+/// durable store (`docs/remote-provider-contract.md` § `transcript retain <id>` /
+/// `transcript import`).
 ///
 /// A key is opaque and provider-scoped, so `(provider, key)` is the identity.
 /// Everything else on the row exists to make a key findable again by a human:

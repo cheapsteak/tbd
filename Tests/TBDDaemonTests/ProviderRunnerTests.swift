@@ -24,6 +24,18 @@ struct ProviderRunnerTests: ~Copyable {
         return RemoteProviderConfig(name: "stub", exec: path.path)
     }
 
+    /// A timeout names the operation that hung. The four `transcript`
+    /// subcommands are four different operations, so their name carries the
+    /// subcommand; operands never appear.
+    @Test func verbNameCarriesTheTranscriptSubcommandButNoOperand() {
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptRetain(sessionID: "s-1")) == "transcript retain")
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptImport) == "transcript import")
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptRead(sessionID: "s-1", since: "c")) == "transcript read")
+        #expect(ProviderRunner.verbName(["send", "s-1", "--submit"]) == "send")
+        #expect(ProviderRunner.verbName(["delete", "s-1", "--retain"]) == "delete")
+        #expect(ProviderRunner.verbName([]) == "?")
+    }
+
     @Test func successCapturesStdoutAndContractVersionEnv() async throws {
         let config = try stub(#"echo "{\"ok\": true, \"v\": \"$TBD_CONTRACT_VERSION\"}""#)
         let result = try await ProviderRunner().run(

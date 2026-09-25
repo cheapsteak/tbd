@@ -73,7 +73,7 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         case .result(let result):
             return result
         case .timeout:
-            throw ProviderRunError.timeout(verb: verb.first ?? "?")
+            throw ProviderRunError.timeout(verb: ProviderRunner.verbName(verb))
         }
     }
 

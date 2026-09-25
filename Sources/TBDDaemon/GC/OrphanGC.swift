@@ -957,8 +957,8 @@ public actor OrphanGC {
     /// Gated by `gcRetainedTranscriptsEnabled` on top of `gcEnabled`, both
     /// because every new background sweep that unlinks files and deletes rows
     /// soaks behind its own switch, and because the exchange whose residue it
-    /// reclaims only exists on a provider declaring `retain`, `import` or
-    /// `recall` — a machine with no such provider has nothing here for this leg
+    /// reclaims only exists on a provider declaring `transcript.retain`,
+    /// `transcript.import` or `transcript.recall` — a machine with no such provider has nothing here for this leg
     /// to be right or wrong about.
     ///
     /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:

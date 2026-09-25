@@ -215,9 +215,46 @@ struct RemoteCommandsTests {
     // MARK: - The missing-capability refusal
 
     @Test func missingCapabilityRefusalNamesTheCapabilityAndProvider() {
-        let text = remoteMissingCapability("recall", provider: "agentbox")
-        #expect(text.contains("recall"))
-        #expect(text.contains("agentbox"))
+        let text = remoteMissingCapability(RemoteCapability.transcriptRecall, provider: "agentbox")
+        #expect(text == "Error: provider 'agentbox' has not declared the 'transcript.recall' capability")
+    }
+
+    private func fleet(declaring capabilities: [String]) -> RemoteFleetSnapshot {
+        RemoteFleetSnapshot(
+            providers: [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "agentbox", exec: "/bin/agentbox"),
+                describe: ProviderDescribe(name: "agentbox", capabilities: capabilities),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)],
+            sessions: [], worktrees: [])
+    }
+
+    /// Each namespaced capability admits its own command and nothing else.
+    @Test func namespacedCapabilitiesAdmitTheirCommands() {
+        let all = [
+            RemoteCapability.transcriptRead, RemoteCapability.transcriptRetain,
+            RemoteCapability.transcriptImport, RemoteCapability.transcriptRecall,
+        ]
+        for capability in all {
+            let snapshot = fleet(declaring: [capability])
+            #expect(snapshot.missingCapability(capability, provider: "agentbox") == nil)
+            for other in all where other != capability {
+                #expect(snapshot.missingCapability(other, provider: "agentbox") != nil)
+            }
+        }
+    }
+
+    /// The hard cutover: a provider still declaring the bare pre-namespace
+    /// spellings is refused `retain`, `delete --retain`, `import`, `recall` and
+    /// `transcript`, and the refusal names the namespaced string to declare.
+    @Test func barePreNamespaceCapabilitiesAdmitNothing() {
+        let snapshot = fleet(declaring: ["delete", "transcript", "retain", "import", "recall"])
+        for capability in [
+            RemoteCapability.transcriptRead, RemoteCapability.transcriptRetain,
+            RemoteCapability.transcriptImport, RemoteCapability.transcriptRecall,
+        ] {
+            #expect(snapshot.missingCapability(capability, provider: "agentbox")
+                == remoteMissingCapability(capability, provider: "agentbox"))
+        }
     }
 
     // MARK: - delete: the caller-side policy

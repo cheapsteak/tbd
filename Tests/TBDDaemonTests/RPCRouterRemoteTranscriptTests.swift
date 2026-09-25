@@ -5,7 +5,7 @@ import Foundation
 import TestSupport
 
 /// `remote.transcript` — a live session's conversation, as Claude Code
-/// transcript JSONL (`docs/remote-provider-contract.md` § `transcript <id>`).
+/// transcript JSONL (`docs/remote-provider-contract.md` § `transcript read <id>`).
 ///
 /// Tier 2: in-memory GRDB plus a fake provider invoker, no real subprocess.
 /// Wiring mirrors `RPCRouterRemoteExchangeTests` — `describe` is popped first,
@@ -85,11 +85,23 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
     /// contract.
     @Test func refusesAndNeverSpawnsWhenCapabilityUndeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["log", "recall"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["log", RemoteCapability.transcriptRecall])])
         let r = await router(invoker: invoker)
         let response = await call(r, params)
         #expect(response.success == false)
-        #expect(response.error?.contains("transcript") == true)
+        #expect(response.error?.contains(RemoteCapability.transcriptRead) == true)
+        #expect(invoker.calls == [["describe"]])
+    }
+
+    /// The hard cutover: the bare pre-namespace `transcript` capability admits
+    /// nothing, so a provider still declaring it is refused and never spawned.
+    @Test func bareTranscriptCapabilityDoesNotAdmitTranscriptRead() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["transcript"])])
+        let r = await router(invoker: invoker)
+        let response = await call(r, params)
+        #expect(response.success == false)
+        #expect(response.error?.contains(RemoteCapability.transcriptRead) == true)
         #expect(invoker.calls == [["describe"]])
     }
 
@@ -108,13 +120,13 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
         try await db.config.setRemoteBackendsEnabled(true)
         let jsonl = "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n"
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["transcript"]),
+            describeDeclaring([RemoteCapability.transcriptRead]),
             ProviderResult(exitCode: 0, stdout: Data(jsonl.utf8), stderr: ""),
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, params)
         #expect(response.success)
-        #expect(invoker.calls == [["describe"], ["transcript", "fix-flaky-ci"]])
+        #expect(invoker.calls == [["describe"], RemoteVerb.transcriptRead(sessionID: "fix-flaky-ci")])
         #expect(try response.decodeResult(RemoteTranscriptResult.self).jsonl == jsonl)
     }
 
@@ -125,7 +137,7 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
     @Test func ignoresTheCursorEnvelopeOnStderr() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["transcript"]),
+            describeDeclaring([RemoteCapability.transcriptRead]),
             ProviderResult(
                 exitCode: 0, stdout: Data("{\"type\":\"user\"}\n".utf8),
                 stderr: #"{"cursor": "abc123"}"#),
@@ -141,7 +153,7 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
     @Test func surfacesTheProvidersErrorMessage() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["transcript"]),
+            describeDeclaring([RemoteCapability.transcriptRead]),
             ProviderResult(
                 exitCode: 1,
                 stdout: Data(#"{"error": {"code": "not_found", "message": "no such session"}}"#.utf8),
@@ -156,12 +168,12 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
     @Test func reportsATimeoutInWords() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(outcomes: [
-            .result(describeDeclaring(["transcript"])),
+            .result(describeDeclaring([RemoteCapability.transcriptRead])),
             .timeout,
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, params)
         #expect(response.success == false)
-        #expect(response.error == "provider 'agentbox' timed out running 'transcript'")
+        #expect(response.error == "provider 'agentbox' timed out running 'transcript read'")
     }
 }

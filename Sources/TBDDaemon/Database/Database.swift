@@ -36,7 +36,7 @@ public final class TBDDatabase: Sendable {
     /// TBD's own, so a row that is lost is a shadow nothing can recognise.
     public let shadowPeerArtifacts: ShadowPeerArtifactStore
     /// TBD's record of the transcripts a provider has retained
-    /// (`docs/remote-provider-contract.md` § `retain <id>` / `import`). The
+    /// (`docs/remote-provider-contract.md` § `transcript retain <id>` / `transcript import`). The
     /// provider contract gives no way to enumerate the keys a provider issued,
     /// so these rows are the only listing a caller has.
     public let retainedTranscripts: RetainedTranscriptStore

@@ -366,8 +366,8 @@ extension RPCRouter {
     /// The refusal a handler returns instead of invoking a verb the provider
     /// has not declared. `section` names the contract heading to read, and
     /// defaults to the `<verb> <id>` shape the session-addressed verbs use;
-    /// the exchange verbs pass their own, because `import` takes no id and
-    /// `recall` takes a key rather than one.
+    /// the exchange verbs pass their own, because `transcript import` takes no id
+    /// and `transcript recall` takes a key rather than one.
     private static func missingCapabilityResponse(
         provider: String, capability: String, section: String? = nil
     ) -> RPCResponse {
@@ -648,13 +648,14 @@ extension RPCRouter {
     // MARK: - The transcript exchange
 
     /// The budget for all three exchange verbs, matching the contract's
-    /// 60-second timeout for `retain`, `import`, and `recall` — a transcript is
+    /// 60-second timeout for `transcript retain`, `transcript import`, and
+    /// `transcript recall` — a transcript is
     /// a whole conversation, and the two store-writing verbs may be moving it
     /// across a network.
     private static let exchangeTimeout: TimeInterval = 60
 
     /// Retains one of the provider's own sessions' transcripts
-    /// (`docs/remote-provider-contract.md` § `retain <id>`). Mirrors
+    /// (`docs/remote-provider-contract.md` § `transcript retain <id>`). Mirrors
     /// `handleRemoteLog`'s shape — same outer gate, same cloud gate, same
     /// timeout and `failureClass` branches — with two additions.
     ///
@@ -678,14 +679,15 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteRetainParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard await declaredCapabilities(manager, provider: params.provider).contains("retain") else {
+        guard await declaredCapabilities(manager, provider: params.provider).contains(RemoteCapability.transcriptRetain) else {
             return Self.missingCapabilityResponse(
-                provider: params.provider, capability: "retain", section: "retain <id> / import")
+                provider: params.provider, capability: RemoteCapability.transcriptRetain,
+                section: "transcript retain <id> / transcript import")
         }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["retain", params.sessionID],
+                providerName: params.provider, verb: RemoteVerb.transcriptRetain(sessionID: params.sessionID),
                 stdin: nil, timeout: Self.exchangeTimeout)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error("remote.retain provider=\(params.provider, privacy: .public) timed out")
@@ -704,10 +706,10 @@ extension RPCRouter {
 
     /// Puts a transcript from anywhere — including this machine — into a
     /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `import`). See `handleRemoteRetain` for the shared shape and for why the
+    /// `transcript import`). See `handleRemoteRetain` for the shared shape and for why the
     /// capability check and the receipt row are both part of the verb.
     ///
-    /// Unlike `retain` there is no session on this provider, so the recorded
+    /// Unlike `transcript retain` there is no session on this provider, so the recorded
     /// row carries no source session id and no origin lane. Malformed JSONL is
     /// the provider's `invalid_params`, surfaced through the ordinary
     /// `failureClass` branch rather than pre-validated here: the contract makes
@@ -719,14 +721,15 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteImportParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard await declaredCapabilities(manager, provider: params.provider).contains("import") else {
+        guard await declaredCapabilities(manager, provider: params.provider).contains(RemoteCapability.transcriptImport) else {
             return Self.missingCapabilityResponse(
-                provider: params.provider, capability: "import", section: "retain <id> / import")
+                provider: params.provider, capability: RemoteCapability.transcriptImport,
+                section: "transcript retain <id> / transcript import")
         }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["import"],
+                providerName: params.provider, verb: RemoteVerb.transcriptImport,
                 stdin: Data(params.jsonl.utf8), timeout: Self.exchangeTimeout)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error("remote.import provider=\(params.provider, privacy: .public) timed out")
@@ -744,10 +747,11 @@ extension RPCRouter {
     }
 
     /// Reads a retained transcript back (`docs/remote-provider-contract.md` §
-    /// `recall <key>`). See `handleRemoteRetain` for the shared shape.
+    /// `transcript recall <key>`). See `handleRemoteRetain` for the shared shape.
     ///
-    /// **stdout is the whole response.** `recall` writes nothing to stderr —
-    /// the contract keeps exactly one stderr exception, `transcript`'s cursor
+    /// **stdout is the whole response.** `transcript recall` writes nothing to
+    /// stderr — the contract keeps exactly one stderr exception, `transcript
+    /// read`'s cursor
     /// envelope, and a retained transcript is immutable so a cursor would have
     /// nothing to mean. Truncation is detected against the receipt's `bytes`
     /// instead, which is why a short read is logged here naming both counts.
@@ -761,14 +765,15 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteRecallParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard await declaredCapabilities(manager, provider: params.provider).contains("recall") else {
+        guard await declaredCapabilities(manager, provider: params.provider).contains(RemoteCapability.transcriptRecall) else {
             return Self.missingCapabilityResponse(
-                provider: params.provider, capability: "recall", section: "recall <key>")
+                provider: params.provider, capability: RemoteCapability.transcriptRecall,
+                section: "transcript recall <key>")
         }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["recall", params.key],
+                providerName: params.provider, verb: RemoteVerb.transcriptRecall(key: params.key),
                 stdin: nil, timeout: Self.exchangeTimeout)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error("remote.recall provider=\(params.provider, privacy: .public) timed out")
@@ -798,11 +803,11 @@ extension RPCRouter {
     }
 
     /// The conversation of a session the provider still has
-    /// (`docs/remote-provider-contract.md` § `transcript <id>`). See
+    /// (`docs/remote-provider-contract.md` § `transcript read <id>`). See
     /// `handleRemoteRetain` for the shared shape and for why the capability is
     /// checked before anything is invoked.
     ///
-    /// **stderr is dropped on the floor, deliberately.** `transcript` is the
+    /// **stderr is dropped on the floor, deliberately.** `transcript read` is the
     /// contract's one stderr exception: it may write a continuation-cursor
     /// envelope there. This RPC reads the whole transcript in one call and has
     /// nowhere to keep a cursor between calls, so carrying it across the RPC
@@ -819,15 +824,15 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteTranscriptParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard await declaredCapabilities(manager, provider: params.provider).contains("transcript") else {
+        guard await declaredCapabilities(manager, provider: params.provider).contains(RemoteCapability.transcriptRead) else {
             return Self.missingCapabilityResponse(
-                provider: params.provider, capability: "transcript",
-                section: "transcript <id> [--since <cursor>]")
+                provider: params.provider, capability: RemoteCapability.transcriptRead,
+                section: "transcript read <id> [--since <cursor>]")
         }
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["transcript", params.sessionID],
+                providerName: params.provider, verb: RemoteVerb.transcriptRead(sessionID: params.sessionID),
                 stdin: nil, timeout: Self.exchangeTimeout)
         } catch let error as ProviderRunError {
             remoteHandlerLogger.error(
@@ -937,7 +942,7 @@ extension RPCRouter {
         }
     }
 
-    /// Compares what `recall` returned against the byte count the receipt
+    /// Compares what `transcript recall` returned against the byte count the receipt
     /// claimed, and logs at `.error` when it falls short.
     ///
     /// Silent when TBD holds no receipt for this key — a key recalled from
@@ -1012,8 +1017,8 @@ extension RPCRouter {
     /// before anything is spawned, so a daemon with the flag off never runs a
     /// provider's `delete` for any reason.
     ///
-    /// **`--retain` needs the `retain` capability too.** The contract makes the
-    /// flag valid only where the provider declares `retain`; sending it to a
+    /// **`--retain` needs the `transcript.retain` capability too.** The contract
+    /// makes the flag valid only where the provider declares `transcript.retain`; sending it to a
     /// provider that does not would either be ignored — destroying a session
     /// the caller believed was being preserved — or fail after the fact.
     ///
@@ -1054,9 +1059,9 @@ extension RPCRouter {
                 provider: params.provider, capability: "delete",
                 section: "delete <id> [--retain]")
         }
-        if params.retain, !capabilities.contains("retain") {
+        if params.retain, !capabilities.contains(RemoteCapability.transcriptRetain) {
             return Self.missingCapabilityResponse(
-                provider: params.provider, capability: "retain",
+                provider: params.provider, capability: RemoteCapability.transcriptRetain,
                 section: "delete <id> [--retain]")
         }
         let actuationID = try await beginActuation(
