@@ -23,19 +23,20 @@ struct RemoteComposerSendTests {
     private func makeCoordinator(
         recorder: Recorder, remoteFails: Error? = nil, wireRemote: Bool = true
     ) -> ComposerSendCoordinator {
-        ComposerSendCoordinator(
+        // Typed up front: a closure literal inside the ternary below loses its
+        // `@Sendable` inference.
+        let remote: ComposerSendCoordinator.RemoteSender = { selection, text in
+            recorder.remoteSends.append((selection, text))
+            if let remoteFails { throw remoteFails }
+        }
+        return ComposerSendCoordinator(
             send: { _ in recorder.localSends += 1 },
             wake: { _, _, _ in
                 recorder.wakes += 1
                 return .noOp
             },
             awaitSessionStart: { _, _ in false },
-            sendRemote: wireRemote
-                ? { selection, text in
-                    recorder.remoteSends.append((selection, text))
-                    if let remoteFails { throw remoteFails }
-                }
-                : nil,
+            sendRemote: wireRemote ? remote : nil,
             onRemoteSent: { recorder.syncRequests.append($0) })
     }
 
