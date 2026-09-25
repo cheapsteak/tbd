@@ -95,7 +95,7 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
         switch outcome {
         case .timedOut:
             return .timedOut
-        case let .completed(status, stdoutData, stderrData):
+        case let .completed(status, stdoutData, stderrData), let .signaled(status, stdoutData, stderrData):
             // Under a pty `stderrData` is always empty (the streams merged
             // onto stdout already); under pipes it carries the CLI's own
             // diagnostics on a genuinely separate descriptor, kept apart from

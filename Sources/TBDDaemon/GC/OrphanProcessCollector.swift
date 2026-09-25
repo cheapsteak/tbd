@@ -689,7 +689,7 @@ public struct OrphanProcessCollector: Sendable {
         case .timedOut:
             logger.error("gc: ps timed out after 60s")
             return nil
-        case .completed(let status, let stdout, _):
+        case .completed(let status, let stdout, _), .signaled(let status, let stdout, _):
             guard status == 0 else {
                 logger.error("""
                 gc: ps exited \(status, privacy: .public) — treating the process snapshot as unavailable

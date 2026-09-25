@@ -241,8 +241,15 @@ private final class CancellationRelay: @unchecked Sendable {
 /// `.timedOut` means the call exceeded its deadline — either the watchdog fired
 /// and killed the child, or the child's exit was only observed after the full
 /// deadline had already elapsed. Callers map it to their own timeout error type.
+///
+/// `.signaled` is a child that died of an uncaught signal before its deadline,
+/// so it has no exit status; `signal` is the signal number, the value
+/// `Process.terminationStatus` reports in that case. Callers that do not care
+/// about the difference treat it as a non-zero `.completed`, which is what it
+/// was reported as before the case existed.
 enum BoundedProcessOutcome {
     case completed(status: Int32, stdout: Data, stderr: Data)
+    case signaled(signal: Int32, stdout: Data, stderr: Data)
     case timedOut
 }
 
@@ -307,7 +314,8 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 }
 
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
-/// resolves to `.completed(status, stdout, stderr)` or `.timedOut` — or throws
+/// resolves to `.completed(status, stdout, stderr)`, `.signaled(signal, stdout,
+/// stderr)` or `.timedOut` — or throws
 /// the spawn error if `Process.run()` fails. Shared by
 /// `TmuxManager.runExternalCommand`, `GitManager.run`, and `ProviderRunner.run`,
 /// which map the outcome to their own error types (`TmuxError` / `GitError` /
@@ -669,6 +677,12 @@ func runBoundedProcess(
             // lie in the same direction.
             if ContinuousClock.now - start >= timeout {
                 continuation.resume(returning: .timedOut)
+            } else if process.terminationReason == .uncaughtSignal {
+                continuation.resume(returning: .signaled(
+                    signal: process.terminationStatus,
+                    stdout: outData,
+                    stderr: errData
+                ))
             } else {
                 continuation.resume(returning: .completed(
                     status: process.terminationStatus,

@@ -929,6 +929,13 @@ extension RPCRouter {
     }
 
     static let sendMessageExitedRefusal = "session has exited; a message cannot be sent to it"
+
+    /// The refusal for `remote.sendMessage` while `transcript_composer_enabled`
+    /// is off. `remote_transcript_enabled` off answers with
+    /// `remoteTranscriptDisabledResponse`, as `remote.transcriptSync` does.
+    static let transcriptComposerDisabledResponse = RPCResponse(error:
+        "the transcript composer is disabled (config transcript_composer_enabled); " +
+        "turn on \"Message composer in the transcript pane\" in Settings")
     static let sendMessageWaitingInputRefusal =
         "the agent is waiting on a prompt; answer it in the terminal"
 
@@ -937,6 +944,10 @@ extension RPCRouter {
     /// (`docs/remote-provider-contract.md` § `--submit`).
     ///
     /// Refused, without invoking anything:
+    /// - unless both `remote_transcript_enabled` and `transcript_composer_enabled`
+    ///   are on. The daemon reads the flags itself rather than trusting the app
+    ///   to hide the composer, so a direct RPC call cannot send input the
+    ///   hidden composer would not;
     /// - unless the provider declares `send-submit` — a caller MUST NOT pass
     ///   `--submit` otherwise;
     /// - when the provider's snapshot is stale, as `remote.send` is;
@@ -949,6 +960,13 @@ extension RPCRouter {
     /// is judged against the mirror as it stands when its turn comes. Each
     /// send that reaches the provider is recorded in the actuation log, as
     /// `remote.send` is.
+    ///
+    /// Three outcomes, never retried. Exit 0 answers `.sent`. A non-zero exit
+    /// is not sent and answers with an RPC error carrying the provider's error
+    /// object. A call that ended without an exit status — the 30-second timeout
+    /// fired, or the provider died of a signal — answers `.unknown`: the
+    /// provider may already have pressed Enter, so resending could deliver the
+    /// message twice, and reporting it as a failure would invite exactly that.
     func handleRemoteSendMessage(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -957,6 +975,13 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        let config = try await db.config.get()
+        guard config.remoteTranscriptEnabled else {
+            return Self.remoteTranscriptDisabledResponse
+        }
+        guard config.transcriptComposerEnabled else {
+            return Self.transcriptComposerDisabledResponse
+        }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.sendSubmit) else {
             return Self.missingCapabilityResponse(
@@ -993,11 +1018,21 @@ extension RPCRouter {
                 verb: RemoteVerb.sendSubmit(sessionID: params.sessionID),
                 stdin: Data(params.text.utf8), timeout: Self.sendMessageTimeout)
         } catch let error as ProviderRunError {
+            // No exit status: the provider may have pressed Enter before the
+            // deadline killed it. Unknown, not a failure, and never retried.
             remoteHandlerLogger.error(
-                "remote.sendMessage provider=\(params.provider, privacy: .public) timed out")
+                "remote.sendMessage provider=\(params.provider, privacy: .public) timed out; outcome unknown")
             let message = Self.friendlyMessage(for: error, provider: params.provider)
-            await finishActuation(actuationID, .transportFailed, error: message)
-            return RPCResponse(error: message)
+            await finishActuation(actuationID, .transportFailed, error: "outcome unknown: \(message)")
+            return try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown))
+        }
+        if result.terminatedBySignal {
+            remoteHandlerLogger.error(
+                "remote.sendMessage provider=\(params.provider, privacy: .public) died of signal \(result.exitCode, privacy: .public); outcome unknown")
+            await finishActuation(
+                actuationID, .transportFailed,
+                error: "outcome unknown: provider died of signal \(result.exitCode)")
+            return try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown))
         }
         if result.failureClass != nil {
             let message = result.decodedError?.message ?? "send failed (exit \(result.exitCode))"
@@ -1007,7 +1042,7 @@ extension RPCRouter {
             return RPCResponse(error: message)
         }
         await finishActuation(actuationID, .dispatched)
-        return .ok()
+        return try RPCResponse(result: RemoteSendMessageResult(outcome: .sent))
     }
 
     /// Lists the receipts TBD holds, optionally filtered to one provider.

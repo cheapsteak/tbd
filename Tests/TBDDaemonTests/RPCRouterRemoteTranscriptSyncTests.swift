@@ -87,6 +87,14 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         providerOK(#"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"}]}"#)
     }
 
+    /// Everything `remote.sendMessage` needs on: remote backends, and both of
+    /// the flags the daemon checks itself.
+    private func enableSend(remoteTranscript: Bool = true, composer: Bool = true) async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(remoteTranscript)
+        try await db.config.setTranscriptComposerEnabled(composer)
+    }
+
     private func poll(_ manager: RemoteProviderManager) async {
         await manager.pollOnce(provider: RemoteProviderConfig(name: "agentbox", exec: "/nonexistent"))
     }
@@ -201,8 +209,36 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     // MARK: - remote.sendMessage refusals
 
-    @Test func sendIsRefusedWithoutSendSubmit() async throws {
+    /// Either flag off refuses before anything is invoked — the daemon reads
+    /// the flags itself, so a direct RPC call cannot send what the hidden
+    /// composer would not.
+    @Test(arguments: [(false, true), (true, false), (false, false)])
+    func sendIsRefusedWithEitherFlagOff(remoteTranscript: Bool, composer: Bool) async throws {
+        try await enableSend(remoteTranscript: remoteTranscript, composer: composer)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
+        let r = router(await manager(invoker))
+        let response = try await send(r)
+        #expect(response.success == false)
+        let expected = remoteTranscript
+            ? RPCRouter.transcriptComposerDisabledResponse.error
+            : RPCRouter.remoteTranscriptDisabledResponse.error
+        #expect(response.error == expected)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+        #expect(try actuationRows().isEmpty)
+    }
+
+    /// Both flags unset: the shipped defaults refuse as well, not only an
+    /// explicit `false`.
+    @Test func sendIsRefusedWithBothFlagsUnset() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
+        let r = router(await manager(invoker))
+        #expect(try await send(r).error == RPCRouter.remoteTranscriptDisabledResponse.error)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+    }
+
+    @Test func sendIsRefusedWithoutSendSubmit() async throws {
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [describeDeclaring(["send"])])
         let r = router(await manager(invoker))
         let response = try await send(r)
@@ -213,7 +249,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     @Test func sendIsRefusedOnAStaleSnapshot() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]),
             providerOK(#"{"sessions": [{"id": "s-1", "state": "running"}]}"#),
@@ -232,7 +268,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     @Test func sendIsRefusedWhileTheAgentWaitsOnAPrompt() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(agentState: .waitingInput),
         ])
@@ -251,7 +287,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         (RemoteProcessState.running, RemoteAgentState.exited),
     ])
     func sendIsRefusedAfterTheSessionExited(state: RemoteProcessState, agentState: RemoteAgentState) async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(state: state, agentState: agentState),
         ])
@@ -263,7 +299,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     @Test func aGoneSessionReadsAsExited() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]), listing(agentState: .idle),
         ])
@@ -281,7 +317,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     /// and a session the mirror has not reported yet.
     @Test(arguments: [RemoteAgentState.working, RemoteAgentState.idle, nil])
     func sendInvokesSendSubmitWithTheTextOnStdin(agentState: RemoteAgentState?) async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script:
             [describeDeclaring(["send", RemoteCapability.sendSubmit])]
             + (agentState.map { [listing(agentState: $0)] } ?? [])
@@ -292,6 +328,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let text = "fix the flaky test\nthen push"
         let response = try await send(r, text)
         #expect(response.success)
+        #expect(try response.decodeResult(RemoteSendMessageResult.self).outcome == .sent)
         #expect(Self.sends(invoker) == [["send", "s-1", "--submit"]])
         #expect(invoker.callsSnapshot().last == ["send", "s-1", "--submit"])
         #expect(invoker.stdinsSnapshot().last ?? nil == Data(text.utf8))
@@ -307,7 +344,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     @Test func aFailedSendIsRecordedAndSurfaced() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]),
             ProviderResult(
@@ -316,14 +353,53 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
                 stderr: ""),
         ])
         let r = router(await manager(invoker))
-        #expect(try await send(r).error == "input box not ready")
+        let response = try await send(r)
+        #expect(response.success == false)
+        #expect(response.error == "input box not ready")
+        #expect(Self.sends(invoker).count == 1)
         #expect(try actuationRows().last?["result"] as? String == "transport-failed")
+    }
+
+    /// The deadline fired with no exit status: the provider may already have
+    /// pressed Enter. Unknown — a result, not an error — and never retried.
+    @Test func aTimedOutSendIsUnknownAndNotRetried() async throws {
+        try await enableSend()
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(describeDeclaring(["send", RemoteCapability.sendSubmit])),
+            .timeout,
+        ])
+        let r = router(await manager(invoker))
+        let response = try await send(r)
+        #expect(response.success)
+        #expect(response.error == nil)
+        #expect(try response.decodeResult(RemoteSendMessageResult.self).outcome == .unknown)
+        #expect(Self.sends(invoker) == [["send", "s-1", "--submit"]])
+        let last = try #require(try actuationRows().last)
+        #expect(last["result"] as? String == "transport-failed")
+        #expect((last["error"] as? String)?.hasPrefix("outcome unknown") == true)
+    }
+
+    /// The provider died of a signal, so it has no exit status either: the
+    /// same unknown outcome, even though `exitCode` is non-zero and the call
+    /// classifies as a failure everywhere else.
+    @Test func aSendWhoseProviderDiedIsUnknownAndNotRetried() async throws {
+        try await enableSend()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit]),
+            ProviderResult(exitCode: 9, stdout: Data(), stderr: "", terminatedBySignal: true),
+        ])
+        let r = router(await manager(invoker))
+        let response = try await send(r)
+        #expect(response.success)
+        #expect(try response.decodeResult(RemoteSendMessageResult.self).outcome == .unknown)
+        #expect(Self.sends(invoker) == [["send", "s-1", "--submit"]])
+        #expect((try actuationRows().last?["error"] as? String)?.hasPrefix("outcome unknown") == true)
     }
 
     /// Two sends to one session never overlap: the second reaches the provider
     /// only after the first has returned.
     @Test func concurrentSendsToOneSessionAreSerialized() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
+        try await enableSend()
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit]),
             providerOK("{}"),

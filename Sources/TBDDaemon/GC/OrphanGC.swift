@@ -1875,7 +1875,7 @@ public actor OrphanGC {
         case .timedOut:
             logger.error("gc: lsof timed out after 60s")
             return nil
-        case .completed(let status, let stdout, _):
+        case .completed(let status, let stdout, _), .signaled(let status, let stdout, _):
             guard status == 0 else {
                 logger.error("gc: lsof exited \(status, privacy: .public) — treating live cwds as unavailable")
                 return nil
