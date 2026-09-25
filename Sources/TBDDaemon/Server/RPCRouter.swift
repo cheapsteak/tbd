@@ -210,6 +210,13 @@ public final class RPCRouter: Sendable {
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
     let terminalSendSerializer = TerminalSendSerializer()
+    /// Queues concurrent `remote.sendMessage` RPCs per remote session, the
+    /// same way — see `RemoteSendMessageSerializer`.
+    let remoteSendMessageSerializer = RemoteSendMessageSerializer()
+    /// Per-session fetch lanes behind `remote.transcriptSync`. Built over
+    /// `remoteManager`, so it is `nil` exactly when that is — and the handler
+    /// is refused by `remoteGate()` before it would need one.
+    let remoteTranscriptSync: RemoteTranscriptSync?
     /// Daemon-lifetime incremental transcript baselines used only to enrich
     /// terminal-list responses for Codex presentation state.
     let codexActivityTracker = CodexTranscriptActivityTracker()
@@ -389,6 +396,7 @@ public final class RPCRouter: Sendable {
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
         actuationLog: ActuationLog,
+        remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.recordedAppIdentity = recordedAppIdentity
@@ -465,6 +473,16 @@ public final class RPCRouter: Sendable {
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
         self.remoteManager = remoteManager
+        // `remoteTranscriptEnvironment` resolves the cache root through
+        // `TBDConstants`, so `TBD_HOME` decides where caches live and a test
+        // can point it at a temp home without touching the process env.
+        self.remoteTranscriptSync = remoteManager.map { manager in
+            RemoteTranscriptSync(environment: remoteTranscriptEnvironment) { provider, verb in
+                try await manager.invoke(
+                    providerName: provider, verb: verb, stdin: nil,
+                    timeout: RPCRouter.transcriptReadTimeout)
+            }
+        }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
             if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
@@ -863,7 +881,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.remoteTranscriptSync:
                 return try await handleRemoteTranscriptSync(request.paramsData)
             case RPCMethod.remoteSendMessage:
-                return try await handleRemoteSendMessage(request.paramsData)
+                return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:
