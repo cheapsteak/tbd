@@ -360,6 +360,25 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(try actuationRows().last?["result"] as? String == "transport-failed")
     }
 
+    /// A throw other than a timeout — here a spawn failure — comes before the
+    /// provider ran: an RPC error, not unknown, and the actuation request is
+    /// still confirmed with an outcome row.
+    @Test func aSendThatCouldNotStartIsAnErrorAndIsRecorded() async throws {
+        try await enableSend()
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(describeDeclaring(["send", RemoteCapability.sendSubmit])),
+            .thrown(SpawnFailure()),
+        ])
+        let r = router(await manager(invoker))
+        let response = try await send(r)
+        #expect(response.success == false)
+        #expect(response.error != nil)
+        #expect(Self.sends(invoker).count == 1)
+        let rows = try actuationRows()
+        #expect(rows.count == 2)
+        #expect(rows.last?["result"] as? String == "transport-failed")
+    }
+
     /// The deadline fired with no exit status: the provider may already have
     /// pressed Enter. Unknown — a result, not an error — and never retried.
     @Test func aTimedOutSendIsUnknownAndNotRetried() async throws {
@@ -442,6 +461,53 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let stdins = invoker.stdinsSnapshot().dropFirst().map { $0.flatMap { String(data: $0, encoding: .utf8) } }
         #expect(stdins == ["one", "two"])
     }
+
+    /// A send queued behind another is judged against the flags as they stand
+    /// when its turn comes: switching the composer off while it waits refuses
+    /// it, and only the first send reaches the provider.
+    @Test func aQueuedSendIsRefusedWhenAFlagTurnsOffBeforeItsTurn() async throws {
+        try await enableSend()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit]),
+            providerOK("{}"),
+        ])
+        let trace = Trace()
+        let gate = Gate()
+        invoker.onCall = { verb in
+            guard verb.first == "send" else { return }
+            _ = await trace.enter()
+            await gate.wait()
+            await trace.exit()
+        }
+        let r = router(await manager(invoker))
+
+        let one = try RPCRequest(
+            method: RPCMethod.remoteSendMessage,
+            params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "one"))
+        let two = try RPCRequest(
+            method: RPCMethod.remoteSendMessage,
+            params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "two"))
+        async let first = r.handle(one)
+        let firstEntered = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await trace.events == ["in"]
+        }
+        async let second = r.handle(two)
+        let secondQueued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await r.remoteSendMessageSerializer.admittedCount == 2
+        }
+        try await db.config.setTranscriptComposerEnabled(false)
+        await gate.open()
+
+        let firstResponse = await first
+        let secondResponse = await second
+        #expect(firstEntered == .satisfied)
+        #expect(secondQueued == .satisfied)
+        #expect(firstResponse.success)
+        #expect(secondResponse.error == RPCRouter.transcriptComposerDisabledResponse.error)
+        #expect(Self.sends(invoker).count == 1)
+    }
+
+    private struct SpawnFailure: Error {}
 
     private actor Trace {
         private(set) var events: [String] = []

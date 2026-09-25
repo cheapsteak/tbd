@@ -956,8 +956,9 @@ extension RPCRouter {
     /// - when the session has exited.
     ///
     /// Sends to one session are serialized (`RemoteSendMessageSerializer`), and
-    /// the state checks run inside the lane, so a send queued behind another
-    /// is judged against the mirror as it stands when its turn comes. Each
+    /// the flag and state checks run again inside the lane, so a send queued
+    /// behind another is judged against the flags and the mirror as they stand
+    /// when its turn comes. Each
     /// send that reaches the provider is recorded in the actuation log, as
     /// `remote.send` is.
     ///
@@ -975,13 +976,7 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        let config = try await db.config.get()
-        guard config.remoteTranscriptEnabled else {
-            return Self.remoteTranscriptDisabledResponse
-        }
-        guard config.transcriptComposerEnabled else {
-            return Self.transcriptComposerDisabledResponse
-        }
+        if let refusal = try await sendMessageFlagRefusal() { return refusal }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.sendSubmit) else {
             return Self.missingCapabilityResponse(
@@ -995,11 +990,27 @@ extension RPCRouter {
         }
     }
 
+    /// The refusal for `remote.sendMessage` while either flag it needs is off,
+    /// or nil when both are on. Read before the send is queued, for a prompt
+    /// answer, and again inside the lane, so a send queued behind another is
+    /// judged against the flags as they stand when its turn comes.
+    private func sendMessageFlagRefusal() async throws -> RPCResponse? {
+        let config = try await db.config.get()
+        guard config.remoteTranscriptEnabled else {
+            return Self.remoteTranscriptDisabledResponse
+        }
+        guard config.transcriptComposerEnabled else {
+            return Self.transcriptComposerDisabledResponse
+        }
+        return nil
+    }
+
     /// One serialized `remote.sendMessage`, from the state checks to the
     /// actuation outcome.
     private func sendMessage(
         _ params: RemoteSendMessageParams, manager: RemoteProviderManager, actor: ActuationActor?
     ) async throws -> RPCResponse {
+        if let refusal = try await sendMessageFlagRefusal() { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
@@ -1025,6 +1036,12 @@ extension RPCRouter {
             let message = Self.friendlyMessage(for: error, provider: params.provider)
             await finishActuation(actuationID, .transportFailed, error: "outcome unknown: \(message)")
             return try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown))
+        } catch {
+            // Any other throw — an unknown provider, a spawn failure — comes
+            // before the provider ran, so nothing was sent. Recorded before it
+            // propagates, so the request row is never left unconfirmed.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
         }
         if result.terminatedBySignal {
             remoteHandlerLogger.error(
