@@ -331,4 +331,62 @@ struct RemoteTranscriptSyncTests: ~Copyable {
             RemoteVerb.transcriptRead(sessionID: "s-a"), RemoteVerb.transcriptRead(sessionID: "s-b"),
         ])
     }
+
+    // MARK: - Discard
+
+    /// `discard` removes the session's cache directory and leaves another
+    /// session's alone.
+    @Test func discardRemovesOnlyThatSessionsCache() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"a\":1}\n", #"{"cursor": "a-1"}"#),
+            Self.page("{\"b\":1}\n", #"{"cursor": "b-1"}"#),
+        ])
+        let sync = makeSync(provider)
+        let a = try await sync.sync(provider: "agentbox", sessionID: "s-a")
+        let b = try await sync.sync(provider: "agentbox", sessionID: "s-b")
+
+        await sync.discard(provider: "agentbox", sessionID: "s-a")
+
+        let aDirectory = URL(fileURLWithPath: a.path).deletingLastPathComponent().path
+        #expect(FileManager.default.fileExists(atPath: aDirectory) == false)
+        #expect(FileManager.default.fileExists(atPath: b.path))
+    }
+
+    /// A fetch in flight when its session is discarded drops the page it was
+    /// fetching instead of recreating the directory, and throws `.discarded`.
+    /// Once that lane is gone, a sync asked for afterwards runs normally.
+    @Test func aDiscardDuringAFetchDropsItsPageAndLeavesNoDirectory() async throws {
+        let gate = Gate()
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor": "c-1"}"#),
+            Self.page("{\"n\":2}\n", #"{"cursor": "c-2"}"#),
+        ], holdFirst: gate)
+        let sync = makeSync(provider)
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: environment)
+
+        async let first = sync.sync(provider: "agentbox", sessionID: "s-1")
+        let started = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await provider.calls.count == 1
+        }
+        await sync.discard(provider: "agentbox", sessionID: "s-1")
+        let discardedBeforeRelease = FileManager.default.fileExists(atPath: directory.path)
+        await gate.open()
+
+        var thrown: RemoteTranscriptSyncError?
+        do {
+            _ = try await first
+        } catch let error as RemoteTranscriptSyncError {
+            thrown = error
+        }
+        #expect(thrown == .discarded)
+        #expect(started == .satisfied)
+        #expect(discardedBeforeRelease == false)
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false,
+                "the in-flight page recreated the discarded cache")
+        #expect(await sync.activeLaneCount == 0)
+
+        let again = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(try fileText(again) == "{\"n\":2}\n")
+    }
 }

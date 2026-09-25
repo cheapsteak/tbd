@@ -10,10 +10,15 @@ enum RemoteTranscriptSyncError: Error, Equatable, LocalizedError {
     /// The provider exited non-zero. `message` is its contract error message
     /// when it emitted one, otherwise a description of the exit.
     case providerFailed(message: String)
+    /// The session was deleted or dismissed while this sync was running, and
+    /// its cache was discarded; the page fetched meanwhile was dropped rather
+    /// than written back into a directory nothing tracks any more.
+    case discarded
 
     var errorDescription: String? {
         switch self {
         case .providerFailed(let message): return message
+        case .discarded: return "the session was removed; its transcript cache was discarded"
         }
     }
 }
@@ -76,6 +81,10 @@ actor RemoteTranscriptSync {
     private let environment: [String: String]
     private let pageCap: Int
     private var lanes: [LaneKey: Lane] = [:]
+    /// Sessions whose cache was discarded while their lane was running. A
+    /// fetch in such a lane persists nothing more — see `discard`. Cleared
+    /// when the lane drops, so a sync requested afterwards runs normally.
+    private var discarded: Set<LaneKey> = []
     /// Test-only inspection: how many `sync` calls have reached the actor, so
     /// a coalescing test can tell every request has arrived — and so has
     /// either queued or joined a follow-up — before it lets a fetch finish.
@@ -128,6 +137,40 @@ actor RemoteTranscriptSync {
         return try await task.value
     }
 
+    /// Removes one session's cache directory, for a session TBD has stopped
+    /// tracking (a successful `remote.delete` or `remote.dismiss`). Best
+    /// effort: a failure is logged, and `OrphanGC`'s remote-transcript leg is
+    /// the guarantee behind it.
+    ///
+    /// A fetch already in flight for the session would otherwise write its
+    /// page straight back into a freshly recreated directory, so its lane is
+    /// marked: every fetch in it — the running one and a queued follow-up —
+    /// drops what it fetched and throws `.discarded` instead of persisting.
+    /// The check and the writes both run on this actor with no suspension
+    /// between them, so a page can never land after the removal. A sync
+    /// requested after the lane drops runs normally: the caller asked for it.
+    func discard(provider: String, sessionID: String) {
+        let key = LaneKey(provider: provider, sessionID: sessionID)
+        if lanes[key] != nil { discarded.insert(key) }
+        let directory = cache(provider: provider, sessionID: sessionID).directory
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: directory)
+            syncLogger.info(
+                """
+                discarded transcript cache provider=\(provider, privacy: .public) \
+                session=\(sessionID, privacy: .public)
+                """)
+        } catch {
+            syncLogger.warning(
+                """
+                could not discard transcript cache provider=\(provider, privacy: .public) \
+                session=\(sessionID, privacy: .public): \(error.localizedDescription, privacy: .public); \
+                the orphan sweep reclaims it later
+                """)
+        }
+    }
+
     /// Test-only inspection: the number of sessions with a lane, which drops
     /// back to zero once every sync has finished.
     var activeLaneCount: Int { lanes.count }
@@ -161,12 +204,14 @@ actor RemoteTranscriptSync {
     private func finish(_ key: LaneKey) {
         if lanes[key]?.followUp == nil {
             lanes[key] = nil
+            discarded.remove(key)
         }
     }
 
     // MARK: - Fetching
 
     private func fetchPages(_ key: LaneKey) async throws -> RemoteTranscriptSyncResult {
+        if discarded.contains(key) { throw RemoteTranscriptSyncError.discarded }
         let cache = self.cache(provider: key.provider, sessionID: key.sessionID)
         var state = try cache.load()
         var since = state.cursor
@@ -184,6 +229,10 @@ actor RemoteTranscriptSync {
                     """)
                 throw RemoteTranscriptSyncError.providerFailed(message: message)
             }
+            // Checked after the provider call, the one suspension point in the
+            // loop: a discard that landed while it ran must not be undone by
+            // persisting its answer.
+            if discarded.contains(key) { throw RemoteTranscriptSyncError.discarded }
             let envelope = RemoteTranscriptEnvelope.parse(
                 stderr: result.stderr, requestedSince: since != nil, provider: key.provider)
             if since != nil, envelope.source != .envelope {

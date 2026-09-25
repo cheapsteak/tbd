@@ -536,4 +536,75 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
             await withCheckedContinuation { waiters.append($0) }
         }
     }
+
+    // MARK: - Eager cache removal on delete and dismiss
+
+    /// A cache directory for the session, with a transcript in it, at the path
+    /// `remote.transcriptSync` writes.
+    private func seedCache(_ sessionID: String) throws -> String {
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: sessionID, environment: ["TBD_HOME": home.path])
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{}\n".utf8).write(
+            to: directory.appendingPathComponent(TBDConstants.remoteTranscriptFileName))
+        return directory.path
+    }
+
+    @Test func aSuccessfulDeleteRemovesOnlyThatSessionsCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            providerOK(#"{"id": "s-1", "deleted": true}"#),
+        ])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+        let other = try seedCache("s-2")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDelete,
+            params: #"{"provider": "agentbox", "sessionID": "s-1", "retain": false}"#))
+
+        #expect(response.success)
+        #expect(FileManager.default.fileExists(atPath: cache) == false)
+        #expect(FileManager.default.fileExists(atPath: other))
+    }
+
+    /// A delete the provider refused leaves the cache: the session still exists.
+    @Test func aFailedDeleteKeepsTheCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "permission_denied", "message": "no"}}"#.utf8),
+                stderr: ""),
+        ])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDelete,
+            params: #"{"provider": "agentbox", "sessionID": "s-1", "retain": false}"#))
+
+        #expect(response.success == false)
+        #expect(FileManager.default.fileExists(atPath: cache))
+    }
+
+    @Test func dismissRemovesOnlyThatSessionsCache() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([])])
+        let r = router(await manager(invoker))
+        let cache = try seedCache("s-1")
+        let other = try seedCache("s-2")
+
+        let response = await r.handle(RPCRequest(
+            method: RPCMethod.remoteDismiss,
+            params: #"{"provider": "agentbox", "sessionID": "s-1"}"#))
+
+        #expect(response.success)
+        #expect(FileManager.default.fileExists(atPath: cache) == false)
+        #expect(FileManager.default.fileExists(atPath: other))
+    }
 }

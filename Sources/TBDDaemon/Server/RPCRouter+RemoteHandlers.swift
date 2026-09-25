@@ -1300,6 +1300,10 @@ extension RPCRouter {
         // row is dropped.
         await deletion.restamp(at: now())
         await recordDeleteAftermath(outcome, params: params, now: now)
+        // Prompt cleanup only; `OrphanGC`'s remote-transcript leg is the
+        // guarantee. A retained copy, if one was asked for, lives on the
+        // provider and in `~/tbd/transcripts/`, never here.
+        await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: outcome)
     }
@@ -1369,6 +1373,11 @@ extension RPCRouter {
         if changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
+        // Dismissing hides the session, so its transcript cache goes with it —
+        // even when the row was already dismissed, which is how a retry after a
+        // failed removal gets a second chance. Prompt cleanup only; the orphan
+        // sweep is the guarantee.
+        await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         return .ok()
     }
 
