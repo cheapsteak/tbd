@@ -30,8 +30,20 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
 ///   it lands; the cadence resumes once a sync reports it is caught up. A
 ///   failed sync always waits the interval, so a refusing daemon is not
 ///   hammered.
-/// - **Stop** – going inactive ends the loop; no sync runs until it is active
-///   again, and a sync in flight when it stops publishes nothing.
+/// - **Inactive** – going inactive ends the loop; no sync starts until it is
+///   active again. A sync already in flight still publishes when it returns:
+///   the daemon has persisted what it fetched either way, and the result is
+///   for this driver's own session, so dropping it would only leave the pane
+///   waiting on a spinner for data already on disk.
+/// - **Stop** – `stop()` retires the driver (the pane went away, or its
+///   selection moved to another session and a new driver took over). A sync
+///   in flight then publishes nothing.
+/// - **Order** – a result never overwrites one from a sync that started
+///   later, so a slow in-flight sync finishing after a restart cannot move the
+///   snapshot backwards.
+/// - **Seed** – `initialSnapshot` (what the daemon already cached, see
+///   `RemoteTranscriptSyncSnapshot.cached(for:)`) is the snapshot before any
+///   sync publishes, so the pane renders the cache at once.
 /// - **Immediate triggers** – `syncNow()` (after a successful composer send)
 ///   and `noteAgentState(_:)` (whenever the session's `agent_state` or
 ///   `agent_state_at` moves) run a sync without waiting for the tick, and the
@@ -49,7 +61,7 @@ final class RemoteTranscriptSyncDriver {
     nonisolated static let defaultInterval: Duration = .seconds(3)
 
     let selection: RemoteSessionSelection
-    private(set) var snapshot = RemoteTranscriptSyncSnapshot()
+    private(set) var snapshot: RemoteTranscriptSyncSnapshot
 
     /// How many syncs have completed (successfully or not). For tests and
     /// diagnostics; nothing renders from it.
@@ -69,6 +81,13 @@ final class RemoteTranscriptSyncDriver {
     @ObservationIgnored private var pendingTrigger = false
     /// The agent-state fingerprint last seen, so only a *change* triggers.
     @ObservationIgnored private var lastAgentState: AgentStateMark?
+    /// Moved by `stop()`: a sync publishes only if it is unchanged since the
+    /// sync started.
+    @ObservationIgnored private var epoch = 0
+    /// Ordinal of the last sync started, and of the last one whose success
+    /// was published, so an older result never replaces a newer one.
+    @ObservationIgnored private var lastStartedSync = 0
+    @ObservationIgnored private var lastPublishedSync = 0
 
     /// `agent_state` together with `agent_state_at`: a session that goes
     /// working → idle → working between two reads still moves the timestamp.
@@ -80,11 +99,13 @@ final class RemoteTranscriptSyncDriver {
     init(
         selection: RemoteSessionSelection,
         sync: @escaping Syncer,
+        initialSnapshot: RemoteTranscriptSyncSnapshot? = nil,
         interval: Duration = RemoteTranscriptSyncDriver.defaultInterval,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.selection = selection
         self.sync = sync
+        self.snapshot = initialSnapshot ?? RemoteTranscriptSyncSnapshot()
         self.interval = interval
         self.clock = clock
     }
@@ -122,8 +143,10 @@ final class RemoteTranscriptSyncDriver {
         syncNow()
     }
 
-    /// Stop for good — the pane went away.
+    /// Stop for good — the pane went away, or moved to another session. A
+    /// sync in flight publishes nothing.
     func stop() {
+        epoch &+= 1
         setActive(false)
     }
 
@@ -159,13 +182,17 @@ final class RemoteTranscriptSyncDriver {
 
     /// Runs one sync and publishes it. Returns true when it succeeded without
     /// catching up, i.e. the next sync should start without waiting.
+    ///
+    /// Publishes even when the loop stopped (went inactive) while the sync
+    /// ran; only `stop()` or a newer published result suppresses it.
     private func runSync() async -> Bool {
-        let loopTask = loop
+        let epoch = self.epoch
+        lastStartedSync += 1
+        let ordinal = lastStartedSync
         do {
             let result = try await sync(selection)
-            // A sync that was in flight when the loop stopped (or restarted)
-            // publishes nothing: its pane is not the one on screen any more.
-            guard loopTask == loop, !Task.isCancelled else { return false }
+            guard epoch == self.epoch, ordinal > lastPublishedSync else { return false }
+            lastPublishedSync = ordinal
             snapshot = RemoteTranscriptSyncSnapshot(
                 path: result.path, generation: result.generation,
                 caughtUp: result.caughtUp, refreshToken: snapshot.refreshToken &+ 1,
@@ -173,7 +200,10 @@ final class RemoteTranscriptSyncDriver {
             completedSyncs += 1
             return !result.caughtUp
         } catch {
-            guard loopTask == loop, !Task.isCancelled else { return false }
+            // A cancelled call says nothing about the daemon; the next sync
+            // will. Not shown as a failure.
+            if error is CancellationError { return false }
+            guard epoch == self.epoch, ordinal > lastPublishedSync else { return false }
             logger.debug("""
             transcript sync failed for \(self.selection.provider, privacy: .public)/\
             \(self.selection.sessionID, privacy: .public): \(error, privacy: .public)

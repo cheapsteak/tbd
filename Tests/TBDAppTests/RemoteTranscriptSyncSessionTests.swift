@@ -143,6 +143,51 @@ struct RemoteTranscriptSyncSessionTests {
         #expect(h.syncs.values == ["s1", "s2", "s2"])
     }
 
+    @Test("a sync for the old selection that finishes after a switch publishes nowhere")
+    func staleSelectionResultIsDropped() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<String>()
+        let gate = RemoteTranscriptSyncGate()
+        let session = RemoteTranscriptSyncSession(
+            isOnScreen: true,
+            appActive: true,
+            makeDriver: { selection in
+                RemoteTranscriptSyncDriver(
+                    selection: selection,
+                    sync: { selection in
+                        syncs.record(selection.sessionID)
+                        // Only s1's sync is held; s2 answers at once.
+                        if selection.sessionID == "s1" { await gate.wait() }
+                        return RemoteTranscriptSyncResult(
+                            path: "/cache/\(selection.sessionID).jsonl",
+                            generation: 1, caughtUp: true)
+                    },
+                    interval: Self.interval,
+                    clock: clock)
+            })
+        defer {
+            session.stop()
+            gate.open()
+        }
+
+        session.start(Self.first, agentState: nil)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == "s1")
+        let firstDriver = try #require(session.driver)
+
+        session.start(Self.second, agentState: nil)
+        #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == "s2")
+        try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
+        let secondSnapshot = session.driver?.snapshot
+
+        // s1's sync answers only now, after the switch.
+        gate.releaseOne()
+        await settle()
+        #expect(firstDriver.snapshot == RemoteTranscriptSyncSnapshot(),
+                "a retired driver for another session must not publish")
+        #expect(session.driver?.snapshot == secondSnapshot)
+        #expect(session.driver?.snapshot.path == "/cache/s2.jsonl")
+    }
+
     @Test("stop ends syncing and reports the driver stopped")
     func stopEnds() async throws {
         let h = Harness()

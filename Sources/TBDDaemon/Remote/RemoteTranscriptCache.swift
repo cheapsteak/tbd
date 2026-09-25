@@ -44,7 +44,10 @@ struct RemoteTranscriptCacheState: Codable, Equatable, Sendable {
 /// Only the daemon writes here, and only from `RemoteTranscriptSync`'s
 /// per-session lane, so there is never a second writer to coordinate with. The
 /// app reads `transcript.jsonl` directly and uses `generation` (from the RPC
-/// result) to know when to start over.
+/// result) to know when to start over. Before its first sync returns it also
+/// reads `generation` from `state.json` to seed the pane
+/// (`RemoteTranscriptSyncSnapshot.cached(for:)`); `state.json` is always
+/// replaced atomically, so that read never sees a torn file.
 ///
 /// Not an actor: every method is synchronous file IO called from inside that
 /// lane.

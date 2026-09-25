@@ -133,6 +133,27 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(driver.snapshot.refreshToken == 2)
     }
 
+    @Test("a cancelled sync is not reported as a failure")
+    func cancellationIsNotAFailure() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let driver = Self.makeDriver(clock: clock, syncs: syncs) { n in
+            if n == 1 { throw CancellationError() }
+            return RemoteTranscriptSyncResult(path: "/p", generation: 1, caughtUp: true)
+        }
+        defer { driver.stop() }
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(), "a cancelled call says nothing about the daemon")
+
+        await clock.advance(by: Self.interval)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot.refreshToken == 1)
+    }
+
     @Test("going inactive stops the cadence; going active again syncs at once")
     func stopsWhenInactive() async throws {
         let clock = EventDrivenTestClock()
@@ -218,40 +239,6 @@ struct RemoteTranscriptSyncDriverTests {
 
     // MARK: - Catching up
 
-    /// Holds each sync until the test releases it, so a test can look at the
-    /// driver between two back-to-back syncs. A release that arrives before
-    /// its sync parks is banked, and `open()` lets everything through for
-    /// teardown.
-    @MainActor
-    private final class SyncGate {
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        private var banked = 0
-        private var isOpen = false
-
-        func wait() async {
-            if isOpen { return }
-            if banked > 0 {
-                banked -= 1
-                return
-            }
-            await withCheckedContinuation { waiters.append($0) }
-        }
-
-        func releaseOne() {
-            if waiters.isEmpty {
-                banked += 1
-            } else {
-                waiters.removeFirst().resume()
-            }
-        }
-
-        func open() {
-            isOpen = true
-            for waiter in waiters { waiter.resume() }
-            waiters.removeAll()
-        }
-    }
-
     /// Lets a sync closure built before the driver read the driver's snapshot
     /// when the sync starts.
     @MainActor
@@ -271,7 +258,7 @@ struct RemoteTranscriptSyncDriverTests {
     private static func makeGatedDriver(
         clock: EventDrivenTestClock,
         starts: FireRecorder<SyncStart>,
-        gate: SyncGate,
+        gate: RemoteTranscriptSyncGate,
         caughtUp: @escaping @MainActor (Int) -> Bool
     ) -> RemoteTranscriptSyncDriver {
         let ref = DriverRef()
@@ -297,7 +284,7 @@ struct RemoteTranscriptSyncDriverTests {
     func catchUpSyncsBackToBack() async throws {
         let clock = EventDrivenTestClock()
         let starts = FireRecorder<SyncStart>()
-        let gate = SyncGate()
+        let gate = RemoteTranscriptSyncGate()
         let driver = Self.makeGatedDriver(clock: clock, starts: starts, gate: gate) { $0 >= 3 }
         defer {
             driver.stop()
@@ -327,11 +314,11 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(await starts.next(timeout: TestDeadlines.saturatedPass)?.ordinal == 4)
     }
 
-    @Test("going inactive mid-catch-up stops the back-to-back syncs and publishes nothing more")
+    @Test("going inactive mid-catch-up starts no further sync, but the one in flight still publishes")
     func inactiveStopsCatchUp() async throws {
         let clock = EventDrivenTestClock()
         let starts = FireRecorder<SyncStart>()
-        let gate = SyncGate()
+        let gate = RemoteTranscriptSyncGate()
         let driver = Self.makeGatedDriver(clock: clock, starts: starts, gate: gate) { _ in false }
         defer {
             driver.stop()
@@ -346,14 +333,91 @@ struct RemoteTranscriptSyncDriverTests {
         // Hidden while sync 2 is in flight; then let it answer.
         driver.setActive(false)
         gate.releaseOne()
+        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await MainActor.run { driver.snapshot.refreshToken == 2 }
+        }
+        #expect(published == .satisfied,
+                "the sync in flight when the pane hid fetched data already persisted; it must still publish")
+        #expect(driver.snapshot.caughtUp == false)
         await settle()
         await clock.advance(by: .seconds(30))
         await settle()
-        #expect(starts.values.map(\.ordinal) == [1, 2], "a hidden pane must not keep catching up")
-        #expect(driver.snapshot.refreshToken == 1, "the sync in flight when the pane hid must publish nothing")
+        #expect(starts.values.map(\.ordinal) == [1, 2], "a hidden pane must not start another sync")
 
         driver.setActive(true)
-        #expect(await starts.next(timeout: TestDeadlines.saturatedPass) == SyncStart(ordinal: 3, tokenSeen: 1))
+        #expect(await starts.next(timeout: TestDeadlines.saturatedPass) == SyncStart(ordinal: 3, tokenSeen: 2))
+    }
+
+    @Test("a sync that finishes after going inactive publishes its result")
+    func inFlightSyncPublishesAfterInactive() async throws {
+        let clock = EventDrivenTestClock()
+        let starts = FireRecorder<SyncStart>()
+        let gate = RemoteTranscriptSyncGate()
+        let driver = Self.makeGatedDriver(clock: clock, starts: starts, gate: gate) { _ in true }
+        defer {
+            driver.stop()
+            gate.open()
+        }
+
+        driver.setActive(true)
+        #expect(await starts.next(timeout: TestDeadlines.saturatedPass)?.ordinal == 1)
+        driver.setActive(false)
+        gate.releaseOne()
+        let published = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await MainActor.run { driver.snapshot.refreshToken == 1 }
+        }
+        #expect(published == .satisfied)
+        #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(
+            path: "/cache/s1.jsonl", generation: 1, caughtUp: true, refreshToken: 1))
+    }
+
+    @Test("a sync that finishes after stop() publishes nothing")
+    func inFlightSyncAfterStopIsDropped() async throws {
+        let clock = EventDrivenTestClock()
+        let starts = FireRecorder<SyncStart>()
+        let gate = RemoteTranscriptSyncGate()
+        let driver = Self.makeGatedDriver(clock: clock, starts: starts, gate: gate) { _ in true }
+        defer { gate.open() }
+
+        driver.setActive(true)
+        #expect(await starts.next(timeout: TestDeadlines.saturatedPass)?.ordinal == 1)
+        driver.stop()
+        gate.releaseOne()
+        await settle()
+        await clock.advance(by: .seconds(30))
+        await settle()
+        #expect(driver.snapshot == RemoteTranscriptSyncSnapshot(),
+                "a retired driver's pane is gone or shows another session")
+        #expect(starts.values.map(\.ordinal) == [1])
+    }
+
+    @Test("the initial snapshot is what the driver shows before any sync publishes")
+    func initialSnapshotSeedsThePane() async throws {
+        let clock = EventDrivenTestClock()
+        let starts = FireRecorder<SyncStart>()
+        let gate = RemoteTranscriptSyncGate()
+        let seed = RemoteTranscriptSyncSnapshot(path: "/cache/s1.jsonl", generation: 4, caughtUp: false)
+        let ref = DriverRef()
+        let driver = RemoteTranscriptSyncDriver(
+            selection: Self.selection,
+            sync: { _ in
+                starts.record(SyncStart(ordinal: 1, tokenSeen: ref.driver?.snapshot.refreshToken ?? -1))
+                await gate.wait()
+                return RemoteTranscriptSyncResult(path: "/cache/s1.jsonl", generation: 4, caughtUp: true)
+            },
+            initialSnapshot: seed,
+            interval: Self.interval,
+            clock: clock)
+        ref.driver = driver
+        defer {
+            driver.stop()
+            gate.open()
+        }
+        #expect(driver.snapshot == seed)
+
+        driver.setActive(true)
+        _ = await starts.next(timeout: TestDeadlines.saturatedPass)
+        #expect(driver.snapshot == seed, "the seed stands while the first sync is still running")
     }
 
     @Test("a failed sync waits the interval even while the load is not caught up")
@@ -379,5 +443,39 @@ struct RemoteTranscriptSyncDriverTests {
         #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 3)
         // Sync 3 succeeded without catching up, so sync 4 follows at once.
         #expect(await syncs.next(timeout: TestDeadlines.saturatedPass) == 4)
+    }
+}
+
+/// Holds each remote transcript sync until the test releases it, so a test can
+/// look at a driver while a sync is in flight. A release that arrives before
+/// its sync parks is banked, and `open()` lets everything through for
+/// teardown. Shared by the driver and session suites.
+@MainActor
+final class RemoteTranscriptSyncGate {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var banked = 0
+    private var isOpen = false
+
+    func wait() async {
+        if isOpen { return }
+        if banked > 0 {
+            banked -= 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func releaseOne() {
+        if waiters.isEmpty {
+            banked += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+
+    func open() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
     }
 }

@@ -12,8 +12,10 @@ import TBDShared
 /// - `generation` – bumped by the daemon when it replaced the file with a
 ///   conversation that starts over; a change drops every item and re-reads
 ///   from byte zero (`RemoteTranscriptTail`);
-/// - `caughtUp` – false while the daemon is still paging the transcript in,
-///   which the pane shows as loading while records appear;
+/// - `caughtUp` – false while the daemon is still paging the transcript in
+///   (or before the first sync has answered), which the header shows as a
+///   non-blocking "Syncing…" while records already cached stay readable. The
+///   full-pane loading state is only for a session with no cache file yet;
 /// - `refreshToken` – bumped on every completed sync, so an append that moved
 ///   none of the other three is still read.
 ///
@@ -114,7 +116,7 @@ struct RemoteTranscriptPaneView: View {
                     .help(syncError)
             } else if !caughtUp {
                 ProgressView().controlSize(.small)
-                Text("Loading…")
+                Text("Syncing…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -135,9 +137,17 @@ struct RemoteTranscriptPaneView: View {
                     Text("No messages yet")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                } else {
+                } else if path == nil {
+                    // No cache file yet: nothing to show until the first
+                    // page lands.
                     ProgressView()
                     Text("Loading transcript…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    // A cache file exists; its read is in flight or it holds
+                    // nothing yet. The header says a sync is still running.
+                    Text("Reading transcript…")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
