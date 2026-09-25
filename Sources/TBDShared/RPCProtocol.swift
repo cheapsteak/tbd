@@ -333,6 +333,19 @@ public enum RPCMethod {
     /// capabilities separate so `transcript` never becomes ambiguous about
     /// which of the two a provider implements.
     public static let remoteTranscript = "remote.transcript"
+    /// Brings a session's local transcript cache
+    /// (`~/tbd/remote-transcripts/<provider>/<sessionID>/`) up to date through
+    /// `transcript read --since`, and says where it is. The app tails the file;
+    /// the daemon runs no timers of its own for transcripts. Refused unless
+    /// `remote_transcript_enabled` is on and the provider declares
+    /// `transcript.read`. Design:
+    /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
+    public static let remoteTranscriptSync = "remote.transcriptSync"
+    /// Submits a message to a remote session through `send <id> --submit`, the
+    /// provider pasting it and pressing Enter. Distinct from `remote.send`,
+    /// which delivers raw keystrokes. Refused unless the provider declares
+    /// `send-submit`.
+    public static let remoteSendMessage = "remote.sendMessage"
     /// Lists the receipts TBD holds. Deliberately absent from
     /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
     /// `provider` field is an optional *filter* rather than an address, so
@@ -374,6 +387,7 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
+        remoteTranscriptSync, remoteSendMessage,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
@@ -392,6 +406,11 @@ public enum RPCMethod {
     /// feature's only opt-in. Reading needs no method of its own: `config.get`
     /// already carries the resolved value.
     public static let configSetTranscriptComposerEnabled = "config.setTranscriptComposerEnabled"
+    /// The remote-transcript gate (`remote_transcript_enabled`) — the soak
+    /// switch for `remote.transcriptSync`, the remote transcript pane and its
+    /// composer. Reading needs no method of its own: `config.get` carries the
+    /// resolved value and `daemon.capabilities` carries it to the app.
+    public static let configSetRemoteTranscriptEnabled = "config.setRemoteTranscriptEnabled"
     /// The model-proxy gate (`model_proxy_enabled`) — whether a new pty-holder
     /// session's Messages API traffic is routed through the loopback proxy.
     /// Reading needs no method of its own: `config.get` carries the resolved
@@ -1805,6 +1824,46 @@ public struct RemoteTranscriptResult: Codable, Sendable {
     public init(jsonl: String) { self.jsonl = jsonl }
 }
 
+/// Params for `remote.transcriptSync` — bring one session's transcript cache
+/// up to date. The result is a `RemoteTranscriptSyncResult`.
+public struct RemoteTranscriptSyncParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcriptSync`.
+///
+/// - `path` — the cache's `transcript.jsonl`, which the app reads directly.
+/// - `generation` — incremented whenever the provider answered from the
+///   beginning (`reset`), so a reader holding records from an earlier
+///   generation discards them and rereads the file from the start.
+/// - `caughtUp` — false when the sync stopped at its page cap with the
+///   provider still reporting `more`; the next sync resumes from the stored
+///   cursor.
+public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
+    public let path: String
+    public let generation: Int
+    public let caughtUp: Bool
+    public init(path: String, generation: Int, caughtUp: Bool) {
+        self.path = path; self.generation = generation; self.caughtUp = caughtUp
+    }
+}
+
+/// Params for `remote.sendMessage` — submit `text` as one message through
+/// `send <id> --submit` (`docs/remote-provider-contract.md` § `--submit`).
+/// Embedded newlines belong to the message. The result is empty.
+public struct RemoteSendMessageParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let text: String
+    public init(provider: String, sessionID: String, text: String) {
+        self.provider = provider; self.sessionID = sessionID; self.text = text
+    }
+}
+
 /// Params for `remote.delete` — destroy a provider-hosted session
 /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`). The result
 /// is a `RemoteDeleteResult`.
@@ -1929,6 +1988,15 @@ public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
 /// column out of its NULL "never chose" state, so an operator who turns the
 /// feature off stays off when the shipped default graduates.
 public struct ConfigSetTranscriptComposerEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteTranscriptEnabled` — the remote-transcript gate
+/// (default OFF during soak). Writing either value is the explicit gesture that
+/// lifts the column out of its NULL "never chose" state, so an operator who
+/// turns the feature off stays off when the shipped default graduates.
+public struct ConfigSetRemoteTranscriptEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -3843,6 +3911,16 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// streams nothing, and this field says so rather than making the app
     /// re-derive the pair.
     public var transcriptStreamingEnabled: Bool
+    /// Whether the remote transcript pane and its composer are enabled
+    /// (`remote_transcript_enabled`). Default OFF while it soaks. The app shows
+    /// the Transcript toggle on a remote session only with this on (and the
+    /// provider declaring `transcript.read`); the remote composer additionally
+    /// needs `transcriptComposerEnabled`. Resolved through
+    /// `Config.remoteTranscriptEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3969,6 +4047,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
+        // New field for the remote-transcript gate. A daemon that does not send
+        // it has no `remote.transcriptSync` either, so fall through to the
+        // shipped default rather than showing a pane nothing can fill.
+        remoteTranscriptEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptEnabled)
+            ?? Config.remoteTranscriptEnabledDefault
     }
 }
 

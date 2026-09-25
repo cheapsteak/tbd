@@ -1196,6 +1196,16 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the remote-transcript gate (default OFF). Read per request by
+    /// the daemon, so no restart is needed; re-read capabilities after writing
+    /// so a toggle reflects the daemon's persisted state.
+    func setRemoteTranscriptEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteTranscriptEnabled,
+            params: ConfigSetRemoteTranscriptEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the model-proxy gate (default OFF). Read fresh at spawn time, so
     /// no daemon restart is needed — but it applies only to sessions started
     /// after the call: a session's Messages API base URL is fixed in the
@@ -1322,6 +1332,32 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.remoteSend,
             params: RemoteSendParams(provider: provider, sessionID: sessionID, text: text)
+        )
+    }
+
+    /// Bring a remote session's local transcript cache up to date and say
+    /// where it is (`remote.transcriptSync`). The app reads `result.path`
+    /// directly; a changed `generation` means discard and reread from the
+    /// start. Refused by the daemon unless `remote_transcript_enabled` is on
+    /// and the provider declares `transcript.read`.
+    func remoteTranscriptSync(
+        provider: String, sessionID: String
+    ) async throws -> RemoteTranscriptSyncResult {
+        try await callAsync(
+            method: RPCMethod.remoteTranscriptSync,
+            params: RemoteTranscriptSyncParams(provider: provider, sessionID: sessionID),
+            resultType: RemoteTranscriptSyncResult.self
+        )
+    }
+
+    /// Submit `text` as one message to a remote session
+    /// (`remote.sendMessage` → `send <id> --submit`). Unlike `remoteSend`, the
+    /// text is a message, not keystrokes: the provider pastes it and presses
+    /// Enter. Refused by the daemon unless the provider declares `send-submit`.
+    func remoteSendMessage(provider: String, sessionID: String, text: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.remoteSendMessage,
+            params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text)
         )
     }
 

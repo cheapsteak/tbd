@@ -115,6 +115,34 @@ struct ConfigCommandsTests {
         #expect(rendered.contains("auto-archive-on-merge: off"))
     }
 
+    // MARK: - remote-transcript: the soak switch for the remote transcript
+
+    /// The whole message for both states. Each says what the switch now does,
+    /// so it owes one sentence per state rather than the merge defaults'
+    /// generic form.
+    @Test func remoteTranscriptDescribesBothStates() {
+        #expect(ConfigSet.confirmation(key: "remote-transcript", value: .on)
+            == "Set remote-transcript to on. Remote sessions whose provider serves "
+            + "transcripts can show a Transcript pane beside the terminal.")
+        #expect(ConfigSet.confirmation(key: "remote-transcript", value: .off)
+            == "Set remote-transcript to off. Remote sessions show only their terminal.")
+    }
+
+    @Test func remoteTranscriptIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("remote-transcript"))
+        #expect(try ConfigSet.parseOnOff("on", key: "remote-transcript") == .on)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "remote-transcript")
+        }
+    }
+
+    @Test func configGetPrintsRemoteTranscriptInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("remote-transcript: off"))
+        config.remoteTranscriptEnabled = true
+        #expect(ConfigGet.render(config).contains("remote-transcript: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

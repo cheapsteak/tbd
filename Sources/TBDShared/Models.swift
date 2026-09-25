@@ -1700,6 +1700,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// **Resolved, not stored**, same shape as `modelProxyEnabled`:
     /// `transcript_streaming_enabled ?? Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
+    /// The single opt-in for the remote session transcript
+    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md`, "Flag"):
+    /// `remote.transcriptSync`, the Transcript pane beside a remote session's
+    /// terminal, and — together with `transcriptComposerEnabled`, so remote and
+    /// local composers switch together — the remote composer. It ships OFF
+    /// because the composer sends input to sessions and the sync writes a cache
+    /// under `~/tbd/remote-transcripts/`.
+    ///
+    /// A **config column** rather than an app default, because the daemon's
+    /// `remote.transcriptSync` handler enforces it.
+    ///
+    /// **Resolved, not stored**, like `transcriptComposerEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `remote_transcript_enabled ?? Config.remoteTranscriptEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var remoteTranscriptEnabled: Bool
     /// The loopback port this TBD home's model proxy binds, or nil if none has
     /// been minted.
     ///
@@ -1829,6 +1847,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// trusted. Graduation is a change to this constant, with no forcing
     /// `UPDATE` migration and every explicit opt-out left alone.
     public static let transcriptStreamingDefault = false
+    /// The shipped default for `remoteTranscriptEnabled`, and the single place
+    /// it lives. The remote transcript ships off; graduation — after a soak in
+    /// which no sync duplicated or spliced a conversation, no message reached a
+    /// session blocked on a prompt, and the cache reclaimer never removed a
+    /// tracked session's directory — is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let remoteTranscriptEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1871,6 +1896,7 @@ public struct Config: Codable, Sendable, Equatable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 modelProxyEnabled: Bool = Config.modelProxyDefault,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
+                remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault,
                 modelProxyPort: Int? = nil,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
@@ -1914,6 +1940,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.updateMode = updateMode
         self.modelProxyEnabled = modelProxyEnabled
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
+        self.remoteTranscriptEnabled = remoteTranscriptEnabled
         self.modelProxyPort = modelProxyPort
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
@@ -2043,6 +2070,12 @@ public struct Config: Codable, Sendable, Equatable {
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
+        // And for the remote transcript's gate: absent means the sender knew
+        // nothing about the flag, which is the NULL column's situation — follow
+        // the shipped default rather than hardcoding `false`.
+        remoteTranscriptEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptEnabled)
+            ?? Config.remoteTranscriptEnabledDefault
         // Absent means the sender knew nothing about the port — the same state
         // as an unminted column. Like `holderOwnerToken` there is no shipped
         // default to fall through to; see the property's note.

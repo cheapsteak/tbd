@@ -250,6 +250,18 @@ extension AppState {
         remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
     }
 
+    // MARK: - Transcript
+
+    /// Whether the daemon reports the remote transcript as enabled
+    /// (`remote_transcript_enabled`). Read from the capability payload, so it
+    /// is the shipped default (off) until capabilities have been fetched: a
+    /// Transcript toggle that flashed in and then disappeared would be worse
+    /// than one that appeared a moment late. The remote composer additionally
+    /// needs `transcriptComposerEnabled`.
+    var remoteTranscriptEnabled: Bool {
+        daemonCapabilities?.remoteTranscriptEnabled ?? Config.remoteTranscriptEnabledDefault
+    }
+
     // MARK: - Destroying a session
 
     /// Whether the daemon currently permits `remote.delete`
