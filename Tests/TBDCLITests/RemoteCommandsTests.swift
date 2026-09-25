@@ -285,6 +285,27 @@ struct RemoteCommandsTests {
             state: nil, workspaceDirty: false, force: false, address: address) == nil)
     }
 
+    // MARK: - delete: resolving --retain
+
+    /// Unspecified is not "off" — it asks for a receipt whenever the provider
+    /// can give one, matching what the app already does.
+    @Test func unspecifiedRetainDefaultsOnWhenTheProviderDeclaresIt() {
+        #expect(RemoteDeletePrecondition.resolveRetain(nil, capabilities: ["delete", "retain"]))
+    }
+
+    /// A provider that never declared `retain` has no receipt to give, and
+    /// that is "no receipt available", not a caller mistake — this must not
+    /// be conflated with the explicit-`--retain` refusal, which errors.
+    @Test func unspecifiedRetainStaysOffWithoutTheCapabilityAndDoesNotError() {
+        #expect(!RemoteDeletePrecondition.resolveRetain(nil, capabilities: ["delete"]))
+    }
+
+    /// `--no-retain` declines even against a provider that could have
+    /// retained — the explicit opt-out always wins.
+    @Test func explicitNoRetainDeclinesEvenWhenTheProviderCanRetain() {
+        #expect(!RemoteDeletePrecondition.resolveRetain(false, capabilities: ["delete", "retain"]))
+    }
+
     // MARK: - delete: the two outcomes
 
     /// `deleted: false` is a success — there was nothing to destroy — and is

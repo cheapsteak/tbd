@@ -297,7 +297,7 @@ tbd remote create --provider <name> [--param key=value]...
 tbd remote stop <session> [--json]
 tbd remote archive <session> [--json]
 tbd remote unarchive <session> [--json]
-tbd remote delete <session> [--retain] [--force] [--json]
+tbd remote delete <session> [--retain | --no-retain] [--force] [--json]
 tbd remote transcript <session> [-o <path>]
 tbd remote retain <session> [--json]
 tbd remote import --provider <name> [<path>|-] [--json]
@@ -333,7 +333,17 @@ tbd remote dismiss <session>
   per-repo policy question, not a transport question, and is out of scope.
   `meta.workspace_dirty` is the same fact in the other direction.
 - **`delete` refuses without `--force`** when the session is running or claims
-  `workspace_dirty`. `--retain` prints the key.
+  `workspace_dirty`.
+- **`delete` retains by default wherever the provider can**, matching what the
+  app already does: retention is what makes an irreversible action safe, so
+  the default must not be the lossy one. `--retain`/`--no-retain` is a tri-state
+  flag (unspecified, forced on, forced off) — leaving it unspecified retains
+  when the provider declares `retain` and does nothing otherwise, with no
+  error either way; `--no-retain` destroys the transcript along with the
+  session even where the provider could have kept it; `--retain` against a
+  provider that has not declared `retain` is refused, naming the missing
+  capability, the same as any other missing-capability refusal. Retention
+  succeeding prints the key.
 - **A missing capability is a one-line refusal naming it, exit 1**, decided
   before any provider call — never a provider error surfaced raw.
 - **Key-returning commands print the bare key on stdout** and everything else on
