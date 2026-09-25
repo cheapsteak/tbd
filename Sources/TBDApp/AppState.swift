@@ -2118,7 +2118,6 @@ final class AppState {
     /// Storm indicator for observability and tests.
     @ObservationIgnored private(set) var skippedPollCycles = 0
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
-    let notificationSoundPlayer = NotificationSoundPlayer()
     let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
@@ -3211,8 +3210,8 @@ final class AppState {
             unreadByWorktree[notification.worktreeID] = incoming
         }
 
-        // Fire sound + macOS notification
-        notificationSoundPlayer.playIfEnabled(for: notification.type)
+        // Post the macOS notification. Its sound rides on the notification,
+        // so Focus and Do Not Disturb silence both together.
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,

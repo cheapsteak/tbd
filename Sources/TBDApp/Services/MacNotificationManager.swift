@@ -10,6 +10,9 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "MacNotification
 final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     @AppStorage("enableNotifications") private var enabled: Bool = true
 
+    /// Supplies the sound attached to each banner from the user's settings.
+    private let soundPlayer = NotificationSoundPlayer()
+
     private var hasRequestedPermission = false
     private var hasLoggedUnavailable = false
 
@@ -42,7 +45,7 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert]) { granted, error in
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
                 logger.error("requestAuthorization failed: \(error.localizedDescription, privacy: .public)")
             } else if !granted {
@@ -92,7 +95,9 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = Self.bannerTitle(worktreeName: worktreeName, type: type)
         content.body = truncatedMessage
-        content.sound = nil
+        // The center plays the sound, so Focus and Do Not Disturb silence it
+        // along with the banner. Nothing plays it directly.
+        content.sound = soundPlayer.notificationSound(for: type)
         // The request `identifier` must stay as worktreeID so re-posting
         // collapses banners (one outstanding banner per worktree). Stash the
         // originating terminal in userInfo so the click handler can route to
@@ -140,13 +145,13 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: - UNUserNotificationCenterDelegate
 
-    /// Show banners even when TBD is the frontmost app.
+    /// Show banners, and play their sound, even when TBD is the frontmost app.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler handler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        handler([.banner])
+        handler([.banner, .sound])
     }
 
     /// Remove delivered banners for the given worktrees from Notification Center.

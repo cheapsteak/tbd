@@ -565,7 +565,7 @@ struct DeltaIngestionTests {
 ///
 /// Both tests keep the delta's worktree VISIBLE (selected), which makes the
 /// handler return at `AppState.swift:2335` before it reaches
-/// `notificationSoundPlayer.playIfEnabled` and `macNotificationManager`. That
+/// `macNotificationManager`. That
 /// is deliberate: driving the full path in a unit test would play a sound and
 /// post a system notification on the developer's machine.
 @MainActor

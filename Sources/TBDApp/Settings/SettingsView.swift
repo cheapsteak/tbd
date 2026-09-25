@@ -76,9 +76,10 @@ struct GeneralSettingsTab: View {
                 Toggle("Enable macOS notifications", isOn: $enableNotifications)
                     .help("Show system notifications when background tasks complete")
                 Toggle("Enable notification sounds", isOn: $enableSounds)
-                    .help("Play a sound when background tasks complete")
+                    .disabled(!enableNotifications)
+                    .help("Play a sound with each macOS notification. The sound follows Focus and Do Not Disturb, like the notification itself.")
 
-                if enableSounds {
+                if enableNotifications && enableSounds {
                     HStack {
                         Picker("Sound", selection: Binding(
                             get: { customPath.isEmpty ? soundName : "__custom__" },
@@ -754,7 +755,7 @@ struct GeneralSettingsTab: View {
 
     private func pickCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -767,7 +768,7 @@ struct GeneralSettingsTab: View {
 
     private func pickErrorCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
