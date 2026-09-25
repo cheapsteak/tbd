@@ -170,21 +170,24 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         #expect(try fileText(third) == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
     }
 
-    /// The refetch counts toward the page cap. With a cap of one, the
-    /// discarded delta is the whole sync: nothing held is touched, and the
-    /// sync reports it is not caught up.
-    @Test func theRefetchCountsTowardThePageCap() async throws {
+    /// The discarded answer does not count toward the page cap; the refetch
+    /// does. With a cap of one the refetch still runs inside the same sync —
+    /// were the discard to use the sync up, the next one would send the same
+    /// cursor, be discarded again, and never make progress.
+    @Test func aDiscardedAnswerDoesNotUseUpTheSync() async throws {
         let provider = ScriptedProvider([
             Self.page("{\"n\":1}\n", #"{"cursor": "c-1"}"#),
             Self.page("{\"n\":2}\n", #"{"cursor": 42}"#),
+            Self.page("{\"n\":1}\n{\"n\":2}\n", #"{"cursor": "c-2", "more": true}"#),
         ])
         let sync = makeSync(provider, pageCap: 1)
         let first = try await sync.sync(provider: "agentbox", sessionID: "s-1")
         let second = try await sync.sync(provider: "agentbox", sessionID: "s-1")
 
-        #expect(await provider.calls == [read(), read(since: "c-1")])
-        #expect(try fileText(second) == "{\"n\":1}\n")
-        #expect(second.generation == first.generation)
+        #expect(await provider.calls == [read(), read(since: "c-1"), read()])
+        #expect(try fileText(second) == "{\"n\":1}\n{\"n\":2}\n")
+        #expect(second.generation == first.generation + 1)
+        // The refetch was the one counted page, and it said `more`.
         #expect(!second.caughtUp)
     }
 
@@ -196,7 +199,7 @@ struct RemoteTranscriptSyncTests: ~Copyable {
             Self.page("{\"n\":2}\n", #"{"cursor": "c-2", "more": true}"#),
             Self.page("{\"n\":3}\n", #"{"cursor": "c-3"}"#),
         ])
-        let sync = makeSync(provider)
+        let sync = makeSync(provider, pageCap: 3)
         let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
         #expect(await provider.calls == [read(), read(since: "c-1"), read(since: "c-2")])
         #expect(try fileText(result) == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
@@ -224,6 +227,34 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         #expect(try fileText(resumed) == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
     }
 
+    /// The default cap is one page: a sync returns after every page of a long
+    /// load, so the app can render the prefix while the rest streams in, and
+    /// each following sync resumes from the stored cursor.
+    @Test func theDefaultCapReturnsAfterEveryPage() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor": "c-1", "more": true}"#),
+            Self.page("{\"n\":2}\n", #"{"cursor": "c-2", "more": true}"#),
+            Self.page("{\"n\":3}\n", #"{"cursor": "c-3"}"#),
+        ])
+        let sync = makeSync(provider)
+
+        let first = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read()])
+        #expect(!first.caughtUp)
+        #expect(try fileText(first) == "{\"n\":1}\n")
+
+        let second = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(), read(since: "c-1")])
+        #expect(!second.caughtUp)
+        #expect(try fileText(second) == "{\"n\":1}\n{\"n\":2}\n")
+
+        let third = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(), read(since: "c-1"), read(since: "c-2")])
+        #expect(third.caughtUp)
+        #expect(try fileText(third) == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
+        #expect(third.generation == first.generation)
+    }
+
     /// Each page is written before the next is fetched: a failure on page two
     /// leaves page one, and its cursor, in place.
     @Test func eachPageIsPersistedBeforeTheNextIsFetched() async throws {
@@ -234,7 +265,7 @@ struct RemoteTranscriptSyncTests: ~Copyable {
                 stderr: ""),
             Self.page("{\"n\":2}\n", #"{"cursor": "c-2"}"#),
         ])
-        let sync = makeSync(provider)
+        let sync = makeSync(provider, pageCap: 2)
         await #expect(throws: RemoteTranscriptSyncError.providerFailed(message: "transport dropped")) {
             try await sync.sync(provider: "agentbox", sessionID: "s-1")
         }
@@ -253,7 +284,7 @@ struct RemoteTranscriptSyncTests: ~Copyable {
             Self.page("{\"new\":1}\n", #"{"cursor": "n-1", "reset": true, "more": true}"#),
             Self.page("{\"new\":2}\n", #"{"cursor": "n-2"}"#),
         ])
-        let sync = makeSync(provider)
+        let sync = makeSync(provider, pageCap: 3)
         let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
         #expect(try fileText(result) == "{\"new\":1}\n{\"new\":2}\n")
         #expect(result.generation == 2)

@@ -38,15 +38,22 @@ enum RemoteTranscriptSyncError: Error, Equatable, LocalizedError {
 /// began. Different sessions sync independently.
 ///
 /// **Pages while the envelope says `more`,** persisting each page before
-/// fetching the next, so a slow first load fills the pane progressively. A
-/// sync stops after `pageCap` pages and reports `caughtUp == false`, so a
-/// provider that never clears `more` cannot hold the lane forever; the next
-/// sync resumes from the stored cursor.
+/// fetching the next. A sync stops after `pageCap` persisted pages and reports
+/// `caughtUp == false`, so a provider that never clears `more` cannot hold the
+/// lane forever; the next sync resumes from the stored cursor. The default cap
+/// is one page, so a long first load returns after every page and the app's
+/// driver, which re-syncs at once while `caughtUp` is false, renders each
+/// page as it lands.
 ///
 /// **A `--since` answer without a valid envelope is discarded.** That output
 /// is only the delta after the cursor, so writing it as a reset would wipe the
 /// history held before it. The sync drops the cursor and refetches from the
-/// beginning within the same sync; the refetch counts toward `pageCap`.
+/// beginning within the same sync. The discarded answer does not count toward
+/// `pageCap` and the refetch does: were the discard to use up a one-page sync,
+/// the next sync would send the same cursor, be discarded again, and never
+/// progress. The loop stays bounded because the refetch carries no cursor and
+/// so cannot itself be discarded — every discard is followed by a persisted
+/// page.
 ///
 /// No clock: nothing here sleeps, polls, debounces or times out. The app owns
 /// the refresh cadence (the daemon runs no transcript timers), and each
@@ -57,10 +64,19 @@ actor RemoteTranscriptSync {
     /// with the contract's 60-second `transcript read` budget.
     typealias Invoke = @Sendable (_ provider: String, _ verb: [String]) async throws -> ProviderResult
 
-    /// Pages fetched by one sync before it reports it is not caught up. Each
-    /// page is one provider call of up to 60 seconds, so the cap bounds how
-    /// long a single sync can hold its lane.
-    static let defaultPageCap = 8
+    /// Pages persisted by one sync before it reports it is not caught up.
+    ///
+    /// One, because a page is the unit the pane can show and it is slow: a
+    /// full `transcript read` page over a provider transport runs to tens of
+    /// seconds, while the round trip that ends one sync and starts the next —
+    /// a local RPC, a `state.json` load, and the app's read of the appended
+    /// bytes — costs milliseconds. Returning after every page therefore buys
+    /// first paint one page in for no measurable throughput, and keeps the
+    /// lane's hold to a single provider call, so a sync asked for by a send
+    /// queues behind one page rather than several. An initial load and an
+    /// incremental sync share the cap: an incremental delta is almost always
+    /// one page anyway.
+    static let defaultPageCap = 1
 
     private struct LaneKey: Hashable {
         let provider: String
@@ -216,7 +232,8 @@ actor RemoteTranscriptSync {
         var state = try cache.load()
         var since = state.cursor
         var caughtUp = false
-        for _ in 0..<pageCap {
+        var pages = 0
+        while pages < pageCap {
             let result = try await invoke(
                 key.provider, RemoteVerb.transcriptRead(sessionID: key.sessionID, since: since))
             if result.failureClass != nil {
@@ -242,6 +259,8 @@ actor RemoteTranscriptSync {
                     session=\(key.sessionID, privacy: .public): a --since answer came without a valid \
                     envelope; discarding it and refetching from the beginning
                     """)
+                // Not counted toward the cap: the refetch that follows is, and
+                // it carries no cursor, so it cannot be discarded in turn.
                 since = nil
                 continue
             }
@@ -250,6 +269,7 @@ actor RemoteTranscriptSync {
             } else {
                 state = try cache.append(result.stdout, cursor: envelope.cursor, to: state)
             }
+            pages += 1
             since = state.cursor
             if !envelope.more {
                 caughtUp = true
