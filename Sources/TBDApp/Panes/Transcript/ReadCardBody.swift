@@ -7,6 +7,9 @@ struct ReadCardBody: View {
     let inputJSON: String
     let result: ToolResult?
     let terminalID: UUID?
+    /// The transcript file to read a full body from when there is no
+    /// terminal — see `TranscriptFullBodySource`.
+    let detailPath: String?
 
     @State private var fullResultText: String? = nil
     @Environment(AppState.self) var appState
@@ -25,6 +28,10 @@ struct ReadCardBody: View {
         return try? Self.decoder.decode(Input.self, from: data)
     }
 
+    var fullBodySource: TranscriptFullBodySource? {
+        TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
+    }
+
     var body: some View {
         let parsedInput = decodeInput()
         VStack(alignment: .leading, spacing: 12) {
@@ -37,7 +44,7 @@ struct ReadCardBody: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                let showTruncation = r.truncatedTo != nil && fullResultText == nil && terminalID != nil
+                let showTruncation = r.truncatedTo != nil && fullResultText == nil && fullBodySource != nil
                 let showPreview = parsedInput?.file_path != nil && openFilePreview != nil
                 if showPreview || showTruncation {
                     HStack(spacing: 12) {
@@ -61,10 +68,8 @@ struct ReadCardBody: View {
     }
 
     private func fetchFull() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
-            await MainActor.run { fullResultText = r.text }
+        if let r = await fullBodySource?.fetch(itemID: id, appState: appState) {
+            fullResultText = r.text
         }
     }
 }
