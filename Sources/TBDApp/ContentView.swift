@@ -291,8 +291,20 @@ struct ContentView: View {
                 if let selection = appState.selectedRemoteSession {
                     let showsReconnect = appState.attachedRemoteSelections.contains(selection)
                     let showsStop = appState.remoteSessionShowsStop(selection)
-                    if showsReconnect || showsStop {
+                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                    if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
+                            if showsTranscriptToggle {
+                                // One preference for every remote session
+                                // (`remoteTranscriptOpen`), not per session.
+                                Button {
+                                    appState.toggleRemoteTranscriptOpen()
+                                } label: {
+                                    Image(systemName: appState.remoteTranscriptOpen
+                                          ? "text.bubble.fill" : "text.bubble")
+                                }
+                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                            }
                             if showsReconnect {
                                 // Restarts the local `attach` child in place —
                                 // the way out of a pane whose transport died
