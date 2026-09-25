@@ -148,6 +148,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// callers act on is `Config.transcriptStreamingEffective`, the conjunction
     /// with `modelProxyEnabled`.
     var transcript_streaming_enabled: Bool?
+    /// Gate for the remote session transcript — `remote.transcriptSync`, the
+    /// remote pane and its composer. **Genuinely tri-state**, same shape as
+    /// `transcript_composer_enabled`: the
+    /// `20260924120000_config_remote_transcript_enabled` migration carries no
+    /// SQL default, so `nil` here means "never chose" rather than "off".
+    /// Resolve it through `Config.remoteTranscriptEnabledDefault`, never
+    /// through `?? false`.
+    var remote_transcript_enabled: Bool?
     /// The loopback port this TBD home's model proxy binds, or nil if none has
     /// been minted. **Not a flag**, exactly like `holder_owner_token`: NULL
     /// means "not yet minted", and the mint is the conditional UPDATE in
@@ -224,6 +232,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   provisional assistant row. Resolved here on its own; what callers act
     ///   on is `Config.transcriptStreamingEffective`, its conjunction with the
     ///   proxy flag.
+    /// - Parameter remoteTranscriptDefault: same shape once more, for
+    ///   `remote_transcript_enabled` — the remote session transcript's gate.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -244,6 +254,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
+        remoteTranscriptDefault: Bool = Config.remoteTranscriptEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -343,6 +354,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // readable as the two separate choices it records.
         config.transcriptStreamingEnabled =
             transcript_streaming_enabled ?? transcriptStreamingDefault
+        // And once more, for the remote transcript's gate — NOT `?? false`.
+        config.remoteTranscriptEnabled =
+            remote_transcript_enabled ?? remoteTranscriptDefault
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
@@ -834,6 +848,20 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_composer_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote-transcript gate (default OFF, soaking). It gates
+    /// `remote.transcriptSync`, the remote transcript pane and — with
+    /// `transcript_composer_enabled` — the remote composer. The column is
+    /// written on every call, because writing either value is the explicit
+    /// gesture that lifts it out of NULL forever after.
+    public func setRemoteTranscriptEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_transcript_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

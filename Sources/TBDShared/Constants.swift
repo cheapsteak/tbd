@@ -358,6 +358,47 @@ public enum TBDConstants {
             provider: provider, key: key, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Root of the remote-session transcript caches: `~/tbd/remote-transcripts`.
+    /// Honors TBD_HOME.
+    ///
+    /// A TBD-owned root outside the Claude projects store on purpose:
+    /// `ClaudeSessionScanner` searches under project roots, so remote
+    /// conversations kept here are never listed as local sessions.
+    public static func remoteTranscriptsDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("remote-transcripts")
+    }
+    public static var remoteTranscriptsDir: URL {
+        remoteTranscriptsDir(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// One remote session's transcript cache directory:
+    /// `~/tbd/remote-transcripts/<provider>/<sessionID>/`. Honors TBD_HOME.
+    ///
+    /// Both components are escaped exactly as `retainedTranscriptPath` escapes
+    /// its own — a session id is opaque by contract, so the mapping must be
+    /// injective and must never let a separator, `.` or `..` traverse. It holds
+    /// `remoteTranscriptFileName` and `remoteTranscriptStateFileName`.
+    public static func remoteTranscriptDir(
+        provider: String, sessionID: String, environment: [String: String]
+    ) -> URL {
+        let root = remoteTranscriptsDir(environment: environment).path
+        return URL(
+            fileURLWithPath: "\(root)/\(filenameEscaped(provider))/\(filenameEscaped(sessionID))",
+            isDirectory: true)
+    }
+    public static func remoteTranscriptDir(provider: String, sessionID: String) -> URL {
+        remoteTranscriptDir(
+            provider: provider, sessionID: sessionID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The conversation, as Claude Code transcript JSONL, inside
+    /// `remoteTranscriptDir`.
+    public static let remoteTranscriptFileName = "transcript.jsonl"
+    /// `{cursor, length, generation}` for the conversation beside it, inside
+    /// `remoteTranscriptDir`.
+    public static let remoteTranscriptStateFileName = "state.json"
+
     /// RFC 3986's unreserved set less `.`, so no encoded component can be `.`
     /// or `..`. See `retainedTranscriptPath` for why each exclusion is
     /// load-bearing.

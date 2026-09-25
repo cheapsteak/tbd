@@ -512,6 +512,7 @@ import Testing
             "20260907215725_config_transcript_streaming",
             "20260907215726_config_model_proxy_port",
             "20260907215727_terminal_transcript_stream_path",
+            "20260924120000_config_remote_transcript_enabled",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

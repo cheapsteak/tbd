@@ -260,3 +260,60 @@ import Foundation
         #expect(url.path == "/tmp/tbd-transcripts/transcripts/agentbox/fix%20flaky%20CI.jsonl")
     }
 }
+
+/// `~/tbd/remote-transcripts/<provider>/<sessionID>/` — the per-session cache
+/// `remote.transcriptSync` keeps and the app tails. Env dictionaries
+/// throughout, for the reason `RetainedTranscriptPathTests` gives.
+@Suite struct RemoteTranscriptDirTests {
+    private let env = ["TBD_HOME": "/tmp/tbd-remote-transcripts"]
+
+    @Test func rootFollowsTBDHome() {
+        #expect(TBDConstants.remoteTranscriptsDir(environment: env).path
+            == "/tmp/tbd-remote-transcripts/remote-transcripts")
+    }
+
+    @Test func rootFallsBackToHomeTbdWhenKeyAbsent() {
+        let path = TBDConstants.remoteTranscriptsDir(environment: [:]).path
+        #expect(path.contains(FileManager.default.homeDirectoryForCurrentUser.path))
+        #expect(path.hasSuffix("/tbd/remote-transcripts"))
+    }
+
+    @Test func sessionDirLandsUnderItsProvider() {
+        let url = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-123", environment: env)
+        #expect(url.path == "/tmp/tbd-remote-transcripts/remote-transcripts/agentbox/s-123")
+        #expect(url.hasDirectoryPath)
+    }
+
+    @Test func theTwoFileNames() {
+        #expect(TBDConstants.remoteTranscriptFileName == "transcript.jsonl")
+        #expect(TBDConstants.remoteTranscriptStateFileName == "state.json")
+        let dir = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-123", environment: env)
+        #expect(dir.appendingPathComponent(TBDConstants.remoteTranscriptFileName).path
+            == "/tmp/tbd-remote-transcripts/remote-transcripts/agentbox/s-123/transcript.jsonl")
+    }
+
+    /// A session id is opaque and may contain a separator or be `..`; it must
+    /// stay one directory under its provider, escaped the way
+    /// `retainedTranscriptPath` escapes a key.
+    @Test func componentsAreEscapedRatherThanTraversing() {
+        let separator = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "a/b", environment: env)
+        #expect(separator.path == "/tmp/tbd-remote-transcripts/remote-transcripts/agentbox/a%2Fb")
+        let dotdot = TBDConstants.remoteTranscriptDir(
+            provider: "..", sessionID: "..", environment: env)
+        #expect(dotdot.path == "/tmp/tbd-remote-transcripts/remote-transcripts/%2E%2E/%2E%2E")
+        #expect(dotdot.pathComponents.count
+            == TBDConstants.remoteTranscriptsDir(environment: env).pathComponents.count + 2)
+    }
+
+    @Test func escapingIsInjectiveAcrossPercentSequences() {
+        let literal = TBDConstants.remoteTranscriptDir(
+            provider: "p", sessionID: "a%2Fb", environment: env)
+        let separator = TBDConstants.remoteTranscriptDir(
+            provider: "p", sessionID: "a/b", environment: env)
+        #expect(literal.path != separator.path)
+        #expect(literal.path == "/tmp/tbd-remote-transcripts/remote-transcripts/p/a%252Fb")
+    }
+}

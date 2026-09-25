@@ -23,6 +23,7 @@ struct ConfigGet: AsyncParsableCommand {
             "auto-archive-on-merge: \(config.autoArchiveOnMergeDefault ? "on" : "off")",
             "auto-hibernate-on-merge: \(config.autoHibernateOnMergeDefault ? "on" : "off")",
             "update-mode: \(config.updateMode.rawValue)",
+            "remote-transcript: \(config.remoteTranscriptEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
 
@@ -47,14 +48,14 @@ struct ConfigSet: AsyncParsableCommand {
     /// value argument is allowed to be. The value therefore arrives as a raw
     /// string and is parsed per key, rather than as a type that could only ever
     /// express one key's vocabulary.
-    static let onOffKeys = ["auto-archive-on-merge", "auto-hibernate-on-merge"]
+    static let onOffKeys = ["auto-archive-on-merge", "auto-hibernate-on-merge", "remote-transcript"]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
-    @Argument(help: "Setting key (auto-archive-on-merge, auto-hibernate-on-merge, update-mode)")
+    @Argument(help: "Setting key (auto-archive-on-merge, auto-hibernate-on-merge, remote-transcript, update-mode)")
     var key: String
 
-    @Argument(help: "on|off for the merge defaults; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults and remote-transcript; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -67,7 +68,15 @@ struct ConfigSet: AsyncParsableCommand {
     /// given fall through to the generic form, which satisfies that rule by
     /// construction.
     static func confirmation(key: String, value: OnOffArgument) -> String {
-        "Set \(key) default to \(value.rawValue)."
+        switch (key, value) {
+        case ("remote-transcript", .on):
+            return "Set remote-transcript to on. Remote sessions whose provider serves "
+                + "transcripts can show a Transcript pane beside the terminal."
+        case ("remote-transcript", .off):
+            return "Set remote-transcript to off. Remote sessions show only their terminal."
+        default:
+            return "Set \(key) default to \(value.rawValue)."
+        }
     }
 
     /// The update mode's confirmation. Three states, and each one changes what
@@ -122,6 +131,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetAutoHibernateOnMergeDefault,
                 params: ConfigSetAutoHibernateDefaultParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "remote-transcript":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetRemoteTranscriptEnabled,
+                params: ConfigSetRemoteTranscriptEnabledParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)

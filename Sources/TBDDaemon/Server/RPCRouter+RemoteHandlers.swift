@@ -847,6 +847,38 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteTranscriptResult(jsonl: jsonl))
     }
 
+    /// `remote.transcriptSync` — bring a session's transcript cache up to date
+    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md`).
+    ///
+    /// Only the gates every provider-named verb shares run here so far — the
+    /// backends gate and the cloud gate, which `RPCMethod.providerNamedRemoteMethods`
+    /// obliges — and then the call is refused as not yet implemented. The sync
+    /// itself, and its own gates (`remote_transcript_enabled`, `transcript.read`),
+    /// land with `RemoteTranscriptSync`.
+    func handleRemoteTranscriptSync(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteTranscriptSyncParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        return RPCResponse(error: "remote.transcriptSync is not implemented yet")
+    }
+
+    /// `remote.sendMessage` — submit a message through `send <id> --submit`.
+    /// Same shape as `handleRemoteTranscriptSync` for now: the shared gates,
+    /// then a refusal. The send, its serializer and its own refusals
+    /// (`send-submit`, stale snapshot, `waiting_input`, exited) land later;
+    /// once they do, success answers with a `RemoteSendMessageResult`
+    /// (`sent` or `unknown`) and "not sent" with an RPC error.
+    func handleRemoteSendMessage(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        return RPCResponse(error: "remote.sendMessage is not implemented yet")
+    }
+
     /// Lists the receipts TBD holds, optionally filtered to one provider.
     ///
     /// Local-only — it reads TBD's own rows and never invokes a provider verb,

@@ -431,6 +431,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the remote-transcript gate — the default-off soak switch for
+    /// `remote.transcriptSync`, the remote transcript pane and (with the
+    /// composer gate) the remote composer. It takes effect on the daemon already
+    /// running: the sync handler reads the column per request.
+    func handleConfigSetRemoteTranscriptEnabled(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetRemoteTranscriptEnabledParams.self, from: paramsData)
+        try await db.config.setRemoteTranscriptEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the model-proxy gate — the default-off soak switch for routing a
     /// pty-holder session's Messages API traffic through the loopback proxy.
     /// This is how the soak is turned on: the flag is the feature's only opt-in,
