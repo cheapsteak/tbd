@@ -1701,7 +1701,7 @@ public struct TmuxManager: Sendable {
         case .timedOut:
             logger.warning("subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
             throw TmuxError.timedOut(command: commandDescription, timeout: timeout)
-        case let .completed(status, stdoutData, stderrData):
+        case let .completed(status, stdoutData, stderrData), let .signaled(status, stdoutData, stderrData):
             let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             let output = stdout.isEmpty ? stderr : stdout

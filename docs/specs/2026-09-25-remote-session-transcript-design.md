@@ -75,7 +75,8 @@ A new actor under `Sources/TBDDaemon/Remote/` gives each `(provider, sessionID)`
 
 - One `transcript read` runs per session at a time. A request arriving while one is in flight waits for it, plus at most one follow-up, so a burst of requests costs at most two fetches.
 - It pages while the envelope says `more`, writing each page before fetching the next, so a slow first load fills the pane progressively. A sync stops after a fixed number of pages and reports that it is not caught up, so a provider that never clears `more` cannot hold the lane forever; the next sync resumes from the stored cursor.
-- Delays and timeouts take an injected clock.
+- A `--since` answer that comes without a valid envelope, absent or malformed, is discarded rather than written: that output is only the delta after the cursor, so reading it as a reset would wipe the history held before it. The sync drops the cursor and refetches from the beginning within the same sync, and the refetch counts toward the page cap. On the envelope's own side, a `{`-prefixed stderr line that is not valid JSON is a diagnostic and is passed over; only an object naming `cursor`, `reset`, or `more` that then fails the strict decode is malformed.
+- The sync actor and the `remote.sendMessage` serializer never sleep, poll, or time out on their own. Each provider call's timeout is enforced by `ProviderRunner` through `RemoteProviderManager.invoke(timeout:)`, and the refresh cadence lives in the app's sync driver, which takes the injected clock.
 
 ### Cache
 
@@ -87,7 +88,9 @@ Each session's transcript is cached under `~/tbd/remote-transcripts/<provider>/<
 The two files are kept consistent by write order:
 
 - **Append.** A page is appended to `transcript.jsonl` first. Then `state.json` is written atomically with the new cursor and the file's new length. On load, `transcript.jsonl` is truncated to the recorded `length`, so a crash between the two writes cannot leave records that the next fetch returns again.
-- **Reset.** Three steps, in this order. First `state.json` is written atomically with no cursor, a `length` of 0, and `generation` incremented, so readers know to discard what they hold. Then the page is written to a temporary file and renamed over `transcript.jsonl`. Last, `state.json` is written again with the new cursor and length. A crash after the first step leaves a state that records nothing: load truncates `transcript.jsonl` to zero bytes, and the next sync fetches from the beginning, which is itself a reset. No crash point can pair a new file with an old cursor.
+- **Reset.** Three steps, in this order. First `state.json` is written atomically with no cursor, a `length` of 0, and `generation` incremented, so readers know to discard what they hold. Then the page is written to a temporary file and renamed over `transcript.jsonl`. Last, `state.json` is written again with the new cursor and length. A crash after the first step leaves a state that records nothing: load truncates `transcript.jsonl` to zero bytes, and the next sync fetches from the beginning, which is itself a reset. No crash point can pair a new file with an old cursor. Load also removes any temporary file a crash left between the write and the rename.
+- **Repair on load.** Beyond truncating uncommitted bytes, load clears `transcript.jsonl` and drops the cursor when the file is shorter than the recorded `length` or `state.json` cannot be read, so the next sync fetches from the beginning. Every repair increments `generation`, so a reader never keeps records the cache no longer holds.
+- **Unchanged reset.** A reset whose page is byte-identical to the committed file keeps its `generation` and rewrites only the cursor. A provider with no incremental support answers every call with the whole conversation, and bumping `generation` each time would make the pane discard and re-render an unchanged transcript on every sync.
 
 The cache sits outside the Claude projects store on purpose: `ClaudeSessionScanner` searches under project roots, so a TBD-owned root keeps remote conversations from being listed as local sessions. The daemon only writes this root and the app reads it directly, so no daemon read RPC needs to admit a second permitted transcript root.
 
@@ -118,7 +121,7 @@ The cache directory is a new kind of durable resource, and `OrphanGC` reclaims i
 - A session directory is reclaimed when TBD no longer tracks its `(provider, sessionID)` and nothing has been written to it within `gcGraceSeconds`, the grace window every other leg uses. A session is tracked while a `remote_session` row for it has `dismissed = 0` or a `worktree` row for it has a status other than `archived`. Row absence alone would not do: dismissing sets `dismissed = 1` and keeps the row, and archiving keeps the worktree row, so a sweep that waited for rows to disappear would never reclaim a dismissed or archived session's cache. A session un-dismissed or unarchived after its cache was reclaimed simply refetches. The window keeps a sync that raced a dismiss from losing its file mid-write.
 - A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. The sweep is the guarantee; the eager removal is only prompt cleanup.
 
-The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install that never enabled `remote_transcript_enabled` has no such directories, so the leg finds nothing.
+The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install that never enabled `remote_transcript_enabled` has no such directories, so the leg finds nothing. The leg walks the whole cache root against the rows rather than a record of what it created, so it also reclaims directories written before it existed.
 
 ## App
 
@@ -160,11 +163,12 @@ The existing send footer is unchanged: it still appears only when no terminal is
 
 Each gate is tested on both branches.
 
-- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope.
-- **Sync actor**, against the mock provider invoker and an injected clock:
+- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope; a non-JSON `{` diagnostic beside a valid envelope.
+- **Sync actor**, against a scripted provider invoker:
   - append and cursor round-trip;
   - reset rewrites the file and increments `generation`;
   - paging continues while `more`, stops at the page cap without being caught up, and persists each page;
+  - a `--since` answer with an absent or malformed envelope keeps what is held and ends in a full refetch, and that refetch counts toward the page cap;
   - concurrent requests coalesce;
   - a `transcript.jsonl` longer than `state.json`'s `length` is truncated on load;
   - paths follow `TBD_HOME`.

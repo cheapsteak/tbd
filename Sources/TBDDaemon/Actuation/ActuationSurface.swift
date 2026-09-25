@@ -99,6 +99,11 @@ enum ActuationSurface: CaseIterable, Sendable {
     case remoteCreate
     case remoteStop
     case remoteSend
+    /// Submits a message to a remote session through `send <id> --submit` —
+    /// a `send`, like `remoteSend`, but a message pasted and submitted by the
+    /// provider rather than raw keystrokes. The paste and its Enter are one
+    /// intent, so one row.
+    case remoteSendMessage
     /// Retires a remote session from the working inventory
     /// (`docs/remote-provider-contract.md` § `archive <id>`) — same shape as
     /// `worktreeArchive`'s `dispose`, one level down: this is the provider
@@ -148,6 +153,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteCreate: return RPCMethod.remoteCreate
         case .remoteStop: return RPCMethod.remoteStop
         case .remoteSend: return RPCMethod.remoteSend
+        case .remoteSendMessage: return RPCMethod.remoteSendMessage
         case .remoteArchive: return RPCMethod.remoteArchive
         case .remoteUnarchive: return RPCMethod.remoteUnarchive
         case .remoteDelete: return RPCMethod.remoteDelete
@@ -159,7 +165,7 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// `hibernate`/`wake` while keeping their own `method`.
     var kind: ActuationKind {
         switch self {
-        case .terminalSend, .remoteSend: return .send
+        case .terminalSend, .remoteSend, .remoteSendMessage: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,

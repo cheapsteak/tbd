@@ -62,6 +62,38 @@ struct BoundedProcessRunnerTests {
         #expect(stdout == payload)
     }
 
+    /// A child that dies of an uncaught signal has no exit status, and the
+    /// runner says so rather than reporting the signal number as an exit code.
+    @Test func aChildKilledBySignalIsSignaledNotCompleted() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo before; kill -9 $$"],
+            currentDirectory: nil,
+            timeout: .seconds(10)
+        )
+        guard case .signaled(let signal, let stdout, _) = outcome else {
+            Issue.record("expected .signaled, got \(outcome)")
+            return
+        }
+        #expect(signal == SIGKILL)
+        #expect(String(data: stdout, encoding: .utf8) == "before\n")
+    }
+
+    /// A plain non-zero exit stays `.completed`: only a signal is `.signaled`.
+    @Test func aNonZeroExitIsStillCompleted() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", "exit 9"],
+            currentDirectory: nil,
+            timeout: .seconds(10)
+        )
+        guard case .completed(let status, _, _) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 9)
+    }
+
     /// `cat` reads to EOF before exiting. If the runner failed to close the
     /// stdin pipe's write end after writing, `cat` would block forever
     /// waiting for more input and this test would hang until the 10s

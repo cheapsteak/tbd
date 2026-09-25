@@ -852,36 +852,214 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteTranscriptResult(jsonl: jsonl))
     }
 
-    /// `remote.transcriptSync` — bring a session's transcript cache up to date
-    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md`).
+    /// The contract's 60-second budget for one `transcript read` call — one
+    /// page of a `remote.transcriptSync`.
+    static let transcriptReadTimeout: TimeInterval = 60
+
+    /// The contract's 30-second budget for `send <id> --submit`.
+    static let sendMessageTimeout: TimeInterval = 30
+
+    /// The refusal for `remote.transcriptSync` while `remote_transcript_enabled`
+    /// is off. Names the flag and the command that turns it on, for the reason
+    /// `remoteDeleteDisabledResponse` does; tests assert equality against it.
+    static let remoteTranscriptDisabledResponse = RPCResponse(error:
+        "remote transcripts are disabled (config remote_transcript_enabled); " +
+        "turn them on with `tbd config set remote-transcript on`")
+
+    /// `remote.transcriptSync` — bring a session's local transcript cache up to
+    /// date through `transcript read --since`, and say where it is
+    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md` § RPCs).
     ///
-    /// Only the gates every provider-named verb shares run here so far — the
-    /// backends gate and the cloud gate, which `RPCMethod.providerNamedRemoteMethods`
-    /// obliges — and then the call is refused as not yet implemented. The sync
-    /// itself, and its own gates (`remote_transcript_enabled`, `transcript.read`),
-    /// land with `RemoteTranscriptSync`.
+    /// Gate order: the backends gate and the cloud gate first, as every
+    /// provider-named verb (`RPCMethod.providerNamedRemoteMethods`); then
+    /// `remote_transcript_enabled`; then the provider's `transcript.read`
+    /// declaration, checked before anything is invoked because the contract
+    /// forbids invoking an undeclared verb.
+    ///
+    /// The work itself is `RemoteTranscriptSync`'s: one fetch lane per session,
+    /// coalescing a burst of requests into at most two fetches, paging while the
+    /// provider says `more` up to a fixed cap. The app calls this on its own
+    /// cadence; the daemon runs no transcript timers.
     func handleRemoteTranscriptSync(_ paramsData: Data) async throws -> RPCResponse {
-        guard try await remoteGate() != nil else {
+        guard let manager = try await remoteGate(), let sync = remoteTranscriptSync else {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteTranscriptSyncParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        return RPCResponse(error: "remote.transcriptSync is not implemented yet")
+        guard try await db.config.get().remoteTranscriptEnabled else {
+            return Self.remoteTranscriptDisabledResponse
+        }
+        guard await declaredCapabilities(manager, provider: params.provider)
+            .contains(RemoteCapability.transcriptRead) else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: RemoteCapability.transcriptRead,
+                section: "transcript read <id> [--since <cursor>]")
+        }
+        do {
+            let result = try await sync.sync(provider: params.provider, sessionID: params.sessionID)
+            return try RPCResponse(result: result)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.transcriptSync provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        } catch let error as RemoteTranscriptSyncError {
+            return RPCResponse(error: error.localizedDescription)
+        }
     }
 
-    /// `remote.sendMessage` — submit a message through `send <id> --submit`.
-    /// Same shape as `handleRemoteTranscriptSync` for now: the shared gates,
-    /// then a refusal. The send, its serializer and its own refusals
-    /// (`send-submit`, stale snapshot, `waiting_input`, exited) land later;
-    /// once they do, success answers with a `RemoteSendMessageResult`
-    /// (`sent` or `unknown`) and "not sent" with an RPC error.
-    func handleRemoteSendMessage(_ paramsData: Data) async throws -> RPCResponse {
-        guard try await remoteGate() != nil else {
+    /// Why `remote.sendMessage` declines a session in its mirrored state, or
+    /// nil when it may send. Separate from the handler so the wording lives in
+    /// one place the tests can pin.
+    ///
+    /// A session with no mirror row is not refused: the provider is the source
+    /// of truth, and a session it has not reported yet is not known to be in
+    /// either state. A `gone` row — one the provider stopped reporting — reads
+    /// as exited.
+    static func sendMessageStateRefusal(_ row: RemoteSessionRow?) -> String? {
+        guard let row else { return nil }
+        if row.gone
+            || row.state == RemoteProcessState.exited.rawValue
+            || row.agentState == RemoteAgentState.exited.rawValue {
+            return sendMessageExitedRefusal
+        }
+        if row.agentState == RemoteAgentState.waitingInput.rawValue {
+            return sendMessageWaitingInputRefusal
+        }
+        return nil
+    }
+
+    static let sendMessageExitedRefusal = "session has exited; a message cannot be sent to it"
+
+    /// The refusal for `remote.sendMessage` while `transcript_composer_enabled`
+    /// is off. `remote_transcript_enabled` off answers with
+    /// `remoteTranscriptDisabledResponse`, as `remote.transcriptSync` does.
+    static let transcriptComposerDisabledResponse = RPCResponse(error:
+        "the transcript composer is disabled (config transcript_composer_enabled); " +
+        "turn on \"Message composer in the transcript pane\" in Settings")
+    static let sendMessageWaitingInputRefusal =
+        "the agent is waiting on a prompt; answer it in the terminal"
+
+    /// `remote.sendMessage` — submit `text` as one message through
+    /// `send <id> --submit`, the provider pasting it and pressing Enter
+    /// (`docs/remote-provider-contract.md` § `--submit`).
+    ///
+    /// Refused, without invoking anything:
+    /// - unless both `remote_transcript_enabled` and `transcript_composer_enabled`
+    ///   are on. The daemon reads the flags itself rather than trusting the app
+    ///   to hide the composer, so a direct RPC call cannot send input the
+    ///   hidden composer would not;
+    /// - unless the provider declares `send-submit` — a caller MUST NOT pass
+    ///   `--submit` otherwise;
+    /// - when the provider's snapshot is stale, as `remote.send` is;
+    /// - while the mirrored `agent_state` is `waiting_input`: the agent is
+    ///   blocked on a prompt, and the Enter would choose its highlighted option;
+    /// - when the session has exited.
+    ///
+    /// Sends to one session are serialized (`RemoteSendMessageSerializer`), and
+    /// the flag and state checks run again inside the lane, so a send queued
+    /// behind another is judged against the flags and the mirror as they stand
+    /// when its turn comes. Each
+    /// send that reaches the provider is recorded in the actuation log, as
+    /// `remote.send` is.
+    ///
+    /// Three outcomes, never retried. Exit 0 answers `.sent`. A non-zero exit
+    /// is not sent and answers with an RPC error carrying the provider's error
+    /// object. A call that ended without an exit status — the 30-second timeout
+    /// fired, or the provider died of a signal — answers `.unknown`: the
+    /// provider may already have pressed Enter, so resending could deliver the
+    /// message twice, and reporting it as a failure would invite exactly that.
+    func handleRemoteSendMessage(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        return RPCResponse(error: "remote.sendMessage is not implemented yet")
+        if let refusal = try await sendMessageFlagRefusal() { return refusal }
+        guard await declaredCapabilities(manager, provider: params.provider)
+            .contains(RemoteCapability.sendSubmit) else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: RemoteCapability.sendSubmit,
+                section: "send <id> [--submit]")
+        }
+        return try await remoteSendMessageSerializer.run(
+            provider: params.provider, sessionID: params.sessionID
+        ) {
+            try await self.sendMessage(params, manager: manager, actor: actor)
+        }
+    }
+
+    /// The refusal for `remote.sendMessage` while either flag it needs is off,
+    /// or nil when both are on. Read before the send is queued, for a prompt
+    /// answer, and again inside the lane, so a send queued behind another is
+    /// judged against the flags as they stand when its turn comes.
+    private func sendMessageFlagRefusal() async throws -> RPCResponse? {
+        let config = try await db.config.get()
+        guard config.remoteTranscriptEnabled else {
+            return Self.remoteTranscriptDisabledResponse
+        }
+        guard config.transcriptComposerEnabled else {
+            return Self.transcriptComposerDisabledResponse
+        }
+        return nil
+    }
+
+    /// One serialized `remote.sendMessage`, from the state checks to the
+    /// actuation outcome.
+    private func sendMessage(
+        _ params: RemoteSendMessageParams, manager: RemoteProviderManager, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        if let refusal = try await sendMessageFlagRefusal() { return refusal }
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
+        let row = try await db.remoteSessions.row(provider: params.provider, sessionID: params.sessionID)
+        if let refusal = Self.sendMessageStateRefusal(row) {
+            return RPCResponse(error: refusal)
+        }
+        let actuationID = try await beginActuation(
+            .remoteSendMessage, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID),
+            message: params.text, submit: true)
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider,
+                verb: RemoteVerb.sendSubmit(sessionID: params.sessionID),
+                stdin: Data(params.text.utf8), timeout: Self.sendMessageTimeout)
+        } catch let error as ProviderRunError {
+            // No exit status: the provider may have pressed Enter before the
+            // deadline killed it. Unknown, not a failure, and never retried.
+            remoteHandlerLogger.error(
+                "remote.sendMessage provider=\(params.provider, privacy: .public) timed out; outcome unknown")
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: "outcome unknown: \(message)")
+            return try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown))
+        } catch {
+            // Any other throw — an unknown provider, a spawn failure — comes
+            // before the provider ran, so nothing was sent. Recorded before it
+            // propagates, so the request row is never left unconfirmed.
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        if result.terminatedBySignal {
+            remoteHandlerLogger.error(
+                "remote.sendMessage provider=\(params.provider, privacy: .public) died of signal \(result.exitCode, privacy: .public); outcome unknown")
+            await finishActuation(
+                actuationID, .transportFailed,
+                error: "outcome unknown: provider died of signal \(result.exitCode)")
+            return try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown))
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "send failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.sendMessage provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        await finishActuation(actuationID, .dispatched)
+        return try RPCResponse(result: RemoteSendMessageResult(outcome: .sent))
     }
 
     /// Lists the receipts TBD holds, optionally filtered to one provider.

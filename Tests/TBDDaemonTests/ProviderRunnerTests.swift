@@ -71,6 +71,23 @@ struct ProviderRunnerTests: ~Copyable {
         #expect(w.failureClass == .permanent)
     }
 
+    /// A provider killed by a signal keeps the non-zero `exitCode` every verb
+    /// already reads, and says it had no exit status of its own.
+    @Test func aProviderKilledBySignalIsMarkedTerminatedBySignal() async throws {
+        let killed = try stub("kill -9 $$")
+        let result = try await ProviderRunner().run(
+            killed, verb: ["send", "s-1", "--submit"], stdin: nil, timeout: 10, contractVersion: 1)
+        #expect(result.terminatedBySignal)
+        #expect(result.exitCode == SIGKILL)
+        #expect(result.failureClass != nil)
+
+        let exited = try stub("exit 9")
+        let plain = try await ProviderRunner().run(
+            exited, verb: ["send", "s-1", "--submit"], stdin: nil, timeout: 10, contractVersion: 1)
+        #expect(!plain.terminatedBySignal)
+        #expect(plain.exitCode == 9)
+    }
+
     @Test func stderrIsCapturedSeparately() async throws {
         let config = try stub(#"echo '{"sessions": []}'; echo "diag" 1>&2"#)
         let result = try await ProviderRunner().run(
