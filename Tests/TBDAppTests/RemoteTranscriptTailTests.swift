@@ -97,6 +97,67 @@ struct RemoteTranscriptTailTests {
         #expect(items.count == 1, "nothing from the previous generation survives")
     }
 
+    /// A user-prompt line. `id` and `text` lengths are held fixed by callers
+    /// that need two lines of identical byte length.
+    private func promptLine(uuid: String, text: String) -> String {
+        #"{"type":"user","uuid":""# + uuid
+            + #"","timestamp":"2026-09-25T10:00:00.000Z","message":{"role":"user","content":""#
+            + text + #""}}"#
+    }
+
+    /// The reset `TranscriptSource` cannot see on its own, so only the
+    /// generation can force it. The new file is LONGER (no shrink), written
+    /// later (no backwards mtime), and its first record has the same byte
+    /// length as the old one, so every byte in the 512-byte window before the
+    /// old read offset — which lies inside the shared long record — is
+    /// unchanged. `TranscriptSource` alone reads that as an append and keeps
+    /// the old first record; dropping it takes `RemoteTranscriptTail` calling
+    /// `forget` on the generation change.
+    @Test("a generation change resets even when the new file looks like an append")
+    func generationChangeResetsWhatLooksLikeAnAppend() async throws {
+        let longText = String(repeating: "x", count: 800)
+        let oldFirst = promptLine(uuid: "g1-u1", text: "Old opening line.")
+        let newFirst = promptLine(uuid: "g2-u1", text: "New opening line.")
+        #expect(oldFirst.utf8.count == newFirst.utf8.count, "the fixture depends on equal lengths")
+        let shared = promptLine(uuid: "shared-1", text: longText)
+        let appended = promptLine(uuid: "g2-u3", text: "Appended after.")
+
+        let path = try cacheFile([oldFirst, shared])
+        let tail = RemoteTranscriptTail()
+        let before = try #require(await tail.read(key: "k", path: path, generation: 1))
+        #expect(userPrompts(before).count == 2)
+        #expect(userPrompts(before).first == "Old opening line.")
+
+        try replace(path, with: [newFirst, shared, appended])
+        let after = try #require(await tail.read(key: "k", path: path, generation: 2))
+        #expect(userPrompts(after).count == 3)
+        #expect(userPrompts(after).first == "New opening line.")
+        #expect(userPrompts(after).last == "Appended after.")
+        #expect(!userPrompts(after).contains("Old opening line."),
+                "a record from the previous generation survived the reset")
+    }
+
+    @Test("the same append-shaped rewrite without a generation change is read as an append")
+    func appendShapedRewriteWithoutGenerationIsAnAppend() async throws {
+        // The control for the test above: it pins the premise that
+        // `TranscriptSource` by itself does NOT reset on this file shape, so
+        // the reset above is the generation's doing and not the heuristics'.
+        let longText = String(repeating: "x", count: 800)
+        let oldFirst = promptLine(uuid: "g1-u1", text: "Old opening line.")
+        let newFirst = promptLine(uuid: "g2-u1", text: "New opening line.")
+        let shared = promptLine(uuid: "shared-1", text: longText)
+        let appended = promptLine(uuid: "g2-u3", text: "Appended after.")
+
+        let path = try cacheFile([oldFirst, shared])
+        let tail = RemoteTranscriptTail()
+        _ = await tail.read(key: "k", path: path, generation: 1)
+        try replace(path, with: [newFirst, shared, appended])
+        let after = try #require(await tail.read(key: "k", path: path, generation: 1))
+        #expect(userPrompts(after).count == 3)
+        #expect(userPrompts(after).first == "Old opening line.")
+        #expect(userPrompts(after).last == "Appended after.")
+    }
+
     @Test("a generation change with the same bytes re-reads rather than doubling")
     func generationChangeSameBytes() async throws {
         let path = try cacheFile(try fixtureLines())
