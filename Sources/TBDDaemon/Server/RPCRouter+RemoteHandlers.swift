@@ -895,6 +895,12 @@ extension RPCRouter {
                 provider: params.provider, capability: RemoteCapability.transcriptRead,
                 section: "transcript read <id> [--since <cursor>]")
         }
+        // A dismissed session's cache is discarded and reclaimed by the orphan
+        // sweep; syncing it would rebuild a directory nothing will show.
+        if try await db.remoteSessions.row(
+            provider: params.provider, sessionID: params.sessionID)?.dismissed == true {
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
         do {
             let result = try await sync.sync(provider: params.provider, sessionID: params.sessionID)
             return try RPCResponse(result: result)
@@ -906,6 +912,10 @@ extension RPCRouter {
             return RPCResponse(error: error.localizedDescription)
         }
     }
+
+    /// What `remote.transcriptSync` answers for a dismissed session.
+    static let transcriptSyncDismissedRefusal =
+        "this session is dismissed; its transcript is no longer kept"
 
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
@@ -1301,7 +1311,8 @@ extension RPCRouter {
         await deletion.restamp(at: now())
         await recordDeleteAftermath(outcome, params: params, now: now)
         // Prompt cleanup only; `OrphanGC`'s remote-transcript leg is the
-        // guarantee. A retained copy, if one was asked for, lives on the
+        // guarantee, and the archived lane this leaves behind does not pin the
+        // cache against it. A retained copy, if one was asked for, lives on the
         // provider and in `~/tbd/transcripts/`, never here.
         await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         await finishActuation(actuationID, .dispatched)
@@ -1375,8 +1386,10 @@ extension RPCRouter {
         }
         // Dismissing hides the session, so its transcript cache goes with it —
         // even when the row was already dismissed, which is how a retry after a
-        // failed removal gets a second chance. Prompt cleanup only; the orphan
-        // sweep is the guarantee.
+        // failed removal gets a second chance. Prompt cleanup only: a dismissed
+        // row does not pin the cache, so the orphan sweep reclaims whatever
+        // this misses, and `remote.transcriptSync` refuses a dismissed session
+        // so an open pane cannot rebuild it.
         await remoteTranscriptSync?.discard(provider: params.provider, sessionID: params.sessionID)
         return .ok()
     }

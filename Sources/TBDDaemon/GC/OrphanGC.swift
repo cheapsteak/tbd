@@ -1110,7 +1110,10 @@ public actor OrphanGC {
     /// Reclaims `~/tbd/remote-transcripts/<provider>/<sessionID>/` directories
     /// whose session TBD no longer tracks — the named reconciler for the
     /// remote transcript cache (`docs/specs/2026-09-25-remote-session-transcript-design.md`,
-    /// "Reclaiming the cache").
+    /// "Reclaiming the cache"). Its event-driven sibling is the eager removal a
+    /// successful `remote.delete` or `remote.dismiss` performs
+    /// (`RemoteTranscriptSync.discard`); that is prompt cleanup, and this is
+    /// the guarantee behind it.
     ///
     /// A session is tracked while a `remote_session` row for it has
     /// `dismissed = 0` or a `worktree` row for it has a status other than

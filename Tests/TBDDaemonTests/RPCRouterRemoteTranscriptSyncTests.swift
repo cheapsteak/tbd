@@ -191,6 +191,49 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         ])
     }
 
+    /// A dismissed session is refused before the provider is invoked, so an
+    /// open pane cannot rebuild a cache the dismiss discarded.
+    @Test func syncIsRefusedForADismissedSession() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        _ = try await db.remoteSessions.dismiss(provider: "agentbox", sessionID: "s-1")
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+        ])
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+        let directory = TBDConstants.remoteTranscriptDir(
+            provider: "agentbox", sessionID: "s-1", environment: ["TBD_HOME": home.path])
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false)
+    }
+
+    /// The other branch: the same mirror row, not dismissed, syncs.
+    @Test func syncProceedsForAMirroredSessionThatIsNotDismissed() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor": "c-1"}"#),
+        ])
+        let r = router(await manager(invoker))
+
+        let response = await sync(r)
+
+        #expect(response.success)
+        #expect(invoker.callsSnapshot() == [["describe"], RemoteVerb.transcriptRead(sessionID: "s-1")])
+    }
+
     @Test func syncSurfacesAProviderFailure() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         try await db.config.setRemoteTranscriptEnabled(true)
