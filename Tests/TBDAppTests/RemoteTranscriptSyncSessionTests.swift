@@ -132,16 +132,11 @@ struct RemoteTranscriptSyncSessionTests {
         #expect(h.session.driver?.selection == Self.second)
 
         // Only the new driver keeps a cadence: a tick syncs s2 and never s1.
-        // The old driver's loop ran (and withdrew its sleeper) before the new
-        // one's first sync, so the one sleeper left is the new driver's.
-        // The clock alone, not the main-actor harness: the poll's condition
-        // is sent off the main actor.
-        let clock = h.clock
-        let oneSleeper = await pollUntilTrue(timeout: Self.mainActorHop) {
-            clock.sleeperCount == 1
-        }
-        #expect(oneSleeper == .satisfied,
-                "expected exactly the new driver's tick, found \(h.clock.sleeperCount) sleepers")
+        // The old driver's loop resumed (and withdrew its sleeper) before the
+        // new one's first sync ran, so the sleeper this waits for is the new
+        // driver's. Were the old driver still running, its own tick would
+        // fire on the advance below and put an "s1" in the recorder.
+        try await h.armed()
         await h.clock.advance(by: Self.interval)
         #expect(await h.syncs.next() == "s2")
         await settle()
