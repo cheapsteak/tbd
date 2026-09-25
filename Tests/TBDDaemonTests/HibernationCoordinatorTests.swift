@@ -1492,6 +1492,84 @@ struct HibernationCoordinatorTests {
                 "onServerCreated must fire once with the recreated server name")
     }
 
+    /// A restarted tmux server may assign the replacement the same numeric id
+    /// stored by the dead pre-reboot window. Cleanup must distinguish identity
+    /// from that reused coordinate and leave the fresh replacement alive for
+    /// the agent respawn.
+    @Test func wakeDoesNotKillReplacementWhenTmuxReusesOldWindowID() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.updateTmuxIDs(
+            id: terminalID, windowID: "@mock-0", paneID: "%mock-0")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunWindowIsDead: { $0 == "@mock-0" })
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let wake = await coord.wake(terminalID: terminalID)
+
+        #expect(wake.isOk)
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!after.isParked)
+        #expect(after.tmuxWindowID == "@mock-0")
+        #expect(after.tmuxPaneID == "%mock-0")
+        let commands = recorded.snapshot()
+        #expect(!commands.contains {
+            $0.contains("kill-window") && $0.contains("@mock-0")
+        }, "cleanup killed the freshly-created replacement: \(commands)")
+        #expect(commands.contains {
+            $0.contains("respawn-window") && $0.contains("@mock-0")
+        }, "replacement was not respawned: \(commands)")
+    }
+
+    @Test func wakeDoesNotKillBootstrapWindowWhenTmuxReusesID() async throws {
+        let (db, _, terminalID) = try await setup()
+        // Stale row: window "@mock-1" is dead, so the first guard
+        // (windowID != window.windowID) does not prevent kill, and only the
+        // bootstrap guard is under test.
+        try await db.terminals.updateTmuxIDs(
+            id: terminalID, windowID: "@mock-1", paneID: "%mock-1")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        // Bootstrap window ID "@mock-0" matches the replacement window ID
+        // (first createWindow call in dry-run). This is the ABA scenario: tmux
+        // restarted and the new window got the old bootstrap ID. The guard
+        // should prevent killing it.
+        let bootstrapWindowID = "@mock-0"
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunWindowIsDead: { $0 == "@mock-1" },
+            dryRunEnsureServerWindowID: { _ in bootstrapWindowID })
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let wake = await coord.wake(terminalID: terminalID)
+
+        #expect(wake.isOk)
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!after.isParked)
+        let commands = recorded.snapshot()
+        // The bootstrap window should not be killed because tmux reused the
+        // bootstrap ID for the replacement window we just created.
+        #expect(!commands.contains {
+            $0.contains("kill-window") && $0.contains("@mock-0")
+        }, "cleanup killed the replacement window: \(commands)")
+        // But respawn should have happened on @mock-0.
+        #expect(commands.contains {
+            $0.contains("respawn-window") && $0.contains("@mock-0")
+        }, "replacement was not respawned: \(commands)")
+    }
+
     @Test func deadWindowWakePersistsReplacementTokenBeforeAgentLaunch() async throws {
         let (db, _, terminalID) = try await setup()
         // Dry-run recreation returns these same coordinates, exercising the

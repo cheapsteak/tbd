@@ -235,7 +235,13 @@ extension WorktreeLifecycle {
                 transport: transport,
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
-            if let initialWindowID {
+            // Kill the untracked initial window that new-session created, but skip
+            // if a restarted tmux server reused the window ID for the replacement
+            // we just created (ABA scenario: the fresh window and the old ID are
+            // textually identical, so killing it would destroy the session we just
+            // spawned). Within one live tmux incarnation, window IDs are unique, so
+            // this is defense in depth.
+            if let initialWindowID, initialWindowID != terminal.tmuxWindowID {
                 try? await tmux.killWindow(
                     server: currentWorktree.tmuxServer,
                     windowID: initialWindowID)

@@ -166,6 +166,14 @@ public struct TmuxManager: Sendable {
     /// so existing fixtures keep composing. Tests that need a *drifted*
     /// (window, pane) pair inject a window id that disagrees with the row.
     public let dryRunPaneWindowID: (@Sendable (String, String) -> String?)?
+    /// Optional test hook consulted by `ensureServer` in dryRun mode:
+    /// `server` → the bootstrap window ID to report. Without it, dryRun
+    /// ensureServer returns `nil`, matching the typical case where the session
+    /// already exists (no new window created). Tests that need to exercise the
+    /// case where tmux creates a server and returns a bootstrap window ID inject
+    /// a non-nil value here, allowing the ABA scenario — where a restarted
+    /// tmux reuses the bootstrap ID for the replacement window — to be tested.
+    public let dryRunEnsureServerWindowID: (@Sendable (String) -> String?)?
     /// Optional test hook consulted by `pasteText` in dryRun mode:
     /// `(server, paneID, bytes)` — the payload that would have been written to
     /// the buffer file. `dryRunRecorder` cannot carry it: the real path passes
@@ -219,7 +227,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunEnsureServerWindowID: (@Sendable (String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -235,6 +243,7 @@ public struct TmuxManager: Sendable {
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
         self.dryRunPanePID = dryRunPanePID
         self.dryRunPaneWindowID = dryRunPaneWindowID
+        self.dryRunEnsureServerWindowID = dryRunEnsureServerWindowID
         self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
@@ -1016,7 +1025,9 @@ public struct TmuxManager: Sendable {
             // assert that size flags propagate.
             let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
             dryRunRecorder?(args)
-            return nil
+            // Allow tests to inject a bootstrap window ID for the ABA scenario
+            // where a restarted tmux server reuses window IDs.
+            return dryRunEnsureServerWindowID?(server)
         }
         // Check if the session already exists before creating
         let hasSessionArgs = Self.hasSessionCommand(server: server, session: session)
