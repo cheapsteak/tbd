@@ -62,6 +62,9 @@ struct MessageComposerView: View {
                     .padding(.top, 6)
                     .accessibilityIdentifier(ComposerAccessibility.error)
             }
+            if draft.unconfirmedSendText != nil {
+                unknownSendBanner
+            }
             if case .blocked(let message) = state {
                 blockedBanner(message)
             }
@@ -517,7 +520,8 @@ struct MessageComposerView: View {
 
     private func submit(_ text: String) {
         // A Return must not do what a disabled button cannot.
-        guard state.isEnabled, !isSending, let coordinator else { return }
+        guard state.isEnabled, !isSending, let coordinator,
+              Self.maySubmit(text: text, draft: draft) else { return }
         draft.text = text
         errorMessage = nil
         isSending = true
@@ -525,14 +529,38 @@ struct MessageComposerView: View {
             defer { isSending = false }
             let outcome = await coordinator.send(
                 text: text, paths: draft.pathsByNumber, state: state, target: target)
-            switch outcome {
-            case .sent, .woke:
-                draft.clear()
-                issue(.clear)
-            case .failed(let message):
-                // The text stays exactly where it is; only the banner changes.
-                errorMessage = message
-            }
+            errorMessage = Self.apply(outcome, text: text, to: draft)
+            if outcome == .sent || outcome == .woke { issue(.clear) }
+        }
+    }
+
+    /// Whether a submit of `text` may go out at all. Refused only for the exact
+    /// text of a remote send whose outcome was unknown, until the person edits
+    /// it or confirms the resend — so no single keystroke can send it twice.
+    static func maySubmit(text: String, draft: ComposerDraft) -> Bool {
+        draft.mayResubmit(text)
+    }
+
+    /// What one send outcome does to the draft, and the failure banner it
+    /// raises (nil for none).
+    ///
+    /// Sent and woke clear the draft. Not sent keeps the text exactly where it
+    /// is and returns the message for the failure banner. Unknown keeps the
+    /// text too, but raises no failure banner: it holds the text on the draft,
+    /// which shows the distinct unknown banner and refuses resubmitting that
+    /// text unchanged.
+    static func apply(
+        _ outcome: ComposerSendCoordinator.Outcome, text: String, to draft: ComposerDraft
+    ) -> String? {
+        switch outcome {
+        case .sent, .woke:
+            draft.clear()
+            return nil
+        case .failed(let message):
+            return message
+        case .mayHaveBeenSent:
+            draft.holdAfterUnknownSend(text)
+            return nil
         }
     }
 
@@ -555,7 +583,7 @@ struct MessageComposerView: View {
         // this send from a sibling terminal pane of a split, where the person
         // pressing Cmd+Return means the terminal they are typing into. The
         // router owns the key; the button stays clickable.
-        .disabled(!state.isEnabled || isSending)
+        .disabled(!state.isEnabled || isSending || !Self.maySubmit(text: draft.text, draft: draft))
         .help(Self.sendButtonHelp(state: state))
         // The label is the terminal's name and changes with it; the identifier
         // does not, which is the whole point of having both.
@@ -597,6 +625,30 @@ struct MessageComposerView: View {
         exited
             ? "Claude exited in this terminal. Sending will resume the session."
             : "This session is hibernated. Sending will resume it."
+    }
+
+    /// A remote send that may have landed. The text stays, and sending it
+    /// unchanged takes this button — an explicit confirmation — rather than a
+    /// Return. Editing the text lifts the hold as well.
+    @ViewBuilder
+    private var unknownSendBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "questionmark.circle.fill").foregroundStyle(.orange)
+            Text(ComposerSendCoordinator.unknownOutcomeMessage)
+                .font(.caption)
+                .lineLimit(2)
+                .accessibilityIdentifier(ComposerAccessibility.unknownSend)
+            Spacer(minLength: 0)
+            Button("Send Again") {
+                draft.confirmResend()
+                submit(currentText())
+            }
+            .controlSize(.small)
+            .disabled(!state.isEnabled || isSending)
+            .accessibilityIdentifier(ComposerAccessibility.unknownSendConfirm)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
     }
 
     @ViewBuilder

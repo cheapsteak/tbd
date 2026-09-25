@@ -34,9 +34,13 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "composer.send")
 /// spawn, an archive restore), leaves it held.
 ///
 /// **Remote.** A remote target (`ComposerTarget.remote`) takes neither path:
-/// one `remote.sendMessage` carries the text, a failure keeps it in the box
-/// with the daemon's sentence as the banner, and a success asks for an
-/// immediate transcript sync.
+/// one `remote.sendMessage` carries the text. Sent asks for an immediate
+/// transcript sync. Not sent keeps the text in the box with the daemon's
+/// sentence as the banner. Unknown — the provider timed out or died and may
+/// already have pressed Enter — is its own outcome: it asks for a sync too, so
+/// the transcript can answer whether the message landed, and it is never
+/// reported as a failure, because a failure invites a retry that could send
+/// the message twice. Nothing here resubmits.
 @MainActor
 final class ComposerSendCoordinator {
     enum Outcome: Equatable {
@@ -46,7 +50,15 @@ final class ComposerSendCoordinator {
         /// Nothing was delivered, or delivery could not be confirmed. The caller
         /// restores the text and shows this message.
         case failed(message: String)
+        /// A remote send ended without an exit status. The message may have
+        /// been delivered; the caller keeps the text, shows this message, and
+        /// must not let one keystroke send it again.
+        case mayHaveBeenSent(message: String)
     }
+
+    /// The banner for a remote send whose outcome is unknown.
+    static let unknownOutcomeMessage =
+        "May have been sent — check the transcript before sending again"
 
     /// What a wake answered: the incarnation it minted, or why nothing happened.
     ///
@@ -79,11 +91,12 @@ final class ComposerSendCoordinator {
     /// like a measurement rather than a deadline.
     static var wakeHoldTimeoutSeconds: Int { Int(wakeHoldTimeout.components.seconds) }
 
-    /// selection, message text → `remote.sendMessage`. Throws what the daemon
-    /// refused with.
-    typealias RemoteSender = @Sendable @MainActor (RemoteSessionSelection, String) async throws -> Void
-    /// Told after a remote send succeeded, so the transcript syncs at once
-    /// rather than on its next tick.
+    /// selection, message text → `remote.sendMessage`. Answers `.sent` or
+    /// `.unknown`; throws when the message was not sent.
+    typealias RemoteSender =
+        @Sendable @MainActor (RemoteSessionSelection, String) async throws -> RemoteSendOutcome
+    /// Told after a remote send that was, or may have been, delivered, so the
+    /// transcript syncs at once rather than on its next tick.
     typealias RemoteSentHandler = @MainActor (RemoteSessionSelection) -> Void
 
     private let sendParams: Sender
@@ -183,8 +196,9 @@ final class ComposerSendCoordinator {
         guard let sendRemote else {
             return .failed(message: "This composer cannot reach remote sessions.")
         }
+        let delivery: RemoteSendOutcome
         do {
-            try await sendRemote(selection, text)
+            delivery = try await sendRemote(selection, text)
         } catch {
             logger.warning("""
             composer send failed for remote session \
@@ -194,7 +208,17 @@ final class ComposerSendCoordinator {
             return .failed(message: Self.bannerMessage(for: error))
         }
         onRemoteSent?(selection)
-        return .sent
+        switch delivery {
+        case .sent:
+            return .sent
+        case .unknown:
+            logger.warning("""
+            composer send to remote session \
+            \(selection.provider, privacy: .public)/\(selection.sessionID, privacy: .public) \
+            ended with an unknown outcome
+            """)
+            return .mayHaveBeenSent(message: Self.unknownOutcomeMessage)
+        }
     }
 
     // MARK: - Running

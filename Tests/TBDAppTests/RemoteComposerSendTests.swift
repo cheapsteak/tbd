@@ -7,6 +7,12 @@ import TBDShared
 /// text kept until the daemon accepts it, the daemon's own sentence on a
 /// refusal, an immediate transcript sync on success, and never the local
 /// paste or wake paths.
+///
+/// A send has three outcomes (`docs/specs/2026-09-25-remote-session-transcript-design.md`,
+/// "Submission"): sent clears the text and syncs; not sent keeps the text and
+/// shows the failure banner; unknown keeps the text, shows its own banner,
+/// syncs so the transcript can answer, and refuses a one-keystroke resend until
+/// the text is edited or the resend confirmed.
 @MainActor
 @Suite("Remote composer send")
 struct RemoteComposerSendTests {
@@ -21,13 +27,15 @@ struct RemoteComposerSendTests {
     }
 
     private func makeCoordinator(
-        recorder: Recorder, remoteFails: Error? = nil, wireRemote: Bool = true
+        recorder: Recorder, remoteFails: Error? = nil,
+        remoteOutcome: RemoteSendOutcome = .sent, wireRemote: Bool = true
     ) -> ComposerSendCoordinator {
         // Typed up front: a closure literal inside the ternary below loses its
         // `@Sendable` inference.
         let remote: ComposerSendCoordinator.RemoteSender = { selection, text in
             recorder.remoteSends.append((selection, text))
             if let remoteFails { throw remoteFails }
+            return remoteOutcome
         }
         return ComposerSendCoordinator(
             send: { _ in recorder.localSends += 1 },
@@ -67,6 +75,102 @@ struct RemoteComposerSendTests {
 
         #expect(outcome == .failed(message: "session is waiting on a prompt"))
         #expect(recorder.syncRequests.isEmpty)
+    }
+
+    @Test("an unknown outcome is its own outcome, never a failure, and still asks for a sync")
+    func unknownOutcomeSyncsAndIsNotAFailure() async {
+        let recorder = Recorder()
+        let outcome = await makeCoordinator(recorder: recorder, remoteOutcome: .unknown).send(
+            text: "hi", paths: [:], state: .running, target: .remote(Self.selection))
+
+        #expect(outcome == .mayHaveBeenSent(
+            message: "May have been sent — check the transcript before sending again"))
+        #expect(outcome == .mayHaveBeenSent(message: ComposerSendCoordinator.unknownOutcomeMessage))
+        #expect(recorder.syncRequests == [Self.selection],
+                "the transcript is what answers whether it landed")
+        #expect(recorder.remoteSends.count == 1, "the coordinator never resubmits by itself")
+    }
+
+    // MARK: - The unknown-outcome hold
+
+    @Test("sent clears the text and leaves nothing held")
+    func sentClearsAndHoldsNothing() {
+        let draft = ComposerDraft()
+        draft.text = "hi"
+        #expect(MessageComposerView.apply(.sent, text: "hi", to: draft) == nil)
+        #expect(draft.text.isEmpty)
+        #expect(draft.unconfirmedSendText == nil)
+        #expect(draft.mayResubmit("hi"))
+    }
+
+    @Test("not sent keeps the text, banners the failure, and allows an immediate retry")
+    func notSentKeepsTextAndAllowsRetry() {
+        let draft = ComposerDraft()
+        draft.text = "hi"
+        let banner = MessageComposerView.apply(
+            .failed(message: "session is waiting on a prompt"), text: "hi", to: draft)
+        #expect(banner == "session is waiting on a prompt")
+        #expect(draft.text == "hi")
+        #expect(draft.unconfirmedSendText == nil)
+        #expect(draft.mayResubmit("hi"), "nothing was delivered, so a retry is safe")
+    }
+
+    @Test("unknown keeps the text and blocks resubmitting it unchanged")
+    func unknownKeepsTextAndBlocksImmediateResubmit() {
+        let draft = ComposerDraft()
+        draft.text = "hi"
+        let banner = MessageComposerView.apply(
+            .mayHaveBeenSent(message: ComposerSendCoordinator.unknownOutcomeMessage),
+            text: "hi", to: draft)
+        #expect(banner == nil, "the unknown banner is its own, not the failure banner")
+        #expect(draft.text == "hi")
+        #expect(draft.unconfirmedSendText == "hi")
+        #expect(!draft.mayResubmit("hi"), "one keystroke must not send it twice")
+    }
+
+    @Test("an edit lifts the unknown hold; reverting the edit restores it")
+    func editLiftsTheHold() {
+        let draft = ComposerDraft()
+        draft.holdAfterUnknownSend("hi")
+        #expect(draft.mayResubmit("hi, again"))
+        #expect(!draft.mayResubmit("hi"))
+    }
+
+    @Test("an explicit confirm lifts the unknown hold for the same text")
+    func confirmLiftsTheHold() {
+        let draft = ComposerDraft()
+        draft.holdAfterUnknownSend("hi")
+        draft.confirmResend()
+        #expect(draft.unconfirmedSendText == nil)
+        #expect(draft.mayResubmit("hi"))
+    }
+
+    @Test("a later successful send clears the hold with the text")
+    func clearDropsTheHold() {
+        let draft = ComposerDraft()
+        draft.holdAfterUnknownSend("hi")
+        draft.clear()
+        #expect(draft.unconfirmedSendText == nil)
+    }
+
+    @Test("a held draft refuses the submit before anything is sent; a confirmed one sends")
+    func heldDraftRefusesThenConfirmedSends() async {
+        let recorder = Recorder()
+        let coordinator = makeCoordinator(recorder: recorder, remoteOutcome: .unknown)
+        let draft = ComposerDraft()
+        draft.text = "hi"
+        let first = await coordinator.send(
+            text: "hi", paths: [:], state: .running, target: .remote(Self.selection))
+        _ = MessageComposerView.apply(first, text: "hi", to: draft)
+
+        #expect(!MessageComposerView.maySubmit(text: "hi", draft: draft))
+        #expect(recorder.remoteSends.count == 1)
+
+        draft.confirmResend()
+        #expect(MessageComposerView.maySubmit(text: "hi", draft: draft))
+        _ = await coordinator.send(
+            text: "hi", paths: [:], state: .running, target: .remote(Self.selection))
+        #expect(recorder.remoteSends.count == 2)
     }
 
     @Test("a blocked or exited remote target sends nothing")
