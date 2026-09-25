@@ -1682,8 +1682,13 @@ public final class Daemon: Sendable {
                     return await checkerGit.remoteURL("origin", at: worktree)
                 },
                 remoteHead: { url, worktree in
+                    // `main`, unless `scripts/update.sh` has pointed the check
+                    // at the release tag (update source `release`).
                     try? await checkerGit.lsRemoteHead(
-                        url: url, ref: UpdateChecker.mainRef, repoPath: worktree)
+                        url: url,
+                        ref: UpdateChecker.comparedRef(
+                            environment: ProcessInfo.processInfo.environment),
+                        repoPath: worktree)
                 },
                 isAncestor: { ours, latest, worktree in
                     // Ask the cheap question first: a decided ancestry is the

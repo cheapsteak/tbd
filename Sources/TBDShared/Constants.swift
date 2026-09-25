@@ -29,6 +29,15 @@ public enum TBDConstants {
         tmuxExecutablePathFile(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// File naming the ref the daemon's update check compares against:
+    /// `~/tbd/updates/check-ref`. Written by `scripts/update.sh` while the
+    /// update source is `release`, absent otherwise. Honors `TBD_HOME`.
+    public static func updateCheckRefFile(environment: [String: String]) -> URL {
+        configDir(environment: environment)
+            .appendingPathComponent("updates")
+            .appendingPathComponent("check-ref")
+    }
+
     /// Unix socket path resolved from the given environment dictionary.
     /// Honors `TBD_SOCKET_PATH` independently of `TBD_HOME` — darwin caps
     /// `sun_path` at ~104 bytes, so a deep `TBD_HOME` can overflow even though
