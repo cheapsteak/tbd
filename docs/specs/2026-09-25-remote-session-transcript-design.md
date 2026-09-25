@@ -87,7 +87,7 @@ Each session's transcript is cached under `~/tbd/remote-transcripts/<provider>/<
 The two files are kept consistent by write order:
 
 - **Append.** A page is appended to `transcript.jsonl` first. Then `state.json` is written atomically with the new cursor and the file's new length. On load, `transcript.jsonl` is truncated to the recorded `length`, so a crash between the two writes cannot leave records that the next fetch returns again.
-- **Reset.** The page is written to a temporary file and renamed over `transcript.jsonl`, and `generation` is incremented, so readers know to discard what they hold.
+- **Reset.** Three steps, in this order. First `state.json` is written atomically with no cursor, a `length` of 0, and `generation` incremented, so readers know to discard what they hold. Then the page is written to a temporary file and renamed over `transcript.jsonl`. Last, `state.json` is written again with the new cursor and length. A crash after the first step leaves a state that records nothing: load truncates `transcript.jsonl` to zero bytes, and the next sync fetches from the beginning, which is itself a reset. No crash point can pair a new file with an old cursor.
 
 The cache sits outside the Claude projects store on purpose: `ClaudeSessionScanner` searches under project roots, so a TBD-owned root keeps remote conversations from being listed as local sessions. The daemon only writes this root and the app reads it directly, so no daemon read RPC needs to admit a second permitted transcript root.
 
@@ -112,10 +112,10 @@ The existing `remote.transcript` RPC and `tbd remote transcript` keep their full
 
 The cache directory is a new kind of durable resource, and `OrphanGC` reclaims it in a new leg under `gcEnabled`:
 
-- A session directory is reclaimed when neither a `worktree` row nor a `remote_session` row refers to its `(provider, sessionID)`, and nothing has been written to it for 24 hours. The age floor keeps a sync that raced a dismiss from losing its file mid-write.
+- A session directory is reclaimed when neither a `worktree` row nor a `remote_session` row refers to its `(provider, sessionID)`, and nothing has been written to it within `gcGraceSeconds`, the grace window every other leg uses. The window keeps a sync that raced a dismiss from losing its file mid-write.
 - A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. The sweep is the guarantee; the eager removal is only prompt cleanup.
 
-The leg needs no soak flag of its own: the cache is derived data a later sync can rebuild, and the leg only removes directories whose sessions TBD no longer tracks.
+The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install that never enabled `remote_transcript_enabled` has no such directories, so the leg finds nothing.
 
 ## App
 
@@ -169,15 +169,15 @@ Each gate is tested on both branches.
   - `remote.transcriptSync` refused with the flag off or without `transcript.read`;
   - `remote.sendMessage` refused without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized.
-- **Namespace cutover** – retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring only `retain` is offered neither retain nor `--retain`.
-- **OrphanGC leg** – keeps a directory whose session has a row, keeps one written within 24 hours, reclaims one with no row past the floor, and does nothing with `gcEnabled` off.
+- **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
+- **OrphanGC leg** – keeps a directory whose session has a row, keeps one written within `gcGraceSeconds`, reclaims one with no row outside the window, and does nothing with `gcEnabled` off.
 - **App gates** – toolbar toggle visibility against the capability and flag; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
 - **Config column** – a pre-migration row reads NULL and follows the default constant; an explicit `false` survives a change to it.
 
 ## Rollout
 
 - Everything ships behind `remote_transcript_enabled`, default off; the composer also needs `transcript_composer_enabled`. The soak enables both against a provider that implements `transcript.read` and `send-submit`.
-- The namespace rename is a hard cutover in TBD. A provider that has not adopted the namespaced spellings loses retain and recall in TBD until it does; everything else keeps working.
+- The namespace rename is a hard cutover in TBD. A provider that has not adopted the namespaced spellings loses, until it does, every transcript operation it declares under a bare spelling — `transcript` (read), `retain`, `import`, and `recall` alike. Every other capability keeps working. No provider shipped the bare `transcript` or `import`, so in practice an un-updated provider loses retain and recall.
 - Provider implementations of `transcript read` (with paging and `reset`), `send --submit`, and the renamed verbs are tracked with each provider.
 
 ## Rejected alternatives
