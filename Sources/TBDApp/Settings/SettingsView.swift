@@ -204,6 +204,7 @@ struct GeneralSettingsTab: View {
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
                 transcriptComposerToggle
+                remoteTranscriptToggle
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
                 Picker("Usage reset times", selection: $usageResetTimeStyle) {
@@ -382,6 +383,23 @@ struct GeneralSettingsTab: View {
             }
         ))
         .help(AppState.transcriptComposerHelp)
+    }
+
+    /// Remote-session transcript opt-in (`remote_transcript_enabled`), beside
+    /// the composer toggle because together they decide whether a remote
+    /// session gets a transcript pane and a composer in it. Reads the
+    /// persisted flag from `daemon.capabilities` and writes via
+    /// `config.setRemoteTranscriptEnabled`. Off by default (soaking).
+    @ViewBuilder
+    private var remoteTranscriptToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Transcript pane for remote sessions", isOn: Binding(
+            get: { capabilities?.remoteTranscriptEnabled ?? Config.remoteTranscriptEnabledDefault },
+            set: { newValue in
+                Task { await appState.setRemoteTranscriptEnabled(newValue) }
+            }
+        ))
+        .help(AppState.remoteTranscriptHelp)
     }
 
     /// Ask for a first message when creating a worktree. Reads the persisted

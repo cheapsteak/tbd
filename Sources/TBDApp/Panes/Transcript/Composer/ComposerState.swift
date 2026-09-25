@@ -31,11 +31,17 @@ enum ComposerState: Equatable {
     /// because a pasted body plus Enter would commit whichever option is
     /// highlighted.
     case blocked(message: String)
+    /// Shown but disabled, with `message` as a note and nothing to act on.
+    /// Only a remote target reaches it — a session the provider reports as
+    /// exited, which has no wake path (`RemoteComposerState.exited`). The local
+    /// resolver never produces it: a local session that exited is
+    /// `.notRunning`, which sending resumes.
+    case unavailable(message: String)
 
     var isEnabled: Bool {
         switch self {
         case .running, .notRunning: return true
-        case .blocked, .hidden: return false
+        case .blocked, .hidden, .unavailable: return false
         }
     }
 

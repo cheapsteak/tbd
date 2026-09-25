@@ -23,12 +23,19 @@ import TBDShared
 /// remote detail tab has no window-level overlay host, and each frame carries
 /// the cache file so "Show full output" can read it app-side. Links to file
 /// paths are suppressed: they name files on another machine.
+///
+/// Below the transcript sits the shared `MessageComposerView` for a
+/// `.remote` target, when `RemoteComposerState` offers one: the provider
+/// declares `send-submit` and both `remote_transcript_enabled` and
+/// `transcript_composer_enabled` are on.
 struct RemoteTranscriptPaneView: View {
     let selection: RemoteSessionSelection
     let path: String?
     let generation: Int
     let caughtUp: Bool
     var refreshToken: Int = 0
+    /// The last sync's failure, if the most recent one failed.
+    var syncError: String?
 
     @Environment(AppState.self) var appState
 
@@ -60,6 +67,7 @@ struct RemoteTranscriptPaneView: View {
             header
             Divider()
             content
+            composer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
@@ -96,7 +104,15 @@ struct RemoteTranscriptPaneView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
-            if !caughtUp {
+            if let syncError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help(syncError)
+                Text("Sync failed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(syncError)
+            } else if !caughtUp {
                 ProgressView().controlSize(.small)
                 Text("Loading…")
                     .font(.caption)
@@ -173,6 +189,19 @@ struct RemoteTranscriptPaneView: View {
             // A new session or a new conversation rebuilds the table's
             // stateful coordinator rather than diffing across the reset.
             .id("\(storeKey)#\(generation)")
+        }
+    }
+
+    /// Outside the table's `.id`, so a generation reset that rebuilds the
+    /// table leaves a half-written message alone; keyed by the session, so a
+    /// selection change gets that session's own draft and registration.
+    @ViewBuilder
+    private var composer: some View {
+        let state = appState.remoteComposerState(for: selection)
+        if state != .hidden {
+            Divider()
+            MessageComposerView(target: .remote(selection), state: state.composerState)
+                .id(ComposerKey.remote(selection))
         }
     }
 

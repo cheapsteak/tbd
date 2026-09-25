@@ -59,11 +59,34 @@ final class ComposerDraft {
         attachments.mapValues(\.path)
     }
 
+    /// The text of a remote send whose outcome was unknown: it may have been
+    /// delivered. Held on the draft rather than the view so a switch away and
+    /// back does not quietly re-arm a one-keystroke resend.
+    private(set) var unconfirmedSendText: String?
+
+    /// Record that `text` may already have been delivered.
+    func holdAfterUnknownSend(_ text: String) {
+        unconfirmedSendText = text
+    }
+
+    /// The person explicitly chose to send the held text again.
+    func confirmResend() {
+        unconfirmedSendText = nil
+    }
+
+    /// Whether `text` may be submitted: anything but the exact text of an
+    /// unconfirmed send. Editing the text is the other way past the hold.
+    func mayResubmit(_ text: String) -> Bool {
+        guard let unconfirmedSendText else { return true }
+        return text != unconfirmedSendText
+    }
+
     /// A successful send, or an explicit discard. Numbering restarts because a
     /// fresh message has no tokens to collide with.
     func clear() {
         text = ""
         attachments = [:]
         nextNumber = 1
+        unconfirmedSendText = nil
     }
 }
