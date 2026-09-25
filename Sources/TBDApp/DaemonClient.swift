@@ -1390,7 +1390,7 @@ actor DaemonClient {
     }
 
     /// Ask a provider to retain one of its own sessions' transcripts
-    /// (`docs/remote-provider-contract.md` § `retain <id>`), and record the
+    /// (`docs/remote-provider-contract.md` § `transcript retain <id>`), and record the
     /// receipt daemon-side. Unlike `remoteRename`, the capability check is the
     /// DAEMON's here — the handler refuses before invoking anything — so a
     /// caller need not pre-check, and gets a refusal naming the capability
@@ -1405,7 +1405,7 @@ actor DaemonClient {
 
     /// Put a transcript from anywhere — including this machine — into a
     /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `import`). `jsonl` is Claude Code transcript JSONL.
+    /// `transcript import`). `jsonl` is Claude Code transcript JSONL.
     func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
         try await callAsync(
             method: RPCMethod.remoteImport,
@@ -1415,7 +1415,7 @@ actor DaemonClient {
     }
 
     /// Read a retained transcript back (`docs/remote-provider-contract.md` §
-    /// `recall <key>`). With `saveLocally`, the daemon also writes it under
+    /// `transcript recall <key>`). With `saveLocally`, the daemon also writes it under
     /// `~/tbd/transcripts/` and returns that path; the records come back in
     /// `jsonl` either way.
     func remoteRecall(
@@ -1453,7 +1453,7 @@ actor DaemonClient {
     /// than a destroyed session.
     ///
     /// `retain` asks the provider to keep the transcript first, and needs the
-    /// `retain` capability as well. The returned `RemoteDeleteResult` carries a
+    /// `transcript.retain` capability as well. The returned `RemoteDeleteResult` carries a
     /// receipt exactly when it was asked for, and `deleted: false` — nothing
     /// was there to destroy — is a success, not an error.
     func remoteDelete(

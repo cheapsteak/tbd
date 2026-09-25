@@ -125,7 +125,7 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
     /// so a soak participant knows which of three gates closed.
     @Test func deleteRefusesNamingTheFlagAndNeverSpawnsWhenFlagOff() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["delete", "retain"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["delete", RemoteCapability.transcriptRetain])])
         let r = await router(invoker: invoker)
         try await mirrorSession()
 
@@ -159,7 +159,7 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
     @Test func deleteRefusesWhenCapabilityUndeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         try await db.config.setRemoteDeleteEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["retain", "recall"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRetain, RemoteCapability.transcriptRecall])])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.delete", deleteParams())
         #expect(response.success == false)
@@ -178,7 +178,20 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.delete", deleteParams(retain: true))
         #expect(response.success == false)
-        #expect(response.error?.contains("retain") == true)
+        #expect(response.error?.contains(RemoteCapability.transcriptRetain) == true)
+        #expect(invoker.calls == [["describe"]], "nothing may be destroyed on the way to this refusal")
+    }
+
+    /// The hard cutover: the bare pre-namespace `retain` admits nothing, so a
+    /// provider that still declares it is not sent `--retain` either.
+    @Test func bareRetainCapabilityDoesNotAdmitTheRetainFlag() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["delete", "retain"])])
+        let r = await router(invoker: invoker)
+        let response = await call(r, "remote.delete", deleteParams(retain: true))
+        #expect(response.success == false)
+        #expect(response.error?.contains(RemoteCapability.transcriptRetain) == true)
         #expect(invoker.calls == [["describe"]], "nothing may be destroyed on the way to this refusal")
     }
 
@@ -213,7 +226,7 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
         try await db.config.setRemoteBackendsEnabled(true)
         try await db.config.setRemoteDeleteEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["delete", "retain"]),
+            describeDeclaring(["delete", RemoteCapability.transcriptRetain]),
             providerOK(deletedJSON),
         ])
         let r = await router(invoker: invoker)
@@ -230,7 +243,7 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
         try await db.config.setRemoteDeleteEnabled(true)
         try await mirrorSession()
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["delete", "retain"]),
+            describeDeclaring(["delete", RemoteCapability.transcriptRetain]),
             providerOK(deletedWithReceiptJSON),
         ])
         let r = await router(invoker: invoker)
@@ -260,7 +273,7 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
         let lane = try await adoptLane()
         try await mirrorSession()
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["delete", "retain"]),
+            describeDeclaring(["delete", RemoteCapability.transcriptRetain]),
             providerOK(deletedWithReceiptJSON),
         ])
         let r = await router(invoker: invoker)

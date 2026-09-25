@@ -319,18 +319,19 @@ public enum RPCMethod {
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
     /// The transcript exchange (`docs/remote-provider-contract.md` §
-    /// `retain <id>` / `import`, § `recall <key>`). All three are
+    /// `transcript retain <id>` / `transcript import`, § `transcript recall
+    /// <key>`). All three are
     /// non-destructive and gated by their capabilities alone — no feature flag
     /// stands in front of them.
     public static let remoteRetain = "remote.retain"
     public static let remoteImport = "remote.import"
     public static let remoteRecall = "remote.recall"
     /// The live transcript of a session the provider still has
-    /// (`docs/remote-provider-contract.md` § `transcript <id>`). A sibling of
-    /// the exchange verbs rather than one of them: `recall` reads an immutable
+    /// (`docs/remote-provider-contract.md` § `transcript read <id>`). A sibling
+    /// of the exchange verbs rather than one of them: `transcript recall` reads an immutable
     /// blob out of the provider's store by key, this reads a growing
     /// conversation out of a live session by id, and the contract keeps the two
-    /// capabilities separate so `transcript` never becomes ambiguous about
+    /// capabilities separate so `transcript.read` never becomes ambiguous about
     /// which of the two a provider implements.
     public static let remoteTranscript = "remote.transcript"
     /// Brings a session's local transcript cache
@@ -1725,7 +1726,7 @@ public struct RemoteReconnectResult: Codable, Sendable {
 
 /// Params for `remote.retain` — ask a provider to put one of its own sessions'
 /// transcripts into its durable store (`docs/remote-provider-contract.md` §
-/// `retain <id>`). The result is a `RetainReceipt`.
+/// `transcript retain <id>`). The result is a `RetainReceipt`.
 public struct RemoteRetainParams: Codable, Sendable {
     public let provider: String
     public let sessionID: String
@@ -1736,8 +1737,8 @@ public struct RemoteRetainParams: Codable, Sendable {
 
 /// Params for `remote.import` — put a transcript from somewhere else, including
 /// this machine, into a provider's durable store with no session of the
-/// provider's involved (`docs/remote-provider-contract.md` § `import`). The
-/// result is a `RetainReceipt`.
+/// provider's involved (`docs/remote-provider-contract.md` § `transcript
+/// import`). The result is a `RetainReceipt`.
 ///
 /// `jsonl` is Claude Code transcript JSONL, which the contract's format-scope
 /// paragraph fixes for this verb. It rides as a `String` rather than `Data`
@@ -1753,7 +1754,7 @@ public struct RemoteImportParams: Codable, Sendable {
 }
 
 /// Params for `remote.recall` — read back a transcript the provider retained
-/// (`docs/remote-provider-contract.md` § `recall <key>`).
+/// (`docs/remote-provider-contract.md` § `transcript recall <key>`).
 ///
 /// `key` is opaque and provider-scoped, so the provider travels with it: the
 /// same string may mean different things to two providers, and a caller MUST
@@ -1802,7 +1803,7 @@ public struct RemoteRecallResult: Codable, Sendable {
 }
 
 /// Params for `remote.transcript` — the conversation of a session the provider
-/// still has (`docs/remote-provider-contract.md` § `transcript <id>`).
+/// still has (`docs/remote-provider-contract.md` § `transcript read <id>`).
 ///
 /// No cursor. The verb's `--since` exists so a *live* view can fetch a growing
 /// transcript incrementally, and this RPC serves a one-shot read of the whole
@@ -1902,7 +1903,7 @@ public struct RemoteSendMessageResult: Codable, Sendable, Equatable {
 ///
 /// `retain` maps to the verb's `--retain` flag, and is a request rather than a
 /// preference: the contract makes retention something a caller asks for
-/// explicitly, never something implied by the provider declaring `retain`. So
+/// explicitly, never something implied by the provider declaring `transcript.retain`. So
 /// an absent field decodes as `false` — a caller that said nothing did not ask
 /// for storage, and allocating it anyway would put a copy of a conversation on
 /// a remote store nobody asked to write to. The hand-written decoder exists for

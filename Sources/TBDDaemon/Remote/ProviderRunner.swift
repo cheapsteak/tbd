@@ -77,11 +77,23 @@ public struct ProviderRunner: RemoteProviderInvoking {
         return env
     }
 
+    /// The name a log line or timeout message gives an invocation: the verb,
+    /// plus its subcommand for `transcript`, whose four subcommands are four
+    /// different operations (`RemoteVerb`). Operands never appear — a session
+    /// id, cursor or key is not part of what was run.
+    public static func verbName(_ verb: [String]) -> String {
+        guard let first = verb.first else { return "?" }
+        if first == "transcript", verb.count > 1 {
+            return "\(first) \(verb[1])"
+        }
+        return first
+    }
+
     public func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
                     timeout: TimeInterval, contractVersion: Int) async throws -> ProviderResult {
         let env = Self.invocationEnvironment(
             base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
-        let verbName = verb.first ?? "?"
+        let verbName = Self.verbName(verb)
 
         switch try await runBoundedProcess(
             executable: config.exec,
