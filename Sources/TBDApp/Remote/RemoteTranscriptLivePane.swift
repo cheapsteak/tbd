@@ -72,7 +72,10 @@ struct RemoteTranscriptLivePane: View {
                     selection: selection,
                     sync: { [appState] selection in
                         try await appState.remoteTranscriptSyncer(selection)
-                    })
+                    },
+                    // Show what the daemon already cached before the first
+                    // sync returns: a long load can take a minute or more.
+                    initialSnapshot: .cached(for: selection))
             },
             didStart: { [appState] in appState.registerRemoteTranscriptSyncDriver($0) },
             didStop: { [appState] in appState.unregisterRemoteTranscriptSyncDriver($0) })
