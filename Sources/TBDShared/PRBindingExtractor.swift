@@ -308,7 +308,11 @@ public enum PRBindingExtractor {
     /// GitHub pull requests are accepted on ANY host (`/<owner>/<repo>/pull/<n>`),
     /// unlike `parsePRURLs(in:)`, whose github.com lock stays in place for hook
     /// scraping. The host is lowercased, since hosts compare case-insensitively
-    /// and callers compare it against `github.com`; `url` stays verbatim.
+    /// and callers compare it against `github.com`, and `www.github.com` — an
+    /// alias GitHub redirects to `github.com` — is read as `github.com`, so the
+    /// binding is queried for status and dedupes with the same PR found any
+    /// other way. Binding identity is `(host, owner, repo, number)`, never the
+    /// URL, so `url` stays verbatim.
     ///
     /// The forge is not a field here: `Forge.forURL` reads it from the URL
     /// (`/-/merge_requests/` is GitLab, anything else GitHub), so a GitHub
@@ -330,7 +334,9 @@ public enum PRBindingExtractor {
            let match = regex.firstMatch(in: entry, range: whole),
            match.numberOfRanges == 5,
            let number = Int(ns.substring(with: match.range(at: 4))) {
-            return ParsedPRURL(host: ns.substring(with: match.range(at: 1)).lowercased(),
+            var host = ns.substring(with: match.range(at: 1)).lowercased()
+            if host == "www.github.com" { host = "github.com" }
+            return ParsedPRURL(host: host,
                                owner: ns.substring(with: match.range(at: 2)),
                                repo: ns.substring(with: match.range(at: 3)),
                                number: number,

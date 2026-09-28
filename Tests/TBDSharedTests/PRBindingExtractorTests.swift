@@ -310,6 +310,21 @@ struct PRBindingExtractorTests {
         #expect(PRBindingExtractor.parsePRURL(exactly: upper)?.url == upper)
     }
 
+    /// `www.github.com` is GitHub's alias for `github.com`. Keyed on the alias,
+    /// a binding would never be queried for status and would not dedupe with
+    /// the same PR found by branch or hook.
+    @Test("parsePRURL(exactly:) reads www.github.com as github.com, keeping the URL verbatim")
+    func normalisesWWWGitHubHost() {
+        let url = "https://www.github.com/acme/api/pull/1"
+        #expect(PRBindingExtractor.parsePRURL(exactly: url)
+                == ParsedPRURL(host: "github.com", owner: "acme", repo: "api", number: 1, url: url))
+        let upper = "https://WWW.GitHub.com/acme/api/pull/2"
+        #expect(PRBindingExtractor.parsePRURL(exactly: upper)?.host == "github.com")
+        // Only the exact alias is folded; another subdomain is its own host.
+        #expect(PRBindingExtractor.parsePRURL(exactly: "https://ghe.github.com/acme/api/pull/3")?.host
+                == "ghe.github.com")
+    }
+
     /// (pinning) The any-host acceptance belongs to the exact-entry parser
     /// only. Hook scraping reads free-form tool output and keeps its
     /// github.com lock.
