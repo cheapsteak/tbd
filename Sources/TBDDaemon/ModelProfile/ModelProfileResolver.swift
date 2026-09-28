@@ -322,7 +322,9 @@ public struct ModelProfileResolver: Sendable {
                     logger.info("balancing found no eligible candidate; falling back to default")
                 }
             } catch {
-                logger.error("candidate source threw; falling back to default: \(error, privacy: .public)")
+                // Either the candidate source or loading the chosen profile
+                // (its keychain read) can throw here; the log names both.
+                logger.error("balancing threw (candidate source or loading the pick); falling back to default: \(error, privacy: .public)")
             }
             // Reaching here means the pick placed nothing; its reservation
             // must not count against the profile.
