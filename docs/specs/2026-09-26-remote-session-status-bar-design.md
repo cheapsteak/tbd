@@ -152,9 +152,15 @@ it. A chip whose status TBD can never read still earns its place: it is the PR's
 link in a stable spot beside the lane, one click from the forge's own view,
 instead of a URL the user has to hunt for in the session's history.
 
-Auto-archive is unchanged. `.provider` bindings feed the existing merged-transition
-rail on the rail's existing rule, like any other binding; arming stays a
-deliberate per-lane gesture.
+`.provider` bindings take part in auto-archive exactly like branch-found ones:
+they feed the existing merged-transition rail, and every non-detached binding must
+be terminal with at least one merged. The rail also requires a merged binding to
+be the lane's own work, and a merged `.provider` binding always is — the provider
+named it in the session's own `meta.prs`, which is an explicit claim of ownership.
+So a lane whose only PR the provider named retires when that PR merges, even with
+no valid live branch or after its agent has moved to another branch, where no
+branch match could establish ownership. Arming stays a deliberate per-lane
+gesture.
 
 No migration is needed: the source is stored as its raw string in an existing
 text column. An older daemon reading a `.provider` row after a downgrade must
