@@ -145,8 +145,12 @@ with that source, on exactly the terms `.branch` binds on:
 
 A binding in another repository gets its status from a lookup keyed by its own
 `(host, owner, repo, number)`, not from the row's repository. When TBD cannot read
-it — no credentials for that host, a repository it cannot see — the chip shows the
-never-observed state rather than disappearing, since the provider did claim it.
+it — no credentials for that host, a repository it cannot see, a forge host such
+as a GitHub Enterprise server that TBD's refresh never queries — the chip shows
+the never-observed state rather than disappearing, since the provider did claim
+it. A chip whose status TBD can never read still earns its place: it is the PR's
+link in a stable spot beside the lane, one click from the forge's own view,
+instead of a URL the user has to hunt for in the session's history.
 
 Auto-archive is unchanged. `.provider` bindings feed the existing merged-transition
 rail on the rail's existing rule, like any other binding; arming stays a
