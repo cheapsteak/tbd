@@ -1068,10 +1068,47 @@ public actor PRStatusManager {
         guard !bindings.isEmpty else { return [:] }
         let cwd = repoPath ?? FileManager.default.currentDirectoryPath
         var result: [UUID: PRBindingObservation] = [:]
-        for group in Self.groupBindingsByRepo(bindings) {
+        let (queryable, unqueryable) = Self.partitionByGitHubQueryability(bindings)
+        for binding in unqueryable {
+            logger.debug("refreshBindings: not querying PR #\(binding.number, privacy: .public) on \(binding.host, privacy: .public) — gh answers for github.com here, where the same owner/repo/number may be a different pull request; it stays unobserved")
+        }
+        for group in Self.groupBindingsByRepo(queryable) {
             result.merge(await refreshBindingGroup(group, repoPath: cwd)) { _, fresh in fresh }
         }
         return result
+    }
+
+    /// Split bindings into the ones this path may query and the GitHub-shaped
+    /// ones on a host other than `github.com`, which it must never query.
+    ///
+    /// The GitHub arm runs `gh api graphql` with no `--hostname`, so it asks
+    /// github.com. A GitHub Enterprise pull request (a provider may name one
+    /// in `meta.prs`) shares its `owner/repo/number` coordinates with whatever
+    /// github.com happens to hold under them — a different pull request, or
+    /// none. Querying it there would write a stranger's status onto the
+    /// binding, and a stranger's MERGED would drive the merge rule and
+    /// auto-archive the worktree. Such a binding therefore gets no
+    /// observation at all: it stays exactly as stored, which for a new one is
+    /// never-observed.
+    ///
+    /// The forge is read from the binding's own URL (`Forge.forURL`): a merge
+    /// request goes to the GitLab arm on its own host as before. An empty host
+    /// is left queryable, the same "unknown is not a mismatch" reading the
+    /// coordinator's host check uses.
+    static func partitionByGitHubQueryability(
+        _ bindings: [PRBinding]
+    ) -> (queryable: [PRBinding], unqueryable: [PRBinding]) {
+        var queryable: [PRBinding] = []
+        var unqueryable: [PRBinding] = []
+        for binding in bindings {
+            let host = binding.host.lowercased()
+            if Forge.forURL(binding.url) == .github, !host.isEmpty, host != "github.com" {
+                unqueryable.append(binding)
+            } else {
+                queryable.append(binding)
+            }
+        }
+        return (queryable, unqueryable)
     }
 
     /// Group bindings by their own `(host, owner, repo)` so each group needs one

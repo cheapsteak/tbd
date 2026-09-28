@@ -37,6 +37,56 @@ struct PRPollRemoteLaneTests {
                  location: .remote(provider: "agentbox", sessionID: sessionID))
     }
 
+    /// Seed the mirror row whose `meta` the poll reads a lane's live branch from.
+    private static func seedMirror(_ db: TBDDatabase, provider: String = "agentbox",
+                                   sessionID: String, meta: [String: String]?) async throws {
+        _ = try await db.remoteSessions.upsertOne(
+            provider: provider,
+            session: RemoteSessionPayload(id: sessionID, state: .running, meta: meta),
+            now: Date())
+    }
+
+    // MARK: - Which branch a row is matched on
+
+    @Test("a remote row whose stored branch is main matches on its live branch")
+    func remoteRowUsesLiveBranch() {
+        let lane = Self.remoteRow(repoID: UUID(), branch: "main", sessionID: "s-1")
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "claude/fix-x"]) == .match("claude/fix-x"))
+    }
+
+    @Test("an absent, blank or invalid live branch skips branch matching, never falling back",
+          arguments: [nil, [:], ["branch": ""], ["branch": "-rf"], ["branch": "a..b"]] as [[String: String]?])
+    func remoteRowWithoutLiveBranchIsBindingsOnly(_ meta: [String: String]?) {
+        let lane = Self.remoteRow(repoID: UUID(), branch: "main", sessionID: "s-1")
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: meta) == .bindingsOnly)
+    }
+
+    @Test("a local row still uses its stored branch, whatever a mirror says")
+    func localRowUsesStoredBranch() {
+        let local = Self.localRow(repoID: UUID(), branch: "tbd/local", path: "/tmp/l")
+        #expect(RPCRouter.pollBranch(for: local, mirrorMeta: ["branch": "other"]) == .match("tbd/local"))
+    }
+
+    /// A landed lane is `.local` with its origin retained, so the mirror still
+    /// has a row for its session. It is a local worktree now.
+    @Test("a landed lane polls on its local stored branch, not the mirror's live one")
+    func landedLaneIsLocal() {
+        var landed = Self.localRow(repoID: UUID(), branch: "claude/landed", path: "/tmp/landed")
+        landed.origin = WorktreeOrigin(provider: "agentbox", sessionID: "s-1")
+        #expect(RPCRouter.pollBranch(for: landed, mirrorMeta: ["branch": "claude/other"]) == .match("claude/landed"))
+    }
+
+    @Test("mirror meta is keyed by provider and session, and a gone row still counts")
+    func mirrorMetaByOriginKeys() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/a"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: nil)
+        #expect(try await db.remoteSessions.markGone(provider: "agentbox", sessionID: "s-a"))
+        let byOrigin = RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list())
+        #expect(byOrigin[WorktreeOrigin(provider: "agentbox", sessionID: "s-a")] == ["branch": "tbd/a"])
+        #expect(byOrigin[WorktreeOrigin(provider: "agentbox", sessionID: "s-b")] == nil)
+    }
+
     // MARK: - Which rows are pollable
 
     /// The fence that this change removes. A remote lane survives
@@ -130,22 +180,37 @@ struct PRPollRemoteLaneTests {
         let local = try await db.worktrees.create(
             repoID: repo.id, name: "local", branch: "tbd/local-lane",
             path: localDir.path, tmuxServer: "tbd-local")
+        // Stored branches are both `main`: a lane's stored branch is identity,
+        // frozen at adoption, and the poll must match on the LIVE branch the
+        // mirror carries instead.
         let laneA = try await db.worktrees.createRemote(
-            repoID: repo.id, name: "lane-a", branch: "tbd/remote-a",
+            repoID: repo.id, name: "lane-a", branch: "main",
             provider: "agentbox", sessionID: "s-a")
         let laneB = try await db.worktrees.createRemote(
-            repoID: repo.id, name: "lane-b", branch: "tbd/remote-b",
+            repoID: repo.id, name: "lane-b", branch: "main",
             provider: "agentbox", sessionID: "s-b")
+        // No mirror row at all: no live branch, so bindings only.
+        let laneC = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-c", branch: "main",
+            provider: "agentbox", sessionID: "s-c")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: ["branch": "tbd/remote-b"])
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s",
             path: tempDir.appendingPathComponent("scratch").path, tmuxServer: "tbd-scratch")
 
         let router = Self.makeRouter(db: db, gh: nil)
         let rows = RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active))
-        let entries = await router.pollEntries(rows, repos: try await db.repos.list())
+        let plan = await router.pollEntries(
+            rows, repos: try await db.repos.list(),
+            mirrorMeta: RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list()))
+        let entries = plan.matched
 
         #expect(!rows.contains { $0.id == scratch.id })
         #expect(entries.count == 3)
+        #expect(!entries.contains { $0.id == laneC.id })
+        #expect(plan.bindingsOnly.map(\.id) == [laneC.id])
+        #expect(plan.bindingsOnly.first?.worktreePath == repoDir.path)
         let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
 
         // The local row is untouched by the change: its own checkout, its own branch.
@@ -153,7 +218,7 @@ struct PRPollRemoteLaneTests {
         #expect(byID[local.id]?.worktreePath == localDir.path)
         #expect(byID[local.id]?.defaultBranch == "main")
 
-        // Each lane carries the REPO's checkout and its OWN branch.
+        // Each lane carries the REPO's checkout and its own LIVE branch.
         #expect(byID[laneA.id]?.branch == "tbd/remote-a")
         #expect(byID[laneA.id]?.worktreePath == repoDir.path)
         #expect(byID[laneA.id]?.defaultBranch == "main")
@@ -178,9 +243,12 @@ struct PRPollRemoteLaneTests {
         let repoID = UUID()
         let lane = Self.remoteRow(repoID: repoID, branch: "tbd/lane", sessionID: "s-1")
 
-        let entries = await router.pollEntries([lane], repos: [])
+        let plan = await router.pollEntries(
+            [lane], repos: [],
+            mirrorMeta: [WorktreeOrigin(provider: "agentbox", sessionID: "s-1"): ["branch": "tbd/lane"]])
 
-        #expect(entries.isEmpty)
+        #expect(plan.matched.isEmpty)
+        #expect(plan.bindingsOnly.isEmpty)
     }
 
     // MARK: - End to end through pr.list
@@ -202,16 +270,20 @@ struct PRPollRemoteLaneTests {
             repoID: repo.id, name: "local", branch: "tbd/local-lane",
             path: localDir.path, tmuxServer: "tbd-local")
         let laneA = try await db.worktrees.createRemote(
-            repoID: repo.id, name: "lane-a", branch: "tbd/remote-a",
+            repoID: repo.id, name: "lane-a", branch: "main",
             provider: "agentbox", sessionID: "s-a")
         let laneB = try await db.worktrees.createRemote(
-            repoID: repo.id, name: "lane-b", branch: "tbd/remote-b",
+            repoID: repo.id, name: "lane-b", branch: "main",
             provider: "agentbox", sessionID: "s-b")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: ["branch": "tbd/remote-b"])
 
+        // `main` answers too, which proves the lanes' stored branch is never asked.
         let gh = RecordingGH(prsByBranch: [
             "tbd/local-lane": 101,
             "tbd/remote-a": 202,
             "tbd/remote-b": 303,
+            "main": 999,
         ])
         let router = Self.makeRouter(db: db, gh: gh)
 
@@ -225,6 +297,7 @@ struct PRPollRemoteLaneTests {
         #expect(result.statuses[local.id]?.number == 101)
         #expect(result.statuses[laneA.id]?.number == 202)
         #expect(result.statuses[laneB.id]?.number == 303)
+        #expect(!result.statuses.values.contains { $0.number == 999 })
 
         // The structural guarantee: the synthetic path never reaches a subprocess.
         let paths = await gh.recordedPaths
@@ -247,10 +320,11 @@ struct PRPollRemoteLaneTests {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let lane = try await db.worktrees.createRemote(
-            repoID: repo.id, name: "lane-a", branch: "tbd/remote-a",
+            repoID: repo.id, name: "lane-a", branch: "main",
             provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
 
-        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202])
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202, "main": 999])
         let router = Self.makeRouter(db: db, gh: gh)
 
         let response = await router.handle(try RPCRequest(
@@ -261,6 +335,182 @@ struct PRPollRemoteLaneTests {
         #expect(result.status?.number == 202)
         #expect(await gh.recordedBranches == ["tbd/remote-a"])
         #expect(Set(await gh.recordedPaths) == [repoDir.path])
+    }
+
+    @Test("pr.refresh on a lane with no live branch makes no attempt and runs no gh")
+    func refreshWithoutLiveBranchMakesNoAttempt() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["repo": "acme/acme-prod"])
+        let gh = RecordingGH(prsByBranch: ["main": 999])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.prRefresh, params: PRRefreshParams(worktreeID: lane.id)))
+        #expect(response.success)
+        let result = try response.decodeResult(PRRefreshResult.self)
+        #expect(result.status == nil)
+        #expect(result.observation == nil)
+        #expect(await gh.recordedPaths.isEmpty)
+    }
+
+    // MARK: - Bindings on remote lanes
+
+    /// Before remote rows resolved their repo through the repo's checkout,
+    /// every bind on a lane deferred, so a lane could hold no binding at all.
+    @Test("a branch-found PR on a remote lane becomes a binding")
+    func remoteLaneBranchMatchBinds() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        let router = Self.makeRouter(db: db, gh: RecordingGH(prsByBranch: ["tbd/remote-a": 202]))
+
+        try await router.runPollPass()
+
+        let bound = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(bound.map(\.number) == [202])
+        #expect(bound.first?.source == .branch)
+    }
+
+    @Test("bindingRepoPath: local row -> own checkout, remote row -> repo checkout")
+    func bindingRepoPathResolution() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/repos/acme", displayName: "acme", defaultBranch: "main")
+        let local = try await db.worktrees.create(repoID: repo.id, name: "l", branch: "b",
+                                                  path: "/repos/acme/wt/l", tmuxServer: "t")
+        let lane = try await db.worktrees.createRemote(repoID: repo.id, name: "r", branch: "main",
+                                                       provider: "agentbox", sessionID: "s")
+        #expect(await RPCRouter.bindingRepoPath(worktreeID: local.id, db: db) == "/repos/acme/wt/l")
+        #expect(await RPCRouter.bindingRepoPath(worktreeID: lane.id, db: db) == "/repos/acme")
+        #expect(await RPCRouter.bindingRepoPath(worktreeID: UUID(), db: db) == nil)
+    }
+
+    /// A pass where every polled row is bindings-only: no row was matched by
+    /// branch, and bound PRs must still refresh — with `gh` run in the repo's
+    /// checkout, never the daemon's own working directory.
+    @Test("a lane with no live branch still refreshes its bindings, in the repo's checkout")
+    func bindingsOnlyLaneRefreshesInRepoCheckout() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, owner: "acme", repo: "acme-prod", number: 202,
+            url: "https://github.com/acme/acme-prod/pull/202", source: .provider))
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        try await router.runPollPass()
+
+        let stored = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(stored.first?.status?.number == 202)
+        let paths = await gh.recordedPaths
+        #expect(!paths.isEmpty)
+        #expect(paths.allSatisfy { $0 == repoDir.path })
+    }
+
+    // MARK: - Provider-named PRs in another repo, and on another host
+
+    /// Pinning: a binding's status is looked up by its OWN owner and name, so
+    /// a provider-named PR in a companion repo is observed there.
+    @Test("a provider PR in another repo is refreshed against that repo")
+    func foreignProviderPRRefreshesByItsOwnIdentity() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, owner: "acme", repo: "acme-web", number: 88,
+            url: "https://github.com/acme/acme-web/pull/88", source: .provider))
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202], numberedOnly: [88: "feature/web"])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        try await router.runPollPass()
+
+        #expect(await gh.recordedRepos.contains("acme/acme-web"))
+        let web = try await db.prBindings.list(worktreeID: lane.id).first { $0.repo == "acme-web" }
+        #expect(web?.status?.number == 88)
+    }
+
+    /// Pinning: a lookup that resolves nothing leaves the binding in place with
+    /// no status, which the app renders as the never-observed chip.
+    @Test("a provider PR whose lookup resolves nothing stays bound and never-observed")
+    func unresolvedProviderPRStaysNeverObserved() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, owner: "acme", repo: "acme-web", number: 88,
+            url: "https://github.com/acme/acme-web/pull/88", source: .provider))
+        let router = Self.makeRouter(db: db, gh: RecordingGH(prsByBranch: ["tbd/remote-a": 202]))
+
+        try await router.runPollPass()
+
+        let web = try await db.prBindings.list(worktreeID: lane.id).first { $0.repo == "acme-web" }
+        #expect(web != nil)
+        #expect(web?.status == nil)
+    }
+
+    /// `gh api graphql` runs with no `--hostname`, so it asks github.com. The
+    /// same owner/repo/number there may be a different pull request — here the
+    /// stub WOULD answer #202 for `acme/acme-prod` — and a stranger's status,
+    /// merged included, must never land on a GitHub Enterprise binding. The
+    /// lane has no live branch, so the binding refresh is the only thing that
+    /// could run a by-number query at all.
+    @Test("a GitHub Enterprise binding is never queried against github.com")
+    func enterpriseBindingIsNeverQueried() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, host: "ghe.acme.example", owner: "acme", repo: "acme-prod",
+            number: 202, url: "https://ghe.acme.example/acme/acme-prod/pull/202", source: .provider))
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        try await router.runPollPass()
+
+        #expect(await gh.numberQueryCount == 0)
+        let stored = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(stored.map(\.number) == [202])
+        #expect(stored.first?.status == nil)
+    }
+
+    @Test("GitHub bindings off github.com are unqueryable; github.com, GitLab and hostless ones are not")
+    func queryabilityPartition() {
+        let wt = UUID()
+        let dotCom = PRBinding(worktreeID: wt, owner: "acme", repo: "api", number: 1,
+                               url: "https://github.com/acme/api/pull/1", source: .branch)
+        let enterprise = PRBinding(worktreeID: wt, host: "ghe.acme.example", owner: "acme", repo: "api",
+                                   number: 2, url: "https://ghe.acme.example/acme/api/pull/2", source: .provider)
+        let gitlab = PRBinding(worktreeID: wt, host: "git.acme.example", owner: "acme", repo: "api",
+                               number: 3, url: "https://git.acme.example/acme/api/-/merge_requests/3",
+                               source: .provider)
+        let hostless = PRBinding(worktreeID: wt, host: "", owner: "acme", repo: "api", number: 4,
+                                 url: "https://github.com/acme/api/pull/4", source: .manual)
+        let split = PRStatusManager.partitionByGitHubQueryability([dotCom, enterprise, gitlab, hostless])
+        #expect(split.queryable.map(\.number) == [1, 3, 4])
+        #expect(split.unqueryable.map(\.number) == [2])
     }
 
     /// The other arm of the same guard, still intact: an id that names no row
@@ -306,14 +556,26 @@ private actor RecordingGH {
     private(set) var recordedPaths: [String] = []
     /// The `branch=` variable of every by-branch refresh query, in order.
     private(set) var recordedBranches: [String] = []
+    /// `owner/name` of every query that bound both variables, in order.
+    private(set) var recordedRepos: [String] = []
+    /// How many by-number (`pullRequest(number:)`) queries ran.
+    private(set) var numberQueryCount = 0
 
-    init(prsByBranch: [String: Int]) {
+    /// - Parameter numberedOnly: PRs that resolve by number (to the given head
+    ///   branch) but are on no branch the poll asks about — a PR in another
+    ///   repository, reached only through its binding.
+    init(prsByBranch: [String: Int], numberedOnly: [Int: String] = [:]) {
         self.prsByBranch = prsByBranch
         for (branch, number) in prsByBranch { branchByNumber[number] = branch }
+        for (number, branch) in numberedOnly { branchByNumber[number] = branch }
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         recordedPaths.append(repoPath)
+        if let owner = args.first(where: { $0.hasPrefix("owner=") })?.dropFirst("owner=".count),
+           let name = args.first(where: { $0.hasPrefix("name=") })?.dropFirst("name=".count) {
+            recordedRepos.append("\(owner)/\(name)")
+        }
         if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         // The aliased branch query the poll issues, checked before the
@@ -333,6 +595,7 @@ private actor RecordingGH {
                 stdout: #"{"data":{"repository":{"pullRequests":{"nodes":[\#(node ?? "")]}}}}"#)
         }
         if query.contains("pullRequest(number:") {
+            numberQueryCount += 1
             let fields = Self.aliasedNumbers(inQuery: query).map { alias, number in
                 let node = branchByNumber[number].map { Self.node(number: number, head: $0) } ?? "null"
                 return "\"\(alias)\": \(node)"
