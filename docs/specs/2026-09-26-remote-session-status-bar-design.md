@@ -144,11 +144,14 @@ with that source, on exactly the terms `.branch` binds on:
   forge queries.
 
 A binding in another repository gets its status from a lookup keyed by its own
-`(host, owner, repo, number)`, not from the row's repository. When TBD cannot read
-it — no credentials for that host, a repository it cannot see, a forge host such
-as a GitHub Enterprise server that TBD's refresh never queries — the chip shows
-the never-observed state rather than disappearing, since the provider did claim
-it. A chip whose status TBD can never read still earns its place: it is the PR's
+`(host, owner, repo, number)`, not from the row's repository, and asked of its own
+host: a GitHub Enterprise pull request is queried against that Enterprise server,
+never against `github.com`, where the same owner, repository and number may name
+a different pull request. When that host cannot answer — no credentials for it,
+unreachable, a repository TBD cannot see — or the host is not a plain hostname
+TBD will pass to `gh`, the chip shows the never-observed state rather than
+disappearing, since the provider did claim it. There is no fallback to another
+host. A chip whose status TBD can never read still earns its place: it is the PR's
 link in a stable spot beside the lane, one click from the forge's own view,
 instead of a URL the user has to hunt for in the session's history.
 
