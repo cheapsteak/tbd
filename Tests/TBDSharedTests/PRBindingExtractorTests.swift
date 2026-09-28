@@ -278,4 +278,43 @@ struct PRBindingExtractorTests {
         #expect(!PRBindingExtractor.isPRCreateCommand("gh mr create"))
         #expect(!PRBindingExtractor.isPRCreateCommand("glab pr create"))
     }
+
+    @Test("parsePRURL(exactly:) accepts only an entry that IS one PR URL")
+    func parsesExactEntryOnly() {
+        #expect(PRBindingExtractor.parsePRURL(exactly: "https://github.com/acme/api/pull/7")?.number == 7)
+        let mr = PRBindingExtractor.parsePRURL(
+            exactly: "https://gitlab.acme.example/acme/platform/api/-/merge_requests/12")
+        #expect(mr?.owner == "acme/platform")   // nested group
+        #expect(mr?.repo == "api")
+        #expect(mr?.host == "gitlab.acme.example")
+        #expect(mr?.number == 12)
+        for junk in ["https://github.com/acme/api/pull/7/", "https://github.com/acme/api/pull/7?x=1",
+                     "https://github.com/acme/api/pull/7#c", "http://github.com/acme/api/pull/7",
+                     "see https://github.com/acme/api/pull/7", "https://github.com/acme/api/pull/7x",
+                     "https://github.com/acme/pull/7", "https://github.com/acme/../pull/7",
+                     "https://ghe.acme.example/acme/sub/api/pull/7"] {
+            #expect(PRBindingExtractor.parsePRURL(exactly: junk) == nil, "\(junk)")
+        }
+    }
+
+    @Test("parsePRURL(exactly:) accepts a GitHub PR URL on any https host")
+    func parsesExactGitHubEnterpriseURL() {
+        let url = "https://ghe.acme.example/acme/api/pull/7"
+        let parsed = PRBindingExtractor.parsePRURL(exactly: url)
+        #expect(parsed == ParsedPRURL(host: "ghe.acme.example", owner: "acme", repo: "api",
+                                      number: 7, url: url))
+        #expect(parsed.map { Forge.forURL($0.url) } == .github)
+        // Hosts compare case-insensitively; the URL itself stays verbatim.
+        let upper = "https://GitHub.com/acme/api/pull/8"
+        #expect(PRBindingExtractor.parsePRURL(exactly: upper)?.host == "github.com")
+        #expect(PRBindingExtractor.parsePRURL(exactly: upper)?.url == upper)
+    }
+
+    /// (pinning) The any-host acceptance belongs to the exact-entry parser
+    /// only. Hook scraping reads free-form tool output and keeps its
+    /// github.com lock.
+    @Test("scanning free text still ignores GitHub-shaped URLs off github.com")
+    func scanningKeepsGitHubHostLock() {
+        #expect(PRBindingExtractor.parsePRURLs(in: "opened https://ghe.acme.example/acme/api/pull/7").isEmpty)
+    }
 }

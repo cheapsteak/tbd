@@ -6,6 +6,7 @@ public enum PRBindingSource: String, Codable, Sendable, CaseIterable {
     case hook       // scraped from a `gh pr create` tool result
     case branch     // matched by head branch against the repo's PRs, whoever opened them
     case manual     // `tbd pr attach`, or seeded from Worktree.prNumber
+    case provider   // named by a remote provider in a session's `meta.prs`
 }
 
 /// A durable statement that a pull request belongs to a worktree.

@@ -45,6 +45,17 @@ public enum PRBindingExtractor {
     private static let gitlabURLPattern =
         #"https://([\w.-]+)/((?:(?!\.{1,2}/)[\w.-]+/)*?(?!\.{1,2}/)[\w.-]+)/(?!\.{1,2}/)([\w.-]+)/-/merge_requests/(\d+)"#
 
+    /// A whole string that IS one GitHub pull-request URL, on any host. Used
+    /// only by `parsePRURL(exactly:)`, for a list a remote provider names in
+    /// `meta.prs`: the contract writes `https://<host>/<owner>/<repo>/pull/<n>`,
+    /// so a GitHub Enterprise host is a real PR there. The scanning pattern
+    /// above keeps its github.com lock, because it reads free-form tool output
+    /// where a `/pull/<n>` path on an arbitrary host is not evidence of a PR.
+    /// Group 1 is the host, 2 the owner, 3 the repo, 4 the number; every
+    /// segment gets the same dot-segment rejection.
+    private static let anyHostGitHubExactPattern =
+        #"\Ahttps://(?!\.{1,2}/)([\w.-]+)/(?!\.{1,2}/)([\w.-]+)/(?!\.{1,2}/)([\w.-]+)/pull/(\d+)\z"#
+
     /// Shell metacharacters that end one command and begin the next. Runs of
     /// them collapse on their own, so `&&`, `||` and `|` need no special case.
     private static let segmentSeparators: Set<Character> = [";", "&", "|", "\n"]
@@ -271,16 +282,61 @@ public enum PRBindingExtractor {
                                number: number,
                                url: ns.substring(with: match.range(at: 0)))
         }
-        collect(gitlabURLPattern, groups: 5) { match, ns in
-            guard let number = Int(ns.substring(with: match.range(at: 4))) else { return nil }
-            return ParsedPRURL(host: ns.substring(with: match.range(at: 1)),
+        collect(gitlabURLPattern, groups: 5) { match, ns in gitLabURL(from: match, in: ns) }
+
+        return out.sorted { $0.location < $1.location }.map(\.parsed)
+    }
+
+    /// A GitLab match's groups as a `ParsedPRURL`: host, namespace path,
+    /// project, number. Shared by the scanner and the exact-entry parser so
+    /// the two cannot read the groups differently.
+    private static func gitLabURL(from match: NSTextCheckingResult, in ns: NSString) -> ParsedPRURL? {
+        guard let number = Int(ns.substring(with: match.range(at: 4))) else { return nil }
+        return ParsedPRURL(host: ns.substring(with: match.range(at: 1)),
+                           owner: ns.substring(with: match.range(at: 2)),
+                           repo: ns.substring(with: match.range(at: 3)),
+                           number: number,
+                           url: ns.substring(with: match.range(at: 0)))
+    }
+
+    /// One whole entry as one PR or MR URL, or nil — the parser for a
+    /// provider-named list (`meta.prs`), where each entry stands alone.
+    ///
+    /// The match must BE the entry: a trailing slash, query, fragment,
+    /// non-https scheme, or surrounding text makes a different string and is
+    /// refused. GitLab merge requests use the scanner's own pattern, anchored.
+    /// GitHub pull requests are accepted on ANY host (`/<owner>/<repo>/pull/<n>`),
+    /// unlike `parsePRURLs(in:)`, whose github.com lock stays in place for hook
+    /// scraping. The host is lowercased, since hosts compare case-insensitively
+    /// and callers compare it against `github.com`; `url` stays verbatim.
+    ///
+    /// The forge is not a field here: `Forge.forURL` reads it from the URL
+    /// (`/-/merge_requests/` is GitLab, anything else GitHub), so a GitHub
+    /// Enterprise URL classifies as `.github` with its own host. A caller that
+    /// can only query github.com must check `host` before querying.
+    public static func parsePRURL(exactly entry: String) -> ParsedPRURL? {
+        let ns = entry as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+
+        if let regex = try? NSRegularExpression(pattern: #"\A"# + gitlabURLPattern + #"\z"#),
+           let match = regex.firstMatch(in: entry, range: whole),
+           match.numberOfRanges == 5,
+           let parsed = gitLabURL(from: match, in: ns) {
+            return ParsedPRURL(host: parsed.host.lowercased(), owner: parsed.owner,
+                               repo: parsed.repo, number: parsed.number, url: entry)
+        }
+
+        if let regex = try? NSRegularExpression(pattern: anyHostGitHubExactPattern),
+           let match = regex.firstMatch(in: entry, range: whole),
+           match.numberOfRanges == 5,
+           let number = Int(ns.substring(with: match.range(at: 4))) {
+            return ParsedPRURL(host: ns.substring(with: match.range(at: 1)).lowercased(),
                                owner: ns.substring(with: match.range(at: 2)),
                                repo: ns.substring(with: match.range(at: 3)),
                                number: number,
-                               url: ns.substring(with: match.range(at: 0)))
+                               url: entry)
         }
-
-        return out.sorted { $0.location < $1.location }.map(\.parsed)
+        return nil
     }
 
     /// Extract bindings from a raw hook payload. Returns empty for anything
