@@ -1068,47 +1068,39 @@ public actor PRStatusManager {
         guard !bindings.isEmpty else { return [:] }
         let cwd = repoPath ?? FileManager.default.currentDirectoryPath
         var result: [UUID: PRBindingObservation] = [:]
-        let (queryable, unqueryable) = Self.partitionByGitHubQueryability(bindings)
-        for binding in unqueryable {
-            logger.debug("refreshBindings: not querying PR #\(binding.number, privacy: .public) on \(binding.host, privacy: .public) — gh answers for github.com here, where the same owner/repo/number may be a different pull request; it stays unobserved")
-        }
-        for group in Self.groupBindingsByRepo(queryable) {
+        for group in Self.groupBindingsByRepo(bindings) {
             result.merge(await refreshBindingGroup(group, repoPath: cwd)) { _, fresh in fresh }
         }
         return result
     }
 
-    /// Split bindings into the ones this path may query and the GitHub-shaped
-    /// ones on a host other than `github.com`, which it must never query.
+    /// The `gh` arguments that aim a GitHub query at a binding's OWN host, or
+    /// nil when the host cannot be put on a command line safely.
     ///
-    /// The GitHub arm runs `gh api graphql` with no `--hostname`, so it asks
-    /// github.com. A GitHub Enterprise pull request (a provider may name one
-    /// in `meta.prs`) shares its `owner/repo/number` coordinates with whatever
-    /// github.com happens to hold under them — a different pull request, or
-    /// none. Querying it there would write a stranger's status onto the
-    /// binding, and a stranger's MERGED would drive the merge rule and
-    /// auto-archive the worktree. Such a binding therefore gets no
-    /// observation at all: it stays exactly as stored, which for a new one is
-    /// never-observed.
+    /// `github.com` (and an absent host) keeps the invocation this path has
+    /// always used, with no `--hostname`. Every other host is named explicitly:
+    /// without it `gh` answers from its default host, where the same
+    /// `owner/repo/number` may be a different pull request — or none — and a
+    /// stranger's MERGED would drive the merge rule and auto-archive the
+    /// worktree. A GitHub Enterprise pull request (a provider may name one in
+    /// `meta.prs`, and a bare-number attach on an Enterprise checkout composes
+    /// one) is therefore only ever asked of its own host; if that host cannot
+    /// answer, the binding simply stays unobserved.
     ///
-    /// The forge is read from the binding's own URL (`Forge.forURL`): a merge
-    /// request goes to the GitLab arm on its own host as before. An empty host
-    /// is left queryable, the same "unknown is not a mismatch" reading the
-    /// coordinator's host check uses.
-    static func partitionByGitHubQueryability(
-        _ bindings: [PRBinding]
-    ) -> (queryable: [PRBinding], unqueryable: [PRBinding]) {
-        var queryable: [PRBinding] = []
-        var unqueryable: [PRBinding] = []
-        for binding in bindings {
-            let host = binding.host.lowercased()
-            if Forge.forURL(binding.url) == .github, !host.isEmpty, host != "github.com" {
-                unqueryable.append(binding)
-            } else {
-                queryable.append(binding)
-            }
+    /// The host reaches argv from a provider-supplied URL, so it must be a
+    /// plain hostname — letters, digits, `.` and `-`, not starting with `-`,
+    /// with an optional numeric port — or nothing is run at all.
+    static func ghHostArguments(forBindingHost host: String) -> [String]? {
+        let host = host.lowercased()
+        if host.isEmpty || host == "github.com" { return [] }
+        let parts = host.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let name = parts.first, !name.isEmpty, name.first != "-",
+              name.allSatisfy({ ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "." || $0 == "-" })
+        else { return nil }
+        if parts.count == 2 {
+            guard !parts[1].isEmpty, parts[1].allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
         }
-        return (queryable, unqueryable)
+        return ["--hostname", host]
     }
 
     /// Group bindings by their own `(host, owner, repo)` so each group needs one
@@ -1144,7 +1136,8 @@ public actor PRStatusManager {
     /// `group.host` chooses the forge. `groupBindingsByRepo` already keys on it,
     /// so a group is one repo on one host and the whole group takes one path:
     /// a GitLab host goes to `refreshGitLabBindingGroup`, everything else stays
-    /// on `gh`, whose auth is host-scoped and therefore needs no host argument.
+    /// on `gh`, aimed at the group's own host by `ghHostArguments` (github.com
+    /// keeps the default-host invocation).
     private nonisolated func refreshBindingGroup(
         _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
         repoPath: String
@@ -1152,12 +1145,17 @@ public actor PRStatusManager {
         if await isGitLabHost(group.host, repoPath: repoPath) {
             return await refreshGitLabBindingGroup(group, repoPath: repoPath)
         }
+        // Asked of the group's own host, never silently of github.com — see
+        // `ghHostArguments`. An unusable host observes nothing.
+        guard let hostArguments = Self.ghHostArguments(forBindingHost: group.host) else {
+            logger.debug("refreshBindings: not querying \(group.owner, privacy: .public)/\(group.name, privacy: .public): host \(group.host, privacy: .public) is not a plain hostname; its bindings stay unobserved")
+            return [:]
+        }
         let aliased = group.bindings.enumerated().map {
             (alias: "pr\($0.offset)", bindingID: $0.element.id, number: $0.element.number)
         }
         let query = Self.numberedPRQuery(aliases: aliased.map { ($0.alias, $0.number) })
-        let args = [
-            "api", "graphql",
+        let args = ["api", "graphql"] + hostArguments + [
             "-f", "query=\(query)",
             "-f", "owner=\(group.owner)",
             "-f", "name=\(group.name)"
@@ -1188,7 +1186,8 @@ public actor PRStatusManager {
                 } else {
                     taskGroup.addTask {
                         (bindingID, await self.fetchCheckSignals(url: node.url, number: node.number,
-                                                                 repoPath: repoPath))
+                                                                 repoPath: repoPath,
+                                                                 hostArguments: hostArguments))
                     }
                 }
             }
@@ -3577,13 +3576,17 @@ public actor PRStatusManager {
     /// One combined GraphQL round trip for a PR's check signals.
     /// Returns nil on any failure (gh missing, non-zero exit, parse error) — callers keep
     /// the previous cached status rather than guessing.
-    private nonisolated func fetchCheckSignals(url: String, number: Int, repoPath: String) async -> (failing: Bool, pending: Bool)? {
+    ///
+    /// `hostArguments` aims the query at the PR's own host (`ghHostArguments`);
+    /// empty keeps the default-host invocation every github.com caller uses.
+    private nonisolated func fetchCheckSignals(url: String, number: Int, repoPath: String,
+                                               hostArguments: [String] = []) async -> (failing: Bool, pending: Bool)? {
         guard let ownerRepo = Self.parseOwnerRepo(fromURL: url) else {
             logger.debug("Cannot parse owner/repo from PR URL \(url, privacy: .public)")
             return nil
         }
         let query = Self.prCheckQuery(owner: ownerRepo.owner, name: ownerRepo.name, number: number)
-        let args = ["api", "graphql", "-f", "query=\(query)"]
+        let args = ["api", "graphql"] + hostArguments + ["-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
               let data = Self.graphQLOutputData(stdout: result.stdout),

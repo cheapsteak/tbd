@@ -33,6 +33,9 @@ struct PRCommandsTests {
         #expect(PRCommand.parseReference("412")?.number == 412)
         #expect(PRCommand.parseReference("#412")?.number == 412)
         #expect(PRCommand.parseReference("not-a-pr") == nil)
+        let enterprise = PRCommand.parseReference("https://ghe.acme.example/acme/acme-web/pull/88")
+        #expect(enterprise?.host == "ghe.acme.example")
+        #expect(enterprise?.url == "https://ghe.acme.example/acme/acme-web/pull/88")
     }
 
     @Test("list renders one line per binding with state and branch")

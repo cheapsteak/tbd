@@ -330,15 +330,51 @@ struct PRBindingRPCTests {
     /// and an unrecoverable one when it creates one: an attach would bind this
     /// repo's #412 in place of the #412 the caller named on some other host,
     /// silently and with no error.
-    @Test("pr.attach does not fall through from an unparseable url to the number")
+    ///
+    /// Attach reads a whole URL exactly, so this one parses as the pull request
+    /// it names — on its own host — and the coordinator refuses it as another
+    /// host's rather than binding this repo's #412.
+    @Test("pr.attach does not fall through from a foreign url to the number")
     func attachDoesNotFallThroughToNumber() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
 
+        let attach = try await harness.attach(
+            url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+        #expect(attach.outcome == "rejectedWrongRepo")
+        #expect(attach.detail == "git.acme-corp.example/acme/acme-prod")
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    @Test("pr.attach of an unparseable url with a number is still an error")
+    func attachUnparseableURLIsAnError() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         await #expect(throws: (any Error).self) {
-            try await harness.attach(
-                url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+            try await harness.attach(url: "not a pr url at all", number: 412)
         }
         #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    /// The scanner is locked to github.com, so before attach read whole URLs
+    /// exactly an Enterprise URL was "unresolvable": a detached Enterprise PR a
+    /// provider had named could never be brought back.
+    @Test("pr.attach of an Enterprise URL binds on its checkout and revives a detached provider PR")
+    func attachEnterpriseURL() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "ghe.acme.example"))
+        let own = try await harness.attach(url: "https://ghe.acme.example/acme/acme-prod/pull/7")
+        #expect(own.outcome == "bound")
+        #expect(own.binding?.host == "ghe.acme.example")
+
+        // A provider-named PR in another repository, detached by the user.
+        let foreignURL = "https://ghe.acme.example/acme/acme-web/pull/88"
+        let foreign = try #require(PRBindingExtractor.parsePRURL(exactly: foreignURL))
+        _ = await harness.router.prBindingCoordinator.bind(
+            worktreeID: harness.worktreeID, parsed: foreign, source: .provider)
+        #expect(try await harness.detach(url: foreignURL))
+        #expect(try await harness.bindings().bindings.map(\.number) == [7])
+
+        let revived = try await harness.attach(url: foreignURL)
+        #expect(revived.outcome == "bound")
+        #expect(try await harness.bindings().bindings.map(\.number).sorted() == [7, 88])
     }
 
     @Test("pr.attach reports a wrong-repo rejection instead of binding")

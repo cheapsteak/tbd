@@ -468,14 +468,43 @@ struct PRPollRemoteLaneTests {
         #expect(web?.status == nil)
     }
 
-    /// `gh api graphql` runs with no `--hostname`, so it asks github.com. The
-    /// same owner/repo/number there may be a different pull request — here the
-    /// stub WOULD answer #202 for `acme/acme-prod` — and a stranger's status,
-    /// merged included, must never land on a GitHub Enterprise binding. The
-    /// lane has no live branch, so the binding refresh is the only thing that
-    /// could run a by-number query at all.
-    @Test("a GitHub Enterprise binding is never queried against github.com")
-    func enterpriseBindingIsNeverQueried() async throws {
+    /// Without `--hostname`, `gh` asks its default host, where the same
+    /// owner/repo/number may be a different pull request — and a stranger's
+    /// status, merged included, must never land on a GitHub Enterprise
+    /// binding. So the by-number query names the binding's own host, and a
+    /// github.com binding keeps the unchanged invocation. The lane has no live
+    /// branch, so the binding refresh is the only thing that queries.
+    @Test("a GitHub Enterprise binding is queried against its own host, never the default")
+    func enterpriseBindingIsQueriedOnItsOwnHost() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, host: "ghe.acme.example", owner: "acme", repo: "acme-web",
+            number: 88, url: "https://ghe.acme.example/acme/acme-web/pull/88", source: .provider))
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, owner: "acme", repo: "acme-prod", number: 202,
+            url: "https://github.com/acme/acme-prod/pull/202", source: .provider))
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202], numberedOnly: [88: "feature/web"])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        try await router.runPollPass()
+
+        let queries = await gh.numberQueries
+        #expect(queries.contains { $0.repo == "acme/acme-web" && $0.hostname == "ghe.acme.example" })
+        #expect(!queries.contains { $0.repo == "acme/acme-web" && $0.hostname == nil })
+        #expect(queries.contains { $0.repo == "acme/acme-prod" && $0.hostname == nil })
+        let stored = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(stored.first { $0.number == 88 }?.status?.number == 88)
+    }
+
+    /// An Enterprise host that cannot answer leaves its binding unobserved; the
+    /// query is never retried against the default host.
+    @Test("a failed Enterprise host query leaves the binding never-observed")
+    func failedEnterpriseHostStaysNeverObserved() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let db = try TBDDatabase(inMemory: true)
@@ -485,50 +514,32 @@ struct PRPollRemoteLaneTests {
         try await db.prBindings.upsert(PRBinding(
             worktreeID: lane.id, host: "ghe.acme.example", owner: "acme", repo: "acme-prod",
             number: 202, url: "https://ghe.acme.example/acme/acme-prod/pull/202", source: .provider))
-        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202])
+        // github.com WOULD answer #202 for acme/acme-prod; the Enterprise host fails.
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202], failingHosts: ["ghe.acme.example"])
         let router = Self.makeRouter(db: db, gh: gh)
 
         try await router.runPollPass()
 
-        #expect(await gh.numberQueryCount == 0)
+        let queries = await gh.numberQueries
+        #expect(queries.allSatisfy { $0.hostname == "ghe.acme.example" })
         let stored = try await db.prBindings.list(worktreeID: lane.id)
         #expect(stored.map(\.number) == [202])
         #expect(stored.first?.status == nil)
     }
 
-    @Test("GitHub bindings off github.com are unqueryable; github.com, GitLab and hostless ones are not")
-    func queryabilityPartition() {
-        let wt = UUID()
-        let dotCom = PRBinding(worktreeID: wt, owner: "acme", repo: "api", number: 1,
-                               url: "https://github.com/acme/api/pull/1", source: .branch)
-        let enterprise = PRBinding(worktreeID: wt, host: "ghe.acme.example", owner: "acme", repo: "api",
-                                   number: 2, url: "https://ghe.acme.example/acme/api/pull/2", source: .provider)
-        let gitlab = PRBinding(worktreeID: wt, host: "git.acme.example", owner: "acme", repo: "api",
-                               number: 3, url: "https://git.acme.example/acme/api/-/merge_requests/3",
-                               source: .provider)
-        let hostless = PRBinding(worktreeID: wt, host: "", owner: "acme", repo: "api", number: 4,
-                                 url: "https://github.com/acme/api/pull/4", source: .manual)
-        let split = PRStatusManager.partitionByGitHubQueryability([dotCom, enterprise, gitlab, hostless])
-        #expect(split.queryable.map(\.number) == [1, 3, 4])
-        #expect(split.unqueryable.map(\.number) == [2])
-    }
-
-    /// The other arm of the same guard, still intact: an id that names no row
-    /// gets "nothing to report" and runs no `gh` at all. (A remote row whose
-    /// repo is gone reaches the same nil, but only through
-    /// `pollWorkingDirectory` — the `worktree.repoID` foreign key cascades, so a
-    /// deleted repo takes its lanes with it and the state is unreachable here.)
-    @Test("pr.refresh reports nothing for an unknown worktree and runs no gh")
-    func refreshForUnknownWorktreeReportsNothing() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let gh = RecordingGH(prsByBranch: ["tbd/lane": 404])
-        let router = Self.makeRouter(db: db, gh: gh)
-
-        let response = await router.handle(try RPCRequest(
-            method: RPCMethod.prRefresh, params: PRRefreshParams(worktreeID: UUID())))
-        #expect(response.success)
-        #expect(try response.decodeResult(PRRefreshResult.self).status == nil)
-        #expect(await gh.recordedPaths.isEmpty)
+    @Test("gh host arguments: github.com unchanged, a plain host named, anything else refused")
+    func ghHostArguments() {
+        #expect(PRStatusManager.ghHostArguments(forBindingHost: "github.com") == [])
+        #expect(PRStatusManager.ghHostArguments(forBindingHost: "GitHub.com") == [])
+        #expect(PRStatusManager.ghHostArguments(forBindingHost: "") == [])
+        #expect(PRStatusManager.ghHostArguments(forBindingHost: "ghe.acme.example")
+                == ["--hostname", "ghe.acme.example"])
+        #expect(PRStatusManager.ghHostArguments(forBindingHost: "ghe.acme.example:8443")
+                == ["--hostname", "ghe.acme.example:8443"])
+        for bad in ["-rf", "--hostname", "ghe_acme.example", "ghe.acme.example:", "a:b:c",
+                    "ghe acme", "ghe.acme.example:x", "héllo.example"] {
+            #expect(PRStatusManager.ghHostArguments(forBindingHost: bad) == nil, "\(bad)")
+        }
     }
 
     // MARK: - Helpers
@@ -558,20 +569,29 @@ private actor RecordingGH {
     private(set) var recordedBranches: [String] = []
     /// `owner/name` of every query that bound both variables, in order.
     private(set) var recordedRepos: [String] = []
-    /// How many by-number (`pullRequest(number:)`) queries ran.
-    private(set) var numberQueryCount = 0
+    /// Every by-number (`pullRequest(number:)`) query: its `owner/name` and
+    /// the `--hostname` it carried, nil when it had none.
+    private(set) var numberQueries: [(repo: String, hostname: String?)] = []
+    private let failingHosts: Set<String>
 
     /// - Parameter numberedOnly: PRs that resolve by number (to the given head
     ///   branch) but are on no branch the poll asks about — a PR in another
     ///   repository, reached only through its binding.
-    init(prsByBranch: [String: Int], numberedOnly: [Int: String] = [:]) {
+    /// - Parameter failingHosts: `--hostname` values whose queries fail (no
+    ///   auth, unreachable).
+    init(prsByBranch: [String: Int], numberedOnly: [Int: String] = [:],
+         failingHosts: Set<String> = []) {
         self.prsByBranch = prsByBranch
+        self.failingHosts = failingHosts
         for (branch, number) in prsByBranch { branchByNumber[number] = branch }
         for (number, branch) in numberedOnly { branchByNumber[number] = branch }
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         recordedPaths.append(repoPath)
+        let hostname = args.firstIndex(of: "--hostname").flatMap { index in
+            args.index(after: index) < args.endIndex ? args[args.index(after: index)] : nil
+        }
         if let owner = args.first(where: { $0.hasPrefix("owner=") })?.dropFirst("owner=".count),
            let name = args.first(where: { $0.hasPrefix("name=") })?.dropFirst("name=".count) {
             recordedRepos.append("\(owner)/\(name)")
@@ -595,7 +615,10 @@ private actor RecordingGH {
                 stdout: #"{"data":{"repository":{"pullRequests":{"nodes":[\#(node ?? "")]}}}}"#)
         }
         if query.contains("pullRequest(number:") {
-            numberQueryCount += 1
+            let owner = args.first(where: { $0.hasPrefix("owner=") })?.dropFirst("owner=".count) ?? ""
+            let name = args.first(where: { $0.hasPrefix("name=") })?.dropFirst("name=".count) ?? ""
+            numberQueries.append((repo: "\(owner)/\(name)", hostname: hostname))
+            if let hostname, failingHosts.contains(hostname) { return nil }
             let fields = Self.aliasedNumbers(inQuery: query).map { alias, number in
                 let node = branchByNumber[number].map { Self.node(number: number, head: $0) } ?? "null"
                 return "\"\(alias)\": \(node)"

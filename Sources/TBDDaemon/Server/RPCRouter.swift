@@ -1714,9 +1714,26 @@ public final class RPCRouter: Sendable {
     /// different pull request, bound with no error. Removing a wrong
     /// association is recoverable; creating one quietly is the failure the
     /// wrong-repo guard exists to prevent, so attach keeps the strict form.
+    ///
+    /// **Attach also reads a whole URL exactly**, with the parser a provider's
+    /// `meta.prs` goes through (`parsePRURL(exactly:)`), which accepts a GitHub
+    /// pull request on any host. That is what lets `tbd pr attach <Enterprise
+    /// URL>` revive a detached Enterprise PR, and bind one on an Enterprise
+    /// checkout; the coordinator's own-repo and host check still decides every
+    /// new binding. Detach reads a URL exactly only when this worktree already
+    /// holds a row for that identity — an Enterprise chip's own binding — so
+    /// every other detach keeps the scanner and its number fallthrough for
+    /// synthetic chips exactly as before.
     private func resolvePRRef(_ params: PRBindingRefParams,
                               numberFallback: Bool = false) async -> PRRefResolution {
         if let url = params.url, !url.isEmpty {
+            if let exact = PRBindingExtractor.parsePRURL(
+                exactly: url.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                if !numberFallback { return .resolved(exact) }
+                if await worktreeHoldsRow(worktreeID: params.worktreeID, for: exact) {
+                    return .resolved(exact)
+                }
+            }
             if let parsed = PRBindingExtractor.parsePRURLs(in: url).first {
                 return .resolved(parsed)
             }
@@ -1727,6 +1744,17 @@ public final class RPCRouter: Sendable {
             return .unknownRepo
         }
         return .resolved(parsed)
+    }
+
+    /// Whether this worktree has a binding row, live or tombstoned, for the
+    /// PR `parsed` names.
+    private func worktreeHoldsRow(worktreeID: UUID, for parsed: ParsedPRURL) async -> Bool {
+        let key = PRBinding(worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
+                            repo: parsed.repo, number: parsed.number, url: parsed.url,
+                            source: .manual).identityKey
+        guard let rows = try? await db.prBindings.list(worktreeID: worktreeID, includeDetached: true)
+        else { return false }
+        return rows.contains { $0.identityKey == key }
     }
 
     /// A bare PR or MR number as a `ParsedPRURL` in the worktree's own repo.
