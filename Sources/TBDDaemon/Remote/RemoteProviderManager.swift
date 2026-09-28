@@ -37,6 +37,11 @@ public actor RemoteProviderManager {
     /// than "the flag is off": it means no bridge can be built at all, so the
     /// gate below is never even consulted.
     private let peerBridging: PeerBridgeWiring?
+    /// Binds the PRs a session names in `meta.prs` after adoption, at both
+    /// convergence points (`apply` and `applyUpsert`). Installed after the
+    /// RPC router exists, because the router owns the binding coordinator;
+    /// nil in fixtures that do not exercise it, where naming PRs does nothing.
+    private var providerPRBinder: ProviderPRBinder?
     static let pollInterval: TimeInterval = 60
     /// The capability a provider must declare in `describe` before TBD opens a
     /// `messages` stream against it.
@@ -568,6 +573,9 @@ public actor RemoteProviderManager {
         // authoritative about presence, so a session it sighted is adopted.
         broadcastAdoptions(await adopter.adopt(sessions: sightings, provider: provider))
         // After adoption, never before: a session first sighted in this very
+        // snapshot binds its named PRs to the row adoption just minted.
+        await providerPRBinder?.bindNamedPRs(sessions: sightings, provider: provider)
+        // After adoption, never before: a session first sighted in this very
         // snapshot already reporting `archived: true` must be filed on the
         // row adoption just minted, not skipped for lack of one.
         //
@@ -654,6 +662,7 @@ public actor RemoteProviderManager {
         broadcastAdoptions(
             await adopter.adopt(
                 session: session, provider: provider, parentOverride: parentWorktreeID))
+        await providerPRBinder?.bindNamedPRs(sessions: [session], provider: provider)
         await syncFilingDecisions(
             sessions: [session], provider: provider,
             requestStartedAt: arrivedAt, now: arrivedAt)
@@ -668,6 +677,13 @@ public actor RemoteProviderManager {
                         kind: session.agentState.rawValue, reason: session.agentStateReason,
                         exitCode: session.exitCode)))
         }
+    }
+
+    /// Install (or clear) the binder for provider-named PRs. Called once at
+    /// boot, after the RPC router is built and before `start()`, so no
+    /// snapshot is applied without it.
+    func setProviderPRBinder(_ binder: ProviderPRBinder?) {
+        providerPRBinder = binder
     }
 
     /// Tell subscribers what adoption changed. Both halves reuse the delta a
