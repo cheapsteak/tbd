@@ -166,6 +166,18 @@ public actor PRStatusManager {
     /// behind its back would spawn `glab auth status` from a unit test.
     private let gitLabHostResolver: GitLabHostResolver?
 
+    /// Non-github.com hosts `gh` may be aimed at, stated outright. Tests pass
+    /// the set directly so `gh auth status` stays out of the loop; production
+    /// leaves it empty and lets `gitHubHostResolver` answer.
+    private let gitHubHosts: Set<String>
+
+    /// Production's answer to "does `gh` hold a login for this host?". A
+    /// binding's host is provider-supplied, and `gh --hostname` sends a
+    /// credential to it, so only hosts on this list are ever queried — see
+    /// `GitHubHostResolver`. Nil in the injecting init, for the same reason
+    /// `gitLabHostResolver` is.
+    private let gitHubHostResolver: GitHubHostResolver?
+
     /// Single-flight admission for the detached GitLab mergeability recheck,
     /// keyed by the project it is issued against.
     ///
@@ -272,14 +284,21 @@ public actor PRStatusManager {
         self.gitLabHostResolver = GitLabHostResolver(glRunner: { args, repoPath in
             await PRStatusManager.runGlab(args: args, repoPath: repoPath, clock: clock)
         }, now: now)
+        self.gitHubHosts = []
+        self.gitHubHostResolver = GitHubHostResolver(ghRunner: { args, repoPath in
+            await PRStatusManager.runGh(args: args, repoPath: repoPath, clock: clock)
+        }, now: now)
         self.now = now
     }
 
     /// `glRunner` and `gitLabHosts` are defaulted so every existing call site
-    /// stays a GitHub-only manager that can never spawn `glab`.
+    /// stays a GitHub-only manager that can never spawn `glab`. `gitHubHosts`
+    /// names the non-github.com hosts `gh` is authenticated to; defaulted
+    /// empty, so only github.com is ever queried unless a test says otherwise.
     init(ghRunner: @escaping GHRunner,
          glRunner: GLRunner? = nil,
          gitLabHosts: Set<String> = [],
+         gitHubHosts: Set<String> = [],
          remoteURLReader: @escaping RemoteURLReader = { _ in nil },
          now: @escaping @Sendable () -> Date = { Date() },
          clock: any Clock<Duration> = ContinuousClock()) {
@@ -288,6 +307,8 @@ public actor PRStatusManager {
         self.glRunner = glRunner
         self.gitLabHosts = Set(gitLabHosts.map { $0.lowercased() })
         self.gitLabHostResolver = nil
+        self.gitHubHosts = Set(gitHubHosts.map { $0.lowercased() })
+        self.gitHubHostResolver = nil
         self.remoteURLReader = remoteURLReader
         self.now = now
     }
@@ -422,6 +443,18 @@ public actor PRStatusManager {
         if gitLabHosts.contains(host.lowercased()) { return true }
         guard let gitLabHostResolver else { return false }
         return await gitLabHostResolver.isGitLabHost(host, repoPath: repoPath)
+    }
+
+    /// Whether `gh` may be aimed at this host: github.com always, any other
+    /// host only if `gh` already holds a login for it. An injected set is the
+    /// whole answer when the injecting init was used; production reads
+    /// `gh auth status` through `gitHubHostResolver` (cached).
+    nonisolated func isGitHubAuthenticatedHost(_ host: String, repoPath: String) async -> Bool {
+        let normalized = host.lowercased()
+        if normalized.isEmpty || normalized == "github.com" { return true }
+        if gitHubHosts.contains(normalized) { return true }
+        guard let gitHubHostResolver else { return false }
+        return await gitHubHostResolver.isAuthenticatedHost(normalized, repoPath: repoPath)
     }
 
     /// The credential refusal last observed for a host, or nil if its most
@@ -1089,7 +1122,10 @@ public actor PRStatusManager {
     ///
     /// The host reaches argv from a provider-supplied URL, so it must be a
     /// plain hostname — letters, digits, `.` and `-`, not starting with `-`,
-    /// with an optional numeric port — or nothing is run at all.
+    /// with an optional numeric port — or nothing is run at all. Shape alone
+    /// is not sufficient: `gh` sends a credential to the host it is aimed at,
+    /// so the caller must also confirm `gh` is authenticated to it
+    /// (`isGitHubAuthenticatedHost`).
     static func ghHostArguments(forBindingHost host: String) -> [String]? {
         let host = host.lowercased()
         if host.isEmpty || host == "github.com" { return [] }
@@ -1149,6 +1185,15 @@ public actor PRStatusManager {
         // `ghHostArguments`. An unusable host observes nothing.
         guard let hostArguments = Self.ghHostArguments(forBindingHost: group.host) else {
             logger.debug("refreshBindings: not querying \(group.owner, privacy: .public)/\(group.name, privacy: .public): host \(group.host, privacy: .public) is not a plain hostname; its bindings stay unobserved")
+            return [:]
+        }
+        // The host is provider-supplied and `gh --hostname` sends a credential
+        // to it (GH_ENTERPRISE_TOKEN for any non-github.com host), so only a
+        // host `gh` is already logged in to is ever asked. This also catches a
+        // GitLab-shaped URL on a host `glab` does not know: it is not on gh's
+        // list either, so it runs nothing.
+        guard await isGitHubAuthenticatedHost(group.host, repoPath: repoPath) else {
+            logger.debug("refreshBindings: not querying \(group.owner, privacy: .public)/\(group.name, privacy: .public): gh is not authenticated to host \(group.host, privacy: .public); its bindings stay unobserved")
             return [:]
         }
         let aliased = group.bindings.enumerated().map {
@@ -3665,6 +3710,17 @@ public actor PRStatusManager {
                 return nil
             }
         }
+    }
+
+    /// The real `gh` subprocess, for `GitHubHostResolver`, which is handed it
+    /// while the manager is still being initialized.
+    private static func runGh(args: [String], repoPath: String,
+                              clock: any Clock<Duration> = ContinuousClock()) async -> GHCommandResult? {
+        guard let ghPath = resolvedGHPath else {
+            logger.debug("gh CLI not found in PATH")
+            return nil
+        }
+        return await runCLI(executable: ghPath, args: args, repoPath: repoPath, clock: clock)
     }
 
     /// The real `glab` subprocess. Static because `GitLabHostResolver` is handed

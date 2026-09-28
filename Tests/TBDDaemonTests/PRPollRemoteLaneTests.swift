@@ -489,7 +489,7 @@ struct PRPollRemoteLaneTests {
             worktreeID: lane.id, owner: "acme", repo: "acme-prod", number: 202,
             url: "https://github.com/acme/acme-prod/pull/202", source: .provider))
         let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202], numberedOnly: [88: "feature/web"])
-        let router = Self.makeRouter(db: db, gh: gh)
+        let router = Self.makeRouter(db: db, gh: gh, gitHubHosts: ["ghe.acme.example"])
 
         try await router.runPollPass()
 
@@ -516,7 +516,7 @@ struct PRPollRemoteLaneTests {
             number: 202, url: "https://ghe.acme.example/acme/acme-prod/pull/202", source: .provider))
         // github.com WOULD answer #202 for acme/acme-prod; the Enterprise host fails.
         let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 202], failingHosts: ["ghe.acme.example"])
-        let router = Self.makeRouter(db: db, gh: gh)
+        let router = Self.makeRouter(db: db, gh: gh, gitHubHosts: ["ghe.acme.example"])
 
         try await router.runPollPass()
 
@@ -524,6 +524,64 @@ struct PRPollRemoteLaneTests {
         #expect(queries.allSatisfy { $0.hostname == "ghe.acme.example" })
         let stored = try await db.prBindings.list(worktreeID: lane.id)
         #expect(stored.map(\.number) == [202])
+        #expect(stored.first?.status == nil)
+    }
+
+    /// A provider-named URL chooses the host, and `gh --hostname <host>` sends
+    /// a credential (GH_ENTERPRISE_TOKEN) to it. A host `gh` is not logged in
+    /// to must therefore run nothing at all — not a query that fails, no
+    /// invocation — and its binding stays never-observed.
+    @Test("a binding on a host gh is not authenticated to issues no gh invocation")
+    func unauthenticatedHostIssuesNoGH() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, host: "evil.example", owner: "acme", repo: "acme-prod",
+            number: 1, url: "https://evil.example/acme/acme-prod/pull/1", source: .provider))
+        // Authenticated to a DIFFERENT Enterprise host: the list is consulted,
+        // and evil.example is not on it.
+        let gh = RecordingGH(prsByBranch: ["tbd/remote-a": 1])
+        let router = Self.makeRouter(db: db, gh: gh, gitHubHosts: ["ghe.acme.example"])
+
+        try await router.runPollPass()
+
+        #expect(await gh.numberQueries.isEmpty)
+        #expect(!(await gh.recordedArgs).contains { argv in argv.contains { $0.contains("evil.example") } })
+        let stored = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(stored.map(\.number) == [1])
+        #expect(stored.first?.status == nil)
+    }
+
+    /// A GitLab-shaped URL whose host `glab` is not configured for is not
+    /// GitLab to TBD — and must not fall through to `gh` either, which would
+    /// send a GitHub credential to it. Neither CLI runs.
+    @Test("a GitLab-shaped binding on an unconfigured host issues neither glab nor gh")
+    func unconfiguredGitLabHostIssuesNeitherCLI() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await db.prBindings.upsert(PRBinding(
+            worktreeID: lane.id, host: "gitlab.evil.example", owner: "acme", repo: "acme-prod",
+            number: 3, url: "https://gitlab.evil.example/acme/acme-prod/-/merge_requests/3",
+            source: .provider))
+        let gh = RecordingGH(prsByBranch: [:])
+        let glab = RecordingGL()
+        let router = Self.makeRouter(db: db, gh: gh, glab: glab)
+
+        try await router.runPollPass()
+
+        #expect(await glab.calls.isEmpty)
+        #expect(await gh.numberQueries.isEmpty)
+        #expect(!(await gh.recordedArgs).contains { argv in argv.contains { $0.contains("evil.example") } })
+        let stored = try await db.prBindings.list(worktreeID: lane.id)
+        #expect(stored.map(\.number) == [3])
         #expect(stored.first?.status == nil)
     }
 
@@ -544,7 +602,9 @@ struct PRPollRemoteLaneTests {
 
     // MARK: - Helpers
 
-    private static func makeRouter(db: TBDDatabase, gh: RecordingGH?) -> RPCRouter {
+    private static func makeRouter(db: TBDDatabase, gh: RecordingGH?,
+                                   gitHubHosts: Set<String> = [],
+                                   glab: RecordingGL? = nil) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(),
@@ -552,9 +612,20 @@ struct PRPollRemoteLaneTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             prManager: gh.map { stub in
-                PRStatusManager(ghRunner: { args, path in await stub.run(args: args, repoPath: path) })
+                PRStatusManager(ghRunner: { args, path in await stub.run(args: args, repoPath: path) },
+                                glRunner: glab.map { gl -> GLRunner in { args, _ in await gl.run(args: args) } },
+                                gitHubHosts: gitHubHosts)
             } ?? PRStatusManager(ghRunner: { _, _ in nil }),
             actuationLog: makeTestActuationLog())
+    }
+}
+
+/// A `glab` stub that records every invocation and answers nothing.
+private actor RecordingGL {
+    private(set) var calls: [[String]] = []
+    func run(args: [String]) -> GHCommandResult? {
+        calls.append(args)
+        return nil
     }
 }
 
@@ -565,6 +636,8 @@ private actor RecordingGH {
     private let prsByBranch: [String: Int]
     private var branchByNumber: [Int: String] = [:]
     private(set) var recordedPaths: [String] = []
+    /// The full argv of every invocation, in order.
+    private(set) var recordedArgs: [[String]] = []
     /// The `branch=` variable of every by-branch refresh query, in order.
     private(set) var recordedBranches: [String] = []
     /// `owner/name` of every query that bound both variables, in order.
@@ -589,6 +662,7 @@ private actor RecordingGH {
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         recordedPaths.append(repoPath)
+        recordedArgs.append(args)
         let hostname = args.firstIndex(of: "--hostname").flatMap { index in
             args.index(after: index) < args.endIndex ? args[args.index(after: index)] : nil
         }
