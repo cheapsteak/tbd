@@ -307,9 +307,9 @@ enum TranscriptBubbleGeometry {
 /// TextKit 1's `usedRect(for:)` is the fast, exact, stable height primitive — no
 /// TextKit-2 `usageBounds` over-measure (TK2 added phantom lines for the table
 /// attachment), no 5s precompute. The bubble's prose `NSTextView` is also TextKit
-/// 1 (it never touches `textLayoutManager`), so the measured height equals the
-/// cell's drawn text height. `lineFragmentPadding == 0` matches the cell's
-/// container. (#129)
+/// 1 — `makeProseView` constructs it with `init(usingTextLayoutManager: false)` —
+/// so the measured height equals the cell's drawn text height.
+/// `lineFragmentPadding == 0` matches the cell's container. (#129)
 @MainActor
 final class TranscriptBubbleMeasurer {
     private let textStorage = NSTextStorage()
@@ -500,7 +500,9 @@ enum TranscriptLinkTarget: Equatable {
     }
 }
 
-/// The chat bubble's selectable prose text view (TextKit 1). A DISTINCT subclass
+/// The chat bubble's selectable prose text view. It must be constructed on
+/// TextKit 1 (`init(usingTextLayoutManager: false)`), as `makeProseView` does;
+/// `init(frame:)` builds a TextKit 2 view. A DISTINCT subclass
 /// so the table's `validateProposedFirstResponder(_:for:)` can recognise it
 /// precisely and let it take the mouse immediately — otherwise NSTableView delays
 /// first responder and the first click selects the row instead of starting a text
@@ -872,13 +874,19 @@ final class TranscriptBubbleCellView: NSTableCellView {
         }
     }
 
-    /// A selectable TextKit-1 prose block. The view is constructed WITHOUT touching
-    /// `layoutManager` first via legacy paths — `NSTextView(frame:)` is TextKit 1
-    /// when we configure through `layoutManager`/`textContainer`. We explicitly
-    /// build a TK1 stack so prose is measured and drawn by the same `usedRect`
-    /// engine. (#129)
+    /// A selectable TextKit-1 prose block.
+    ///
+    /// `init(usingTextLayoutManager: false)` gives the view its own TextKit 1
+    /// stack (storage, `NSLayoutManager`, `NSTextContainer`) from the start.
+    /// `init(frame:)` would build a TextKit 2 view, which matters twice over:
+    /// the measurer is TextKit 1, so a TextKit 2 view breaks measure == render;
+    /// and TextKit 2's mouse-tracking path in `NSTextView.mouseDown(with:)` can
+    /// spin on the main thread without ever dequeuing the mouse-up, hanging the
+    /// app on a click inside a bubble. Relying on a later `layoutManager` access
+    /// to downgrade the view is not enough: nothing here touches it, and the
+    /// downgrade is AppKit's fallback, not a construction guarantee. (#129)
     private func makeProseView(_ string: NSAttributedString, bodyWidth: CGFloat) -> NSView {
-        let textView = TranscriptBubbleTextView(frame: .zero)
+        let textView = TranscriptBubbleTextView(usingTextLayoutManager: false)
         textView.isEditable = false
         textView.isSelectable = true
         textView.delegate = textView
@@ -896,9 +904,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
         textView.textContainerInset = .zero
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = false
-        // Accessing `textContainer` here returns the TextKit-1 container (the view
-        // is created with the legacy text system; we never request
-        // `textLayoutManager`), keeping prose on TK1.
+        // The TextKit 1 container the initializer above created.
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false
