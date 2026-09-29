@@ -147,17 +147,31 @@ A binding in another repository gets its status from a lookup keyed by its own
 `(host, owner, repo, number)`, not from the row's repository, and asked of its own
 host: a GitHub Enterprise pull request is queried against that Enterprise server,
 never against `github.com`, where the same owner, repository and number may name
-a different pull request. When that host cannot answer — no credentials for it,
-unreachable, a repository TBD cannot see — or the host is not a plain hostname
-TBD will pass to `gh`, the chip shows the never-observed state rather than
-disappearing, since the provider did claim it. There is no fallback to another
-host. A chip whose status TBD can never read still earns its place: it is the PR's
+a different pull request. A GitHub host other than `github.com` is queried only if
+`gh` is already authenticated to it (it appears in `gh auth status`). The host
+comes from a provider-supplied URL, so it is untrusted, and `gh` sends an
+Enterprise token from the environment to whatever non-`github.com` host it is
+pointed at; asking only hosts the user has logged `gh` in to means a provider can
+never make TBD post a credential to a host of its choosing. When the host is not
+one `gh` is authenticated to, cannot answer — unreachable, a repository TBD cannot
+see — or is not a plain hostname TBD will pass to `gh`, TBD runs no query against
+it and the chip shows the never-observed state rather than disappearing, since
+the provider did claim it. There is no fallback to another host. A chip whose status TBD can never read still earns its place: it is the PR's
 link in a stable spot beside the lane, one click from the forge's own view,
 instead of a URL the user has to hunt for in the session's history.
 
-Auto-archive is unchanged. `.provider` bindings feed the existing merged-transition
-rail on the rail's existing rule, like any other binding; arming stays a
-deliberate per-lane gesture.
+Auto-archive is unchanged. A merged `.provider` binding feeds the existing
+merged-transition rail on the rail's existing rule: it counts as the lane's own
+work only when its head matches the lane's live branch or its number is the
+lane's PR. A provider's claim alone never retires a lane — an already-merged
+earlier PR, or a companion repository's PR the provider names, cannot archive
+it. A lane whose only PRs came from the provider, with no matching branch, is not
+auto-archived.
+
+A never-observed binding — one whose status TBD cannot read — leaves the lane's
+bindings unresolved, since the rail requires every non-detached binding to be
+terminal. It holds off auto-archive until the user detaches it, erring toward
+keeping the lane. Arming stays a deliberate per-lane gesture.
 
 No migration is needed: the source is stored as its raw string in an existing
 text column. An older daemon reading a `.provider` row after a downgrade must
@@ -258,8 +272,11 @@ binding.
   branch is usually the creation branch, so the fallback preserves the defect it
   would be guarding against.
 - **Display-only provider PRs.** Chips computed from each render's `prs` could not
-  be detached, would vanish when the provider stopped naming them, and could not
-  retire an armed lane whose only PR the provider named.
+  be detached, and would vanish when the provider stopped naming them.
+- **Provider-named PRs count as the lane's own work.** A provider's claim alone
+  would become an autonomous archive trigger: an already-merged PR named on first
+  sighting would retire the lane at once. A new autonomous trigger of that kind
+  would need its own default-off flag and soak.
 - **Excluding `.provider` bindings from auto-archive.** It guards against a
   companion repository's PR merging first, but introduces a binding that does not
   count; how a merge of one of several bound PRs is treated is the rail's rule for

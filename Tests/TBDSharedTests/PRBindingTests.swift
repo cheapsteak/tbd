@@ -6,7 +6,8 @@ import Testing
 struct PRBindingTests {
 
     private func binding(_ number: Int, _ state: PRMergeableState,
-                         detached: Bool = false) -> PRBinding {
+                         detached: Bool = false,
+                         source: PRBindingSource = .hook) -> PRBinding {
         PRBinding(
             id: UUID(), worktreeID: UUID(), host: "github.com",
             owner: "acme", repo: "acme-prod", number: number,
@@ -15,7 +16,7 @@ struct PRBindingTests {
             status: PRStatus(number: number,
                              url: "https://github.com/acme/acme-prod/pull/\(number)",
                              state: state),
-            source: .hook, detached: detached, boundAt: Date()
+            source: source, detached: detached, boundAt: Date()
         )
     }
 
@@ -212,6 +213,30 @@ struct PRBindingTests {
         #expect(PRBinding.mergedBindingIsOwnWork([unobserved],
                                                  branchCandidates: [],
                                                  provenancePRNumber: 1))
+    }
+
+    /// A provider naming a PR in `meta.prs` is not by itself a claim the rail
+    /// accepts: an already-merged earlier PR, or a companion repo's PR, must not
+    /// retire the lane on first sighting. A merged `.provider` binding counts
+    /// only on the rail's existing evidence.
+    @Test("a merged provider-named binding needs a matching head or number to be own work")
+    func providerSourceAloneIsNotOwnWork() {
+        // Head does not match the live branch, number is not the lane's PR.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: ["work-2"], provenancePRNumber: 8))
+        // A lane with no valid live branch has no candidates and no number.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: [], provenancePRNumber: nil))
+        // Its head matching the lane's live branch makes it own work…
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: ["feature-7"], provenancePRNumber: nil))
+        // …as does its number being the lane's PR.
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: [], provenancePRNumber: 7))
     }
 
     @Test("own work ignores detached bindings")
