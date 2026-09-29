@@ -142,9 +142,17 @@ with that source, on exactly the terms `.branch` binds on:
   revives a tombstone.
 - **Only adopted rows bind.** A session with no row — its `repo` resolved to no
   registered repository — gets no bindings.
-- **At most 20 URLs per session** are bound; the rest are ignored with a log line.
-  A misbehaving provider must not turn one snapshot into an unbounded fan-out of
-  forge queries.
+- **At most 20 `.provider` bindings per worktree row, cumulative.** Two caps
+  apply, and they guard different things. Parsing a single snapshot's `prs`
+  value stops after 20 URLs, so one misbehaving snapshot cannot itself turn
+  into an unbounded fan-out of forge queries. Separately, a worktree row may
+  never hold more than 20 `.provider` bindings in total, counting tombstoned
+  rows as well as live ones — a provider that rotates which PRs it names,
+  across many snapshots rather than one, cannot grow past 20 distinct PRs ever
+  bound this way, and detaching one does not free its slot back to the
+  provider. A URL the worktree already has a row for, bound or tombstoned by
+  any source, is not "new" and spends nothing from the allowance; a URL beyond
+  the remaining allowance is ignored with a log line.
 
 A binding in another repository gets its status from a lookup keyed by its own
 `(host, owner, repo, number)`, not from the row's repository, and asked of its own
