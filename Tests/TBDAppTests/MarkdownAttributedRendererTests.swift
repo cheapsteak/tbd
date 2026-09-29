@@ -412,7 +412,81 @@ struct MarkdownAttributedRendererTests {
         #expect(tableCount == 2)
     }
 
+    // A table nested in a list item or blockquote must come out as its own
+    // `.table` block too. Left in the prose it would be a
+    // `TranscriptCardAttachment`, which draws only through TextKit 2 and so
+    // vanishes on the bubble's TextKit 1 prose view.
+    @Test("renderBlocks: a table inside a list item is lifted into its own table block")
+    func blocksTableInListItemIsLifted() {
+        let md = """
+        - item one
+
+          | A | B |
+          |---|---|
+          | 1 | 2 |
+
+        - item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertNestedTableLifted(blocks, before: "item one", after: "item two")
+    }
+
+    @Test("renderBlocks: a table inside a blockquote is lifted into its own table block")
+    func blocksTableInBlockquoteIsLifted() {
+        let md = """
+        > Quoted intro.
+        >
+        > | A | B |
+        > |---|---|
+        > | 1 | 2 |
+
+        Trailing paragraph.
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertNestedTableLifted(blocks, before: "Quoted intro.", after: "Trailing paragraph.")
+    }
+
     // MARK: - Helpers
+
+    /// Asserts `blocks` is prose containing `before`, then exactly one A|B table,
+    /// then prose containing `after` — and that no prose block carries an
+    /// attachment (a `TranscriptCardAttachment` or any other) or the lifted
+    /// table's placeholder character.
+    func assertNestedTableLifted(_ blocks: [MessageBlock], before: String, after: String) {
+        var tables: [TranscriptTableData] = []
+        var tableIndex: Int?
+        for (index, block) in blocks.enumerated() {
+            switch block {
+            case .table(let data):
+                tables.append(data)
+                tableIndex = index
+            case .prose(let s):
+                var hasAttachment = false
+                s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+                    if v != nil { hasAttachment = true }
+                }
+                #expect(!hasAttachment, "prose must not carry a table attachment: \(s.string)")
+                #expect(!s.string.contains("\u{FFFC}"), "prose must not carry a placeholder: \(s.string)")
+                #expect(!s.string.hasPrefix("\n"), "prose after a lifted table must not open on a blank line")
+            case .image:
+                Issue.record("unexpected image block")
+            }
+        }
+        #expect(tables.count == 1)
+        #expect(tables.first?.columnCount == 2)
+        #expect(tables.first?.header.map(\.string) == ["A", "B"])
+        guard let tableIndex else { return }
+        let proseBefore = blocks[..<tableIndex].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        let proseAfter = blocks[(tableIndex + 1)...].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        #expect(proseBefore.contains(before), "prose before the table: \(proseBefore)")
+        #expect(proseAfter.contains(after), "prose after the table: \(proseAfter)")
+    }
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
         (s.string as NSString).range(of: substring)

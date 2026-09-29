@@ -22,22 +22,18 @@ struct TranscriptBubbleTextKitTests {
     private let columnWidth: CGFloat = 800
 
     /// Inline code naming a path the resolver knows, so the prose carries a
-    /// `tbd-file:` link like the one whose click hung the app; a fenced block, so
-    /// the async highlight path runs; and enough text to wrap at 800pt.
+    /// `tbd-file:` link like the one whose click hung the app, and enough text to
+    /// wrap at 800pt.
     private let text = """
-        The queue decisions are written up in `.context/deploy-queue-decisions.md`, \
-        and the rollout notes beside them cover each environment in turn, starting \
-        with `acme-prod` and ending with the staging mirror that nobody reads.
-
-        ```swift
-        let answer = 42
-        ```
+        The notes are written up in `.context/acme-notes.md`, and the sections \
+        beside them cover each module in turn, starting with `acme-core` and \
+        ending with the sample app that exercises every public entry point.
 
         That is everything.
         """
 
     private let resolver: TranscriptPathResolver = {
-        $0 == ".context/deploy-queue-decisions.md" ? "/w/.context/deploy-queue-decisions.md" : nil
+        $0 == ".context/acme-notes.md" ? "/w/.context/acme-notes.md" : nil
     }
 
     private struct Built {

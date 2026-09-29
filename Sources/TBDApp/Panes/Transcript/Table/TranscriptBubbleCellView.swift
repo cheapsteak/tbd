@@ -526,7 +526,12 @@ extension TranscriptBubbleTextView: NSTextViewDelegate {
         default: url = nil
         }
         guard let url, let target = TranscriptLinkTarget(url: url) else { return false }
-        onLinkClicked?(target)
+        // Run the handler on a later main-actor turn, outside NSTextView's
+        // mouse-tracking loop: it mutates the pane layout, which must not
+        // happen while the text view is still tracking the click.
+        if let handler = onLinkClicked {
+            Task { @MainActor in handler(target) }
+        }
         // Handled here — returning false would let AppKit hand a `tbd-file:`
         // URL to NSWorkspace, which has no handler for it.
         return true

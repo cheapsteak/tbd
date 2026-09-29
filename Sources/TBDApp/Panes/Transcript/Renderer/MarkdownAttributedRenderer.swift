@@ -55,15 +55,20 @@ enum MarkdownAttributedRenderer {
     }
 
     /// Splits `markdown` into an ordered list of typed `MessageBlock`s: runs of
-    /// consecutive non-table top-level blocks are rendered into one `.prose`
-    /// `NSAttributedString` each (via the SAME visitor logic as `render`), and a
-    /// `Table` node becomes a `.table` block carrying its `TranscriptTableData`.
+    /// consecutive non-table blocks are rendered into one `.prose`
+    /// `NSAttributedString` each (via the SAME visitor logic as `render`), and
+    /// every `Table` node becomes a `.table` block carrying its
+    /// `TranscriptTableData`.
     ///
     /// Unlike `render`, prose is rendered WITHOUT touching TextKit-2 attachments —
     /// tables are broken out as native blocks instead — so the bubble cell can lay
     /// prose out on TextKit 1 (fast, exact `usedRect`) and host the table as its
-    /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
-    /// stay inside prose with unchanged inline rendering. (#129)
+    /// own view. That holds for a table NESTED in a list item or blockquote too:
+    /// the visitor lifts it out (`liftsNestedTables`) and the enclosing prose is
+    /// split around it in document order, because a card attachment draws only
+    /// through TextKit 2's `viewProvider` and would vanish on the TextKit 1 prose
+    /// view. Code blocks, lists, blockquotes, paragraphs, and headings all stay
+    /// inside prose with unchanged inline rendering. (#129)
     ///
     /// `recognizePastes` is for USER prompts only: it pulls Claude Code's
     /// `<pasted_content id="…">` spans out first (`TranscriptPastedContent`) and
@@ -76,7 +81,7 @@ enum MarkdownAttributedRenderer {
         linkResolver: TranscriptPathResolver?,
         recognizePastes: Bool = false
     ) -> [MessageBlock] {
-        var visitor = AttributedStringVisitor(theme: theme)
+        var visitor = AttributedStringVisitor(theme: theme, liftsNestedTables: true)
         var blocks: [MessageBlock] = []
         var proseRun = NSMutableAttributedString()
 
@@ -84,6 +89,44 @@ enum MarkdownAttributedRenderer {
             guard proseRun.length > 0 else { return }
             blocks.append(.prose(finalizedProse(proseRun, theme: theme, linkResolver: linkResolver)))
             proseRun = NSMutableAttributedString()
+        }
+
+        // Appends one rendered top-level block to the prose run, splitting it
+        // at each table the visitor lifted out of a list item or blockquote:
+        // the prose before the placeholder, then the table as its own block,
+        // then the prose after it. A slice that is only whitespace (the
+        // table's own terminator, the wrapper's paragraph break) is dropped,
+        // and a slice that follows a table loses its leading newlines so the
+        // next prose block does not open on a blank line.
+        func appendRendered(_ rendered: NSAttributedString) {
+            let lifted = visitor.liftedTables
+            visitor.liftedTables.removeAll()
+            guard !lifted.isEmpty else {
+                proseRun.append(rendered)
+                return
+            }
+            func appendSlice(_ range: NSRange, followsTable: Bool) {
+                guard range.length > 0 else { return }
+                let slice = NSMutableAttributedString(attributedString: rendered.attributedSubstring(from: range))
+                if followsTable {
+                    let ns = slice.string as NSString
+                    var start = 0
+                    while start < ns.length, ns.character(at: start) == 0x0A { start += 1 }
+                    if start > 0 { slice.deleteCharacters(in: NSRange(location: 0, length: start)) }
+                }
+                guard !slice.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                proseRun.append(slice)
+            }
+            var cursor = 0
+            let full = NSRange(location: 0, length: rendered.length)
+            rendered.enumerateAttribute(.tbdLiftedTable, in: full, options: []) { value, range, _ in
+                guard let index = value as? Int, lifted.indices.contains(index) else { return }
+                appendSlice(NSRange(location: cursor, length: range.location - cursor), followsTable: cursor > 0)
+                flushProse()
+                blocks.append(.table(lifted[index]))
+                cursor = NSMaxRange(range)
+            }
+            appendSlice(NSRange(location: cursor, length: rendered.length - cursor), followsTable: cursor > 0)
         }
 
         // Attached-image markers are pulled out BEFORE markdown parsing: the
@@ -104,7 +147,7 @@ enum MarkdownAttributedRenderer {
                             let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
                             if data.columnCount > 0 { blocks.append(.table(data)) }
                         } else {
-                            proseRun.append(visitor.visit(child))
+                            appendRendered(visitor.visit(child))
                         }
                     }
                 }
@@ -180,8 +223,17 @@ enum MessageBlock {
     case image(TranscriptImageAttachment)
 }
 
+private extension NSAttributedString.Key {
+    /// Marks the one-character placeholder the visitor leaves where it lifted a
+    /// nested table out of the prose (`liftsNestedTables`). Its value is the
+    /// table's `Int` index into `AttributedStringVisitor.liftedTables`.
+    /// `renderBlocks` splits the prose at every such character, so it never
+    /// reaches a rendered string.
+    static let tbdLiftedTable = NSAttributedString.Key("tbdLiftedTable")
+}
+
 /// Walks the swift-markdown AST and appends styled runs. Only ever instantiated
-/// and used on the main actor (inside `MarkdownAttributedRenderer.render`). (#129)
+/// and used on the main actor (inside `MarkdownAttributedRenderer`). (#129)
 ///
 /// `@MainActor` keeps theme access (non-Sendable `NSFont`/`NSColor`) compiler-checked.
 /// The `@preconcurrency` on the `MarkupVisitor` conformance reconciles the nonisolated
@@ -191,6 +243,16 @@ private struct AttributedStringVisitor {
     typealias Result = NSAttributedString
 
     let theme: TranscriptTextTheme
+
+    /// When set, `visitTable` does not emit a `TranscriptCardAttachment`: it
+    /// appends the table's data to `liftedTables` and leaves a placeholder
+    /// character marked `.tbdLiftedTable` for `renderBlocks` to split at. The
+    /// live bubble path sets it, because its prose views are TextKit 1 and a
+    /// card attachment only draws through TextKit 2. `render` leaves it off.
+    var liftsNestedTables = false
+
+    /// Tables lifted out since the caller last drained this, in document order.
+    var liftedTables: [TranscriptTableData] = []
 }
 
 extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
@@ -338,6 +400,15 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         // attachment hosting a real SwiftUI grid. (#129)
         let data = MarkdownTable.data(table, theme: theme, render: { self.visit($0) })
         guard data.columnCount > 0 else { return NSAttributedString() }
+        if liftsNestedTables {
+            liftedTables.append(data)
+            let out = NSMutableAttributedString(
+                string: "\u{FFFC}",
+                attributes: [.tbdLiftedTable: liftedTables.count - 1]
+            )
+            out.append(NSAttributedString(string: "\n"))
+            return out
+        }
         let tableView = TranscriptTableView(
             data: data,
             borderColor: Color(theme.tableBorderColor)
