@@ -341,6 +341,46 @@ struct TranscriptEstimatorAccuracyTests {
                     + "\(summary)\(sizeCaveat)"))
     }
 
+    // MARK: - Blockquoted tables
+
+    /// A GFM table inside a blockquote — single or nested `> >` — is lifted out
+    /// of the quote and drawn as its own grid block, exactly like the same table
+    /// unquoted. So the estimator must charge it as grid rows, not as three
+    /// lines of quoted prose. Calibration-free: it compares the quoted message
+    /// with its unquoted twin rather than with a fixed budget, and pins the
+    /// premise too — the two render to the same measured height.
+    @Test("a blockquoted table is estimated as a grid block, like the same table unquoted",
+          arguments: ["> ", "> > ", ">"])
+    func blockquotedTableIsEstimatedAsAGrid(quote: String) {
+        let table = """
+            | Path | Up-front cost | Clip risk |
+            | --- | --- | --- |
+            | Authoritative | measure visible rows | none |
+            | Estimate+correct | cheap | high |
+            """
+        let quoted = table.split(separator: "\n").map { quote + $0 }.joined(separator: "\n")
+        let intro = "Comparison of the two paths:\n\n"
+        let outro = "\n\nThe table view renders this as a grid."
+        for width in Self.widths {
+            func heights(_ text: String) -> (estimate: CGFloat, measured: CGFloat) {
+                let item = TranscriptItem.assistantText(id: "a", text: text, timestamp: nil, usage: nil)
+                let node = TranscriptRenderNode(id: "a", kind: .chatBubble(item), badgeUsage: nil)
+                let measured = TranscriptBubbleGeometry.rowHeight(
+                    blocksHeight: MessageBlockMeasurer().blocksHeight(
+                        TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil, linkResolver: nil),
+                        bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: .assistant)),
+                    role: .assistant)
+                return (TableTranscriptView.Coordinator.estimate(for: node, width: width), measured)
+            }
+            let plain = heights(intro + table + outro)
+            let inQuote = heights(intro + quoted + outro)
+            #expect(inQuote.measured == plain.measured,
+                    "width \(width): the quoted table should render as the same grid block")
+            #expect(inQuote.estimate == plain.estimate,
+                    "width \(width): quoted estimate \(inQuote.estimate), unquoted \(plain.estimate)")
+        }
+    }
+
     // MARK: - Generated structured corpus
 
     /// The counterpart to `wrapArithmeticStaysCalibrated`, and the answer to how

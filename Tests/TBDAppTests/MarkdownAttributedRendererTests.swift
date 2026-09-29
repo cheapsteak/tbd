@@ -446,7 +446,59 @@ struct MarkdownAttributedRendererTests {
         assertNestedTableLifted(blocks, before: "Quoted intro.", after: "Trailing paragraph.")
     }
 
+    // A list item that OPENS with a table leaves only its marker ("• " or
+    // "1. ") before the placeholder. That slice must be dropped rather than
+    // drawn as a lone bullet block above the table.
+    @Test("renderBlocks: a bulleted item that opens with a table leaves no lone bullet")
+    func blocksBulletedItemOpeningWithTableHasNoLoneMarker() {
+        let md = """
+        - | A | B |
+          |---|---|
+          | 1 | 2 |
+        - item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertItemOpeningWithTable(blocks, nextItem: "• item two")
+    }
+
+    @Test("renderBlocks: a numbered item that opens with a table leaves no lone number")
+    func blocksNumberedItemOpeningWithTableHasNoLoneMarker() {
+        let md = """
+        1. | A | B |
+           |---|---|
+           | 1 | 2 |
+        2. item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertItemOpeningWithTable(blocks, nextItem: "2. item two")
+    }
+
     // MARK: - Helpers
+
+    /// Asserts `blocks` OPENS with the lifted A|B table — no prose block before
+    /// it — and continues with prose starting `nextItem`, and that the private
+    /// list-marker tag never reaches rendered prose.
+    func assertItemOpeningWithTable(_ blocks: [MessageBlock], nextItem: String) {
+        guard case .table(let data)? = blocks.first else {
+            Issue.record("the first block must be the table, not a lone marker: \(blocks)")
+            return
+        }
+        #expect(data.header.map(\.string) == ["A", "B"])
+        let prose = blocks.compactMap { block -> NSAttributedString? in
+            if case .prose(let s) = block { return s }
+            return nil
+        }
+        #expect(prose.count == 1)
+        #expect(prose.first?.string.hasPrefix(nextItem) == true, "\(prose.map(\.string))")
+        for s in prose {
+            var tagged = false
+            s.enumerateAttribute(NSAttributedString.Key("tbdListMarker"),
+                                 in: NSRange(location: 0, length: s.length)) { v, _, _ in
+                if v != nil { tagged = true }
+            }
+            #expect(!tagged, "the list-marker tag must not leave the renderer")
+        }
+    }
 
     /// Asserts `blocks` is prose containing `before`, then exactly one A|B table,
     /// then prose containing `after` — and that no prose block carries an
