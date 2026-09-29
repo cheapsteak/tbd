@@ -1399,9 +1399,9 @@ public final class RPCRouter: Sendable {
     ///
     /// The branch each entry is matched on comes from `pollBranch`: a local row's
     /// stored branch, and a remote row's LIVE branch from `mirrorMeta` (keyed by
-    /// the row's provider and session). A remote row with no valid live branch
-    /// is not matched by branch at all; it lands in `bindingsOnly`, so its
-    /// bindings still refresh.
+    /// the row's provider and session). A remote row with no valid live branch,
+    /// or whose live branch is its repo's default branch, is not matched by
+    /// branch at all; it lands in `bindingsOnly`, so its bindings still refresh.
     func pollEntries(
         _ worktrees: [Worktree], repos: [Repo], mirrorMeta: [WorktreeOrigin: [String: String]]
     ) async -> PollPlan {
@@ -1417,7 +1417,9 @@ public final class RPCRouter: Sendable {
             guard let workingDirectory = Self.pollWorkingDirectory(wt, repoPathByID: pathByRepo) else {
                 continue
             }
-            switch Self.pollBranch(for: wt, mirrorMeta: Self.mirrorOrigin(of: wt).flatMap { mirrorMeta[$0] }) {
+            switch Self.pollBranch(for: wt,
+                                   mirrorMeta: Self.mirrorOrigin(of: wt).flatMap { mirrorMeta[$0] },
+                                   defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] }) {
             case .bindingsOnly:
                 plan.bindingsOnly.append((id: wt.id, worktreePath: workingDirectory))
             case .match(let branch):
@@ -1456,12 +1458,22 @@ public final class RPCRouter: Sendable {
     /// adoption and usually the creation branch, so it is never used for a
     /// lookup and there is no fallback to it. A landed lane is `.local` (its
     /// retained origin notwithstanding) and keeps its stored branch.
-    static func pollBranch(for worktree: Worktree, mirrorMeta: [String: String]?) -> PollBranchChoice {
+    ///
+    /// A remote row whose live branch is the repo's default branch is not
+    /// matched by branch either: a session that has not pushed a branch of its
+    /// own yet reports `main`, and every PR whose head is `main` — a fork's,
+    /// typically — is somebody else's work. `defaultBranch` is the repo
+    /// record's stored value (`Repo.defaultBranch`), read with the rows rather
+    /// than asked of the forge each poll; nil (repo unknown) compares equal to
+    /// nothing. Local rows are unaffected.
+    static func pollBranch(for worktree: Worktree, mirrorMeta: [String: String]?,
+                           defaultBranch: String?) -> PollBranchChoice {
         switch worktree.location {
         case .local:
             return .match(worktree.branch)
         case .remote:
             guard let live = RemoteSessionPayload.metaLiveBranch(mirrorMeta) else { return .bindingsOnly }
+            if let defaultBranch, live == defaultBranch { return .bindingsOnly }
             return .match(live)
         }
     }
@@ -1532,14 +1544,16 @@ public final class RPCRouter: Sendable {
         }
         // The branch the poll matches this row on, chosen by the same rule: a
         // remote row's live branch from its mirror row, never its stored one.
-        // A remote row with no valid live branch gets "no attempt", like a
-        // scratch row — its bindings still refresh on the poll.
+        // A remote row with no valid live branch, or on its repo's default
+        // branch, gets "no attempt", like a scratch row — its bindings still
+        // refresh on the poll.
         var mirrorMeta: [String: String]?
         if case .remote(let provider, let sessionID) = wt.location {
             mirrorMeta = (try? await db.remoteSessions.row(provider: provider, sessionID: sessionID))?
                 .decodedPayload?.meta
         }
-        guard case .match(let branch) = Self.pollBranch(for: wt, mirrorMeta: mirrorMeta) else {
+        guard case .match(let branch) = Self.pollBranch(
+            for: wt, mirrorMeta: mirrorMeta, defaultBranch: repo?.defaultBranch) else {
             return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
         // Read the branch facts through the SAME cache the poll uses. Reading

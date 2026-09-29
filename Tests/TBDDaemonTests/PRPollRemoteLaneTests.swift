@@ -51,20 +51,44 @@ struct PRPollRemoteLaneTests {
     @Test("a remote row whose stored branch is main matches on its live branch")
     func remoteRowUsesLiveBranch() {
         let lane = Self.remoteRow(repoID: UUID(), branch: "main", sessionID: "s-1")
-        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "claude/fix-x"]) == .match("claude/fix-x"))
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "claude/fix-x"],
+                                     defaultBranch: "main") == .match("claude/fix-x"))
     }
 
     @Test("an absent, blank or invalid live branch skips branch matching, never falling back",
           arguments: [nil, [:], ["branch": ""], ["branch": "-rf"], ["branch": "a..b"]] as [[String: String]?])
     func remoteRowWithoutLiveBranchIsBindingsOnly(_ meta: [String: String]?) {
         let lane = Self.remoteRow(repoID: UUID(), branch: "main", sessionID: "s-1")
-        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: meta) == .bindingsOnly)
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: meta, defaultBranch: "main") == .bindingsOnly)
+    }
+
+    /// A session that has not pushed a branch of its own reports the repo's
+    /// default branch, and every PR whose head is `main` — a fork's, typically —
+    /// is somebody else's. Such a lane is polled for its bindings only.
+    @Test("a remote row whose live branch is the repo's default branch is bindings-only")
+    func remoteRowOnDefaultBranchIsBindingsOnly() {
+        let lane = Self.remoteRow(repoID: UUID(), branch: "main", sessionID: "s-1")
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "main"],
+                                     defaultBranch: "main") == .bindingsOnly)
+        // The repo's own default, not a hard-coded `main`.
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "trunk"],
+                                     defaultBranch: "trunk") == .bindingsOnly)
+        #expect(RPCRouter.pollBranch(for: lane, mirrorMeta: ["branch": "main"],
+                                     defaultBranch: "trunk") == .match("main"))
+    }
+
+    @Test("a local row on the repo's default branch still matches on it")
+    func localRowOnDefaultBranchStillMatches() {
+        let local = Self.localRow(repoID: UUID(), branch: "main", path: "/tmp/l")
+        #expect(RPCRouter.pollBranch(for: local, mirrorMeta: nil,
+                                     defaultBranch: "main") == .match("main"))
     }
 
     @Test("a local row still uses its stored branch, whatever a mirror says")
     func localRowUsesStoredBranch() {
         let local = Self.localRow(repoID: UUID(), branch: "tbd/local", path: "/tmp/l")
-        #expect(RPCRouter.pollBranch(for: local, mirrorMeta: ["branch": "other"]) == .match("tbd/local"))
+        #expect(RPCRouter.pollBranch(for: local, mirrorMeta: ["branch": "other"],
+                                     defaultBranch: "main") == .match("tbd/local"))
     }
 
     /// A landed lane is `.local` with its origin retained, so the mirror still
@@ -73,7 +97,8 @@ struct PRPollRemoteLaneTests {
     func landedLaneIsLocal() {
         var landed = Self.localRow(repoID: UUID(), branch: "claude/landed", path: "/tmp/landed")
         landed.origin = WorktreeOrigin(provider: "agentbox", sessionID: "s-1")
-        #expect(RPCRouter.pollBranch(for: landed, mirrorMeta: ["branch": "claude/other"]) == .match("claude/landed"))
+        #expect(RPCRouter.pollBranch(for: landed, mirrorMeta: ["branch": "claude/other"],
+                                     defaultBranch: "main") == .match("claude/landed"))
     }
 
     @Test("mirror meta is keyed by provider and session, and a gone row still counts")
@@ -231,6 +256,41 @@ struct PRPollRemoteLaneTests {
         #expect(Set(entries.map(\.id)).count == 3)
         #expect(Set(entries.map(\.branch)).count == 3)
         #expect(!entries.contains { $0.worktreePath.hasPrefix("remote://") })
+    }
+
+    /// The composed input reads each row's default branch from its repo record:
+    /// a lane reporting it is bindings-only, a lane on a feature branch is
+    /// matched, and a local row on the default branch is matched as before.
+    @Test("the composed input makes a lane on the default branch bindings-only")
+    func composedLaneOnDefaultBranchIsBindingsOnly() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "main",
+            path: repoDir.path, tmuxServer: "tbd-local")
+        let onDefault = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-a", branch: "main",
+            provider: "agentbox", sessionID: "s-a")
+        let onFeature = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-b", branch: "main",
+            provider: "agentbox", sessionID: "s-b")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "main"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: ["branch": "claude/fix-x"])
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: try await db.repos.list(),
+            mirrorMeta: RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list()))
+
+        #expect(plan.bindingsOnly.map(\.id) == [onDefault.id])
+        let byID = Dictionary(uniqueKeysWithValues: plan.matched.map { ($0.id, $0) })
+        #expect(byID[onDefault.id] == nil)
+        #expect(byID[onFeature.id]?.branch == "claude/fix-x")
+        #expect(byID[local.id]?.branch == "main")
     }
 
     /// A lane whose repo row was deleted has no directory to run in, so it is

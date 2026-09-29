@@ -120,6 +120,10 @@ own checkout. What changes is the branch it matches:
   PRs already bound to it keep refreshing through the existing bound-number path.
   There is no fallback to the stored branch: it is exactly the value that matches
   the wrong PRs.
+- When the live branch is the repository's default branch, the row is likewise
+  not matched by branch: a session that has not pushed a branch of its own reports
+  the default, and PRs whose head is that name — from forks, typically — are not
+  its work; the default comes from the repository's stored record, not a forge query.
 - Every branch comparison in the PR pipeline uses the live value, including the
   head-ref-mismatch check that clears a worktree's cached status.
 - A branch change adds PRs and never removes them. A PR bound while the session was
