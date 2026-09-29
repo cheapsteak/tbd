@@ -1,7 +1,7 @@
 # Status bar for remote sessions
 
 **Date:** 2026-09-26
-**Status:** Approved, not built.
+**Status:** Approved, built.
 **Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md)
 (the Session object's `meta` map and its well-known keys, Worktree identity
 keys, and `land <id>`'s branch-name rules),
@@ -73,10 +73,9 @@ a managed sandbox that exposes none, a session not yet placed on a machine, a
 machine already reclaimed — omits the key rather than inventing one. Absence is
 the normal case for many providers and needs no explanation.
 
-A caller that cannot parse the value treats the key as absent and logs the
-rejection. It displays the value and copies it verbatim, and never connects to
-it: `location` is a place for a human to read and paste into `ssh` or `scp`, not a
-transport TBD dials. That is also why the format is scp-style rather than a URL —
+A caller that cannot parse the value treats the key as absent. It displays the
+value and copies it verbatim, and never connects to it: `location` is a place for
+a human to read and paste into `ssh` or `scp`, not a transport TBD dials. That is also why the format is scp-style rather than a URL —
 a scheme would imply a connection the caller never makes, and would force a
 provider whose sessions are not reachable over SSH to claim a transport anyway.
 
