@@ -1207,14 +1207,27 @@ public final class RPCRouter: Sendable {
         // work, and those two facts are the only evidence of ownership there is.
         // An entry that somehow has no poll row is judged against no candidates
         // and no number, which fails the ownership arm closed.
+        //
+        // The worktree's own repository travels too, but is resolved only for a
+        // group holding a merged `.provider` binding — the one source the rule
+        // checks it for (a provider may name a companion repository's PR, whose
+        // branch name or number can coincide with the lane's). The resolver is
+        // the same one the coordinator's own-repo check uses, behind the same
+        // TTL cache, so a pass with no merged provider PR pays nothing for it.
         if let mergeTrigger {
             let entryByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
             for (worktreeID, group) in Dictionary(grouping: refreshed, by: \.worktreeID) {
                 let entry = entryByID[worktreeID]
+                let needsOwnRepo = group.contains {
+                    !$0.detached && $0.source == .provider && $0.status?.state == .merged
+                }
+                var ownRepo: (owner: String, name: String, host: String)?
+                if needsOwnRepo { ownRepo = await prBindingRepoResolver(worktreeID) }
                 await mergeTrigger.evaluate(
                     worktreeID: worktreeID, bindings: group,
                     branchCandidates: entry.map { PRStatusManager.candidatesFor($0) } ?? [],
-                    provenancePRNumber: entry?.prNumber)
+                    provenancePRNumber: entry?.prNumber,
+                    ownRepo: ownRepo)
             }
         }
     }

@@ -71,6 +71,45 @@ struct AllResolvedTriggerTests {
         #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
     }
 
+    /// A provider may name a companion repository's PR. Its head sharing the
+    /// lane's branch name is a coincidence across repositories, not evidence
+    /// that it is the lane's work.
+    @Test("a merged provider PR in another repo on the same branch name does not fire")
+    func providerPRInOtherRepoOnSameBranchDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "claude/fix-x")
+        try await harness.bindProvider(12, state: .merged, owner: "acme", repo: "acme-web")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
+    /// The same number coincidence: `acme-web#412` is not `acme-prod#412`.
+    @Test("a merged provider PR in another repo whose number is the provenance does not fire")
+    func providerPRInOtherRepoWithProvenanceNumberDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "claude/fix-x",
+                                                    provenancePRNumber: 412)
+        try await harness.bindProvider(412, state: .merged, headBranch: "other",
+                                       owner: "acme", repo: "acme-web")
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
+    @Test("a merged provider PR in the worktree's own repo on its branch fires")
+    func providerPRInOwnRepoOnSameBranchFires() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "claude/fix-x")
+        try await harness.bindProvider(12, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs == [harness.worktreeID])
+    }
+
+    /// An unresolved own repository cannot vouch for a provider PR.
+    @Test("a merged provider PR does not fire while the own repo is unresolved")
+    func providerPRWithUnresolvedOwnRepoDoesNotFire() async throws {
+        let harness = try await MergeTriggerHarness(worktreeBranch: "claude/fix-x", ownRepo: nil)
+        try await harness.bindProvider(12, state: .merged)
+        await harness.poll()
+        #expect(await harness.firedWorktreeIDs.isEmpty)
+    }
+
     @Test("a merged binding whose head branch was never observed does not fire")
     func unobservedHeadBranchDoesNotFire() async throws {
         let harness = try await MergeTriggerHarness(worktreeBranch: "work-2")
@@ -244,13 +283,18 @@ final class MergeTriggerHarness {
     /// two pieces of evidence the ownership arm of the rule has.
     let branchCandidates: [String]
     let provenancePRNumber: Int?
+    /// The worktree's own repository, as `RPCRouter.refreshBindingStatuses`
+    /// resolves it for a group holding a merged `.provider` binding.
+    let ownRepo: (owner: String, name: String, host: String)?
     private let worktreeBranch: String
     private let recorder: FiredTransitionRecorder
 
     /// `branchCandidates` defaults to the worktree's own branch, the ordinary
     /// case; pass a longer list to stand in for a tracked or push branch.
     init(worktreeBranch: String = "b", branchCandidates: [String]? = nil,
-         provenancePRNumber: Int? = nil) async throws {
+         provenancePRNumber: Int? = nil,
+         ownRepo: (owner: String, name: String, host: String)? = ("acme", "acme-prod", "github.com"))
+        async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/repoART-\(UUID().uuidString)", displayName: "repoART", defaultBranch: "main")
@@ -263,6 +307,7 @@ final class MergeTriggerHarness {
         self.worktreeBranch = worktreeBranch
         self.branchCandidates = branchCandidates ?? [worktreeBranch]
         self.provenancePRNumber = provenancePRNumber
+        self.ownRepo = ownRepo
         self.recorder = recorder
         self.trigger = AllResolvedMergeTrigger { worktreeID, prNumber in
             await recorder.record(worktreeID: worktreeID, prNumber: prNumber)
@@ -291,14 +336,23 @@ final class MergeTriggerHarness {
         try await insert(number, state: state, headBranch: nil)
     }
 
+    /// A PR a remote provider named in `meta.prs`, possibly in a companion
+    /// repository — the one source bound without an own-repo check.
+    func bindProvider(_ number: Int, state: PRMergeableState, headBranch: String? = nil,
+                      owner: String = "acme", repo: String = "acme-prod") async throws {
+        try await insert(number, state: state, headBranch: headBranch ?? worktreeBranch,
+                         owner: owner, repo: repo, source: .provider)
+    }
+
     private func insert(_ number: Int, state: PRMergeableState,
-                        headBranch: String?) async throws {
-        let url = "https://github.com/acme/acme-prod/pull/\(number)"
+                        headBranch: String?, owner: String = "acme", repo: String = "acme-prod",
+                        source: PRBindingSource = .hook) async throws {
+        let url = "https://github.com/\(owner)/\(repo)/pull/\(number)"
         _ = try await db.prBindings.upsert(PRBinding(
-            worktreeID: worktreeID, owner: "acme", repo: "acme-prod",
+            worktreeID: worktreeID, owner: owner, repo: repo,
             number: number, url: url, headBranch: headBranch,
             status: PRStatus(number: number, url: url, state: state),
-            source: .hook))
+            source: source))
     }
 
     func detach(_ number: Int) async throws {
@@ -338,7 +392,8 @@ final class MergeTriggerHarness {
         guard !bindings.isEmpty else { return }
         await trigger.evaluate(worktreeID: worktreeID, bindings: bindings,
                                branchCandidates: branchCandidates,
-                               provenancePRNumber: provenancePRNumber)
+                               provenancePRNumber: provenancePRNumber,
+                               ownRepo: ownRepo)
     }
 
     /// The un-bound fallback, driven the way `PRStatusManager.onMergedTransition`

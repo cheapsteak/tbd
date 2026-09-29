@@ -163,9 +163,13 @@ instead of a URL the user has to hunt for in the session's history.
 Auto-archive is unchanged. A merged `.provider` binding feeds the existing
 merged-transition rail on the rail's existing rule: it counts as the lane's own
 work only when its head matches the lane's live branch or its number is the
-lane's PR. A provider's claim alone never retires a lane — an already-merged
-earlier PR, or a companion repository's PR the provider names, cannot archive
-it. A lane whose only PRs came from the provider, with no matching branch, is not
+lane's PR. Because a `.provider` binding is the one source bound without the
+own-repository check, it must also be in the lane's own repository (same host,
+owner and name) before either comparison applies — a branch name or a number
+identifies a PR only within one repository. A provider's claim alone never
+retires a lane — an already-merged earlier PR, or a companion repository's PR
+the provider names, cannot archive it, even when its head shares the lane's
+branch name. A lane whose only PRs came from the provider, with no matching branch, is not
 auto-archived.
 
 A never-observed binding — one whose status TBD cannot read — leaves the lane's
