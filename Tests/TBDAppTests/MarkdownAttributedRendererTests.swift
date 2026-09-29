@@ -473,6 +473,45 @@ struct MarkdownAttributedRendererTests {
         assertItemOpeningWithTable(blocks, nextItem: "2. item two")
     }
 
+    // A LATER item that opens with a table leaves its marker at the END of the
+    // slice before the placeholder, after the earlier items' text. That
+    // trailing marker must be trimmed while the earlier text survives.
+    @Test("renderBlocks: a later bulleted item that opens with a table leaves no trailing bullet")
+    func blocksLaterBulletedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        - intro
+        - | A | B |
+          |---|---|
+          | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "• intro")
+    }
+
+    @Test("renderBlocks: a later numbered item that opens with a table leaves no trailing number")
+    func blocksLaterNumberedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        1. intro
+        2. | A | B |
+           |---|---|
+           | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "1. intro")
+    }
+
+    @Test("renderBlocks: a nested item that opens with a table leaves no trailing bullet")
+    func blocksNestedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        - outer
+          - | A | B |
+            |---|---|
+            | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "• outer")
+    }
+
     // MARK: - Helpers
 
     /// Asserts `blocks` OPENS with the lifted A|B table — no prose block before
@@ -498,6 +537,35 @@ struct MarkdownAttributedRendererTests {
             }
             #expect(!tagged, "the list-marker tag must not leave the renderer")
         }
+    }
+
+    /// Asserts `blocks` holds exactly one A|B table, that the prose before it
+    /// contains `before`, and that no prose block consists of, or ends with, a
+    /// bare list marker ("•" or "N.").
+    func assertLaterItemOpeningWithTable(_ blocks: [MessageBlock], before: String) {
+        let tableIndices = blocks.indices.filter { index in
+            if case .table = blocks[index] { return true }
+            return false
+        }
+        #expect(tableIndices.count == 1, "\(blocks)")
+        guard let tableIndex = tableIndices.first, case .table(let data) = blocks[tableIndex] else {
+            Issue.record("expected a lifted table block: \(blocks)")
+            return
+        }
+        #expect(data.header.map(\.string) == ["A", "B"])
+        let bareMarker = #/(^|\s)(•|\d+\.)$/#
+        for block in blocks {
+            guard case .prose(let s) = block else { continue }
+            let trimmed = s.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(!trimmed.isEmpty, "no empty prose block")
+            #expect(trimmed.firstMatch(of: bareMarker) == nil,
+                    "prose must not end with a bare marker: \(s.string.debugDescription)")
+        }
+        let proseBefore = blocks[..<tableIndex].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        #expect(proseBefore.contains(before), "prose before the table: \(proseBefore.debugDescription)")
     }
 
     /// Asserts `blocks` is prose containing `before`, then exactly one A|B table,

@@ -68,8 +68,9 @@ enum MarkdownAttributedRenderer {
     /// split around it in document order, because a card attachment draws only
     /// through TextKit 2's `viewProvider` and would vanish on the TextKit 1 prose
     /// view. The trade-off: a lifted table renders flush-left as its own block,
-    /// and text after it within the same list item or quote continues as a plain
-    /// prose block without the item's marker or the quote's indent. Code blocks,
+    /// and text after it within the same list item or quote continues in a new
+    /// prose block. That text keeps its paragraph style — the item's hanging
+    /// indent or the quote's indent — but no marker is drawn for it. Code blocks,
     /// lists, blockquotes, paragraphs, and headings all stay inside prose with
     /// unchanged inline rendering. (#129)
     ///
@@ -97,32 +98,32 @@ enum MarkdownAttributedRenderer {
         // Appends one rendered top-level block to the prose run, splitting it
         // at each table the visitor lifted out of a list item or blockquote:
         // the prose before the placeholder, then the table as its own block,
-        // then the prose after it. A slice that is only whitespace (the
-        // table's own terminator, the wrapper's paragraph break) is dropped,
-        // as is a slice before a table that holds nothing but list markers
-        // (an item that OPENS with a table would otherwise leave a lone "• ").
+        // then the prose after it. A slice before a table loses any trailing
+        // list markers (an item that OPENS with a table would otherwise leave
+        // a lone "• " or "2. " — alone, or after the previous item's text).
         // A slice that follows a table loses its leading newlines so the next
-        // prose block does not open on a blank line.
+        // prose block does not open on a blank line. A slice left with only
+        // whitespace (the table's own terminator, the wrapper's paragraph
+        // break) is dropped.
         func appendRendered(_ rendered: NSAttributedString) {
-            func appendSlice(_ range: NSRange, followsTable: Bool, precedesTable: Bool) {
+            func appendSlice(_ range: NSRange, precedesTable: Bool) {
                 guard range.length > 0 else { return }
                 let slice = NSMutableAttributedString(attributedString: rendered.attributedSubstring(from: range))
-                if followsTable {
+                if range.location > 0 {
                     let ns = slice.string as NSString
                     var start = 0
                     while start < ns.length, ns.character(at: start) == 0x0A { start += 1 }
                     if start > 0 { slice.deleteCharacters(in: NSRange(location: 0, length: start)) }
                 }
+                if precedesTable { Self.trimTrailingListMarkers(slice) }
                 guard !slice.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                if precedesTable, Self.holdsOnlyListMarkers(slice) { return }
                 proseRun.append(slice)
             }
             var cursor = 0
             let full = NSRange(location: 0, length: rendered.length)
             rendered.enumerateAttribute(.tbdLiftedTable, in: full, options: []) { value, range, _ in
                 guard let lifted = value as? LiftedTable else { return }
-                appendSlice(NSRange(location: cursor, length: range.location - cursor),
-                            followsTable: cursor > 0, precedesTable: true)
+                appendSlice(NSRange(location: cursor, length: range.location - cursor), precedesTable: true)
                 flushProse()
                 blocks.append(.table(lifted.data))
                 cursor = NSMaxRange(range)
@@ -130,8 +131,7 @@ enum MarkdownAttributedRenderer {
             if cursor == 0 {
                 proseRun.append(rendered)
             } else {
-                appendSlice(NSRange(location: cursor, length: rendered.length - cursor),
-                            followsTable: true, precedesTable: false)
+                appendSlice(NSRange(location: cursor, length: rendered.length - cursor), precedesTable: false)
             }
         }
 
@@ -182,21 +182,30 @@ enum MarkdownAttributedRenderer {
         return blocks
     }
 
-    /// Whether every non-whitespace character of `slice` sits in a run the
-    /// visitor marked `.tbdListMarker` — i.e. the slice is only the "• " or
-    /// "1. " a list item opened with, and draws nothing of its own.
-    private static func holdsOnlyListMarkers(_ slice: NSAttributedString) -> Bool {
+    /// Deletes the trailing run of characters the visitor marked
+    /// `.tbdListMarker`, together with the whitespace and newlines around
+    /// them, from the end of `slice`. That run is the "• " or "2. " of a list
+    /// item (possibly nested) whose content opens with a lifted table: it
+    /// belongs to the table, which draws without a marker, so left in place it
+    /// would draw as a lone marker at the end of the prose before the table.
+    /// A slice that does not end in a marker is left untouched.
+    private static func trimTrailingListMarkers(_ slice: NSMutableAttributedString) {
         let ns = slice.string as NSString
-        var onlyMarkers = true
-        slice.enumerateAttribute(.tbdListMarker, in: NSRange(location: 0, length: slice.length),
-                                 options: []) { value, range, stop in
-            guard value == nil else { return }
-            if !ns.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                onlyMarkers = false
-                stop.pointee = true
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        var end = ns.length
+        var sawMarker = false
+        while end > 0 {
+            if slice.attribute(.tbdListMarker, at: end - 1, effectiveRange: nil) != nil {
+                sawMarker = true
+            } else if let scalar = Unicode.Scalar(ns.character(at: end - 1)), whitespace.contains(scalar) {
+                // Whitespace between or around markers goes with them.
+            } else {
+                break
             }
+            end -= 1
         }
-        return onlyMarkers
+        guard sawMarker else { return }
+        slice.deleteCharacters(in: NSRange(location: end, length: ns.length - end))
     }
 
     /// Back-fills body font/color onto runs that didn't set their own — the same
