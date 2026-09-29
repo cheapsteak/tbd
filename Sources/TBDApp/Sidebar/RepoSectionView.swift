@@ -391,6 +391,7 @@ struct RepoSectionView: View {
     @ViewBuilder
     private var expandedContent: some View {
         let groups = appState.sidebarRemoteGroups(repoID: repo.id)
+        let hibernation = appState.sidebarHibernation(repoID: repo.id)
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -402,7 +403,7 @@ struct RepoSectionView: View {
                 .listRowBackground(Color.clear)
                 .tag(main.id)
         }
-        ForEach(groups.localRoots) { wt in
+        ForEach(hibernation.workingRoots) { wt in
             WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
@@ -412,11 +413,34 @@ struct RepoSectionView: View {
                 repoID: repo.id,
                 fromOffsets: source,
                 toOffset: destination,
-                visibleIDs: groups.localRoots.map(\.id)
+                visibleIDs: hibernation.workingRoots.map(\.id)
             )
         }
         if !groups.isEmpty {
             remoteGroupContent(groups)
+        }
+        if !hibernation.hibernatedRoots.isEmpty {
+            hibernatedGroupContent(hibernation)
+        }
+    }
+
+    @ViewBuilder
+    private func hibernatedGroupContent(_ partition: SidebarHibernationPartition) -> some View {
+        let id = SidebarGroupID(owner: .repository(repo.id), kind: .hibernated)
+        SidebarGroupHeader(id: id, title: "Hibernated (\(partition.hibernatedCount))")
+            .listRowInsets(childRowInsets)
+        if appState.expandedSidebarGroups.contains(id) {
+            ForEach(partition.hibernatedRoots) { worktree in
+                WorktreeSubtreeView(worktree: worktree, depth: 0, sectionRepoID: repo.id)
+                    .padding(.leading, 16)
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
+                    .onHover { onSectionHoverChange($0) }
+            }
+            .onMove { source, destination in
+                appState.reorderTopLevelWorktrees(
+                    repoID: repo.id, fromOffsets: source, toOffset: destination,
+                    visibleIDs: partition.hibernatedRoots.map(\.id))
+            }
         }
     }
 
