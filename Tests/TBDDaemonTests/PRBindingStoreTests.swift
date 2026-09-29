@@ -530,4 +530,30 @@ struct PRBindingStoreTests {
         _ = try await fixture.store.upsert(nested(owner: "acme/platform"))
         #expect(try await fixture.store.list(worktreeID: wt).count == 2)
     }
+
+    // MARK: - Provider source
+
+    @Test("a provider binding round-trips through the store")
+    func providerSourceRoundTrips() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = try await fixture.store.upsert(binding(9, worktreeID: wt, source: .provider))
+        #expect(try await fixture.store.list(worktreeID: wt).map(\.source) == [.provider])
+    }
+
+    /// (pinning) Spec "No migration": an OLDER daemon reading a source it does
+    /// not know must degrade, not fail. Simulated with a raw value this build
+    /// does not know either.
+    @Test("a row with an unknown source is skipped, not fatal")
+    func unknownSourceRowIsSkipped() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = try await fixture.store.upsert(binding(1, worktreeID: wt, source: .hook))
+        _ = try await fixture.store.upsert(binding(2, worktreeID: wt, source: .branch))
+        try await fixture.store.writer.write { db in
+            try db.execute(sql: "UPDATE worktree_pull_request SET source = 'from-the-future' WHERE number = 2")
+        }
+        #expect(try await fixture.store.list(worktreeID: wt).map(\.number) == [1])
+        #expect(try await fixture.store.listAllByWorktree().live[wt]?.map(\.number) == [1])
+    }
 }

@@ -1116,6 +1116,11 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // Provider-named PRs (`meta.prs`) bind through the router's
+        // coordinator, which exists only now. Installed before
+        // `remoteManager.start()`, so no snapshot is applied without it.
+        await remoteManager?.setProviderPRBinder(
+            ProviderPRBinder(db: database, coordinator: rpcRouter.prBindingCoordinator))
         // And the holder registry, for the same reason and on the same terms:
         // the park path reads a holder session's screen through the reader the
         // spawn path registered, so all three must hold ONE registry.

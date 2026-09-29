@@ -435,21 +435,24 @@ public final class RPCRouter: Sendable {
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the
         // coordinator can be a `let` built during initialization.
-        // `getLocal` rather than `get`: resolving a repo identity means running
-        // git in the worktree's directory, which a remote row does not have on
-        // this machine. Its nil is the correct "nothing here to resolve".
+        // Resolved in `bindingRepoPath`, the directory the row's poll runs in:
+        // a local row's own checkout, and a remote row's REPO checkout, since a
+        // remote row has no directory on this machine and owner, name and host
+        // are repo facts rather than worktree facts. Without the remote arm
+        // every bind on a lane deferred, so a lane could hold no binding at all.
         let repoResolver = prBindingRepoResolver ?? { [db, prManager] worktreeID in
-            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
-            return await prManager.repoIdentity(repoPath: worktree.path)
+            guard let path = await RPCRouter.bindingRepoPath(worktreeID: worktreeID, db: db) else { return nil }
+            return await prManager.repoIdentity(repoPath: path)
         }
         self.prBindingRepoResolver = repoResolver
-        // The forge half of the same seam, captured the same way. `getLocal`
-        // again, and its nil is the same "nothing here to ask in": `glab` reads
-        // its configuration from the checkout's own directory, which a remote
-        // row does not have on this machine.
+        // The forge half of the same seam, resolved in the same directory:
+        // `glab` reads its configuration from the checkout it runs in, and a
+        // remote row's repo checkout carries the same configuration its lane's
+        // repo does. Nil still means "nothing here to ask in" — an unknown row,
+        // or a remote row whose repo is gone.
         let forgeResolver: @Sendable (UUID, String) async -> Bool? = { [db, prManager] worktreeID, host in
-            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
-            return await prManager.isGitLabHost(host, repoPath: worktree.path)
+            guard let path = await RPCRouter.bindingRepoPath(worktreeID: worktreeID, db: db) else { return nil }
+            return await prManager.isGitLabHost(host, repoPath: path)
         }
         self.prBindingForgeResolver = forgeResolver
         self.prBindingCoordinator = PRBindingCoordinator(
@@ -1055,7 +1058,14 @@ public final class RPCRouter: Sendable {
         await mergeTrigger?.beginPollPass()
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        let infos = await pollEntries(worktrees, repos: try await db.repos.list())
+        // A remote row is matched on its session's LIVE branch (`meta.branch`
+        // on the mirror's latest sighting), never on its stored branch. An
+        // unreadable mirror is an empty map: every remote row is then
+        // bindings-only for this pass, with no fallback to the stored branch.
+        let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+        let plan = await pollEntries(worktrees, repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
+        let infos = plan.matched
+        let bindingsOnlyIDs = Set(plan.bindingsOnly.map(\.id))
         let poll = await prManager.fetchAll(worktrees: infos)
         // A heal ran: the worktree was positively shown NOT to own this PR (its
         // head is a branch the worktree merely tracks, or the PR is in another
@@ -1076,15 +1086,22 @@ public final class RPCRouter: Sendable {
                                                 parsed: match.parsed, source: .branch)
         }
         await seedProvenanceBindings(worktrees)
-        await refreshBindingStatuses(polled: infos, repoPath: infos.first?.worktreePath)
+        // A bindings-only row still counts as polled: its bound PRs refresh by
+        // number. The `gh` directory falls back to a bindings-only row's so a
+        // pass where no row was branch-matched never runs `gh` in the daemon's
+        // own cwd.
+        await refreshBindingStatuses(
+            polled: infos, bindingsOnly: bindingsOnlyIDs,
+            repoPath: infos.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath)
         // Prune at the END so we never drop an entry this pass just populated,
         // and **unconditionally** — including when the enumeration came back
         // empty, which is the pass that has the most to prune.
         await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         // Same contract, same reason, for the PR facts themselves: the outcome
         // of an attempt on a worktree that has left the fleet is not a fact
-        // anyone can act on, and every `pr.list` payload would carry it.
-        await prManager.retain(active: Set(infos.map(\.id)))
+        // anyone can act on, and every `pr.list` payload would carry it. A
+        // bindings-only row is still in the fleet.
+        await prManager.retain(active: Set(infos.map(\.id)).union(bindingsOnlyIDs))
     }
 
     /// Bind the PR a worktree was *created from* — `Worktree.prNumber` — so a
@@ -1131,10 +1148,15 @@ public final class RPCRouter: Sendable {
     /// rule below needs each worktree's branch candidates and provenance PR
     /// number, and `PollWorktree` is where the branch facts this pass gathered
     /// already live.
+    ///
+    /// `bindingsOnly` names the polled rows that had no branch to match on this
+    /// pass (a remote row without a valid live branch). Their bindings refresh
+    /// like any other; with no poll entry, the merge rule judges them against
+    /// no branch candidates, so its ownership arm fails closed for that pass.
     private func refreshBindingStatuses(
-        polled entries: [PRStatusManager.PollWorktree], repoPath: String?
+        polled entries: [PRStatusManager.PollWorktree], bindingsOnly: Set<UUID>, repoPath: String?
     ) async {
-        let polled = Set(entries.map(\.id))
+        let polled = Set(entries.map(\.id)).union(bindingsOnly)
         guard let live = try? await db.prBindings.listAll() else { return }
         let bindings = live.filter { polled.contains($0.worktreeID) }
         // Report the whole polled population before the early return, not just
@@ -1185,14 +1207,27 @@ public final class RPCRouter: Sendable {
         // work, and those two facts are the only evidence of ownership there is.
         // An entry that somehow has no poll row is judged against no candidates
         // and no number, which fails the ownership arm closed.
+        //
+        // The worktree's own repository travels too, but is resolved only for a
+        // group holding a merged `.provider` binding — the one source the rule
+        // checks it for (a provider may name a companion repository's PR, whose
+        // branch name or number can coincide with the lane's). The resolver is
+        // the same one the coordinator's own-repo check uses, behind the same
+        // TTL cache, so a pass with no merged provider PR pays nothing for it.
         if let mergeTrigger {
             let entryByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
             for (worktreeID, group) in Dictionary(grouping: refreshed, by: \.worktreeID) {
                 let entry = entryByID[worktreeID]
+                let needsOwnRepo = group.contains {
+                    !$0.detached && $0.source == .provider && $0.status?.state == .merged
+                }
+                var ownRepo: (owner: String, name: String, host: String)?
+                if needsOwnRepo { ownRepo = await prBindingRepoResolver(worktreeID) }
                 await mergeTrigger.evaluate(
                     worktreeID: worktreeID, bindings: group,
                     branchCandidates: entry.map { PRStatusManager.candidatesFor($0) } ?? [],
-                    provenancePRNumber: entry?.prNumber)
+                    provenancePRNumber: entry?.prNumber,
+                    ownRepo: ownRepo)
             }
         }
     }
@@ -1361,14 +1396,20 @@ public final class RPCRouter: Sendable {
     /// `PRStatusManager.branchCandidates`, and `headRefMismatchedMatches` for
     /// why a stale value can only cost a missed heal), and `path` is the
     /// directory a remote row's poll runs in.
+    ///
+    /// The branch each entry is matched on comes from `pollBranch`: a local row's
+    /// stored branch, and a remote row's LIVE branch from `mirrorMeta` (keyed by
+    /// the row's provider and session). A remote row with no valid live branch,
+    /// or whose live branch is its repo's default branch, is not matched by
+    /// branch at all; it lands in `bindingsOnly`, so its bindings still refresh.
     func pollEntries(
-        _ worktrees: [Worktree], repos: [Repo]
-    ) async -> [PRStatusManager.PollWorktree] {
+        _ worktrees: [Worktree], repos: [Repo], mirrorMeta: [WorktreeOrigin: [String: String]]
+    ) async -> PollPlan {
         let defaultBranchByRepo = Dictionary(
             uniqueKeysWithValues: repos.map { ($0.id, $0.defaultBranch) })
         let pathByRepo = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
-        var infos: [PRStatusManager.PollWorktree] = []
-        infos.reserveCapacity(worktrees.count)
+        var plan = PollPlan()
+        plan.matched.reserveCapacity(worktrees.count)
         for wt in worktrees {
             // The one place a row's poll working directory is chosen. A remote
             // row whose repo is gone resolves to nil and is simply not polled —
@@ -1376,19 +1417,100 @@ public final class RPCRouter: Sendable {
             guard let workingDirectory = Self.pollWorkingDirectory(wt, repoPathByID: pathByRepo) else {
                 continue
             }
-            let (upstreamBranch, pushBranch) = await branchFacts(
-                worktreePath: workingDirectory, branch: wt.branch)
-            infos.append((
-                id: wt.id,
-                branch: wt.branch,
-                upstreamBranch: upstreamBranch,
-                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
-                pushBranch: pushBranch,
-                worktreePath: workingDirectory,
-                prNumber: wt.prNumber
-            ))
+            switch Self.pollBranch(for: wt,
+                                   mirrorMeta: Self.mirrorOrigin(of: wt).flatMap { mirrorMeta[$0] },
+                                   defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] }) {
+            case .bindingsOnly:
+                plan.bindingsOnly.append((id: wt.id, worktreePath: workingDirectory))
+            case .match(let branch):
+                let (upstreamBranch, pushBranch) = await branchFacts(
+                    worktreePath: workingDirectory, branch: branch)
+                plan.matched.append((
+                    id: wt.id,
+                    branch: branch,
+                    upstreamBranch: upstreamBranch,
+                    defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
+                    pushBranch: pushBranch,
+                    worktreePath: workingDirectory,
+                    prNumber: wt.prNumber
+                ))
+            }
         }
-        return infos
+        return plan
+    }
+
+    /// Which branch a row is matched on this pass.
+    enum PollBranchChoice: Equatable {
+        case match(String)
+        /// No branch to match on: refresh the row's bindings only.
+        case bindingsOnly
+    }
+
+    /// One poll pass's composed input: the rows matched by branch, and the rows
+    /// that are polled for their bindings alone.
+    struct PollPlan {
+        var matched: [PRStatusManager.PollWorktree] = []
+        var bindingsOnly: [(id: UUID, worktreePath: String)] = []
+    }
+
+    /// Which branch a row is matched on. A remote row reads the LATEST
+    /// sighting's `meta.branch`: its stored branch is identity, frozen at
+    /// adoption and usually the creation branch, so it is never used for a
+    /// lookup and there is no fallback to it. A landed lane is `.local` (its
+    /// retained origin notwithstanding) and keeps its stored branch.
+    ///
+    /// A remote row whose live branch is the repo's default branch is not
+    /// matched by branch either: a session that has not pushed a branch of its
+    /// own yet reports `main`, and every PR whose head is `main` — a fork's,
+    /// typically — is somebody else's work. `defaultBranch` is the repo
+    /// record's stored value (`Repo.defaultBranch`), read with the rows rather
+    /// than asked of the forge each poll; nil (repo unknown) compares equal to
+    /// nothing. Local rows are unaffected.
+    static func pollBranch(for worktree: Worktree, mirrorMeta: [String: String]?,
+                           defaultBranch: String?) -> PollBranchChoice {
+        switch worktree.location {
+        case .local:
+            return .match(worktree.branch)
+        case .remote:
+            guard let live = RemoteSessionPayload.metaLiveBranch(mirrorMeta) else { return .bindingsOnly }
+            if let defaultBranch, live == defaultBranch { return .bindingsOnly }
+            return .match(live)
+        }
+    }
+
+    /// Each mirror row's `meta`, keyed by `(provider, sessionID)`. A `gone`
+    /// row still counts: it is the last-known value, which the mirror keeps
+    /// shown. A row whose payload does not decode, or carries no `meta`, is
+    /// absent.
+    static func mirrorMetaByOrigin(_ rows: [RemoteSessionRow]) -> [WorktreeOrigin: [String: String]] {
+        var out: [WorktreeOrigin: [String: String]] = [:]
+        for row in rows {
+            guard let meta = row.decodedPayload?.meta else { continue }
+            out[WorktreeOrigin(provider: row.provider, sessionID: row.sessionID)] = meta
+        }
+        return out
+    }
+
+    /// The mirror key a row's live branch is read under: its `.remote`
+    /// location, never its retained `origin` (a landed lane is local).
+    private static func mirrorOrigin(of worktree: Worktree) -> WorktreeOrigin? {
+        guard case .remote(let provider, let sessionID) = worktree.location else { return nil }
+        return WorktreeOrigin(provider: provider, sessionID: sessionID)
+    }
+
+    /// The directory a binding's repo identity (and forge) is resolved in —
+    /// the same directory the row's poll runs in. A remote row has no checkout
+    /// here, so it resolves in its repo's; that is sound for the same reason
+    /// `pollWorkingDirectory` states: owner, name and host are repo facts,
+    /// never worktree facts. Nil for an unknown row, or a remote row whose repo
+    /// is gone.
+    static func bindingRepoPath(worktreeID: UUID, db: TBDDatabase) async -> String? {
+        guard let worktree = try? await db.worktrees.get(id: worktreeID) else { return nil }
+        var repoPathByID: [UUID: String] = [:]
+        if let repoID = worktree.repoID, let repo = try? await db.repos.get(id: repoID) {
+            repoPathByID[repo.id] = repo.path
+        }
+        return pollWorkingDirectory(worktree, repoPathByID: repoPathByID)
     }
 
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
@@ -1397,7 +1519,7 @@ public final class RPCRouter: Sendable {
         // Run a targeted refresh for one row and try the tracked upstream branch
         // when needed. The working directory comes from `pollWorkingDirectory`,
         // exactly as the poll's does, so a remote row refreshes against its
-        // repo's checkout and its own branch. A row with no working directory —
+        // repo's checkout and its live branch. A row with no working directory —
         // an unknown id, or a remote row whose repo is gone — gets "nothing to
         // report".
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
@@ -1420,16 +1542,30 @@ public final class RPCRouter: Sendable {
             wt, repoPathByID: repo.map { [$0.id: $0.path] } ?? [:]) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
+        // The branch the poll matches this row on, chosen by the same rule: a
+        // remote row's live branch from its mirror row, never its stored one.
+        // A remote row with no valid live branch, or on its repo's default
+        // branch, gets "no attempt", like a scratch row — its bindings still
+        // refresh on the poll.
+        var mirrorMeta: [String: String]?
+        if case .remote(let provider, let sessionID) = wt.location {
+            mirrorMeta = (try? await db.remoteSessions.row(provider: provider, sessionID: sessionID))?
+                .decodedPayload?.meta
+        }
+        guard case .match(let branch) = Self.pollBranch(
+            for: wt, mirrorMeta: mirrorMeta, defaultBranch: repo?.defaultBranch) else {
+            return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
+        }
         // Read the branch facts through the SAME cache the poll uses. Reading
         // git directly here would let a user refresh attach a PR that the very
         // next poll — still inside the cache's TTL, still holding the older
         // facts — judges by a different candidate list and clears again.
         let (upstreamBranch, pushBranch) = await branchFacts(
-            worktreePath: workingDirectory, branch: wt.branch)
+            worktreePath: workingDirectory, branch: branch)
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
-            branch: wt.branch,
+            branch: branch,
             upstreamBranch: upstreamBranch,
             defaultBranch: repo?.defaultBranch,
             pushBranch: pushBranch,
@@ -1499,7 +1635,18 @@ public final class RPCRouter: Sendable {
         // choice for the wire: a hand-typed attach is the only thing that may
         // revive a tombstone, and a garbled value should not silently acquire
         // automatic-source semantics.
-        let source = params.source.flatMap(PRBindingSource.init(rawValue:)) ?? .manual
+        //
+        // `.provider` reads as `manual` too: it is reachable only from a
+        // provider snapshot, never from the wire, because it skips the
+        // coordinator's repo validation — a socket client naming it would
+        // bypass the wrong-repo guard.
+        let source: PRBindingSource
+        switch params.source.flatMap(PRBindingSource.init(rawValue:)) {
+        case .some(.provider), .none:
+            source = .manual
+        case .some(let wireSource):
+            source = wireSource
+        }
         switch await prBindingCoordinator.bind(worktreeID: params.worktreeID,
                                                parsed: parsed, source: source) {
         case .bound(let binding):
@@ -1594,9 +1741,26 @@ public final class RPCRouter: Sendable {
     /// different pull request, bound with no error. Removing a wrong
     /// association is recoverable; creating one quietly is the failure the
     /// wrong-repo guard exists to prevent, so attach keeps the strict form.
+    ///
+    /// **Attach also reads a whole URL exactly**, with the parser a provider's
+    /// `meta.prs` goes through (`parsePRURL(exactly:)`), which accepts a GitHub
+    /// pull request on any host. That is what lets `tbd pr attach <Enterprise
+    /// URL>` revive a detached Enterprise PR, and bind one on an Enterprise
+    /// checkout; the coordinator's own-repo and host check still decides every
+    /// new binding. Detach reads a URL exactly only when this worktree already
+    /// holds a row for that identity — an Enterprise chip's own binding — so
+    /// every other detach keeps the scanner and its number fallthrough for
+    /// synthetic chips exactly as before.
     private func resolvePRRef(_ params: PRBindingRefParams,
                               numberFallback: Bool = false) async -> PRRefResolution {
         if let url = params.url, !url.isEmpty {
+            if let exact = PRBindingExtractor.parsePRURL(
+                exactly: url.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                if !numberFallback { return .resolved(exact) }
+                if await worktreeHoldsRow(worktreeID: params.worktreeID, for: exact) {
+                    return .resolved(exact)
+                }
+            }
             if let parsed = PRBindingExtractor.parsePRURLs(in: url).first {
                 return .resolved(parsed)
             }
@@ -1607,6 +1771,17 @@ public final class RPCRouter: Sendable {
             return .unknownRepo
         }
         return .resolved(parsed)
+    }
+
+    /// Whether this worktree has a binding row, live or tombstoned, for the
+    /// PR `parsed` names.
+    private func worktreeHoldsRow(worktreeID: UUID, for parsed: ParsedPRURL) async -> Bool {
+        let key = PRBinding(worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
+                            repo: parsed.repo, number: parsed.number, url: parsed.url,
+                            source: .manual).identityKey
+        guard let rows = try? await db.prBindings.list(worktreeID: worktreeID, includeDetached: true)
+        else { return false }
+        return rows.contains { $0.identityKey == key }
     }
 
     /// A bare PR or MR number as a `ParsedPRURL` in the worktree's own repo.
@@ -1650,9 +1825,10 @@ public final class RPCRouter: Sendable {
     /// directory because that is where `glab` reads its configuration from —
     /// or nil when the question could not be put at all.
     ///
-    /// Nil is a third answer and not a soft "no". A worktree with no local row
-    /// — a remote one, or one deleted between the resolve and this call —
-    /// cannot supply that directory, so nothing has answered, and answering
+    /// Nil is a third answer and not a soft "no". A worktree with no directory
+    /// to ask in — an unknown or deleted row, or a remote row whose repo is
+    /// gone (a remote row otherwise asks in its repo's checkout, see
+    /// `bindingRepoPath`) — cannot supply one, so nothing has answered, and answering
     /// "not GitLab" there is a guess that composes `/pull/<n>` on a host that
     /// may well serve `/-/merge_requests/<n>`: a binding whose URL 404s and
     /// whose label reads "PR", persisted. `prRef` defers on nil instead, the

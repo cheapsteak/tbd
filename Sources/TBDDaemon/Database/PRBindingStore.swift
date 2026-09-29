@@ -221,6 +221,48 @@ public struct PRBindingStore: Sendable {
         return AllWorktreeBindings(live: live, detachedCounts: detachedCounts)
     }
 
+    /// What `ProviderPRBinder` needs to enforce `.provider`'s own cumulative
+    /// cap (`RemoteSessionPayload.maxProviderPRs`), which is separate from
+    /// `maxBindingsPerWorktree` above: that cap counts only LIVE bindings of
+    /// any source and evicts to make room, so a provider that keeps naming PRs
+    /// that go terminal can churn through it forever. This one counts
+    /// `.provider` rows whether live or tombstoned, so neither a PR closing
+    /// nor a user's `tbd pr detach` frees a slot for the provider to refill.
+    public struct ProviderBindingCapacity: Sendable {
+        /// Every identity this worktree has ANY row for, live or tombstoned,
+        /// whatever source proposed it. A URL already on record needs no new
+        /// slot: rebinding it is a no-op in `PRBindingCoordinator`
+        /// (`.alreadyBound`, or a tombstone that a `.provider` bind may not
+        /// revive) rather than a new row.
+        public let existingIdentityKeys: Set<String>
+        /// How many rows this worktree has with `source == .provider`, live or
+        /// tombstoned.
+        public let providerBindingCount: Int
+
+        public init(existingIdentityKeys: Set<String>, providerBindingCount: Int) {
+            self.existingIdentityKeys = existingIdentityKeys
+            self.providerBindingCount = providerBindingCount
+        }
+    }
+
+    public func providerBindingCapacity(worktreeID: UUID) async throws -> ProviderBindingCapacity {
+        let rows = try await writer.read { db in
+            try PRBindingRecord
+                .filter(Column("worktreeID") == worktreeID.uuidString)
+                .fetchAll(db)
+        }
+        var keys = Set<String>()
+        var providerCount = 0
+        for row in rows {
+            keys.insert([row.host.lowercased(), row.owner.lowercased(),
+                        row.repo.lowercased(), String(row.number)].joined(separator: "\u{1}"))
+            if row.source == PRBindingSource.provider.rawValue {
+                providerCount += 1
+            }
+        }
+        return ProviderBindingCapacity(existingIdentityKeys: keys, providerBindingCount: providerCount)
+    }
+
     /// Set or clear a tombstone. Returns true only when a row's state actually
     /// **changed** — false both when no such binding exists and when it was
     /// already in the requested state.

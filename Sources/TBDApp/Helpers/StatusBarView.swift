@@ -40,6 +40,72 @@ struct StatusBarView: View {
         )
     }
 
+    /// The bottom-left cluster for a remote row: its `meta.location` and live
+    /// `meta.branch`, each nil when the key is absent or unparseable so it
+    /// hides only its own element. `location` is the verbatim value — shown
+    /// and copied as-is, never tilde-abbreviated, since the remote home is
+    /// unknown.
+    ///
+    /// `nonisolated` for the same reason as `PRChip` below — `StatusBarView`'s
+    /// `View` conformance infers whole-type `@MainActor` isolation onto a
+    /// nested value type, and a main-actor `init` reached from a nonisolated
+    /// context traps at runtime rather than failing to compile.
+    nonisolated struct RemoteStatusLabel: Equatable {
+        let location: String?
+        let branch: String?
+    }
+
+    /// What the bar renders for the single selected worktree. A local row
+    /// (including a landed lane, which is local with an origin) keeps the
+    /// ordinary `LocalWorktree` rendering; a remote row carries only what the
+    /// bar shows for it plus the id its PR chips are read by.
+    nonisolated enum StatusBarSelection: Equatable {
+        case local(LocalWorktree)
+        case remote(worktreeID: UUID, label: RemoteStatusLabel)
+
+        var worktreeID: UUID {
+            switch self {
+            case .local(let worktree): return worktree.worktree.id
+            case .remote(let id, _): return id
+            }
+        }
+    }
+
+    /// The remote row's label, read from the mirror entry for its own
+    /// `(provider, sessionID)` — gone or not, so a stale mirror shows the
+    /// last-known values. The location slot only ever holds a location: with
+    /// no matching session, or no usable key, it is empty, and the provider
+    /// name and session id are never substituted.
+    nonisolated static func remoteStatusLabel(
+        provider: String,
+        sessionID: String,
+        sessions: [RemoteSessionInfo]
+    ) -> RemoteStatusLabel {
+        let meta = sessions.first { $0.provider == provider && $0.payload.id == sessionID }?.payload.meta
+        return RemoteStatusLabel(
+            location: RemoteSessionPayload.metaLocation(meta)?.value,
+            branch: RemoteSessionPayload.metaLiveBranch(meta)
+        )
+    }
+
+    /// nil when nothing is selected, or for a local row with no directory yet
+    /// (the `.creating` placeholder), exactly as `LocalWorktree.init` rules.
+    nonisolated static func statusBarSelection(
+        _ worktree: Worktree?,
+        sessions: [RemoteSessionInfo]
+    ) -> StatusBarSelection? {
+        guard let worktree else { return nil }
+        switch worktree.location {
+        case .local:
+            return LocalWorktree(worktree).map { StatusBarSelection.local($0) }
+        case .remote(let provider, let sessionID):
+            return .remote(
+                worktreeID: worktree.id,
+                label: remoteStatusLabel(provider: provider, sessionID: sessionID, sessions: sessions)
+            )
+        }
+    }
+
     /// Tilde-abbreviates `path` against `home`, matching only whole path
     /// components so a sibling directory like `/Users/meadow` under a home of
     /// `/Users/me` is left alone.
@@ -468,11 +534,16 @@ struct StatusBarView: View {
         // Resolve the single-selected worktree ONCE per body evaluation —
         // selectedWorktreeInfo (the editor button) uses it, instead of
         // re-running findWorktree per render.
-        let selected = appState.selectedWorktreeIDs.count == 1
-            ? appState.selectedWorktreeIDs.first
-                .flatMap { appState.findWorktree(id: $0) }
-                .flatMap(LocalWorktree.init)
+        let row = appState.selectedWorktreeIDs.count == 1
+            ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
             : nil
+        let selection = Self.statusBarSelection(row, sessions: appState.remoteSessions)
+        // The local-only elements — path cluster, parked prompt, auto-archive
+        // chip, editor button — all read this, which is nil for a remote row.
+        let selected: LocalWorktree? = {
+            if case .local(let worktree)? = selection { return worktree }
+            return nil
+        }()
         let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
             if let location = Self.locationLabel(selected) {
@@ -487,22 +558,36 @@ struct StatusBarView: View {
                     if let branch = location.branch {
                         // The branch glyph doubles as the separator from the
                         // path, so no interpunct is needed between them.
-                        CopyableStatusText(
-                            icon: GitBranchIcon(),
-                            text: branch,
-                            copyValue: branch,
-                            truncation: .tail,
-                            tooltip: "Click to copy branch \(branch)",
-                            confirmation: "Copied branch"
-                        )
+                        BranchStatusText(branch: branch)
                     }
                 }
                 // Yields to the version/display-name label on the right, which
                 // is short and must never truncate.
                 .layoutPriority(-1)
             }
-            // Chips render for a SINGLE selection only — `selected` is already
-            // nil for a multi-selection, matching the path/branch cluster and
+            // A remote row's cluster: its verbatim `meta.location` and live
+            // `meta.branch`, each hidden alone when missing or unparseable.
+            // The slot never falls back to the provider or session id.
+            if case .remote(_, let label)? = selection,
+               label.location != nil || label.branch != nil {
+                HStack(spacing: 8) {
+                    if let location = label.location {
+                        // Middle truncation keeps both the host and the leaf
+                        // directory visible in a narrow window.
+                        CopyableStatusText(
+                            text: location,
+                            copyValue: location,
+                            truncation: .middle,
+                            tooltip: "Click to copy \(location)",
+                            confirmation: "Copied location"
+                        )
+                    }
+                    if let branch = label.branch {
+                        BranchStatusText(branch: branch)
+                    }
+                }
+                .layoutPriority(-1)
+            }
             // Failures only; a message merely waiting is the pane banner's.
             // `selected` is nil for a remote worktree, which has no local pane
             // to have parked a prompt against in the first place.
@@ -511,16 +596,18 @@ struct StatusBarView: View {
                    appState.parkedPrompt(for: selected.worktree)) {
                 ParkedPromptStatusItem(worktree: selected.worktree)
             }
-            // the toolbar's PR control.
-            if let selected {
+            // Chips render for a SINGLE selection only — `selection` is nil
+            // for a multi-selection, matching the location cluster and the
+            // toolbar's PR control. Remote rows get chips too.
+            if let selection {
                 // Same accessor as the toolbar control and the sidebar
                 // indicator — bindings when there are any, else the legacy
                 // single status lifted into one synthetic binding — so the
                 // three surfaces cannot show different PRs for one worktree.
-                let bindings = appState.effectivePRBindings(worktreeID: selected.id)
+                let bindings = appState.effectivePRBindings(worktreeID: selection.worktreeID)
                 if !bindings.isEmpty {
                     PRChipCluster(bindings: bindings,
-                                  observation: appState.prObservations[selected.id])
+                                  observation: appState.prObservations[selection.worktreeID])
                         // Same reason as the path cluster: yield width to the
                         // version/display-name label rather than squeezing it.
                         .layoutPriority(-1)
@@ -532,10 +619,11 @@ struct StatusBarView: View {
             // always on screen and already scoped to the selection, so this is
             // where that promise gets said out loud, with its own way out.
             //
-            // Local worktrees only, like every other cluster in this bar:
-            // `selected` is a `LocalWorktree`, which a remote row cannot be.
-            // The daemon does auto-archive remote lanes, so a remote worktree's
-            // arming is still stated by the toolbar badge and its help text.
+            // Local worktrees only: a remote row gets location, branch and PR
+            // chips in this bar, but no auto-archive chip, parked-prompt item
+            // or editor button. The daemon does auto-archive remote lanes, so a
+            // remote worktree's arming is still stated by the toolbar badge and
+            // its help text.
             if let selected,
                let chip = Self.autoArchiveChip(
                    armed: appState.effectiveAutoArchive(for: selected.worktree),
@@ -1042,6 +1130,23 @@ private struct AutoArchiveChipView: View {
         .accessibilityHint(chip.tooltip)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { cancel() }
+    }
+}
+
+/// The branch control, shared by the local and remote clusters so a remote
+/// lane's live branch renders exactly as a local row's branch does.
+private struct BranchStatusText: View {
+    let branch: String
+
+    var body: some View {
+        CopyableStatusText(
+            icon: GitBranchIcon(),
+            text: branch,
+            copyValue: branch,
+            truncation: .tail,
+            tooltip: "Click to copy branch \(branch)",
+            confirmation: "Copied branch"
+        )
     }
 }
 
