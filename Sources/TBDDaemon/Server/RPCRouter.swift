@@ -1152,9 +1152,7 @@ public final class RPCRouter: Sendable {
     /// `bindingsOnly` names the polled rows that had no branch to match on this
     /// pass (a remote row without a valid live branch). Their bindings refresh
     /// like any other; with no poll entry, the merge rule judges them against
-    /// no branch candidates and no provenance number, so only a `.provider`
-    /// binding — which the provider itself claimed as the session's work — can
-    /// satisfy its ownership arm that pass.
+    /// no branch candidates, so its ownership arm fails closed for that pass.
     private func refreshBindingStatuses(
         polled entries: [PRStatusManager.PollWorktree], bindingsOnly: Set<UUID>, repoPath: String?
     ) async {
@@ -1206,11 +1204,9 @@ public final class RPCRouter: Sendable {
         //
         // Each worktree's own branch candidates and provenance number travel with
         // it: the rule fires only when a MERGED binding is the worktree's own
-        // work, and those two facts plus a binding's `.provider` source are the
-        // only evidence of ownership there is. A worktree with no poll entry — a
-        // bindings-only remote row, or one that somehow has no poll row — is
-        // judged against no candidates and no number, so only a merged
-        // `.provider` binding can open the ownership arm for it.
+        // work, and those two facts are the only evidence of ownership there is.
+        // An entry that somehow has no poll row is judged against no candidates
+        // and no number, which fails the ownership arm closed.
         if let mergeTrigger {
             let entryByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
             for (worktreeID, group) in Dictionary(grouping: refreshed, by: \.worktreeID) {

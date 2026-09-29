@@ -193,7 +193,7 @@ public extension PRBinding {
     /// The single-PR path could never do that: no branch matched, so no status
     /// ever moved.
     ///
-    /// Own work means any of three things, and none is belt-and-braces:
+    /// Own work means either of two things, and the second is not belt-and-braces:
     ///
     /// - the merged PR's head branch is one of the worktree's branch candidates.
     ///   Callers pass `PRStatusManager.branchCandidates` / `candidatesFor` — the
@@ -205,24 +205,16 @@ public extension PRBinding {
     ///   fork and will match nothing local; the stored number is the only handle
     ///   that exists for it, and dropping this arm would regress auto-archive for
     ///   exactly the PR-row worktrees the single-PR path handled by number.
-    /// - the merged binding's source is `.provider`. A remote provider named the
-    ///   PR in the session's own `meta.prs`, which is an explicit claim that it
-    ///   is this session's work — stronger evidence than a branch match. It is
-    ///   also the only evidence there is for a remote lane with no valid live
-    ///   branch, or whose agent has since moved to another branch: such a lane
-    ///   is judged against no candidates, so without this arm a lane whose only
-    ///   PR the provider named could never retire.
     ///
-    /// A merged `.hook`, `.branch` or `.manual` binding whose `headBranch` was
-    /// never observed satisfies no arm on its own: unknown holds the gate SHUT,
-    /// the same way a nil status already blocks `allResolved`.
+    /// A merged binding whose `headBranch` was never observed satisfies neither
+    /// arm on its own: unknown holds the gate SHUT, the same way a nil status
+    /// already blocks `allResolved`.
     static func mergedBindingIsOwnWork(_ bindings: [PRBinding],
                                        branchCandidates: [String],
                                        provenancePRNumber: Int?) -> Bool {
         let candidates = Set(branchCandidates)
         return bindings.contains { binding in
             guard !binding.detached, binding.status?.state == .merged else { return false }
-            if binding.source == .provider { return true }
             if let provenancePRNumber, binding.number == provenancePRNumber { return true }
             guard let head = binding.headBranch else { return false }
             return candidates.contains(head)

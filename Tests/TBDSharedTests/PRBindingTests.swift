@@ -6,8 +6,7 @@ import Testing
 struct PRBindingTests {
 
     private func binding(_ number: Int, _ state: PRMergeableState,
-                         detached: Bool = false,
-                         source: PRBindingSource = .hook) -> PRBinding {
+                         detached: Bool = false) -> PRBinding {
         PRBinding(
             id: UUID(), worktreeID: UUID(), host: "github.com",
             owner: "acme", repo: "acme-prod", number: number,
@@ -16,7 +15,7 @@ struct PRBindingTests {
             status: PRStatus(number: number,
                              url: "https://github.com/acme/acme-prod/pull/\(number)",
                              state: state),
-            source: source, detached: detached, boundAt: Date()
+            source: .hook, detached: detached, boundAt: Date()
         )
     }
 
@@ -213,36 +212,6 @@ struct PRBindingTests {
         #expect(PRBinding.mergedBindingIsOwnWork([unobserved],
                                                  branchCandidates: [],
                                                  provenancePRNumber: 1))
-    }
-
-    /// A remote lane with no valid live branch is judged against no branch
-    /// candidates and has no provenance number. The provider naming the PR in
-    /// `meta.prs` is the claim of ownership, so the merged binding still counts.
-    @Test("a merged provider-named binding is own work with no live branch")
-    func ownWorkByProviderSource() {
-        #expect(PRBinding.mergedBindingIsOwnWork(
-            [binding(7, .merged, source: .provider)],
-            branchCandidates: [], provenancePRNumber: nil))
-        // Only a MERGED provider binding establishes ownership.
-        #expect(!PRBinding.mergedBindingIsOwnWork(
-            [binding(7, .mergeable, source: .provider)],
-            branchCandidates: [], provenancePRNumber: nil))
-        // A detached provider binding says nothing.
-        #expect(!PRBinding.mergedBindingIsOwnWork(
-            [binding(7, .merged, detached: true, source: .provider)],
-            branchCandidates: [], provenancePRNumber: nil))
-    }
-
-    /// The source arm is `.provider`'s alone: a manual attach of someone else's
-    /// PR still needs a matching head branch or provenance number.
-    @Test("a merged manual binding with no matching head or number is not own work")
-    func manualSourceIsNotOwnWorkBySourceAlone() {
-        #expect(!PRBinding.mergedBindingIsOwnWork(
-            [binding(7, .merged, source: .manual)],
-            branchCandidates: ["work-2"], provenancePRNumber: 8))
-        #expect(!PRBinding.mergedBindingIsOwnWork(
-            [binding(7, .merged, source: .manual)],
-            branchCandidates: [], provenancePRNumber: nil))
     }
 
     @Test("own work ignores detached bindings")
