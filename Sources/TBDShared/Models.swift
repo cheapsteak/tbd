@@ -1061,6 +1061,11 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     /// Drag-and-drop display order (mirrors `Worktree.sortOrder`). Defaults to
     /// 0 so existing JSON/rows without this field still decode.
     public var sortOrder: Int
+    /// Per-profile opt-out from the balancing pool (design 2026-09-05 §4).
+    /// When true, this profile is never chosen by the launch policy or
+    /// suggested by the limit offer. Defaults to false so existing JSON/rows without this
+    /// field still decode as "in the pool" (the default state).
+    public var poolOptOut: Bool
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
@@ -1068,7 +1073,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
                 fallbackModels: [String]? = nil,
                 envOverrides: [String: String] = [:],
                 createdAt: Date = Date(), lastUsedAt: Date? = nil,
-                sortOrder: Int = 0) {
+                sortOrder: Int = 0, poolOptOut: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -1081,11 +1086,12 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.sortOrder = sortOrder
+        self.poolOptOut = poolOptOut
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
-        case envOverrides, createdAt, lastUsedAt, sortOrder
+        case envOverrides, createdAt, lastUsedAt, sortOrder, poolOptOut
     }
 
     public init(from decoder: Decoder) throws {
@@ -1107,6 +1113,9 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        // Absent means the sender knew nothing about the opt-out, which is the
+        // default state: the profile is in the pool unless it says otherwise.
+        poolOptOut = try c.decodeIfPresent(Bool.self, forKey: .poolOptOut) ?? false
     }
 }
 
@@ -1321,16 +1330,22 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// `Token •••• <tail>` so two token profiles can be told apart, and that is
     /// all it is ever given.
     public let tokenTail: String?
+    /// Count of live Claude sessions on this profile (unparked, not hibernated).
+    /// Computed by the daemon at list time (never persisted). Non-nil only on
+    /// daemons that implement the load-balancing feature (design 2026-09-05);
+    /// nil on older daemons.
+    public let liveSessions: Int?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
                 loginIdentity: String? = nil, configDirPath: String? = nil,
                 usageSnapshot: ProfileUsageSnapshot? = nil,
-                tokenTail: String? = nil) {
+                tokenTail: String? = nil, liveSessions: Int? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
         self.usageSnapshot = usageSnapshot
         self.tokenTail = tokenTail
+        self.liveSessions = liveSessions
     }
 }
 
@@ -1731,6 +1746,17 @@ public struct Config: Codable, Sendable, Equatable {
     /// two. `setModelProxyPort(_:)` overwrites it, which is what the
     /// address-in-use re-mint needs.
     public var modelProxyPort: Int?
+    /// Gate for profile balancing across multiple Claude accounts (design
+    /// 2026-09-05 §6). When enabled, new sessions land on the eligible profile
+    /// with the most room, adjusted for live session count.
+    ///
+    /// **Resolved, not stored**, like `gcRetainedTranscriptsEnabled`: the
+    /// backing column carries no SQL default and stays NULL until somebody
+    /// touches the toggle, so this property is
+    /// `profile_balancing_enabled ?? Config.profileBalancingEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var profileBalancingEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1854,6 +1880,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// tracked session's directory — is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
     public static let remoteTranscriptEnabledDefault = false
+    /// The shipped default for `profileBalancingEnabled`, and the single place
+    /// it lives. Profile balancing ships off; graduation — after a soak in which
+    /// the picker's choices match what the person would have chosen — is a
+    /// change to this constant, with no forcing `UPDATE` migration and every
+    /// explicit opt-out left alone.
+    public static let profileBalancingEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1898,6 +1930,7 @@ public struct Config: Codable, Sendable, Equatable {
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault,
                 modelProxyPort: Int? = nil,
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1942,6 +1975,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.remoteTranscriptEnabled = remoteTranscriptEnabled
         self.modelProxyPort = modelProxyPort
+        self.profileBalancingEnabled = profileBalancingEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2080,6 +2114,11 @@ public struct Config: Codable, Sendable, Equatable {
         // as an unminted column. Like `holderOwnerToken` there is no shipped
         // default to fall through to; see the property's note.
         modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
+        // Same tri-state for profile balancing: absent means the sender knew
+        // nothing about the flag, which is the NULL column's situation — follow
+        // the shipped default rather than hardcoding `false`.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

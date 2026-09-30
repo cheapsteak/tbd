@@ -308,6 +308,15 @@ public enum RPCMethod {
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
+    /// The profile balancing gate (`profile_balancing_enabled`), the launch
+    /// policy's soak switch (design 2026-09-05 §6). Reading needs no method of
+    /// its own: `config.get` already carries the resolved value, as does
+    /// `daemon.capabilities`.
+    public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
+    /// Per-profile opt-out from the balancing pool. Reading needs no method of
+    /// its own: the opt-out is already carried in `model.profiles` as
+    /// `ModelProfile.poolOptOut`.
+    public static let modelProfileSetPoolOptOut = "modelProfile.setPoolOptOut"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -898,6 +907,9 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// the provider's own `create_params` field names. Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalRemoteCreateDefaults: [String: String]
+    /// Whether profile balancing is enabled. Absent on older daemons (fall
+    /// through to the shipped default on the app side).
+    public let profileBalancingEnabled: Bool?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -910,7 +922,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
-        globalRemoteCreateDefaults: [String: String] = [:]
+        globalRemoteCreateDefaults: [String: String] = [:],
+        profileBalancingEnabled: Bool? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -924,6 +937,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.gcEnabled = gcEnabled
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
+        self.profileBalancingEnabled = profileBalancingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -958,6 +972,10 @@ public struct ModelProfileListResult: Codable, Sendable {
             [String: String].self,
             forKey: .globalRemoteCreateDefaults
         ) ?? [:]
+        // New fields for the profile balancing gates. Absent on older daemons —
+        // the app falls through to the shipped defaults on the Config side.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled)
     }
 }
 
@@ -3586,6 +3604,26 @@ public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProfileBalancingEnabled` — the gate for profile
+/// balancing across multiple Claude accounts, the launch policy that spreads new
+/// sessions across the profiles with the most room (default OFF during soak).
+/// Design: `docs/specs/2026-09-05-account-load-balancing-design.md` §6.
+public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
+/// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
+public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
+    public var id: UUID
+    public var optOut: Bool
+    public init(id: UUID, optOut: Bool) {
+        self.id = id
+        self.optOut = optOut
+    }
+}
+
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
 /// orphaned-process collector, which reclaims processes that outlived the
 /// worktree they were rooted in (default OFF during soak, on top of the GC
@@ -3954,6 +3992,16 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `modelProxyEnabled` gives.
     public var remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault
+    /// Whether the profile balancing gate is currently set (design 2026-09-05
+    /// §6). Default OFF while it soaks. Resolved through
+    /// `Config.profileBalancingEnabledDefault`, so an install that never touched
+    /// the toggle reports whatever the shipped default currently is.
+    ///
+    /// `var` rather than `let` for the same reason as `modelProxyEnabled`: this
+    /// type's memberwise initializer is at the type-checker's expression
+    /// budget, so callers construct with the older arguments and assign this
+    /// after.
+    public var profileBalancingEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3977,7 +4025,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 modelProxySupported: Bool = false,
                 modelProxyPort: Int? = nil,
                 modelProxyVersion: String? = nil,
-                transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault) {
+                transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -4001,6 +4050,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.modelProxyPort = modelProxyPort
         self.modelProxyVersion = modelProxyVersion
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
+        self.profileBalancingEnabled = profileBalancingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -4086,6 +4136,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         remoteTranscriptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteTranscriptEnabled)
             ?? Config.remoteTranscriptEnabledDefault
+        // New field for the profile balancing gate. A daemon that does not send
+        // it knows nothing about the feature, so fall through to the shipped
+        // default rather than assuming it is off.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
     }
 }
 

@@ -163,6 +163,15 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// the first port, and there is no literal the shipped code could fall back
     /// to that would not collide with whatever already holds it.
     var model_proxy_port: Int?
+    /// Gate for profile balancing across multiple Claude accounts. When enabled,
+    /// new sessions land on the eligible profile with the most room, adjusted for
+    /// live session count (design 2026-09-05 §6). **Genuinely tri-state**, same
+    /// shape as `gc_retained_transcripts_enabled`: the
+    /// `20260905080315_config_profile_balancing` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.profileBalancingEnabledDefault`, never through
+    /// `?? false`.
+    var profile_balancing_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -239,6 +248,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   parameter proves both properties at once: a NULL row follows a changed
     ///   shipped default, and a string this build does not recognise resolves
     ///   the same way rather than to a hardcoded `.off`.
+    /// - Parameter profileBalancingDefault: same shape again, for
+    ///   `profile_balancing_enabled` — the launch policy's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -255,7 +266,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
         remoteTranscriptDefault: Bool = Config.remoteTranscriptEnabledDefault,
-        updateModeDefault: UpdateMode = Config.updateModeDefault
+        updateModeDefault: UpdateMode = Config.updateModeDefault,
+        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -340,6 +352,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // resolves to the shipped default rather than silently arming a
             // mode this build cannot run.
             updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
+            // Profile balancing gate — NOT `?? false`.
+            profileBalancingEnabled: profile_balancing_enabled ?? profileBalancingDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -862,6 +876,20 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET remote_transcript_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setProfileBalancingEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
