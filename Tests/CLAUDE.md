@@ -945,7 +945,14 @@ or date box. This file is the whole shared surface:
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
 - `await clock.advanceWhenSuspended(by:)` — the one you want by default.
-- `await clock.waitForSuspension()` — the same wait without advancing.
+- `await clock.waitForSuspension()` — the same wait without advancing. Each
+  `checkSuspension()` probe is raced against what is left of `timeout`, because
+  its megaYield can go unscheduled for minutes under saturation and the guard is
+  only read between probes: unbounded, one stuck probe held the test past its
+  45 s guard until `.clockDriven`'s 240 s limit cut it off with nothing recorded
+  (#503). A probe still running at the deadline counts as "not suspended" and
+  the named diagnostic fires. `advance` itself still megaYields and is not
+  bounded; a suite that stalls there belongs on `EventDrivenTestClock`.
 - `TestDateSource` — a lock-guarded box behind the `now: @Sendable () -> Date`
   seam. Deliberately a class with a lock rather than an actor, because that
   seam is a *synchronous* `() -> Date`.
