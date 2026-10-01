@@ -458,20 +458,8 @@ struct TerminalSendDispatchTests {
 
     // MARK: - Keys
 
-    /// Hang guard for the key pacing's arming waits.
-    ///
-    /// The keys tests run on `EventDrivenTestClock` rather than `TestClock`
-    /// because `TestClock`'s arming probe is a `megaYield` — twenty
-    /// background-QoS tasks awaited in series — and under a saturated pass
-    /// macOS starves that QoS so badly that a single probe never returns: the
-    /// probe's own 45 s guard is checked only between probes, so the test sat
-    /// in it until `.clockDriven`'s 240 s limit with nothing recorded.
-    ///
-    /// The budget is the saturated one because the first sleep is reached
-    /// through the whole dispatch — an `async let` child task, the router, the
-    /// actuation row, the dry-run tmux sends — not one hop from the test body.
-    /// The waits are the strict form, so a missed arming throws before
-    /// anything advances and at most one guard elapses in any run.
+    /// The first pacing sleep is reached through the whole dispatch (an `async
+    /// let`, the router, the actuation row), so arming takes the saturated budget.
     private static let keyPacingArming = TestDeadlines.saturatedPass
 
     @Test("--keys sends each named key in order, paced through the injected clock")

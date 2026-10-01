@@ -1187,17 +1187,9 @@ struct ModelProxySupervisorTests {
 
     // MARK: - The port wait
 
-    /// Hang guard for every arming wait on the port wait's own sleep: the fast
-    /// pass's saturated budget, not the clock's 45 s default, because the sleep
-    /// is several scheduling hops from the test body. `start()` runs in an
-    /// unstructured task that first has to be given a thread, and before the
-    /// wait arms it reads the config row, asks `/tbd/status` on the persisted
-    /// port through a real `URLSession`, spawns, and probes the port through
-    /// `LoopbackPortProbe`, which hops to a utility-QoS GCD thread — a class
-    /// macOS deprioritizes behind the default-QoS work saturating the pass.
-    /// That is the `timeout` note on `EventDrivenTestClock.sleeperArmed`; at
-    /// 45 s the first arming here went red on most nightly stress iterations
-    /// with no logic assertion failing.
+    /// The port wait's sleep is several hops from the test body (an unstructured
+    /// `start()`, a `URLSession` status probe, a utility-QoS port probe), so its
+    /// arming takes the saturated budget, not the clock's 45 s default.
     private static let portWaitArming = TestDeadlines.saturatedPass
 
     /// **The port wait's whole reason** (spec, "Port"): a port a routed session
@@ -2075,7 +2067,8 @@ struct ModelProxySupervisorTests {
         // Hop 1: the tick that notices the kill and burns the refused bind.
         try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         // Hop 2: the port wait's own sleep, the only sleeper on this path.
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
 
         let landed = try await waitFor(
             "the successor to take the port back",

@@ -162,11 +162,11 @@ struct TerminalLatencyTapTests {
     /// wait. Stamped before the lock, the late chunk joins this frame with a
     /// floored-to-zero wait and the next draw has nothing left to report.
     @Test("a chunk racing the draw stamp is left for the next draw, not floored into this one")
-    func aChunkRacingTheStampIsLeftForTheNextDraw() throws {
+    func aChunkRacingTheStampIsLeftForTheNextDraw() async throws {
         let lines = Lines()
         let stampStarted = DispatchSemaphore(value: 0)
         let feedReturned = DispatchSemaphore(value: 0)
-        let feederFinished = DispatchSemaphore(value: 0)
+        let feederFinished = FireRecorder<Bool>()
         let stamps = Clock()
         let tap = TerminalLatencyTap(
             terminalID: UUID(),
@@ -195,19 +195,13 @@ struct TerminalLatencyTapTests {
             // to produce a floored zero.
             tap.noteChunk(Array("late".utf8)[...], feedAt: 0.020, feedReturnedAt: 0.020)
             feedReturned.signal()
-            feederFinished.signal()
+            feederFinished.record(true)
         }
 
         tap.noteDrawWillBegin(isOnScreen: true)
-        // The feeder is a GCD thread that has to be scheduled, take the lock
-        // this draw just released, and append. That is scheduling latency, not
-        // the behaviour under test, so it is a gate on the shared saturated
-        // budget rather than a short literal: under a saturated pass the
-        // feeder routinely had not run within two seconds, the second draw
-        // then found nothing, and the test reddened with the tap behaving
-        // exactly as specified. A healthy run returns in microseconds.
-        feederFinished.waitForGate(
-            "the racing feeder to append its late chunk", timeout: TestDeadlines.saturatedPass)
+        // Suspends rather than blocks: the feeder's scheduling latency is not
+        // the behaviour under test, so it gets the saturated budget.
+        #expect(await feederFinished.next(timeout: TestDeadlines.saturatedPass) == true)
         tap.noteDrawWillBegin(isOnScreen: true)
 
         #expect(lines.all.count == 2)

@@ -1064,7 +1064,11 @@ ceiling, one scheduling excursion from tripping it; and the tier-3
 `GitManagerTimeoutTests`, whose arming sits behind an unstructured task inside
 `runBoundedProcess` and whose polled handshake starved past its own real
 `/bin/sleep 30` child under induced load — the call then returned normally
-instead of throwing, at 1–3 of 10 targeted nightly iterations (#503). Design:
+instead of throwing, at 1–3 of 10 targeted nightly iterations (#503); and
+`ProvisionalRowPublishTests` and the `--keys` tests in
+`TerminalSendDispatchTests`, which hit `.clockDriven`'s 240 s limit with nothing
+recorded on the nightly stress loop because a single `megaYield` probe never
+returned, so the 45 s guard checked between probes never ran (#503). Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 
 `PollerClock` is **not** this seam and must not be copied as a template — see
