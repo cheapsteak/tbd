@@ -515,7 +515,7 @@ struct ProvisionalRowPublishTests {
         let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        try #require(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
         #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
     }
 
@@ -577,7 +577,7 @@ struct ProvisionalRowPublishTests {
         let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "A's row must retire on A's own deadline")
+        try #require(withdrawn == .satisfied, "A's row must retire on A's own deadline")
         #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
                 "and B's transcript is untouched by it")
     }
@@ -623,7 +623,7 @@ struct ProvisionalRowPublishTests {
         let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        try #require(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
         #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
     }
 
@@ -746,12 +746,21 @@ struct ProvisionalRowPublishTests {
             retireTimer: timerB, now: { date.now })
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
 
+        // The poll loop's sleep and the re-armed alarm's are both in the ledger
+        // before teardown (the replaced alarm's sleep was cancelled out of it),
+        // so a late-arming sleeper cannot slip in behind the check below.
+        let armed = await pollUntilTrue(timeout: Self.saturatedHop) { clock.sleeperCount >= 2 }
+        try #require(armed == .satisfied, "the poll loop and the re-armed alarm must both arm")
+
         // A tears down: the hold goes, the alarm goes with it, and the source
         // forgets the session — the real teardown sequence, in its real order.
         await scheduler.deregister(sessionID: "s1", token: paneA)
         await scheduler.disarmProvisional(sessionID: "s1")
         #expect(await timerB.armedSessionCount == 0,
                 "the re-armed alarm was reachable from the departing pane's teardown")
+        // Cancellation leaves the ledger synchronously, so anything still
+        // sleeping here is an orphan the 1200 s advance below would fire.
+        #expect(clock.sleeperCount == 0, "teardown left no sleeper on the clock")
 
         // Past every deadline either arm could have set.
         await clock.advance(by: .seconds(1_200))
@@ -876,8 +885,8 @@ struct ProvisionalRowPublishTests {
         let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied,
-                "the row retires on the deadline it was given before the remount")
+        try #require(withdrawn == .satisfied,
+                     "the row retires on the deadline it was given before the remount")
         #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
                 "and B's transcript is untouched")
         let cleared = await pollUntilTrue(timeout: Self.saturatedHop) {
