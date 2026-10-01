@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import TestSupport
 import Testing
 
 @testable import TBDApp
@@ -198,7 +199,15 @@ struct TerminalLatencyTapTests {
         }
 
         tap.noteDrawWillBegin(isOnScreen: true)
-        #expect(feederFinished.wait(timeout: .now() + 2) == .success)
+        // The feeder is a GCD thread that has to be scheduled, take the lock
+        // this draw just released, and append. That is scheduling latency, not
+        // the behaviour under test, so it is a gate on the shared saturated
+        // budget rather than a short literal: under a saturated pass the
+        // feeder routinely had not run within two seconds, the second draw
+        // then found nothing, and the test reddened with the tap behaving
+        // exactly as specified. A healthy run returns in microseconds.
+        feederFinished.waitForGate(
+            "the racing feeder to append its late chunk", timeout: TestDeadlines.saturatedPass)
         tap.noteDrawWillBegin(isOnScreen: true)
 
         #expect(lines.all.count == 2)
