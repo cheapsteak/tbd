@@ -26,8 +26,10 @@ Three human rulings shaped the design:
 - **No backoff by staleness.** Polling less often the longer a PR has sat
   unchanged has the wrong shape for running checks, which become more likely to
   finish as time passes. Intervals follow status, not age.
-- **Closed PRs stay; merged PRs leave.** A closed PR can be reopened, so it is
-  checked slowly. GitHub cannot reopen a merged PR, so it is not checked at all.
+- **Closed PRs are checked only while someone is there; merged PRs leave.** A
+  closed PR can be reopened, so it is checked slowly while its worktree is
+  active and not at all while it is idle. Becoming active checks it at once.
+  GitHub cannot reopen a merged PR, so it is never checked.
 
 ## The problem, measured
 
@@ -110,7 +112,11 @@ Why these are the right shapes:
 - **Waiting on people** (checks failed, changes requested, blocked, draft, ready
   to merge). Changes when a person acts, at no predictable time. A steady
   interval.
-- **Closed.** Reopening is rare but possible. A slow interval.
+- **Closed.** Reopening is rare but possible, and nothing downstream needs to
+  notice it on time: auto-archive acts only on merged, and the chip keeps
+  showing "closed" until someone returns. So a closed PR is checked on a slow
+  interval while its worktree is active, and not at all while it is idle. The
+  worktree becoming active makes the check due at once.
 - **Merged.** GitHub does not allow reopening a merged PR. Nothing can change.
   The PR leaves the schedule. Its cached status stays, so the status-bar chip,
   auto-archive, and auto-hibernate on merge keep working.
@@ -124,8 +130,10 @@ selects it) in the last 30 minutes. Hibernated sessions count as idle. Age of
 the worktree is not a rule: what age stands in for is "when did someone last
 touch this", and activity measures that directly.
 
-Activity slows the waiting tier and the discovery tier for idle worktrees. It
-never slows the checks-running tier: an agent usually finishes, pushes, and goes
+Activity slows the waiting tier and the discovery tier for idle worktrees, and
+removes closed PRs from the schedule entirely while idle. Any change from idle
+to active makes the worktree's item due now. Activity never slows the
+checks-running tier: an agent usually finishes, pushes, and goes
 idle while CI runs, which is exactly when the status will change and exactly
 what auto-archive is waiting for.
 
@@ -167,7 +175,8 @@ about each kind of change. The intervals follow.
 | Checks running | about 1 | within 1 min | 60 s | 60 |
 | Waiting on people, active worktree | about 9 | within 2 min | 2 min | 270 |
 | Waiting on people, idle worktree | | within 6 min | 6 min | |
-| Closed | 3 | within 30 min | 30 min | 6 |
+| Closed, active worktree | 3 | within 30 min | 30 min | 6 |
+| Closed, idle worktree | | on next activity | none | 0 |
 | Merged | 37 | never | none | 0 |
 | Discovery, active branches | about 5 | within 10 min | 10 min | about 30 |
 | Discovery, idle branches | about 26 | within 1 h | 1 h | about 10 |
@@ -206,6 +215,9 @@ writes status, so the two-facts contract (the cached `PRStatus` value and the
   made from a terminal rather than by an agent.
 - **The user selects a worktree.** The app already sends a refresh on selection.
   That refresh also marks the worktree active for 30 minutes.
+- **A worktree goes from idle to active** by any of the signals above. Its item
+  becomes due, which is how a closed PR that was not being checked gets checked
+  again.
 
 ### The scheduler
 
@@ -276,13 +288,15 @@ delete the flag and the old loop.
 
 - **Tier function.** `(status, active) -> interval` is a pure function with a
   case per status and per activity value, including that checks-running ignores
-  activity and merged yields no interval.
+  activity, merged yields no interval, and closed yields an interval only when
+  active.
 - **Governor math.** Pure: given a schedule and a `remaining`, the stretch
   factor is what the formula says, and it is 1 when under the cap.
 - **Scheduler against a fake clock.** Items fire at their due times; a trigger
   moves one item earlier without touching others; coincident items in one repo
   go out as one query; a merged result removes the item; a closed result moves it
-  to the 30-minute tier.
+  to the 30-minute tier while active and removes it while idle; an idle-to-active
+  change makes a closed item due at once.
 - **Triggers.** The hook pattern recognizes the three `git push` forms above and
   does not match `git push --help` or a `git push` inside a quoted string the
   way the existing `gh pr create` matcher already handles quoting. The git
