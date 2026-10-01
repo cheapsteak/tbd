@@ -1187,6 +1187,19 @@ struct ModelProxySupervisorTests {
 
     // MARK: - The port wait
 
+    /// Hang guard for every arming wait on the port wait's own sleep: the fast
+    /// pass's saturated budget, not the clock's 45 s default, because the sleep
+    /// is several scheduling hops from the test body. `start()` runs in an
+    /// unstructured task that first has to be given a thread, and before the
+    /// wait arms it reads the config row, asks `/tbd/status` on the persisted
+    /// port through a real `URLSession`, spawns, and probes the port through
+    /// `LoopbackPortProbe`, which hops to a utility-QoS GCD thread — a class
+    /// macOS deprioritizes behind the default-QoS work saturating the pass.
+    /// That is the `timeout` note on `EventDrivenTestClock.sleeperArmed`; at
+    /// 45 s the first arming here went red on most nightly stress iterations
+    /// with no logic assertion failing.
+    private static let portWaitArming = TestDeadlines.saturatedPass
+
     /// **The port wait's whole reason** (spec, "Port"): a port a routed session
     /// carries in its `ANTHROPIC_BASE_URL` is not this daemon's to give up
     /// while something transient holds it.
@@ -1222,8 +1235,10 @@ struct ModelProxySupervisorTests {
         let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
         let starting = Task { await supervisor.start() }
         defer { starting.cancel() }
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         await starting.value
         await supervisor.stop()
 
@@ -1268,7 +1283,8 @@ struct ModelProxySupervisorTests {
             routedSessionsAlive: { throw GateUnreadable() }, clock: clock)
         let starting = Task { await supervisor.start() }
         defer { starting.cancel() }
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         await starting.value
         await supervisor.stop()
 
@@ -1307,7 +1323,7 @@ struct ModelProxySupervisorTests {
         defer { starting.cancel() }
         for _ in 0..<3 {
             try await clock.requireAdvanceWhenArmed(
-                by: ModelProxySupervisor.defaultPortRetryInterval)
+                by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         }
         await starting.value
         await supervisor.stop()
@@ -1372,7 +1388,8 @@ struct ModelProxySupervisorTests {
         let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
         let starting = Task { await supervisor.start() }
         defer { starting.cancel() }
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         await starting.value
         await supervisor.stop()
 
@@ -1475,7 +1492,8 @@ struct ModelProxySupervisorTests {
         let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
         let starting = Task { await supervisor.start() }
         defer { starting.cancel() }
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         await starting.value
         await supervisor.stop()
 
@@ -1514,7 +1532,8 @@ struct ModelProxySupervisorTests {
         let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
         let starting = Task { await supervisor.start() }
         defer { starting.cancel() }
-        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(
+            by: ModelProxySupervisor.defaultPortRetryInterval, timeout: Self.portWaitArming)
         await starting.value
         await supervisor.stop()
 
