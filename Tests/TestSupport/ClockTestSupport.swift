@@ -397,7 +397,7 @@ public extension TestClock {
     /// twice more per advance. That is inside swift-clocks, on the hot path of
     /// every clock-driven test, and no change here can remove it. What this
     /// helper can do is bound each probe against what remains of `timeout`
-    /// (``probeSuspension(within:)``), so a starved megaYield cannot hold the
+    /// (``probeSuspension(until:)``), so a starved megaYield cannot hold the
     /// wait past its own guard; `advance`'s megaYields stay unbounded. macOS starves
     /// background QoS under saturation, so a residual load sensitivity remains:
     /// this is load-*tolerant*, not load-*independent*. Measured healthy-path
@@ -472,7 +472,7 @@ public extension TestClock {
         // sitting in one probe until `.clockDriven` cuts it off unattributed.
         let deadline = ContinuousClock.now.advanced(by: timeout)
         let armed = await pollUntilTrue(timeout: timeout, pollInterval: pollInterval) {
-            await probeSuspension(within: ContinuousClock.now.duration(to: deadline))
+            await probeSuspension(until: deadline)
         }
         guard case .timedOut = armed else { return }
         Issue.record(
@@ -485,7 +485,7 @@ public extension TestClock {
         )
     }
 
-    /// One `checkSuspension()` probe, raced against `budget` of real time.
+    /// One `checkSuspension()` probe, raced against the caller's absolute `deadline`.
     ///
     /// `checkSuspension()` throws when a sleeper *is* registered, so the probe
     /// reads inverted. It opens with `Task.megaYield()`, whose background-QoS
@@ -493,15 +493,17 @@ public extension TestClock {
     /// saturation, so a task group cannot bound it (the group would await the
     /// stuck child on the way out). The probe therefore runs unstructured and
     /// whichever of it and the timer settles first answers; a probe that loses
-    /// the race finishes on its own later and its answer is dropped. Because the
-    /// budget is what remains of the caller's deadline, at most the last one or
+    /// the race finishes on its own later and its answer is dropped. The timer
+    /// sleeps until the absolute deadline rather than for a relative budget, so
+    /// a timer task that is itself scheduled late cannot push the deadline out;
+    /// and because every probe shares that one deadline, at most the last one or
     /// two probes of a timed-out wait are left running.
-    private func probeSuspension(within budget: Swift.Duration) async -> Bool {
+    private func probeSuspension(until deadline: ContinuousClock.Instant) async -> Bool {
         let race = SuspensionProbeRace()
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             race.install(continuation)
             let timer = Task {
-                try? await Task.sleep(for: max(budget, .zero))
+                try? await Task.sleep(until: deadline, clock: .continuous)
                 race.settle(false)
             }
             Task { [self] in
@@ -519,7 +521,7 @@ public extension TestClock {
     }
 }
 
-/// The once-only answer slot `TestClock.probeSuspension(within:)` races its
+/// The once-only answer slot `TestClock.probeSuspension(until:)` races its
 /// probe and its timer into.
 private final class SuspensionProbeRace: @unchecked Sendable {
     private let lock = NSLock()
