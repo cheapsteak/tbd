@@ -7,13 +7,14 @@ open. On the test fleet that is about 19 `gh` processes at once per pass and
 about 2,900 GitHub GraphQL points an hour, out of a budget of 5,000 that is
 shared by every tool and agent using the same login. In the worst hour measured,
 TBD spent 3,747 points and another tool on the same login then failed to approve
-three pull requests because the budget was gone.
+three pull requests with a rate-limit error. The exact cause of that failure
+was not proven; sustained spend on the shared login is the likely one.
 
 This document replaces the one fixed timer with a schedule. Each known PR is
 checked at an interval chosen by its status and by whether anyone is working in
 its worktree. Branches without a PR are checked for one on a slower schedule.
-Local events (an agent pushes, a branch tip moves, the user clicks a worktree)
-make a check due now. A governor keeps projected spend under a fixed share of
+Local events (a branch's remote tip moves, the user clicks a worktree, a session
+starts working) make a check due now. A governor keeps projected spend under a fixed share of
 the budget. The expected result on the test fleet is about 375 points an hour
 instead of 2,900, and a few `gh` processes a minute instead of 19 every 30
 seconds.
@@ -26,9 +27,10 @@ Three human rulings shaped the design:
 - **No backoff by staleness.** Polling less often the longer a PR has sat
   unchanged has the wrong shape for running checks, which become more likely to
   finish as time passes. Intervals follow status, not age.
-- **Closed PRs are checked only while someone is there; merged PRs leave.** A
-  closed PR can be reopened, so it is checked slowly while its worktree is
-  active and not at all while it is idle. Becoming active checks it at once.
+- **Closed PRs go back to discovery while someone is there; merged PRs leave.**
+  A closed PR can be reopened, or replaced by a new PR on the same branch, so
+  its branch returns to discovery: every 30 minutes while its worktree is
+  active, not at all while it is idle, and at once when it becomes active.
   GitHub cannot reopen a merged PR, so it is never checked.
 
 ## The problem, measured
@@ -55,7 +57,9 @@ Measured on one developer machine on 2026-09-22 and 2026-09-30.
 
 A logging wrapper around `gh` over two hours with the app open attributed about
 80% of all GraphQL calls to the TBD daemon. Agent sessions waiting on their own
-PRs made most of the rest, mostly as free conditional requests.
+PRs made most of the rest. Many of those were REST conditional requests, which
+cost nothing; the remainder were GraphQL, at roughly 300 to 1,500 points an
+hour depending on how many agents were waiting.
 
 Two measurement traps worth recording so nobody repeats them:
 
@@ -112,11 +116,14 @@ Why these are the right shapes:
 - **Waiting on people** (checks failed, changes requested, blocked, draft, ready
   to merge). Changes when a person acts, at no predictable time. A steady
   interval.
-- **Closed.** Reopening is rare but possible, and nothing downstream needs to
-  notice it on time: auto-archive acts only on merged, and the chip keeps
-  showing "closed" until someone returns. So a closed PR is checked on a slow
-  interval while its worktree is active, and not at all while it is idle. The
-  worktree becoming active makes the check due at once.
+- **Closed.** A closed PR can be reopened, or a new PR can be opened from the
+  same branch, in which case the old number is the wrong thing to watch. So a
+  closed PR is not tracked by number at all. Its branch returns to discovery,
+  whose query returns the newest PR for the branch and so catches both cases.
+  Nothing downstream needs to notice either on time: auto-archive acts only on
+  merged, and the chip keeps showing "closed" until someone returns. So that
+  discovery runs every 30 minutes while the worktree is active, not at all while
+  it is idle, and at once when the worktree becomes active.
 - **Merged.** GitHub does not allow reopening a merged PR. Nothing can change.
   The PR leaves the schedule. Its cached status stays, so the status-bar chip,
   auto-archive, and auto-hibernate on merge keep working.
@@ -131,11 +138,18 @@ the worktree is not a rule: what age stands in for is "when did someone last
 touch this", and activity measures that directly.
 
 Activity slows the waiting tier and the discovery tier for idle worktrees, and
-removes closed PRs from the schedule entirely while idle. Any change from idle
-to active makes the worktree's item due now. Activity never slows the
-checks-running tier: an agent usually finishes, pushes, and goes
-idle while CI runs, which is exactly when the status will change and exactly
-what auto-archive is waiting for.
+removes closed PRs' branches from discovery entirely while idle. Any change from
+idle to active makes the worktree's item due now. Activity never slows the
+checks-running tier: an agent usually finishes, pushes, and goes idle while CI
+runs, which is exactly when the status will change and exactly what
+auto-archive is waiting for.
+
+Activity is per worktree, not per app. Today's loop slows to five minutes
+whenever no app is connected; the schedule does not look at the app at all. An
+agent working overnight keeps its tiers with the app closed, which is what
+fleet supervision needs. This is a deliberate change. A machine where every
+session is idle spends about 160 points an hour with the app closed, against
+about 300 today.
 
 ### The numbers, and how they were derived
 
@@ -151,6 +165,10 @@ until the hour resets.
 
     points per hour = PRs in that status x (3600 / interval in seconds) x points per query
 
+A by-number query costs 1 point. A discovery batch costs about 1 point per 8
+branches it carries (6 points measured for 50), so cost scales with branch
+count, not with the number of batches.
+
 **Input 3, measured: how long PRs sit in each status.** From the last 100 PRs in
 each of two repos, 2026-09-06 to 2026-10-01: this repo, and a large private
 monorepo where the same user works.
@@ -163,19 +181,25 @@ monorepo where the same user works.
 | Commits per PR, median | 3 | 2 |
 | Share of a PR's life with checks running | about 10% | about 2% |
 
-The last row is the one that matters. PRs spend almost all their time waiting on
-people. The fast tier for running checks is cheap whatever it is set to; the
-waiting tier drives cost.
+The last row is computed per merged PR as commits times the median CI duration,
+capped at the PR's own open-to-merged time, then summed over all merged PRs and
+divided by their total open time. It is a sum, not a ratio of the medians above,
+which is why it comes out lower than the medians alone suggest: long-lived PRs
+dominate the total. It is the row that matters. PRs spend almost all their time
+waiting on people. The fast tier for running checks is cheap whatever it is set
+to; the waiting tier drives cost.
 
 **Input 4, judgement: target delays.** The owner chose how soon TBD should know
-about each kind of change. The intervals follow.
+about each kind of change. The interval equals the worst-case delay; the average
+delay is half of it. The "PRs in it" column assumes every open PR is in an
+active worktree, which makes the total an upper bound.
 
 | Status | PRs in it (test fleet) | Target delay | Interval | Points per hour |
 |---|---|---|---|---|
 | Checks running | about 1 | within 1 min | 60 s | 60 |
 | Waiting on people, active worktree | about 9 | within 2 min | 2 min | 270 |
 | Waiting on people, idle worktree | | within 6 min | 6 min | |
-| Closed, active worktree | 3 | within 30 min | 30 min | 6 |
+| Closed, active worktree (back in discovery) | 3 | within 30 min | 30 min | 6 |
 | Closed, idle worktree | | on next activity | none | 0 |
 | Merged | 37 | never | none | 0 |
 | Discovery, active branches | about 5 | within 10 min | 10 min | about 30 |
@@ -192,6 +216,10 @@ checks tier adds an average of 30 seconds to a 12-minute CI run, about 4%.
 - Waiting tier at 5 min instead of 2: about 160 points an hour less.
 - Waiting tier at 1 min: about 270 points an hour more.
 - Five PRs with checks running at once: 300 points an hour, inside the cap.
+- Twenty PRs rebased together: 1,200 points an hour in the fast tier alone. The
+  fast tier is never stretched, so it is bounded by count instead: at most 10
+  PRs are in it at once, which is 600 points an hour. The rest wait in the
+  2-minute tier and move up as slots free, oldest pending first.
 - 50 open PRs waiting at 2 min: 1,500 points an hour. This is where the cap
   bites, and the governor stretches the tier.
 
@@ -205,19 +233,23 @@ Each of these makes one item due now. A trigger only moves a due time; it never
 writes status, so the two-facts contract (the cached `PRStatus` value and the
 `PRObservation` outcome of the last attempt) is untouched.
 
-- **An agent runs `git push`.** The PostToolUse hook bridge that already
-  recognizes `gh pr create` learns `git push` as well, including `git push -u
-  origin <branch>` and `git push --force-with-lease`. The worktree's PR, or its
-  discovery item if it has no PR, becomes due.
-- **A branch tip moves.** The periodic git refresh already resolves every branch
-  tip and each repo's base tip on every sweep. When a worktree's tip differs from
-  the tip recorded at its last PR check, its item becomes due. This covers pushes
-  made from a terminal rather than by an agent.
+- **A branch's remote tip moves.** The periodic git refresh, every 60 seconds
+  with the app open and every 5 minutes without it, already fetches and resolves
+  every branch tip and each repo's base tip. When a worktree's remote-tracking
+  tip differs from the tip recorded at its last PR check, its item becomes due.
+  The local tip is deliberately not used: agents commit far more often than they
+  push, and a check before the push is wasted. An agent's `git push` therefore
+  shows up within one refresh, whoever ran it. A hook pattern for `git push` was
+  considered and cut as a duplicate; see the rejected alternatives.
 - **The user selects a worktree.** The app already sends a refresh on selection.
   That refresh also marks the worktree active for 30 minutes.
 - **A worktree goes from idle to active** by any of the signals above. Its item
-  becomes due, which is how a closed PR that was not being checked gets checked
-  again.
+  becomes due, which is how a closed PR's branch that was not being checked gets
+  checked again.
+
+Items are keyed by repo and PR number, so a PR that two worktrees share, such as
+a remote lane and a local checkout of the same branch, is checked once and both
+worktrees receive the result.
 
 ### The scheduler
 
@@ -229,8 +261,12 @@ trigger wakes it, then runs everything that is due. Due tracking items in the
 same repo go out in one aliased by-number query. Due discovery items go out as
 today's batch query, restricted to PR-less branches.
 
-On daemon start every item is due at once, so the first pass looks like today's,
-and the schedule settles from there. Nothing about the schedule is persisted.
+On daemon start every tracked open PR and every discovery item is due at once,
+so the first pass looks like today's, and the schedule settles from there.
+Merged PRs are not re-queried, on restart or ever. Nothing about the schedule is
+persisted. Activity is computed from persisted session state, so it survives a
+restart; the 30-minute recency window starts empty, which only makes the first
+schedule treat more worktrees as idle.
 
 The scheduler takes an injected clock as its last initializer parameter,
 defaulted to `ContinuousClock()`, following the repo rule for anything that
@@ -243,12 +279,32 @@ selection. The daemon logs the cost of each query at info level under the
 `PRStatusManager` category, and keeps the most recent `remaining` and
 `resetAt`.
 
+`remaining` and `resetAt` are server values from the response; the local clock
+is never compared against them directly. This leg is GitHub-only. GitLab has no
+equivalent field, so GitLab items count in the projection below but never move
+`remaining`.
+
 Projected spend is the sum over scheduled items of 3600 divided by each item's
-interval, times its query cost. When projected spend exceeds 1,000 points an
-hour, or `remaining` is below 1,000, the governor multiplies the waiting and
-discovery intervals by the smallest factor that brings projected spend back
-under the cap. It never changes the checks-running interval. When `resetAt`
-passes, the factor resets to 1.
+interval, times its query cost. After every response the governor recomputes
+one stretch factor, the smallest value of 1 or more such that both hold:
+
+- projected spend is at most 1,000 points an hour, and
+- projected spend over the time left until `resetAt` is at most `remaining`.
+
+The factor multiplies the waiting and discovery intervals only, up to a maximum
+of 1 hour. If even the maximum cannot satisfy the second condition, the
+scheduler brakes: nothing but the fast tier runs until `resetAt`. The factor is
+recomputed when `resetAt` passes, not reset. The fast tier is never stretched;
+it is bounded by count, as above.
+
+Two failure cases are stated so the implementation does not guess:
+
+- A rate-limit error response carries no `rateLimit` field. It brakes the
+  scheduler until the last `resetAt` seen, or for one hour if none has been.
+- An attempt that comes back undetermined for any other reason, such as a
+  network error or an unparseable response, keeps its tier interval. It never
+  retries sooner, and the two-facts contract records the outcome as it does
+  today.
 
 ### The flag
 
@@ -271,7 +327,8 @@ delete the flag and the old loop.
   merged-transition dispatcher.
 - The `gh` and `glab` subprocess transports.
 - The GitLab path. GitLab merge requests get the same tiers through the existing
-  per-MR query; discovery on GitLab keeps its existing batch.
+  per-MR query; discovery on GitLab keeps its existing batch. Only the
+  governor's remaining-budget leg is GitHub-only.
 - The PR binding coordinator and the hook bridge's existing `gh pr create`
   handling.
 
@@ -290,17 +347,21 @@ delete the flag and the old loop.
   case per status and per activity value, including that checks-running ignores
   activity, merged yields no interval, and closed yields an interval only when
   active.
-- **Governor math.** Pure: given a schedule and a `remaining`, the stretch
-  factor is what the formula says, and it is 1 when under the cap.
+- **Governor math.** Pure: the factor is 1 when both conditions hold; a low
+  `remaining` with a low hourly projection still stretches when the projection
+  to `resetAt` exceeds `remaining`; the factor caps at 1 hour and brakes beyond
+  it; a rate-limit error brakes until `resetAt`; the factor is recomputed, not
+  reset, when `resetAt` passes.
+- **Fast-tier count bound.** With 12 PRs pending, 10 are in the fast tier and 2
+  wait in the 2-minute tier; a PR finishing frees a slot for the oldest waiter.
 - **Scheduler against a fake clock.** Items fire at their due times; a trigger
   moves one item earlier without touching others; coincident items in one repo
-  go out as one query; a merged result removes the item; a closed result moves it
-  to the 30-minute tier while active and removes it while idle; an idle-to-active
-  change makes a closed item due at once.
-- **Triggers.** The hook pattern recognizes the three `git push` forms above and
-  does not match `git push --help` or a `git push` inside a quoted string the
-  way the existing `gh pr create` matcher already handles quoting. The git
-  refresh reports a tip change exactly once per change.
+  go out as one query; a merged result removes the item; a closed result removes
+  the by-number item and returns the branch to discovery at 30 minutes while
+  active and not at all while idle; an idle-to-active change makes that branch
+  due at once; two worktrees on one PR produce one query and two updates.
+- **Triggers.** The git refresh reports a remote-tip change exactly once per
+  change, and a local commit with no push does not fire it.
 - **Flag branches.** With the column NULL or 0, the old loop runs and the
   scheduler never starts. With 1, the scheduler runs and the old loop never
   starts. A pre-migration row reads NULL, not 0.
@@ -350,6 +411,10 @@ arrive by webhook, so poll.
 - **Agents read PR status from TBD instead of running `gh`.** The daemon already
   holds the answer and `tbd worktree list --json` exposes it. Worth doing, but
   agents turned out to spend far less than the daemon. Secondary.
+- **A hook pattern for `git push`.** Would make an agent's push due at once
+  instead of within one git refresh, saving under a minute with the app open and
+  up to five without it, against CI runs of about 12 minutes. It adds a command
+  matcher to maintain and test. Cut; the remote-tip trigger is the general one.
 
 ### A separate budget
 
