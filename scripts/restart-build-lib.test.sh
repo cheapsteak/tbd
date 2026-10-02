@@ -997,18 +997,26 @@ test_a_build_interrupted_by_ctrl_c_is_torn_down_not_orphaned() {
     rm -rf "$d" "$shim"
 }
 
-# THE FINDING THE PROCESS GROUP ANSWERS. A teardown that can only signal what
-# `ps` enumerated fails on exactly the machine this PR targets: the one where
-# `ps` is slow enough to hit its own bound. Killing the root alone is no
-# substitute — its children re-parent to launchd and go on holding the
-# machine-global slot. So the teardown signals the build's process group, which
-# `run_governed_build` arranges by launching under job control, and this case
-# proves it does not need `ps` by taking `ps` away.
-test_an_interrupt_tears_the_tree_down_even_when_ps_cannot_answer() {
+# THE FINDING THE PROCESS GROUP ANSWERS, and the one the ORDER answers. A
+# teardown that can only signal what `ps` enumerated fails on exactly the
+# machine this PR targets: the one where `ps` is slow enough to hit its own
+# bound. Killing the root alone is no substitute — its children re-parent to
+# launchd and go on holding the machine-global slot. So the teardown signals the
+# build's process group, which `run_governed_build` arranges by launching under
+# job control.
+#
+# This case takes `ps` away AND gives the probe a bound far longer than the case
+# is willing to wait, so it pins both halves at once: that no process table is
+# needed, and that none is consulted BEFORE the signal. A walk placed first
+# would mean a human's Ctrl-C did nothing for twenty seconds here — and the
+# traps are disarmed by then, so an impatient second Ctrl-C would end
+# restart.sh and leave the build alive in a process group that is no longer the
+# terminal's.
+test_an_interrupt_tears_the_tree_down_promptly_when_ps_cannot_answer() {
     local d fake
     d="$(mkunendingworktree)"
     fake="$(mkhangingps)"
-    PATH="$fake:$PATH" TBD_RESTART_PROCESS_PROBE_SECONDS=1 \
+    PATH="$fake:$PATH" TBD_RESTART_PROCESS_PROBE_SECONDS=20 \
         bash -c "$RESTART_SHELL_BODY" "$HERE" "$d" > "$d/stdout.txt" 2> "$d/stderr.txt" &
     RUNNER_PID=$!
     RUNNER_FIXTURE="$d"

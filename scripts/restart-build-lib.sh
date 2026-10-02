@@ -492,14 +492,27 @@ describe_silent_build() {
 # that is the build's group; when it did not, the build shares the caller's
 # group and no group with that id exists at all, so the kill is an ESRCH no-op
 # rather than a signal to the shell doing the killing. Measured in bash 3.2 and
-# 5.2 alike. The pid and walk legs below are what carry the teardown in that
-# case, and they also cover anything that left the group by starting a session
-# of its own.
+# 5.2 alike. The pid-directed kill beside it is what carries the teardown in
+# that case.
 #
-# The walk is therefore a supplement, not the mechanism — but its ORDER still
-# matters: descendants are enumerated BEFORE anything is signalled, because a
-# walk rooted at a dead root reports an empty tree. It is repeated after the
-# grace period for anything forked while the first round was in flight.
+# NOTHING IS PROBED BEFORE ANYTHING IS SIGNALLED, and that ordering is the
+# teardown's whole responsiveness. A descendant walk costs up to
+# `process_probe_seconds`, so a walk placed first means a human's Ctrl-C does
+# nothing at all for several seconds on exactly the wedged machine where the
+# probe is slow — while the traps are already disarmed, so a second, impatient
+# Ctrl-C ends restart.sh and leaves the build alive in a process group that is
+# no longer the terminal's, still holding the slot. That is worse than the bug
+# this teardown was written for. Two signals that cost nothing to send come
+# first, and they are the ones that do the work.
+#
+# There is no walk here at all, and its absence is deliberate. The group kill
+# strictly dominates it: group membership is inherited and survives
+# re-parenting, so a walk can only add a process that left the group by calling
+# `setsid` for itself — which nothing between bash, python and SwiftPM does —
+# and even that is unreachable once the root is dead. Paying seconds of delay at
+# the one moment a person is waiting, to cover a case this tree cannot produce,
+# is the wrong trade. `describe_silent_build` is where the walk earns its bound,
+# because there a human has already been waiting minutes for an answer.
 #
 # SIGTERM THEN SIGKILL, AND NEVER SIGINT. SIGINT is the one signal this tree
 # has been made deaf to, so sending it would be a teardown that tears nothing
@@ -509,19 +522,12 @@ describe_silent_build() {
 # Always returns 0. Callers run under restart.sh's `set -e`, and a kill that
 # lost a race with a process leaving on its own must not become a failure.
 terminate_build_tree() {
-    local builder="$1" signal victims pid
-    victims="$(build_descendant_processes "$builder" 2>/dev/null | awk '{print $1}')" \
-        || victims=""
+    local builder="$1" signal
     for signal in TERM KILL; do
         kill -"$signal" "-$builder" 2>/dev/null || true
         kill -"$signal" "$builder" 2>/dev/null || true
-        for pid in $victims; do
-            kill -"$signal" "$pid" 2>/dev/null || true
-        done
         [ "$signal" = TERM ] || break
         sleep "$BUILD_TEARDOWN_GRACE_SECONDS"
-        victims="$victims $(build_descendant_processes "$builder" 2>/dev/null \
-            | awk '{print $1}')"
     done
     # The job is ours, so collect it: an unreaped child is the smallest
     # unreclaimed resource there is, and this path exists to leave none.
@@ -724,7 +730,14 @@ run_governed_build() {
     local had_monitor=0
     case "$-" in *m*) had_monitor=1 ;; esac
     set -m
-    (clear_sdk_overrides; cd "$repo_root" && scripts/swift-safe build "$@") > "$build_log" 2>&1 &
+    # Stdin from /dev/null, and job control is the reason. A background process
+    # group that reads the terminal is sent SIGTTIN and STOPS — which would
+    # present as a build frozen at 0% CPU holding the machine-global slot, the
+    # exact picture this file exists to explain, and one no amount of better
+    # reporting would have untangled. Nothing in the governed build reads stdin,
+    # so this closes the whole class rather than a known case.
+    (clear_sdk_overrides; cd "$repo_root" && scripts/swift-safe build "$@") \
+        < /dev/null > "$build_log" 2>&1 &
     builder=$!
     [ "$had_monitor" = 1 ] || set +m
     # Saved before arming, and restored below, so this borrows the three
