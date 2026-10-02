@@ -1213,7 +1213,14 @@ public final class RPCRouter: Sendable {
             // stored PR number: a closed PR's branch is in discovery to learn
             // whether that PR reopened or a newer one replaced it, and only
             // the branch query answers with the newest PR for the branch.
-            _ = try await runDiscoveryLeg(discovered, forceBranchMatch: true)
+            let discovery = try await runDiscoveryLeg(discovered, forceBranchMatch: true)
+            // A PR this leg just bound is tracked in this same pass, inside the
+            // `beginPollPass` window opened above. Discovery of an already-
+            // merged PR with nothing bound fires the un-bound fallback from
+            // `fetchAll`; judging the new binding here lets the trigger dedupe
+            // that pass's two edges, as `runPollPass` does. Left to the next
+            // wake, a new pass window would let `evaluate` fan out again.
+            track.formUnion(discovery.newlyBound)
             track.formUnion(await reopenedClosedKeys(among: Set(discovered.map(\.id)),
                                                      observedSince: passStartedAt))
         }
@@ -1306,6 +1313,10 @@ public final class RPCRouter: Sendable {
         let infos: [PRStatusManager.PollWorktree]
         let bindingsOnlyIDs: Set<UUID>
         let bindingsOnlyFirstPath: String?
+        /// The keys of the bindings this leg created — branch matches and
+        /// provenance seeds whose `bind` answered `.bound`. A key that was
+        /// already bound is not here.
+        var newlyBound: Set<PRPollKey> = []
     }
 
     /// The discovery half of a poll pass: compose each row's poll entry, ask
@@ -1349,13 +1360,17 @@ public final class RPCRouter: Sendable {
         // The branch matcher is one of the three binding discovery sources; the
         // coordinator owns the policy (repo validation, tombstones, cap), so a
         // match it rejects is simply not bound.
+        var newlyBound: Set<PRPollKey> = []
         for match in poll.discovered {
-            _ = await prBindingCoordinator.bind(worktreeID: match.worktreeID,
-                                                parsed: match.parsed, source: .branch)
+            if case .bound(let binding) = await prBindingCoordinator.bind(
+                worktreeID: match.worktreeID, parsed: match.parsed, source: .branch) {
+                newlyBound.insert(PRPollKey(binding))
+            }
         }
-        await seedProvenanceBindings(worktrees)
+        newlyBound.formUnion(await seedProvenanceBindings(worktrees))
         return DiscoveryLegResult(infos: infos, bindingsOnlyIDs: bindingsOnlyIDs,
-                                  bindingsOnlyFirstPath: plan.bindingsOnly.first?.worktreePath)
+                                  bindingsOnlyFirstPath: plan.bindingsOnly.first?.worktreePath,
+                                  newlyBound: newlyBound)
     }
 
     /// The end of a poll pass: drop what the fleet no longer holds.
@@ -1390,7 +1405,10 @@ public final class RPCRouter: Sendable {
     /// resolution. Detached numbers stay short-circuited here **and** are
     /// refused by `seedProvenance`, so a `tbd pr detach` is not undone by the
     /// next poll.
-    private func seedProvenanceBindings(_ worktrees: [Worktree]) async {
+    ///
+    /// Answers the keys of the bindings it created.
+    private func seedProvenanceBindings(_ worktrees: [Worktree]) async -> Set<PRPollKey> {
+        var seeded: Set<PRPollKey> = []
         for worktree in worktrees {
             guard let number = worktree.prNumber else { continue }
             guard let recorded = try? await db.prBindings.list(worktreeID: worktree.id,
@@ -1399,9 +1417,12 @@ public final class RPCRouter: Sendable {
             guard let parsed = await prRef(worktreeID: worktree.id, number: number) else {
                 continue
             }
-            _ = await prBindingCoordinator.seedProvenance(worktreeID: worktree.id,
-                                                          parsed: parsed)
+            if case .bound(let binding) = await prBindingCoordinator.seedProvenance(
+                worktreeID: worktree.id, parsed: parsed) {
+                seeded.insert(PRPollKey(binding))
+            }
         }
+        return seeded
     }
 
     /// Refresh every binding of the polled worktrees and persist what came back.

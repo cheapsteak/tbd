@@ -195,6 +195,40 @@ struct PRPollScheduledPassTests {
         #expect(try await h.bindingState(wt: 0, number: 7) == .merged)
     }
 
+    /// A PR that scheduled discovery binds is tracked in the same pass. A
+    /// worktree with nothing bound whose PR merged unwatched raises both merge
+    /// edges: `fetchAll` fires the un-bound fallback, and judging the new
+    /// binding in the same pass window lets the trigger dedupe them. Left to
+    /// the next wake, `evaluate` would fan out a second time.
+    ///
+    /// The worktree is created from PR 7 so the merged binding counts as its
+    /// own work: the canned by-number node's head is not the worktree's
+    /// branch. The branch match binds PR 7 first, so provenance seeds nothing.
+    @Test func aPRBoundByScheduledDiscoveryIsTrackedInTheSamePass() async throws {
+        let h = try await PRPollLegsHarness.make(
+            bindings: [], responses: [7: "MERGED"], worktreeCount: 1,
+            provenanceNumbers: [0: 7], branchNodes: [7: "MERGED"])
+        let fanOuts = IDRecorder()
+        let trigger = AllResolvedMergeTrigger { id, _ in await fanOuts.add(id) }
+        h.router.mergeTrigger = trigger
+        // Wired as `Daemon` wires it, so the un-bound fallback reaches the trigger.
+        let db = h.db
+        await h.prManager.setOnMergedTransition { id, number in
+            let bindings = (try? await db.prBindings.list(worktreeID: id)) ?? []
+            await trigger.observedMerge(worktreeID: id, prNumber: number, bindings: bindings)
+        }
+
+        await h.router.runScheduledPass(PRPollDue(discover: [h.worktreeID(0)], track: []))
+        #expect(await h.gh.branchQueries().count == 1)
+        let numbered = await h.gh.numberedQueries()
+        #expect(numbered.count == 1)
+        #expect(numbered.first?.contains("pullRequest(number: 7)") == true)
+        #expect(try await h.bindingState(wt: 0, number: 7) == .merged)
+
+        await h.router.runScheduledPass(PRPollDue(discover: [], track: [h.key(7)]))
+        #expect(await fanOuts.ids == [h.worktreeID(0)])
+    }
+
     /// A closed binding is re-queried by number only on a status THIS pass
     /// observed. A day-old OPEN cache entry with the same number, and a branch
     /// query that finds nothing, must ask nothing more than the same pass
