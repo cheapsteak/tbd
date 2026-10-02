@@ -109,6 +109,49 @@ EOF
     echo "$d"
 }
 
+# Build a throwaway "worktree" whose scripts/swift-safe stub writes ONE
+# `swift-safe:` line in two writes, $1 seconds apart. Echoes $d.
+#
+# The gap is a whole second against the harness's 0.05s poll, so the watcher
+# drains perhaps twenty times while only the first half exists: the split is
+# what the case needs to happen, not something it hopes for.
+mksplitlineworktree() {
+    local gap="${1:-1}"
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-split.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+printf 'swift-safe: still waiting for the ' >&2
+sleep $gap
+printf 'shared build slot after 60s of 1800s\n' >&2
+echo "swift-safe: exit status 0" >&2
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# Build a throwaway "worktree" whose scripts/swift-safe stub writes nothing but
+# newline-LESS fragments, one every tenth of a second, $1 of them. Echoes $d.
+# Every byte it writes is output, and none of it completes a line.
+mkfragmentworktree() {
+    local fragments="${1:-30}"
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-frag.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+i=0
+while [ \$i -lt $fragments ]; do
+    printf 'x' >&2
+    sleep 0.1
+    i=\$((i + 1))
+done
+printf '\n' >&2
+echo "swift-safe: exit status 0" >&2
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
 # A directory holding a python3 shim that restores SIGINT's DEFAULT disposition
 # and then execs its arguments.
 #
@@ -802,6 +845,38 @@ test_a_hanging_ps_cannot_strand_the_builds_exit_status() {
     # stub exits on its own, so this is a collection, not a kill.
     [ "$AWAITED_RESULT" = finished ] || wait "$runner" 2>/dev/null
     rm -rf "$d" "$fake"
+}
+
+# --- a line that arrives in two writes --------------------------------------
+#
+# `read` consumes a newline-less tail and returns failure, handing the bytes
+# back through its variable. Dropping them there loses the half of the line
+# that carries the `swift-safe:` prefix, so the second write arrives as a bare
+# remainder that matches nothing — and the fragment counts as no output at all,
+# which lets the silence watchdog call a build stalled mid-write.
+
+test_a_progress_line_split_across_two_writes_is_still_streamed() {
+    local d; d="$(mksplitlineworktree 1)"
+    local err; err="$(run_under_restart_shell "$d" 2>&1 >/dev/null)"
+    assert_contains "the two halves are rejoined before the filter sees them" "$err" \
+        "swift-safe: still waiting for the shared build slot after 60s of 1800s"
+    local count
+    count="$(printf '%s\n' "$err" | grep -c "still waiting for the shared" || true)"
+    assert_eq "streamed once, not again by the end-of-build flush" "1" "$count"
+    rm -rf "$d"
+}
+
+test_a_build_writing_partial_lines_is_not_called_silent() {
+    local d; d="$(mkfragmentworktree 30)"
+    local err
+    err="$( (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" 2>&1 >/dev/null
+    ) )"
+    # Three seconds of fragments against a one-second bound: a watcher that
+    # ignores them reports silence, and one that counts them never can.
+    assert_missing "bytes without a newline are still output" "$err" "no build output for"
+    rm -rf "$d"
 }
 
 # --- an interrupted build must not keep the shared slot ------------------------

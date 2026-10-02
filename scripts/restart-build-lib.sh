@@ -524,6 +524,15 @@ interrupt_governed_build() {
 #  - output of ANY kind resets a silence timer, and silence past the bound is
 #    reported by `describe_silent_build`.
 #
+# A line that arrives in two writes is rejoined rather than lost. `read`
+# consumes a newline-less tail and hands it back through its variable while
+# reporting failure, so letting that failure drop the variable throws the bytes
+# away: the second write would then arrive as a bare remainder with no
+# `swift-safe:` on it, match nothing, and never be streamed — and the fragment
+# would not count as output either, which lets the silence watchdog call a
+# build stalled in the middle of writing. swift-safe writes whole lines, so
+# this is rare rather than theoretical; it costs one variable.
+#
 # The silence deadline is armed a second beyond the bound because `date +%s`
 # truncates: two readings a hair apart can straddle a second boundary and
 # differ by one, so arming at exactly `now + silence` lets a report fire after
@@ -538,7 +547,8 @@ interrupt_governed_build() {
 # that failed must not take the build down with it.
 follow_build_progress() {
     local build_log="$1" builder="$2"
-    local poll silence line alive read_any now last_output_at next_report
+    local poll silence line alive read_any now last_output_at next_report pending
+    pending=""
     poll="$(build_poll_seconds)"
     silence="$(build_silence_seconds)"
     now="$(date +%s)"
@@ -563,10 +573,25 @@ follow_build_progress() {
         # the next pass resumes from the same place.
         while IFS= read -r line <&3; do
             read_any=1
+            # Rejoined with whatever the previous pass could not finish; empty
+            # in the ordinary case of a whole line arriving at once.
+            line="$pending$line"
+            pending=""
             case "$line" in
                 "$SWIFT_SAFE_PROGRESS_PREFIX"*) printf '%s\n' "$line" >&2 ;;
             esac
         done
+        # A newline-less tail is CONSUMED by the `read` that failed on it and
+        # left in the variable, so dropping it here loses those bytes for good:
+        # a `swift-safe:` line split across two writes would arrive next pass as
+        # its own second half, no longer match the prefix, and never be streamed.
+        # Carry it instead. It also counts as output — a build caught mid-write
+        # is not a silent one, and leaving `read_any` at 0 for it would let the
+        # watchdog call a writing build stalled.
+        if [ -n "$line" ]; then
+            pending="$line"
+            read_any=1
+        fi
         [ "$alive" = 1 ] || break
         now="$(date +%s)"
         if [ "$read_any" = 1 ]; then
@@ -578,6 +603,13 @@ follow_build_progress() {
         fi
         sleep "$poll"
     done
+    # The only way to arrive here holding anything is a writer that died
+    # mid-line. Print it rather than drop it: half a progress line still says
+    # more than nothing, and the build is over, so nothing is coming to
+    # complete it.
+    case "$pending" in
+        "$SWIFT_SAFE_PROGRESS_PREFIX"*) printf '%s\n' "$pending" >&2 ;;
+    esac
     exec 3<&-
     return 0
 }
