@@ -181,6 +181,64 @@ struct PRPollScheduleTests {
         ])
     }
 
+    /// Eleven PRs enter checksRunning one second apart: 0...9 hold the fast
+    /// slots and 10 overflows.
+    private func elevenPending(_ ids: [UUID], _ s: inout PRPollSchedule) {
+        for i in 0..<11 {
+            s.reconcile((0...i).map { j in wt(ids[j], [(j, .pending)]) }, now: at(TimeInterval(i)))
+        }
+    }
+
+    @Test func aPRThatLeavesChecksRunningAndReentersGoesToTheBackOfTheFastQueue() {
+        var s = PRPollSchedule()
+        let ids = (0..<11).map { _ in UUID() }
+        elevenPending(ids, &s)
+        var facts = (0..<11).map { j in wt(ids[j], [(j, .pending)]) }
+        // PR 0 goes green: PR 10 takes its slot.
+        facts[0] = wt(ids[0], [(0, .mergeable)])
+        s.reconcile(facts, now: at(100))
+        #expect(s.interval(of: .track(key(10)), decision: run1) == .seconds(60))
+        // PR 0 starts checks again: it is now the newest waiter, not the oldest.
+        facts[0] = wt(ids[0], [(0, .pending)])
+        s.reconcile(facts, now: at(200))
+        #expect(s.interval(of: .track(key(0)), decision: run1) == .seconds(120))
+        #expect(s.interval(of: .track(key(10)), decision: run1) == .seconds(60))
+    }
+
+    @Test func anOverflowItemsIntervalIsStretched() {
+        var s = PRPollSchedule()
+        let ids = (0..<11).map { _ in UUID() }
+        elevenPending(ids, &s)
+        let d = PRPollGovernor.Decision.run(stretch: 2)
+        #expect(s.interval(of: .track(key(10)), decision: d) == .seconds(240))
+        #expect(s.interval(of: .track(key(9)), decision: d) == .seconds(60))
+    }
+
+    @Test func underABrakeWithNoFastItemsNothingIsEverDue() {
+        let a = UUID(), c = UUID()
+        var s = PRPollSchedule()
+        s.reconcile([wt(a, [(1, .blocked)]), wt(c)], now: t0)
+        #expect(s.nextDue(decision: .brake) == nil)
+        #expect(s.nextDue(decision: run1) != nil)
+    }
+
+    @Test func aClosedPRInAnActiveWorktreeAtStartIsDueAtOnce() {
+        let a = UUID()
+        var s = PRPollSchedule()
+        s.reconcile([wt(a, active: true, [(1, .closed)])], now: t0)
+        #expect(s.tier(of: .discover(a)) == .closedDiscovery)
+        #expect(s.due(at: t0, decision: run1).discover == [a])
+    }
+
+    @Test func aWorktreeWithAnOpenAndAClosedBindingIsTrackedOnly() {
+        let a = UUID()
+        var s = PRPollSchedule()
+        s.reconcile([wt(a, [(1, .blocked), (2, .closed)])], now: t0)
+        #expect(s.tier(of: .track(key(1))) == .waiting)
+        #expect(s.tier(of: .track(key(2))) == nil)
+        #expect(s.tier(of: .discover(a)) == nil)
+    }
+
     @Test func undiscoverableWorktreeWithNoBindingsHasNoItem() {
         let a = UUID()
         var s = PRPollSchedule()
