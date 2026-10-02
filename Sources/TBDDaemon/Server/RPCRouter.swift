@@ -191,6 +191,21 @@ public final class RPCRouter: Sendable {
     /// must never enumerate differently, and the router keeps the timer because
     /// `Daemon.start()` reaches it through the router to start the loop.
     public let prPoller: PRPoller
+    /// The budgeted PR schedule that replaces `prPoller` when
+    /// `pr_poll_schedule_enabled` is set. Exactly one of the two is started
+    /// (`PRPollDriver`, from `Daemon.start()`); the other stays inert. Its
+    /// facts and its pass live here for the reason `runPollPass` does — the
+    /// enumeration helpers are shared with `pr.refresh` — and are installed at
+    /// the end of `init`.
+    public let prPollScheduler: PRPollScheduler
+    /// In-memory hook and selection stamps the schedule reads activity from.
+    public let activityLedger: WorktreeActivityLedger
+    /// When a scheduled pass last pruned the branch-facts cache against the
+    /// whole fleet. A scheduled pass composes poll entries for the due rows
+    /// only, and `branchTrackingCache.retain` over that subset would evict
+    /// every row that merely was not due, so the full prune runs at most
+    /// hourly instead (`runScheduledPass`).
+    let lastFullPrune = OSAllocatedUnfairLock<Date?>(initialState: nil)
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
@@ -425,6 +440,10 @@ public final class RPCRouter: Sendable {
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
+        self.activityLedger = WorktreeActivityLedger()
+        // Placeholder handlers: the real ones need the fully formed router and
+        // are installed at the end of `init`, beside `prPoller.installPass`.
+        self.prPollScheduler = PRPollScheduler(facts: { [] }, run: { _ in }, now: now, clock: clock)
         // Default the candidate source from the router's own stores rather
         // than leaving it nil: the rate-limit handler's suggestion reads it,
         // and a caller that forgets to pass one would otherwise disable it
@@ -527,6 +546,12 @@ public final class RPCRouter: Sendable {
         // one) is not kept alive by its own poller; a pass on a deallocated
         // router is a no-op, which is the honest answer.
         prPoller.installPass { [weak self] in try await self?.runPollPass() }
+        // The schedule's facts and pass, on the same terms and for the same
+        // reason: `weak`, so a discarded router is not kept alive by its own
+        // scheduler, and a wake on a deallocated router sees no work.
+        prPollScheduler.installHandlers(
+            facts: { [weak self] in await self?.pollScheduleFacts() ?? [] },
+            run: { [weak self] due in await self?.runScheduledPass(due) })
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -1058,7 +1083,9 @@ public final class RPCRouter: Sendable {
     /// Return the daemon's PR snapshot. Serving only — this handler never
     /// drives a fetch.
     ///
-    /// `PRPoller` owns the clock, and it owns it alone. That is not tidiness:
+    /// The periodic driver owns the clock, and it owns it alone — `PRPoller`,
+    /// or `PRPollScheduler` when `pr_poll_schedule_enabled` is set, never both
+    /// (`PRPollDriver`). That is not tidiness:
     /// the merged-PR transition is edge-triggered on a cache change, so
     /// whichever path updates the cache consumes the edge. A second periodic
     /// driver here would swallow edges the first one's consumers (auto-archive,
@@ -1097,6 +1124,151 @@ public final class RPCRouter: Sendable {
             repoPath: discovery.infos.first?.worktreePath ?? discovery.bindingsOnlyFirstPath)
         await pruneAfterPass(infos: discovery.infos,
                              activeIDs: Set(discovery.infos.map(\.id)).union(discovery.bindingsOnlyIDs))
+    }
+
+    // MARK: - PR poll schedule
+
+    /// How often a scheduled pass prunes the branch-facts cache against the
+    /// whole fleet. See `lastFullPrune`.
+    static let scheduledFullPruneInterval: TimeInterval = 3600
+
+    /// The facts the PR schedule is rebuilt from on every wake: each pollable
+    /// active row, whether it is active, whether it has a branch discovery can
+    /// match on, and its live bindings with their stored states.
+    ///
+    /// Activity comes from the hook-fed session rows and the ledger's
+    /// in-memory stamps only — never from terminal text. The ledger is pruned
+    /// to the live terminals and rows here, so stamps for sessions and rows
+    /// that left the fleet do not accumulate.
+    ///
+    /// A DB read failure answers `[]`. The schedule then drops every item and
+    /// the next wake rebuilds them as due — the same as a restart — and the
+    /// warning makes that visible.
+    func pollScheduleFacts() async -> [PRPollWorktreeFacts] {
+        do {
+            let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+            let bindings = try await db.prBindings.listAll().filter { !$0.detached }
+            let terminals = try await db.terminals.list()
+            let repos = try await db.repos.list()
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+            let defaultBranchByRepo = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.defaultBranch) })
+            let bindingsByWorktree = Dictionary(grouping: bindings, by: \.worktreeID)
+            let terminalsByWorktree = Dictionary(grouping: terminals, by: \.worktreeID)
+            await activityLedger.retain(terminalIDs: Set(terminals.map(\.id)),
+                                        worktreeIDs: Set(worktrees.map(\.id)))
+            let stamps = await activityLedger.snapshot()
+            let current = now()
+            return worktrees.map { wt in
+                let active = WorktreeActivity.isActive(
+                    sessions: WorktreeActivity.facts(from: terminalsByWorktree[wt.id] ?? []),
+                    lastHookAt: stamps.hooks, lastSelectedAt: stamps.selections[wt.id], now: current)
+                let discoverable = Self.hasPollableBranch(
+                    wt, repoPathByID: repoPathByID, mirrorMeta: mirrorMeta,
+                    defaultBranchByRepo: defaultBranchByRepo)
+                let facts = (bindingsByWorktree[wt.id] ?? []).map {
+                    PRPollBindingFact(key: PRPollKey($0), state: $0.status?.state)
+                }
+                return PRPollWorktreeFacts(worktreeID: wt.id, active: active,
+                                           discoverable: discoverable, bindings: facts)
+            }
+        } catch {
+            // `.private`, as in `PRPoller.tick`: a GRDB error carries its SQL.
+            routerLogger.warning("PR schedule facts unreadable, schedule emptied: \(error, privacy: .private)")
+            return []
+        }
+    }
+
+    /// One scheduled pass: discover the due branches, refresh the due PRs by
+    /// number, and settle what that implies — the scheduler's counterpart to
+    /// `runPollPass`, built from the same legs.
+    ///
+    /// Never throws: a DB enumeration failure costs this pass, logged as
+    /// `PRPoller.tick` logs it, and the scheduler marks the items as run so a
+    /// failing read does not turn into a tight retry loop.
+    func runScheduledPass(_ due: PRPollDue) async {
+        do {
+            try await runScheduledPassLegs(due)
+        } catch {
+            routerLogger.warning("scheduled PR pass skipped: \(error, privacy: .private)")
+        }
+    }
+
+    private func runScheduledPassLegs(_ due: PRPollDue) async throws {
+        // Open the pass before anything can observe a merge, as `runPollPass`
+        // does and for the same reason.
+        await mergeTrigger?.beginPollPass()
+        let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+        var track = due.track
+
+        if !due.discover.isEmpty {
+            let discovered = worktrees.filter { due.discover.contains($0.id) }
+            // Every branch goes through the branch query, even a row with a
+            // stored PR number: a closed PR's branch is in discovery to learn
+            // whether that PR reopened or a newer one replaced it, and only
+            // the branch query answers with the newest PR for the branch.
+            _ = try await runDiscoveryLeg(discovered, forceBranchMatch: true)
+            track.formUnion(await reopenedClosedKeys(among: Set(discovered.map(\.id))))
+        }
+
+        if !track.isEmpty {
+            let live = try await db.prBindings.listAll()
+            let owners = Set(live.filter { !$0.detached && track.contains(PRPollKey($0)) }.map(\.worktreeID))
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let plan = await pollEntries(worktrees.filter { owners.contains($0.id) },
+                                         repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
+            await refreshBindingStatuses(
+                polled: plan.matched, bindingsOnly: Set(plan.bindingsOnly.map(\.id)),
+                repoPath: plan.matched.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath,
+                onlyKeys: track)
+        }
+
+        // `activeIDs` is the whole pollable fleet, never the due subset: a row
+        // that was not due this round still holds its PR facts.
+        let activeIDs = Set(worktrees.map(\.id))
+        let current = now()
+        let pruneInterval = Self.scheduledFullPruneInterval
+        let fullPruneDue = lastFullPrune.withLock { stamp in
+            stamp.map { current.timeIntervalSince($0) >= pruneInterval } ?? true
+        }
+        if fullPruneDue {
+            // The hourly full prune: compose every row's entry so the
+            // branch-facts cache is retained against the whole fleet.
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let plan = await pollEntries(worktrees, repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
+            await pruneAfterPass(infos: plan.matched, activeIDs: activeIDs)
+            lastFullPrune.withLock { $0 = current }
+        } else {
+            // `pruneAfterPass` with this pass's partial entries would retain
+            // the branch-facts cache against the due rows alone and evict
+            // every row that was not due, so between full prunes only the PR
+            // facts are pruned.
+            await prManager.retain(active: activeIDs)
+        }
+    }
+
+    /// The keys of closed bindings whose PR discovery just found open again.
+    ///
+    /// The branch query can answer with the same closed PR. `bind` then reports
+    /// it already bound and leaves the binding's stored status at `.closed`, so
+    /// on its own a reopened PR would stay on the closed-discovery tier
+    /// forever. When the status discovery just cached for a row names one of
+    /// that row's closed bindings and is not closed, that key is refreshed by
+    /// number in this same pass; its binding row then holds the open status
+    /// and the next reconcile tracks it on its proper tier. A different number
+    /// is a new PR, which discovery's own `bind` handles; the same PR still
+    /// closed changes nothing.
+    private func reopenedClosedKeys(among worktreeIDs: Set<UUID>) async -> Set<PRPollKey> {
+        guard let live = try? await db.prBindings.listAll() else { return [] }
+        let statuses = await prManager.allStatuses()
+        var keys: Set<PRPollKey> = []
+        for binding in live where !binding.detached && worktreeIDs.contains(binding.worktreeID)
+            && binding.status?.state == .closed {
+            guard let cached = statuses[binding.worktreeID], cached.number == binding.number,
+                  cached.state != .closed else { continue }
+            keys.insert(PRPollKey(binding))
+        }
+        return keys
     }
 
     /// What one discovery leg composed and matched: the rows matched by branch

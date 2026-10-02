@@ -25,14 +25,32 @@ struct PRPollLegsHarness {
     /// with no response resolves to `null`, which the refresh treats as "did
     /// not resolve" and keeps the stored status. `provenanceNumbers` maps a
     /// worktree index to the `Worktree.prNumber` it was created from.
+    ///
+    /// `branchNodes` maps a PR number to the GraphQL `state` (`"OPEN"`,
+    /// `"CLOSED"`, `"MERGED"`) the branch query reports for it, on the branch
+    /// of the first worktree bound to (or created from) that number; empty
+    /// means no branch has a PR. `activeWorktrees` names the worktree indexes
+    /// given a selection stamp in the router's activity ledger, so
+    /// `pollScheduleFacts()` reports them active.
     static func make(
         bindings: [(wt: Int, number: Int, state: PRMergeableState)],
         responses: [Int: String],
         worktreeCount: Int? = nil,
-        provenanceNumbers: [Int: Int] = [:]
+        provenanceNumbers: [Int: Int] = [:],
+        branchNodes: [Int: String] = [:],
+        activeWorktrees: Set<Int> = [0]
     ) async throws -> PRPollLegsHarness {
         let db = try TBDDatabase(inMemory: true)
-        let gh = PRPollLegsGH(responses: responses)
+        var branchNodeJSON: [String] = []
+        for (number, state) in branchNodes.sorted(by: { $0.key < $1.key }) {
+            let bound: Int? = bindings.first(where: { $0.number == number })?.wt
+            let createdFrom: Int? = provenanceNumbers.keys.sorted().first(where: { provenanceNumbers[$0] == number })
+            let owner = bound ?? createdFrom ?? 0
+            branchNodeJSON.append(PRPollLegsGH.nodeJSON(
+                number: number, verdict: state == "OPEN" ? "MERGEABLE_CLEAN" : state,
+                head: "tbd/legs-\(owner)"))
+        }
+        let gh = PRPollLegsGH(responses: responses, branchNodes: branchNodeJSON)
         let manager = PRStatusManager(ghRunner: { args, path in
             await gh.run(args: args, repoPath: path)
         })
@@ -75,6 +93,10 @@ struct PRPollLegsHarness {
                 source: .manual))
         }
 
+        for index in activeWorktrees where index < worktreeIDs.count {
+            await router.activityLedger.recordSelection(worktreeID: worktreeIDs[index], at: Date())
+        }
+
         return PRPollLegsHarness(db: db, router: router, gh: gh, prManager: manager,
                                  repoID: repo.id, worktreeIDs: worktreeIDs)
     }
@@ -107,15 +129,18 @@ struct PRPollLegsHarness {
 /// A stand-in for `gh` that records every GraphQL query it is asked and
 /// answers the by-number lookup from canned verdicts.
 ///
-/// The branch query answers with no PRs, `repo view` with `acme/acme-prod`,
+/// The branch query answers with the canned `branchNodes` filtered to each
+/// bound branch (none by default), `repo view` with `acme/acme-prod`,
 /// and the per-PR check query with a green rollup — though the canned nodes
 /// are all green (`SUCCESS`), so the refresh never asks for checks.
 actor PRPollLegsGH {
     private let responses: [Int: String]
+    private let branchNodes: [String]
     private var queries: [String] = []
 
-    init(responses: [Int: String]) {
+    init(responses: [Int: String], branchNodes: [String] = []) {
         self.responses = responses
+        self.branchNodes = branchNodes
     }
 
     /// Every by-number lookup asked, in order. The per-PR check query also
@@ -144,7 +169,7 @@ actor PRPollLegsGH {
             return GHCommandResult(stdout: Self.greenCheckDetailJSON)
         }
         if BranchQueryStub.isBranchQuery(query) {
-            return BranchQueryStub.response(args: args, nodes: [])
+            return BranchQueryStub.response(args: args, nodes: branchNodes)
         }
         if query.contains("pullRequest(number:") {
             let fields = Self.aliasedNumbers(inQuery: query).map { alias, number in
@@ -165,7 +190,10 @@ actor PRPollLegsGH {
     ///
     /// Always approved and with a `SUCCESS` rollup, so no per-PR check query
     /// runs and the merge verdict alone decides the state.
-    static func nodeJSON(number: Int, verdict: String) -> String {
+    ///
+    /// `head` is the node's `headRefName`; the branch query only answers a
+    /// branch with the nodes whose head is that branch.
+    static func nodeJSON(number: Int, verdict: String, head: String? = nil) -> String {
         let state: String
         let mergeStateStatus: String
         switch verdict {
@@ -177,11 +205,12 @@ actor PRPollLegsGH {
             mergeStateStatus = verdict.hasPrefix("MERGEABLE_")
                 ? String(verdict.dropFirst("MERGEABLE_".count)) : verdict
         }
+        let headRef = head ?? "tbd/legs-pr-\(number)"
         return """
         {"number": \(number), "url": "https://github.com/acme/acme-prod/pull/\(number)",
          "title": "PR \(number)",
          "state": "\(state)", "mergeStateStatus": "\(mergeStateStatus)", "reviewDecision": "APPROVED",
-         "headRefName": "tbd/legs-pr-\(number)", "baseRefName": "main",
+         "headRefName": "\(headRef)", "baseRefName": "main",
          "createdAt": "2026-08-01T00:00:00Z", "isDraft": false,
          "statusCheckRollup": {"state": "SUCCESS"}}
         """

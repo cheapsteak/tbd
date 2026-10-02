@@ -17,8 +17,14 @@ public actor PRPollScheduler {
     public typealias FactsProvider = @Sendable () async -> [PRPollWorktreeFacts]
     public typealias Runner = @Sendable (PRPollDue) async -> Void
 
-    private let facts: FactsProvider
-    private let run: Runner
+    /// The facts and the runner. Passed to `init`, or — when their owner is
+    /// not fully formed yet — installed once by `installHandlers` (the
+    /// `PRPoller.installPass` pattern). `nonisolated(unsafe)` for the reason
+    /// `PRPoller.pass` is: written exactly once, synchronously, inside the
+    /// initializer of the object that owns this scheduler, before `start()`
+    /// can read it.
+    private nonisolated(unsafe) var facts: FactsProvider
+    private nonisolated(unsafe) var run: Runner
     /// Date seam: every due time and budget deadline is compared against this.
     private let now: @Sendable () -> Date
     private let maxSleep: Duration
@@ -54,6 +60,16 @@ public actor PRPollScheduler {
         self.now = now
         self.maxSleep = maxSleep
         self.clock = clock
+    }
+
+    /// Install the facts and the runner. Called once, from the end of
+    /// `RPCRouter.init` — the closures need a fully formed router, which does
+    /// not exist while its own stored properties are still being assigned.
+    /// `nonisolated` and synchronous so that construction site can call it
+    /// without an `await`, and so no wake can observe the placeholders.
+    nonisolated func installHandlers(facts: @escaping FactsProvider, run: @escaping Runner) {
+        self.facts = facts
+        self.run = run
     }
 
     public var isRunning: Bool { loopTask != nil }
