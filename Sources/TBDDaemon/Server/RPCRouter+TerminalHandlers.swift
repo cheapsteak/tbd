@@ -5345,6 +5345,9 @@ extension RPCRouter {
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        // Any hook event marks the worktree active for the PR schedule.
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
         // validate, so we fall back to the old behavior.
@@ -5517,6 +5520,8 @@ extension RPCRouter {
             return .ok()
         }
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         if let cwd = params.cwd, !cwd.isEmpty {
             guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
@@ -5725,6 +5730,10 @@ extension RPCRouter {
         // an agent hook, so it must not inflate the hook-event counter.
         if params.origin == nil {
             await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+            // The same rule for the PR schedule's activity: a user interrupt is
+            // not agent activity.
+            await activityLedger.recordHookEvent(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
 
         // Stop-hook transcript sync (Stop/StopFailure reach the daemon as

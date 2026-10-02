@@ -1236,6 +1236,14 @@ public final class Daemon: Sendable {
         await lifecycle.remoteTipTracker.setOnMoved { [weak rpcRouter] id in
             await rpcRouter?.prPollScheduler.trigger(worktreeID: id)
         }
+        // A worktree that may have gone from idle to active (a hook event or a
+        // selection after a quiet 30 minutes) wakes the schedule; reconcile's
+        // idle-to-active rule decides whether anything becomes due. The ledger
+        // signals at most once per worktree per window, so hook traffic cannot
+        // storm the loop. Harmless when the legacy poller runs, as above.
+        await rpcRouter.activityLedger.setOnPossibleActivation { [weak rpcRouter] _ in
+            await rpcRouter?.prPollScheduler.kick()
+        }
 
         self.router = rpcRouter
         // Post-construction wiring, same shape as `claudeUsagePoller` below:

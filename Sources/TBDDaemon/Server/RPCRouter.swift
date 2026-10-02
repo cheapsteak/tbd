@@ -1889,6 +1889,10 @@ public final class RPCRouter: Sendable {
         guard Self.isPollable(wt) else {
             return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
+        // The app sends this on selection, so it is the PR schedule's
+        // "the user is looking at this worktree" signal. Only a pollable row
+        // is stamped: an unpolled one has no schedule item to make due.
+        await activityLedger.recordSelection(worktreeID: wt.id, at: now())
         var repo: Repo?
         if let repoID = wt.repoID {
             repo = try await db.repos.get(id: repoID)
@@ -2005,6 +2009,9 @@ public final class RPCRouter: Sendable {
         switch await prBindingCoordinator.bind(worktreeID: params.worktreeID,
                                                parsed: parsed, source: source) {
         case .bound(let binding):
+            // Wake the PR schedule: its next reconcile sees the new binding,
+            // never yet observed, and makes it due at once.
+            await prPollScheduler.kick()
             return try RPCResponse(result: PRAttachResult(outcome: "bound", binding: binding))
         case .alreadyBound:
             return try RPCResponse(result: PRAttachResult(outcome: "alreadyBound"))
