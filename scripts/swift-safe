@@ -55,6 +55,16 @@ be released.  Openers are a superset of the holder (waiters have the file open
 too), so the line says the holder is among them and never names one as the
 holder.
 
+That probe has THREE outcomes and the line says which one happened, because
+"nobody else has it open" and "I could not ask" are opposite conclusions that
+would otherwise print the same words.  Conflating them is how the original
+misleading line gets reproduced: a probe that cannot complete — plausibly on
+exactly the wedged, CPU-pegged machine where it matters, since that is also
+where ``lsof`` and ``ps`` are slowest — would otherwise fall back to "the
+current holder is unidentified", which is the wording the incident blames.
+``scripts/restart-build-lib.sh`` keeps the same distinction on its own process
+walk, for the same reason.
+
 A wait also ends when whoever requested the build goes away.  Killing a shell
 or an agent session signals only that process, so a wrapper queued behind the
 lock is never told; left waiting it stays in the queue and in time takes the
@@ -657,7 +667,7 @@ def _process_command_names(
     return names
 
 
-def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
+def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...] | None:
     """(pid, name) for every *other* process that has the lock file open.
 
     The recorded identity answers "who took the slot", and it is the answer
@@ -678,10 +688,19 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
     an inherited descriptor appears in it, and the command names separate a
     queued wrapper from a compiler at a glance.
 
-    Best effort in every direction.  No `lsof`, a timeout, a refusal, or
-    unparsable output all return `()` and the caller falls back to saying the
-    holder is unidentified, because this runs inside a wait loop and may never
-    fail one.
+    Three return values, and keeping them apart is the point.  `None` means the
+    probe could not be run at all — no `lsof`, a refusal, or a timeout — and the
+    caller must report that it could not look.  `()` means it ran and found
+    nobody else, which is the honest "unidentified holder" fallback.  A
+    non-empty tuple is the answer.  Collapsing the first two into `()`, which is
+    what this did before, reproduces the exact misleading line the probe was
+    added to remove — and does it on the wedged machine where `lsof` and `ps`
+    are slowest, which is where the line is read.  None of the three fails the
+    wait: this runs inside a wait loop and may never end one.
+
+    The naming leg is a separate matter and stays best-effort: a `ps` that fails
+    leaves the openers named "unknown", which is half an answer rather than no
+    answer, so it is reported as a find and not as a failure.
 
     Both legs share one budget, `LOCK_OPENER_PROBE_TIMEOUT_SECONDS`, and that
     is the whole cost of the probe per heartbeat.  `lsof` is capped at the
@@ -701,7 +720,11 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return ()
+        # `subprocess.TimeoutExpired` is a `SubprocessError`, so this is the
+        # timeout path too — and the one that most needs telling apart from an
+        # empty result, since a probe that runs out of time is a probe on a busy
+        # machine.
+        return None
     # Our own waiter holds the file open too; naming it would describe the
     # process doing the asking as a candidate for the thing blocking it.
     own = os.getpid()
@@ -735,12 +758,24 @@ def _unidentified_holder(
     Reached only from a contended wait, so the lock IS held by someone: the
     one thing that must never be implied here is that it is not.
 
+    Each of `_lock_file_openers`' three outcomes gets its own line.  The one
+    that is easy to lose is the middle one: a probe that could not run says so,
+    rather than borrowing the words for a probe that ran and found nobody.  The
+    words it would otherwise borrow are the ones the incident turned on.
+
     `openers` is resolved here rather than defaulted into the signature, so
     that the name is looked up when it is called: a default argument would
     bind the function object at definition and leave a test's substitution
     silently ignored.
     """
     visible = (openers or _lock_file_openers)(lock_path)
+    if visible is None:
+        return (
+            f"{preamble}, and the process table could not be asked which "
+            f"processes have the lock file open within "
+            f"{LOCK_OPENER_PROBE_TIMEOUT_SECONDS:g}s; the lock is still held, so "
+            f"inspect it by hand: lsof {lock_path}"
+        )
     if not visible:
         return fallback
     listed = ", ".join(

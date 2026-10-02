@@ -1091,6 +1091,60 @@ class WaitReportingTests(unittest.TestCase):
         self.assertIn(f"names pid {stale}, which is not running", description)
         self.assertIn("the current holder is unidentified", description)
 
+    def test_a_probe_that_could_not_run_says_so_rather_than_guessing(self):
+        """The third state, and the one the fallback used to swallow.
+
+        "nobody else has the file open" and "I could not ask" are opposite
+        conclusions.  Reported as the first, the second reproduces word for word
+        the line the incident turned on — a permanently held lock described as a
+        harmless stale file — and it does so on precisely the wedged machine
+        where `lsof` and `ps` are slowest.
+        """
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("could not be asked", description)
+        self.assertIn("the lock is still held", description)
+        self.assertIn("lsof", description)
+        self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_probe_that_could_not_run_is_not_the_same_line_as_one_that_saw_nothing(
+        self,
+    ):
+        """Mutation guard: the two states must not merely both be non-empty."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        could_not_look = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        saw_nothing = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ()
+        )
+        self.assertNotEqual(could_not_look, saw_nothing)
+        self.assertNotIn("could not be asked", saw_nothing)
+
+    def test_an_unrecorded_holder_also_distinguishes_a_probe_that_could_not_run(self):
+        self.record("")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        self.assertIn("has not recorded its identity yet", description)
+        self.assertIn("could not be asked", description)
+        self.assertIn("the lock is still held", description)
+
+    def test_a_probe_that_could_not_run_reaches_the_wait_line_itself(self):
+        """Not just the helper: the line a waiting human actually reads."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        with mock.patch.object(swift_safe, "_lock_file_openers", lambda _: None):
+            first = self.wait_messages()[0]
+        self.assertIn("waiting for the shared build slot", first)
+        self.assertIn("could not be asked", first)
+        self.assertNotIn("the current holder is unidentified", first)
+
     def test_a_crowd_of_openers_is_capped_and_counted(self):
         stale = _dead_pid()
         self.record(f"pid={stale}\n")
@@ -1213,6 +1267,87 @@ class LockOpenerProbeBudgetTests(unittest.TestCase):
             swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS,
             swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
         )
+
+
+class LockOpenerProbeFailureTests(unittest.TestCase):
+    """A probe that cannot complete is distinguishable from one that found nobody.
+
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` is a bound, which means the probe really
+    can run out of time, and the machine where it does is the busy one — the
+    state the whole fallback exists to describe.  A missing `lsof` is the other
+    way in, and reaches the same branch.  The failures are injected rather than
+    provoked: no test may spend the real five seconds, and no test may depend on
+    whether this machine has `lsof` installed.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.lock_path.write_text(f"pid={_dead_pid()}\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @contextlib.contextmanager
+    def _failing_probe(self, error):
+        def fake_run(argv, **kwargs):
+            raise error
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            yield
+
+    def _failures(self):
+        """Every way the probe can fail to run, named for the subTest."""
+        return (
+            (
+                "timeout",
+                subprocess.TimeoutExpired(
+                    cmd=["lsof"], timeout=swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+                ),
+            ),
+            ("missing lsof", FileNotFoundError(2, "No such file or directory", "lsof")),
+            ("refused", PermissionError(13, "Permission denied", "lsof")),
+        )
+
+    def test_the_timeout_is_caught_as_a_failure_and_not_as_an_empty_result(self):
+        # The containment that makes this branch reachable at all, asserted
+        # rather than assumed: `TimeoutExpired` is a `SubprocessError`, so the
+        # existing `except` really does swallow it.
+        self.assertTrue(
+            issubclass(subprocess.TimeoutExpired, subprocess.SubprocessError)
+        )
+        for name, error in self._failures():
+            with self.subTest(failure=name):
+                with self._failing_probe(error):
+                    self.assertIsNone(swift_safe._lock_file_openers(self.lock_path))
+
+    def test_a_failed_probe_reaches_the_description_as_could_not_look(self):
+        """End to end through the real probe, which is where it used to be lost."""
+        for name, error in self._failures():
+            with self.subTest(failure=name):
+                with self._failing_probe(error):
+                    description = swift_safe._holder_description(self.lock_path)
+                self.assertIn("which is not running", description)
+                self.assertIn("could not be asked", description)
+                self.assertIn("the lock is still held", description)
+                self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_probe_that_ran_and_found_nobody_returns_the_empty_tuple(self):
+        """The control leg: without it, `assertIsNone` above could pass for free.
+
+        `lsof` answering nothing but answering is the honest-fallback state, and
+        it must stay an empty tuple rather than becoming `None` along with the
+        failures.
+        """
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn("the current holder is unidentified", description)
+        self.assertNotIn("could not be asked", description)
 
 
 @unittest.skipIf(shutil.which("lsof") is None, "lsof is not installed here")
