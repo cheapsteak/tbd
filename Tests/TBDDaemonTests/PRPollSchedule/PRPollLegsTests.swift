@@ -37,6 +37,49 @@ struct PRPollLegsTests {
         #expect(try await harness.bindingState(wt: 3, number: 8) == .blocked)
     }
 
+    /// A fallback answer — here, PR 7 did not resolve — carries the
+    /// representative's STORED status. Fanned out, it would overwrite a sibling
+    /// whose stored status differs; each binding must keep its own instead.
+    @Test func onlyKeysFallbackKeepsEachSiblingsOwnStatus() async throws {
+        let harness = try await PRPollLegsHarness.make(
+            bindings: [(wt: 0, number: 7, state: .pending), (wt: 1, number: 7, state: .blocked)],
+            responses: [:])
+        await harness.router.refreshBindingStatusesForTests(onlyKeys: [harness.key(7)])
+        #expect(await harness.gh.numberedQueries().count == 1)
+        #expect(try await harness.bindingState(wt: 0, number: 7) == .pending)
+        #expect(try await harness.bindingState(wt: 1, number: 7) == .blocked)
+    }
+
+    /// A binding that is not due keeps its stored status but still counts in
+    /// the worktree's worst-status column write.
+    @Test func nonDueBindingStillTakesPartInTheWorstStatusWrite() async throws {
+        let harness = try await PRPollLegsHarness.make(
+            bindings: [(wt: 0, number: 7, state: .pending), (wt: 0, number: 8, state: .checksFailed)],
+            responses: [7: "MERGEABLE_CLEAN"])
+        await harness.router.refreshBindingStatusesForTests(onlyKeys: [harness.key(7)])
+        #expect(try await harness.bindingState(wt: 0, number: 7) == .mergeable)
+        #expect(try await harness.bindingState(wt: 0, number: 8) == .checksFailed)
+        #expect(try await harness.columnState(wt: 0) == .checksFailed)
+    }
+
+    @Test func forcedDiscoveryAsksByBranchNotByStoredNumber() async throws {
+        let harness = try await PRPollLegsHarness.make(
+            bindings: [], responses: [7: "MERGEABLE_CLEAN"], provenanceNumbers: [0: 7])
+        _ = try await harness.router.runDiscoveryLeg(try await harness.activeWorktrees(),
+                                                     forceBranchMatch: true)
+        #expect(!(await harness.gh.branchQueries().isEmpty))
+        #expect(!(await harness.gh.numberedQueries().joined().contains("pullRequest(number: 7)")))
+    }
+
+    @Test func unforcedDiscoveryResolvesTheStoredNumber() async throws {
+        let harness = try await PRPollLegsHarness.make(
+            bindings: [], responses: [7: "MERGEABLE_CLEAN"], provenanceNumbers: [0: 7])
+        _ = try await harness.router.runDiscoveryLeg(try await harness.activeWorktrees(),
+                                                     forceBranchMatch: false)
+        #expect(await harness.gh.numberedQueries().joined().contains("pullRequest(number: 7)"))
+        #expect(await harness.gh.branchQueries().isEmpty)
+    }
+
     @Test func emptyOnlyKeysQueriesNothing() async throws {
         let harness = try await PRPollLegsHarness.make(
             bindings: [(wt: 0, number: 7, state: .pending)],

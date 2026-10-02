@@ -23,11 +23,13 @@ struct PRPollLegsHarness {
     /// `responses` maps a PR number to the verdict the forge reports for it —
     /// see `PRPollLegsGH.nodeJSON(number:verdict:)` for the vocabulary. A number
     /// with no response resolves to `null`, which the refresh treats as "did
-    /// not resolve" and keeps the stored status.
+    /// not resolve" and keeps the stored status. `provenanceNumbers` maps a
+    /// worktree index to the `Worktree.prNumber` it was created from.
     static func make(
         bindings: [(wt: Int, number: Int, state: PRMergeableState)],
         responses: [Int: String],
-        worktreeCount: Int? = nil
+        worktreeCount: Int? = nil,
+        provenanceNumbers: [Int: Int] = [:]
     ) async throws -> PRPollLegsHarness {
         let db = try TBDDatabase(inMemory: true)
         let gh = PRPollLegsGH(responses: responses)
@@ -46,7 +48,8 @@ struct PRPollLegsHarness {
             prBindingRepoResolver: { _ in ("acme", "acme-prod", "github.com") },
             actuationLog: makeTestActuationLog())
 
-        let count = worktreeCount ?? ((bindings.map { $0.wt }.max() ?? -1) + 1)
+        let highest = (bindings.map { $0.wt } + Array(provenanceNumbers.keys)).max() ?? -1
+        let count = worktreeCount ?? (highest + 1)
         var worktreeIDs: [UUID] = []
         for index in 0..<count {
             let suffix = UUID().uuidString
@@ -54,7 +57,7 @@ struct PRPollLegsHarness {
             let branch = "tbd/legs-\(index)"
             let worktree = try await db.worktrees.create(
                 repoID: repo.id, name: "wt-\(suffix)", branch: branch,
-                path: path, tmuxServer: "tbd-prlegs")
+                path: path, tmuxServer: "tbd-prlegs", prNumber: provenanceNumbers[index])
             // The facts the poll would otherwise shell out to git for.
             _ = await router.branchTrackingCache.upstreamBranchName(
                 worktreePath: path, branch: branch) { "main" }
@@ -82,6 +85,16 @@ struct PRPollLegsHarness {
     }
 
     func worktreeID(_ index: Int) -> UUID { worktreeIDs[index] }
+
+    /// Every active worktree row, in the shape a pass hands `runDiscoveryLeg`.
+    func activeWorktrees() async throws -> [Worktree] {
+        RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active))
+    }
+
+    /// The single `Worktree.prStatus` column for worktree `wt`.
+    func columnState(wt: Int) async throws -> PRMergeableState? {
+        try await db.worktrees.get(id: worktreeIDs[wt])?.prStatus?.state
+    }
 
     /// The stored state of worktree `wt`'s binding to PR `number`, or nil when
     /// no such binding exists or it has never been observed.

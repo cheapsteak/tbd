@@ -1321,6 +1321,15 @@ public final class RPCRouter: Sendable {
     /// The due half of a narrowed refresh: query one representative binding per
     /// due key, and give its observation to every binding with that key. A
     /// binding whose key is not due is absent from the result.
+    ///
+    /// Only a FRESH observation is fanned out. `refreshBindings` also answers
+    /// with fallbacks meaning "keep what is stored" — no data from `gh`, a
+    /// number that did not resolve, a failed check query — and each of those
+    /// carries the representative's own stored status. Handed to a sibling it
+    /// would overwrite the sibling's stored status with the representative's,
+    /// so the sibling gets no entry instead and folds onto itself. The
+    /// representative keeps its own entry either way, exactly as an un-narrowed
+    /// refresh would give it.
     private func refreshDueBindings(
         _ bindings: [PRBinding], onlyKeys: Set<PRPollKey>, repoPath: String?
     ) async -> [UUID: PRStatusManager.PRBindingObservation] {
@@ -1336,11 +1345,30 @@ public final class RPCRouter: Sendable {
         let raw = await prManager.refreshBindings(representatives, repoPath: repoPath)
         var observations: [UUID: PRStatusManager.PRBindingObservation] = [:]
         for binding in due {
-            if let rep = representative[PRPollKey(binding)], let observed = raw[rep.id] {
+            guard let rep = representative[PRPollKey(binding)], let observed = raw[rep.id] else {
+                continue
+            }
+            if binding.id == rep.id || Self.isFreshObservation(observed, of: rep) {
                 observations[binding.id] = observed
             }
         }
         return observations
+    }
+
+    /// Whether `refreshBindings` actually read this binding's PR this round,
+    /// rather than carrying its stored status forward.
+    ///
+    /// Every fresh observation is stamped with a new `observedAt`, and every
+    /// fallback path returns the binding's stored status untouched — never
+    /// re-stamped (see `PRStatusManager.refreshBindingGroup` and its GitLab
+    /// twin). So full `==` against the stored status, `observedAt` included,
+    /// is the discriminator; `sameValue(as:)`, which ignores the stamp, would
+    /// call an unchanged fresh reading a fallback. A binding never observed
+    /// before has no stored status, so anything returned for it is fresh.
+    static func isFreshObservation(
+        _ observed: PRStatusManager.PRBindingObservation, of binding: PRBinding
+    ) -> Bool {
+        observed.status != binding.status
     }
 
     /// Test seam: one binding refresh over every pollable row, as a full pass
