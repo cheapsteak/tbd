@@ -1190,14 +1190,17 @@ public final class RPCRouter: Sendable {
     /// `PRPoller.tick` logs it, and the scheduler marks the items as run so a
     /// failing read does not turn into a tight retry loop.
     func runScheduledPass(_ due: PRPollDue) async {
+        // Taken before anything is asked, so "observed by this pass" can be
+        // told apart from a cached value left by an earlier one.
+        let passStartedAt = now()
         do {
-            try await runScheduledPassLegs(due)
+            try await runScheduledPassLegs(due, passStartedAt: passStartedAt)
         } catch {
             routerLogger.warning("scheduled PR pass skipped: \(error, privacy: .private)")
         }
     }
 
-    private func runScheduledPassLegs(_ due: PRPollDue) async throws {
+    private func runScheduledPassLegs(_ due: PRPollDue, passStartedAt: Date) async throws {
         // Open the pass before anything can observe a merge, as `runPollPass`
         // does and for the same reason.
         await mergeTrigger?.beginPollPass()
@@ -1211,7 +1214,8 @@ public final class RPCRouter: Sendable {
             // whether that PR reopened or a newer one replaced it, and only
             // the branch query answers with the newest PR for the branch.
             _ = try await runDiscoveryLeg(discovered, forceBranchMatch: true)
-            track.formUnion(await reopenedClosedKeys(among: Set(discovered.map(\.id))))
+            track.formUnion(await reopenedClosedKeys(among: Set(discovered.map(\.id)),
+                                                     observedSince: passStartedAt))
         }
 
         if !track.isEmpty {
@@ -1220,10 +1224,24 @@ public final class RPCRouter: Sendable {
             let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
             let plan = await pollEntries(worktrees.filter { owners.contains($0.id) },
                                          repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
-            await refreshBindingStatuses(
+            let trackStartedAt = now()
+            let report = await refreshBindingStatuses(
                 polled: plan.matched, bindingsOnly: Set(plan.bindingsOnly.map(\.id)),
                 repoPath: plan.matched.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath,
                 onlyKeys: track)
+            // A tracked worktree never reaches `fetchAll`, which is where the
+            // fixed poller keeps each worktree's observation and cached status
+            // current. Record both here, so `pr.list` and the freshness label
+            // stay as current as the bindings the pass just read. Stamped at
+            // the start of this leg: a credential refusal `refreshBindings`
+            // recorded during it is newer and stands.
+            for (worktreeID, fresh) in report.dueFreshness {
+                await prManager.recordBindingRefresh(
+                    worktreeID: worktreeID,
+                    status: fresh ? report.worstStatus[worktreeID] : nil,
+                    outcome: fresh ? .observed : .undetermined(cause: PRUndeterminedCause.queryFailed),
+                    at: trackStartedAt)
+            }
         }
 
         // `activeIDs` is the whole pollable fleet, never the due subset: a row
@@ -1252,6 +1270,11 @@ public final class RPCRouter: Sendable {
 
     /// The keys of closed bindings whose PR discovery just found open again.
     ///
+    /// Only a status THIS pass observed counts: a cached entry stamped before
+    /// `observedSince` is an earlier pass's answer — possibly days old — and
+    /// acting on it would re-query the closed PR by number every closed-
+    /// discovery round while its branch query keeps finding nothing.
+    ///
     /// The branch query can answer with the same closed PR. `bind` then reports
     /// it already bound and leaves the binding's stored status at `.closed`, so
     /// on its own a reopened PR would stay on the closed-discovery tier
@@ -1261,14 +1284,16 @@ public final class RPCRouter: Sendable {
     /// and the next reconcile tracks it on its proper tier. A different number
     /// is a new PR, which discovery's own `bind` handles; the same PR still
     /// closed changes nothing.
-    private func reopenedClosedKeys(among worktreeIDs: Set<UUID>) async -> Set<PRPollKey> {
+    private func reopenedClosedKeys(among worktreeIDs: Set<UUID>,
+                                    observedSince: Date) async -> Set<PRPollKey> {
         guard let live = try? await db.prBindings.listAll() else { return [] }
         let statuses = await prManager.allStatuses()
         var keys: Set<PRPollKey> = []
         for binding in live where !binding.detached && worktreeIDs.contains(binding.worktreeID)
             && binding.status?.state == .closed {
             guard let cached = statuses[binding.worktreeID], cached.number == binding.number,
-                  cached.state != .closed else { continue }
+                  cached.state != .closed,
+                  let observedAt = cached.observedAt, observedAt >= observedSince else { continue }
             keys.insert(PRPollKey(binding))
         }
         return keys
@@ -1403,17 +1428,22 @@ public final class RPCRouter: Sendable {
     /// `onlyKeys` narrows what is *asked*, never what is *judged*. Nil asks
     /// about every binding, as a full poll pass does. A set asks about only
     /// the bindings whose `PRPollKey` it holds, and asks once per key: one
-    /// representative binding goes to the forge and its observation is fanned
-    /// out to every binding sharing that key. Every other binding folds onto
-    /// no observation and so keeps its stored status, but still takes part in
-    /// the worst-status write and the merge rule, which need the whole
+    /// representative binding goes to the forge and its fresh observation is
+    /// fanned out to every binding sharing that key. Every other binding folds
+    /// onto no observation and so keeps its stored status, but still takes
+    /// part in the worst-status write and the merge rule, which need the whole
     /// worktree.
+    ///
+    /// The returned report is what the scheduled pass records at worktree
+    /// level (`DueBindingRefreshReport`); a full pass ignores it.
+    @discardableResult
     func refreshBindingStatuses(
         polled entries: [PRStatusManager.PollWorktree], bindingsOnly: Set<UUID>, repoPath: String?,
         onlyKeys: Set<PRPollKey>? = nil
-    ) async {
+    ) async -> DueBindingRefreshReport {
+        var report = DueBindingRefreshReport()
         let polled = Set(entries.map(\.id)).union(bindingsOnly)
-        guard let live = try? await db.prBindings.listAll() else { return }
+        guard let live = try? await db.prBindings.listAll() else { return report }
         let bindings = live.filter { polled.contains($0.worktreeID) }
         // Report the whole polled population before the early return, not just
         // the part with bindings. `evaluate` below only ever sees worktrees that
@@ -1422,11 +1452,19 @@ public final class RPCRouter: Sendable {
         // judged against a fired-guard that still held it.
         await mergeTrigger?.retainBound(
             polled: polled, bound: Set(bindings.map(\.worktreeID)))
-        guard !bindings.isEmpty else { return }
+        guard !bindings.isEmpty else { return report }
 
         let observations: [UUID: PRStatusManager.PRBindingObservation]
         if let onlyKeys {
-            observations = await refreshDueBindings(bindings, onlyKeys: onlyKeys, repoPath: repoPath)
+            let due = await refreshDueBindings(bindings, onlyKeys: onlyKeys, repoPath: repoPath)
+            observations = due.observations
+            // A worktree's attempt resolved only if every due key it owns
+            // came back fresh.
+            for binding in bindings where onlyKeys.contains(PRPollKey(binding)) {
+                let fresh = due.freshKeys.contains(PRPollKey(binding))
+                report.dueFreshness[binding.worktreeID] =
+                    (report.dueFreshness[binding.worktreeID] ?? true) && fresh
+            }
         } else {
             observations = await prManager.refreshBindings(bindings, repoPath: repoPath)
         }
@@ -1454,6 +1492,7 @@ public final class RPCRouter: Sendable {
         // green icon over a bound PR whose checks are failing. One indexed
         // SELECT per worktree that actually has bindings.
         for update in Self.worktreePRStatusUpdates(refreshed) {
+            report.worstStatus[update.worktreeID] = update.status
             guard let current = try? await db.worktrees.get(id: update.worktreeID),
                   current.prStatus?.sameValue(as: update.status) != true else { continue }
             try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
@@ -1491,11 +1530,24 @@ public final class RPCRouter: Sendable {
                     ownRepo: ownRepo)
             }
         }
+        return report
+    }
+
+    /// What a narrowed binding refresh learned, per worktree, for the
+    /// scheduled pass to record at worktree level.
+    struct DueBindingRefreshReport {
+        /// Every worktree owning at least one due key, and whether every due
+        /// key it owns was freshly observed. Empty for an un-narrowed refresh.
+        var dueFreshness: [UUID: Bool] = [:]
+        /// The worst-of status per worktree, as written to its `prStatus`
+        /// column. Never `.merged` (`worktreePRStatusUpdates`).
+        var worstStatus: [UUID: PRStatus] = [:]
     }
 
     /// The due half of a narrowed refresh: query one representative binding per
     /// due key, and give its observation to every binding with that key. A
-    /// binding whose key is not due is absent from the result.
+    /// binding whose key is not due is absent from the result. `freshKeys`
+    /// names the due keys whose representative was freshly observed.
     ///
     /// Only a FRESH observation is fanned out. `refreshBindings` also answers
     /// with fallbacks meaning "keep what is stored" — no data from `gh`, a
@@ -1507,7 +1559,7 @@ public final class RPCRouter: Sendable {
     /// refresh would give it.
     private func refreshDueBindings(
         _ bindings: [PRBinding], onlyKeys: Set<PRPollKey>, repoPath: String?
-    ) async -> [UUID: PRStatusManager.PRBindingObservation] {
+    ) async -> (observations: [UUID: PRStatusManager.PRBindingObservation], freshKeys: Set<PRPollKey>) {
         let due = bindings.filter { onlyKeys.contains(PRPollKey($0)) }
         var representatives: [PRBinding] = []
         var representative: [PRPollKey: PRBinding] = [:]
@@ -1518,16 +1570,22 @@ public final class RPCRouter: Sendable {
         // Representatives go in bind order, not dictionary order, so the
         // query's alias sequence is deterministic.
         let raw = await prManager.refreshBindings(representatives, repoPath: repoPath)
+        var freshKeys: Set<PRPollKey> = []
+        for rep in representatives {
+            if let observed = raw[rep.id], Self.isFreshObservation(observed, of: rep) {
+                freshKeys.insert(PRPollKey(rep))
+            }
+        }
         var observations: [UUID: PRStatusManager.PRBindingObservation] = [:]
         for binding in due {
             guard let rep = representative[PRPollKey(binding)], let observed = raw[rep.id] else {
                 continue
             }
-            if binding.id == rep.id || Self.isFreshObservation(observed, of: rep) {
+            if binding.id == rep.id || freshKeys.contains(PRPollKey(rep)) {
                 observations[binding.id] = observed
             }
         }
-        return observations
+        return (observations, freshKeys)
     }
 
     /// Whether `refreshBindings` actually read this binding's PR this round,
