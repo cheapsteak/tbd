@@ -41,6 +41,13 @@ the set can span both forges. Its menu lists the finished PRs in bind order thro
 default browser, as the `+N` menu does. It offers no untrack action, matching
 the `+N` menu.
 
+That leaves a grouped PR with no untrack gesture in the app: the chip's leading
+icon was the only one, and the PR no longer has a chip. `tbd pr detach` still
+untracks it. This is accepted because the usual reason to untrack a finished
+PR is the room its chip takes, and the group already returns that room. If
+untracking finished PRs from the app turns out to matter, a menu entry in the
+done chip is the place to add it.
+
 **Placement in code** – the split is a pure function in
 `PRBindingPresentation`, alongside `statusBarChips`, returning the open chips,
 the open overflow count, the bindings the `+N` menu lists, and the finished
