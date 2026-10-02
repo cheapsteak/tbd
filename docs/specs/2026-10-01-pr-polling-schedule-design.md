@@ -31,7 +31,11 @@ Three human rulings shaped the design:
   A closed PR can be reopened, or replaced by a new PR on the same branch, so
   its branch returns to discovery: every 30 minutes while its worktree is
   active, not at all while it is idle, and at once when it becomes active.
-  GitHub cannot reopen a merged PR, so it is never checked.
+  GitHub cannot reopen a merged PR, so it is never checked. A branch whose PR
+  merged is not watched for a second PR either. If one is opened from that
+  branch, TBD learns of it only through the hook bridge (an agent running
+  `gh pr create` in TBD) or `tbd pr attach`. This is an accepted limit: work in
+  a worktree whose PR merged is usually finished.
 
 ## The problem, measured
 
@@ -123,7 +127,15 @@ Why these are the right shapes:
   Nothing downstream needs to notice either on time: auto-archive acts only on
   merged, and the chip keeps showing "closed" until someone returns. So that
   discovery runs every 30 minutes while the worktree is active, not at all while
-  it is idle, and at once when the worktree becomes active.
+  it is idle, and at once when the worktree becomes active. The 30-minute
+  interval applies instead of the 10-minute discovery interval, because the
+  branch still has a PR bound. What discovery finds decides what happens next:
+  - **The same PR, still closed.** The binding stays as it is, and the branch
+    stays on the 30-minute discovery interval.
+  - **The same PR, open again.** The same pass refreshes that PR by number, so
+    its stored status becomes open, and from then on it is tracked on its tier.
+  - **A new PR number.** It is bound like any newly discovered PR and tracked
+    at once. The closed PR's binding stays, and no longer affects the schedule.
 - **Merged.** GitHub does not allow reopening a merged PR. Nothing can change.
   The PR leaves the schedule. Its cached status stays, so the status-bar chip,
   auto-archive, and auto-hibernate on merge keep working.
@@ -165,9 +177,13 @@ until the hour resets.
 
     points per hour = PRs in that status x (3600 / interval in seconds) x points per query
 
-A by-number query costs 1 point. A discovery batch costs about 1 point per 8
-branches it carries (6 points measured for 50), so cost scales with branch
-count, not with the number of batches.
+A by-number query costs 1 point. A discovery query costs at least 1 point, and
+about 1 point per 8 branches on a large batch (6 points measured for 50). One
+discovery query covers one repo, so on a small fleet the 1-point minimum is
+what counts: the table below charges 1 point per repo queried. The 5 active
+branches sit in about 5 repos, so they cost about 5 points per 10-minute round.
+The 26 idle branches sit in the 10 polled repos, and items that share an
+interval stay due together, so they cost about 10 points an hour.
 
 **Input 3, measured: how long PRs sit in each status.** From the last 100 PRs in
 each of two repos, 2026-09-06 to 2026-10-01: this repo, and a large private
@@ -192,7 +208,12 @@ to; the waiting tier drives cost.
 **Input 4, judgement: target delays.** The owner chose how soon TBD should know
 about each kind of change. The interval equals the worst-case delay; the average
 delay is half of it. The "PRs in it" column assumes every open PR is in an
-active worktree, which makes the total an upper bound.
+active worktree, and counts 10 open PRs where 8 were measured, to leave
+headroom. Both make the total an upper bound.
+
+The bounds that are not target delays are judgement calls too, approved with
+the rest of this design: at most 10 PRs in the fast tier, a 30-minute activity
+window, and a 1-hour ceiling on any stretched interval.
 
 | Status | PRs in it (test fleet) | Target delay | Interval | Points per hour |
 |---|---|---|---|---|
@@ -219,7 +240,9 @@ checks tier adds an average of 30 seconds to a 12-minute CI run, about 4%.
 - Twenty PRs rebased together: 1,200 points an hour in the fast tier alone. The
   fast tier is never stretched, so it is bounded by count instead: at most 10
   PRs are in it at once, which is 600 points an hour. The rest wait in the
-  2-minute tier and move up as slots free, oldest pending first.
+  2-minute tier and move up as slots free, oldest pending first. So the
+  1-minute target holds for the first 10 PRs with checks running; past the
+  tenth, the target is 2 minutes until a slot frees.
 - 50 open PRs waiting at 2 min: 1,500 points an hour. This is where the cap
   bites, and the governor stretches the tier.
 
@@ -296,6 +319,17 @@ of 1 hour. If even the maximum cannot satisfy the second condition, the
 scheduler brakes: nothing but the fast tier runs until `resetAt`. The factor is
 recomputed when `resetAt` passes, not reset. The fast tier is never stretched;
 it is bounded by count, as above.
+
+The fast tier is therefore the one exception to the second condition. It keeps
+running during a brake, because it carries the changes auto-archive waits for,
+and its worst case is fixed at 600 points an hour. If the login's budget runs
+out, GitHub refuses the fast tier's queries, and a refused query costs no
+points. The rate-limit brake below then holds everything else, and the fast
+tier wastes processes until the reset, not budget.
+
+Projected spend counts every scheduled item at 1 point per round, whether it is
+tracked by number or found by discovery. Items due together share one query
+per repo and GitHub charges per query, so this is an upper bound.
 
 Two failure cases are stated so the implementation does not guess:
 
