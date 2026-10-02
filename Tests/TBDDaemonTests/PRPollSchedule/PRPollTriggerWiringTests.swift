@@ -17,6 +17,17 @@ struct PRPollTriggerWiringTests {
         #expect(await h.router.activityLedger.snapshot().hooks[h.terminalID] != nil)
     }
 
+    /// Flag off, the ledger is disabled: the same hook and `pr.refresh` stamp
+    /// nothing, so nothing accumulates for a schedule that never prunes it.
+    @Test func aDisabledLedgerIsNotStampedByHooksOrRefresh() async throws {
+        let h = try await TriggerHarness.make(ledgerEnabled: false)
+        try await h.sendTerminalActivity(state: .working)
+        try await h.sendPRRefresh()
+        let snap = await h.router.activityLedger.snapshot()
+        #expect(snap.hooks.isEmpty)
+        #expect(snap.selections.isEmpty)
+    }
+
     /// The other branch of the `origin == nil` guard: an app-originated
     /// interrupt is a user action, not agent activity.
     @Test func aUserInterruptDoesNotStampTheLedger() async throws {
@@ -81,7 +92,7 @@ struct PRPollTriggerWiringTests {
         #expect(await kicks.count == 1)
     }
 
-    @Test func flagOffTheLegacyPollerIsUnaffectedByTriggers() async throws {
+    @Test func triggersAloneNeverCallGHOrStartTheScheduler() async throws {
         let h = try await TriggerHarness.make()
         try await h.sendTerminalActivity(state: .working)
         _ = try await h.sendPRAttach(url: "https://github.com/acme/acme-prod/pull/12")
@@ -109,9 +120,10 @@ private struct TriggerHarness {
     var gh: PRPollLegsGH { legs.gh }
     var worktreeID: UUID { legs.worktreeID(0) }
 
-    static func make() async throws -> TriggerHarness {
+    static func make(ledgerEnabled: Bool = true) async throws -> TriggerHarness {
         let legs = try await PRPollLegsHarness.make(
-            bindings: [], responses: [:], worktreeCount: 1, activeWorktrees: [])
+            bindings: [], responses: [:], worktreeCount: 1, activeWorktrees: [],
+            ledgerEnabled: ledgerEnabled)
         let terminal = try await legs.db.terminals.create(
             worktreeID: legs.worktreeID(0), tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)

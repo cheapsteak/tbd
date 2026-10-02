@@ -31,14 +31,16 @@ struct PRPollLegsHarness {
     /// of the first worktree bound to (or created from) that number; empty
     /// means no branch has a PR. `activeWorktrees` names the worktree indexes
     /// given a selection stamp in the router's activity ledger, so
-    /// `pollScheduleFacts()` reports them active.
+    /// `pollScheduleFacts()` reports them active; `ledgerEnabled` is whether
+    /// that ledger records stamps at all (on, as the schedule's path runs it).
     static func make(
         bindings: [(wt: Int, number: Int, state: PRMergeableState)],
         responses: [Int: String],
         worktreeCount: Int? = nil,
         provenanceNumbers: [Int: Int] = [:],
         branchNodes: [Int: String] = [:],
-        activeWorktrees: Set<Int> = [0]
+        activeWorktrees: Set<Int> = [0],
+        ledgerEnabled: Bool = true
     ) async throws -> PRPollLegsHarness {
         let db = try TBDDatabase(inMemory: true)
         var branchNodeJSON: [String] = []
@@ -93,6 +95,10 @@ struct PRPollLegsHarness {
                 source: .manual))
         }
 
+        // The harness models the schedule's path, where `Daemon` enables the
+        // ledger before the scheduler starts. `ledgerEnabled: false` is the
+        // flag-off daemon.
+        await router.activityLedger.setEnabled(ledgerEnabled)
         for index in activeWorktrees where index < worktreeIDs.count {
             await router.activityLedger.recordSelection(worktreeID: worktreeIDs[index], at: Date())
         }

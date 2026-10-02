@@ -35,8 +35,16 @@ public enum WorktreeActivity {
 }
 
 /// In-memory recency stamps. Empty after a restart, by design (see the spec, "The scheduler").
+///
+/// Off until `setEnabled(true)`. Every hook handler stamps it unconditionally,
+/// but only the schedule ever reads or prunes it (`RPCRouter.pollScheduleFacts`),
+/// so with `pr_poll_schedule_enabled` off an always-on ledger would grow an
+/// entry per terminal and worktree for the life of the daemon. `Daemon` enables
+/// it on the schedule's start path, before the scheduler starts.
 public actor WorktreeActivityLedger {
     private let window: TimeInterval
+    /// Whether stamps are recorded at all. See the type comment.
+    public private(set) var isEnabled = false
     private var lastHookAt: [UUID: Date] = [:]
     private var lastSelectedAt: [UUID: Date] = [:]
     private var lastSignalAt: [UUID: Date] = [:]
@@ -48,12 +56,18 @@ public actor WorktreeActivityLedger {
         onPossibleActivation = cb
     }
 
+    public func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+    }
+
     public func recordHookEvent(terminalID: UUID, worktreeID: UUID, at date: Date) async {
+        guard isEnabled else { return }
         lastHookAt[terminalID] = date
         await signalIfLapsed(worktreeID, at: date)
     }
 
     public func recordSelection(worktreeID: UUID, at date: Date) async {
+        guard isEnabled else { return }
         lastSelectedAt[worktreeID] = date
         await signalIfLapsed(worktreeID, at: date)
     }

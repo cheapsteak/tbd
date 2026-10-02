@@ -34,8 +34,36 @@ struct WorktreeActivityTests {
         #expect(!WorktreeActivity.isActive(sessions: s, lastHookAt: [b: t0], lastSelectedAt: nil, now: t0))
     }
 
+    /// Off by default (`pr_poll_schedule_enabled` off): nothing is stamped and
+    /// nothing signals, so the ledger cannot grow without the schedule that
+    /// prunes it.
+    @Test func aDisabledLedgerRecordsNothingAndNeverSignals() async {
+        let ledger = WorktreeActivityLedger()
+        #expect(await ledger.isEnabled == false)
+        let box = UUIDBox()
+        await ledger.setOnPossibleActivation { await box.add($0) }
+        let wt = UUID()
+        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordSelection(worktreeID: wt, at: t0)
+        let snap = await ledger.snapshot()
+        #expect(snap.hooks.isEmpty && snap.selections.isEmpty)
+        #expect(await box.items.isEmpty)
+    }
+
+    @Test func anEnabledLedgerStampsHooksAndSelections() async {
+        let ledger = WorktreeActivityLedger()
+        await ledger.setEnabled(true)
+        let wt = UUID()
+        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordSelection(worktreeID: wt, at: t0)
+        let snap = await ledger.snapshot()
+        #expect(snap.hooks == [a: t0])
+        #expect(snap.selections == [wt: t0])
+    }
+
     @Test func ledgerSignalsOnlyOnAPossibleActivation() async {
         let ledger = WorktreeActivityLedger()
+        await ledger.setEnabled(true)
         let box = UUIDBox()
         await ledger.setOnPossibleActivation { await box.add($0) }
         let wt = UUID()
@@ -48,6 +76,7 @@ struct WorktreeActivityTests {
 
     @Test func retainDropsUnknownIDs() async {
         let ledger = WorktreeActivityLedger()
+        await ledger.setEnabled(true)
         let wt = UUID()
         await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
         await ledger.recordSelection(worktreeID: wt, at: t0)

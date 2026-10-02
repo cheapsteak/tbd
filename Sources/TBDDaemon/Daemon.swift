@@ -1240,7 +1240,8 @@ public final class Daemon: Sendable {
         // selection after a quiet 30 minutes) wakes the schedule; reconcile's
         // idle-to-active rule decides whether anything becomes due. The ledger
         // signals at most once per worktree per window, so hook traffic cannot
-        // storm the loop. Harmless when the legacy poller runs, as above.
+        // storm the loop. With the legacy poller the ledger stays disabled,
+        // so it records nothing and never signals.
         await rpcRouter.activityLedger.setOnPossibleActivation { [weak rpcRouter] _ in
             await rpcRouter?.prPollScheduler.kick()
         }
@@ -2026,7 +2027,12 @@ public final class Daemon: Sendable {
                     await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
                     await rpcRouter.prPoller.start()
                 },
-                schedule: { await rpcRouter.prPollScheduler.start() })
+                schedule: {
+                    // The ledger records hook and selection stamps only for
+                    // the schedule; enabled before the first wake reads it.
+                    await rpcRouter.activityLedger.setEnabled(true)
+                    await rpcRouter.prPollScheduler.start()
+                })
 
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
