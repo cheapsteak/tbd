@@ -395,7 +395,10 @@ public extension TestClock {
     /// `checkSuspension()` opens with `Task.megaYield()` — 20 serially-awaited
     /// **background-QoS** detached tasks — and `TestClock.advance(to:)` calls it
     /// twice more per advance. That is inside swift-clocks, on the hot path of
-    /// every clock-driven test, and no change here can remove it. macOS starves
+    /// every clock-driven test, and no change here can remove it. What this
+    /// helper can do is bound each probe against what remains of `timeout`
+    /// (``probeSuspension(until:)``), so a starved megaYield cannot hold the
+    /// wait past its own guard; `advance`'s megaYields stay unbounded. macOS starves
     /// background QoS under saturation, so a residual load sensitivity remains:
     /// this is load-*tolerant*, not load-*independent*. Measured healthy-path
     /// cost is tens of microseconds to a few milliseconds, but a 6-test suite was
@@ -463,16 +466,13 @@ public extension TestClock {
     func waitForSuspension(timeout: Swift.Duration = .seconds(45),
                            pollInterval: Swift.Duration = .milliseconds(25),
                            sourceLocation: SourceLocation = #_sourceLocation) async {
-        // `checkSuspension()` throws when a sleeper *is* registered, so the
-        // probe reads inverted — that polarity is the whole reason this helper
-        // cannot share `advanceUntil`'s condition shape directly.
+        // Each probe is bounded by what is left of `timeout`: a probe that is
+        // still inside its megaYield at the deadline counts as "not yet
+        // suspended", so the guard below fires on time instead of the test
+        // sitting in one probe until `.clockDriven` cuts it off unattributed.
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         let armed = await pollUntilTrue(timeout: timeout, pollInterval: pollInterval) {
-            do {
-                try await checkSuspension()
-                return false
-            } catch {
-                return true
-            }
+            await probeSuspension(until: deadline)
         }
         guard case .timedOut = armed else { return }
         Issue.record(
@@ -483,6 +483,60 @@ public extension TestClock {
             """,
             sourceLocation: sourceLocation
         )
+    }
+
+    /// One `checkSuspension()` probe, raced against the caller's absolute `deadline`.
+    ///
+    /// `checkSuspension()` throws when a sleeper *is* registered, so the probe
+    /// reads inverted. It opens with `Task.megaYield()`, whose background-QoS
+    /// tasks ignore cancellation and can go unscheduled for minutes under
+    /// saturation, so a task group cannot bound it (the group would await the
+    /// stuck child on the way out). The probe therefore runs unstructured and
+    /// whichever of it and the timer settles first answers; a probe that loses
+    /// the race finishes on its own later and its answer is dropped. The timer
+    /// sleeps until the absolute deadline rather than for a relative budget, so
+    /// a timer task that is itself scheduled late cannot push the deadline out;
+    /// and because every probe shares that one deadline, at most the last one or
+    /// two probes of a timed-out wait are left running.
+    private func probeSuspension(until deadline: ContinuousClock.Instant) async -> Bool {
+        let race = SuspensionProbeRace()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            race.install(continuation)
+            let timer = Task {
+                try? await Task.sleep(until: deadline, clock: .continuous)
+                race.settle(false)
+            }
+            Task { [self] in
+                let armed: Bool
+                do {
+                    try await checkSuspension()
+                    armed = false
+                } catch {
+                    armed = true
+                }
+                race.settle(armed)
+                timer.cancel()
+            }
+        }
+    }
+}
+
+/// The once-only answer slot `TestClock.probeSuspension(until:)` races its
+/// probe and its timer into.
+private final class SuspensionProbeRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func install(_ continuation: CheckedContinuation<Bool, Never>) {
+        lock.withLock { self.continuation = continuation }
+    }
+
+    func settle(_ armed: Bool) {
+        let pending: CheckedContinuation<Bool, Never>? = lock.withLock {
+            defer { continuation = nil }
+            return continuation
+        }
+        pending?.resume(returning: armed)
     }
 }
 
