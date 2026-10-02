@@ -1757,6 +1757,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var profileBalancingEnabled: Bool
+    /// Schedule-based PR polling. Read once at daemon start. Resolved as
+    /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
+    public var prPollScheduleEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1886,6 +1889,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant, with no forcing `UPDATE` migration and every
     /// explicit opt-out left alone.
     public static let profileBalancingEnabledDefault = false
+    /// The shipped default for `prPollScheduleEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant.
+    public static let prPollScheduleDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1931,6 +1937,7 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault,
                 modelProxyPort: Int? = nil,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
+                prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1976,6 +1983,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteTranscriptEnabled = remoteTranscriptEnabled
         self.modelProxyPort = modelProxyPort
         self.profileBalancingEnabled = profileBalancingEnabled
+        self.prPollScheduleEnabled = prPollScheduleEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2119,6 +2127,8 @@ public struct Config: Codable, Sendable, Equatable {
         // the shipped default rather than hardcoding `false`.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
+        prPollScheduleEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
