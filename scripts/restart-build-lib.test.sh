@@ -110,20 +110,28 @@ EOF
 }
 
 # Build a throwaway "worktree" whose scripts/swift-safe stub writes ONE
-# `swift-safe:` line in two writes, $1 seconds apart. Echoes $d.
+# `swift-safe:` line across THREE writes, $1 seconds apart, with no newline
+# until the last. Echoes $d.
 #
-# The gap is a whole second against the harness's 0.05s poll, so the watcher
-# drains perhaps twenty times while only the first half exists: the split is
-# what the case needs to happen, not something it hopes for.
+# The gap is ten poll intervals at the harness's 0.05s, so the watcher drains
+# between every pair of writes: the split is what the case needs to happen, not
+# something it hopes for.
+#
+# Three pieces and not two, because the number discriminates. A carry that
+# REPLACES the held fragment instead of appending to it survives a two-way split
+# — there is nothing to overwrite yet — and on a three-way one drops the first
+# piece, which is the one carrying the prefix.
 mksplitlineworktree() {
-    local gap="${1:-1}"
+    local gap="${1:-0.5}"
     local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-split.XXXXXX")"
     mkdir -p "$d/scripts"
     cat > "$d/scripts/swift-safe" <<EOF
 #!/usr/bin/env bash
-printf 'swift-safe: still waiting for the ' >&2
-sleep $gap
-printf 'shared build slot after 60s of 1800s\n' >&2
+for piece in 'swift-safe: still ' 'waiting for the ' 'shared build slot after 60s of 1800s'; do
+    printf '%s' "\$piece" >&2
+    sleep $gap
+done
+printf '\n' >&2
 echo "swift-safe: exit status 0" >&2
 EOF
     chmod +x "$d/scripts/swift-safe"
@@ -854,11 +862,15 @@ test_a_hanging_ps_cannot_strand_the_builds_exit_status() {
 # that carries the `swift-safe:` prefix, so the second write arrives as a bare
 # remainder that matches nothing — and the fragment counts as no output at all,
 # which lets the silence watchdog call a build stalled mid-write.
+#
+# The carry must ACCUMULATE across passes rather than replace what it holds, so
+# the fixture splits the line three ways: a replacing carry is indistinguishable
+# from a correct one on a two-way split.
 
-test_a_progress_line_split_across_two_writes_is_still_streamed() {
-    local d; d="$(mksplitlineworktree 1)"
+test_a_progress_line_split_across_several_writes_is_still_streamed() {
+    local d; d="$(mksplitlineworktree 0.5)"
     local err; err="$(run_under_restart_shell "$d" 2>&1 >/dev/null)"
-    assert_contains "the two halves are rejoined before the filter sees them" "$err" \
+    assert_contains "all three pieces are rejoined before the filter sees them" "$err" \
         "swift-safe: still waiting for the shared build slot after 60s of 1800s"
     local count
     count="$(printf '%s\n' "$err" | grep -c "still waiting for the shared" || true)"

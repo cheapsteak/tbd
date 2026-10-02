@@ -588,8 +588,15 @@ follow_build_progress() {
         # Carry it instead. It also counts as output — a build caught mid-write
         # is not a silent one, and leaving `read_any` at 0 for it would let the
         # watchdog call a writing build stalled.
+        #
+        # APPENDED, not assigned. A line can arrive in more than two writes, and
+        # a pass that reads only a fragment never enters the loop above that
+        # clears `pending` — so assigning here would drop every piece but the
+        # last and lose the prefix with the first. The loop above is the only
+        # thing that clears the carry, and it does so exactly when it has
+        # consumed it.
         if [ -n "$line" ]; then
-            pending="$line"
+            pending="$pending$line"
             read_any=1
         fi
         [ "$alive" = 1 ] || break
