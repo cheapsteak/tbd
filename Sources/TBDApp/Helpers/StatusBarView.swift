@@ -710,16 +710,18 @@ private struct PRChipCluster: View {
             }
             if model.overflow > 0 {
                 // The label counts what didn't fit; the menu lists everything
-                // it covers. The wording says so — see
+                // it covers — the open PRs only while the done chip holds the
+                // rest. The wording says so — see
                 // `PRBindingPresentation.overflowChipTooltip`.
                 let total = model.overflowMenu.count
+                let openOnly = !model.done.isEmpty
                 PRChipMenu(
                     bindings: model.overflowMenu,
                     label: "+\(model.overflow)",
                     tooltip: PRBindingPresentation.overflowChipTooltip(
-                        total: total, overflow: model.overflow),
+                        total: total, overflow: model.overflow, openOnly: openOnly),
                     spokenLabel: PRBindingPresentation.overflowChipAccessibilityLabel(
-                        total: total, overflow: model.overflow))
+                        total: total, overflow: model.overflow, openOnly: openOnly))
             }
             if !model.done.isEmpty {
                 let count = model.done.count
@@ -952,10 +954,13 @@ private struct PRChipView: View {
 }
 
 /// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N done`
-/// chip. Clicking it drops down the same rows the toolbar's multi-PR dropdown
-/// shows — `PRBindingPresentation.menuRows`, in bind order — so the two
-/// surfaces cannot describe the same PR differently. Neither chip offers an
-/// untrack action; that lives on the individual chips.
+/// chip. Clicking it drops down rows built by the toolbar's multi-PR dropdown's
+/// own builder — `PRBindingPresentation.menuRows`, in bind order — so the two
+/// surfaces cannot describe the same PR differently. Without a done group the
+/// `+N` menu lists every binding, exactly the toolbar's list; with one, the
+/// `+N` menu lists the open bindings and the done chip the finished ones, and
+/// each row still reads as the toolbar's row for that PR does. Neither chip
+/// offers an untrack action; that lives on the individual chips.
 ///
 /// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
 /// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`

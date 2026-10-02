@@ -46,6 +46,20 @@ struct PRBindingPresentationTests {
                     .contains("all 1 pull request ("))
     }
 
+    @Test("with the done chip showing, the overflow wording says the list is open PRs")
+    func overflowWordingOpenOnly() {
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 4, overflow: 2, openOnly: true)
+                    == "Show all 4 open pull requests (2 not shown here)")
+        #expect(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: 4, overflow: 2, openOnly: true)
+                    == "Show all 4 open pull requests, 2 not shown here")
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 1, overflow: 1, openOnly: true)
+                    == "Show all 1 open pull request (1 not shown here)")
+        // Ungrouped, the wording is unchanged.
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 4, overflow: 2, openOnly: false)
+                    == "Show all 4 pull requests (2 not shown here)")
+    }
+
     // MARK: - The toolbar's primary-action branch
 
     /// A lone binding with an unparseable URL used to fall into the several-PR

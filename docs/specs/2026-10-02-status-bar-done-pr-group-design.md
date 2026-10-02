@@ -25,13 +25,17 @@ worktree's work shipped.
 - the existing `+N` menu for open PRs past the limit
 - one done chip, `✓ N done`
 
-The chip limit and the `+N` count apply to open PRs only. When every PR is
-finished, the cluster is the done chip alone.
+The chip limit and the `+N` count apply to open PRs only, and so does the `+N`
+menu: it lists every open PR, and its tooltip and accessibility label say so
+("Show all 4 open pull requests (2 not shown here)"). Without grouping the `+N`
+wording is unchanged. When every PR is finished, the cluster is the done chip
+alone.
 
 **The done chip** – a borderless menu styled like the `+N` chip: secondary text,
 hover underline, pointing-hand cursor through `StatusBarHoverAffordance`, and a
 help tooltip and accessibility label naming the count ("5 merged or closed
-PRs"). Its menu lists the finished PRs in bind order through
+pull requests"), in the aggregate "pull request" noun the `+N` chip uses because
+the set can span both forges. Its menu lists the finished PRs in bind order through
 `PRBindingPresentation.menuRows`, so each row reads like the toolbar's and the
 `+N` menu's (`PR #930  Merged  fix-login`). Choosing a row opens the PR in the
 default browser, as the `+N` menu does. It offers no untrack action, matching
@@ -39,8 +43,8 @@ the `+N` menu.
 
 **Placement in code** – the split is a pure function in
 `PRBindingPresentation`, alongside `statusBarChips`, returning the open chips,
-the open overflow count, and the finished bindings to group (empty when
-grouping does not apply). `StatusBarView.prChips` and `PRChipCluster` consume
+the open overflow count, the bindings the `+N` menu lists, and the finished
+bindings to group (empty when grouping does not apply). `StatusBarView.prChips` and `PRChipCluster` consume
 it. Keeping the rule in a pure function is what lets it be tested without a
 view, as the existing chip selection is.
 
@@ -75,6 +79,8 @@ Unit tests on the pure split function:
 - `.closed` folds alongside `.merged`; a binding with no status stays open
 - the chip limit and the `+N` overflow count only open PRs
 - every PR finished → no open chips, no overflow, all PRs in the group
+- the `+N` wording says "open pull requests" when grouping applies and is
+  unchanged otherwise
 
 ## Rejected alternatives
 

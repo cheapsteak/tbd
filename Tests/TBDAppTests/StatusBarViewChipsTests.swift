@@ -95,6 +95,24 @@ struct StatusBarViewChipsTests {
         #expect(model.done.map(\.number) == [1, 3])
     }
 
+    @Test("with finished PRs folded, the +N chip's wording counts open PRs")
+    func groupedOverflowWordingSaysOpen() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable),
+                        binding(3, .closed), binding(4, .draft),
+                        binding(5, .mergeable)]
+        let model = StatusBarView.prChips(bindings, limit: 1)
+        #expect(model.overflow == 2)
+        // The same composition `PRChipCluster` performs.
+        let openOnly = !model.done.isEmpty
+        #expect(openOnly)
+        #expect(PRBindingPresentation.overflowChipTooltip(
+            total: model.overflowMenu.count, overflow: model.overflow, openOnly: openOnly)
+            == "Show all 3 open pull requests (2 not shown here)")
+        #expect(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: model.overflowMenu.count, overflow: model.overflow, openOnly: openOnly)
+            == "Show all 3 open pull requests, 2 not shown here")
+    }
+
     @Test("a lone merged PR keeps its chip and nothing folds")
     func loneMergedKeepsChip() {
         let bindings = [binding(1, .merged), binding(2, .mergeable)]
