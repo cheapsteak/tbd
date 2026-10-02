@@ -84,6 +84,26 @@ struct StatusBarViewChipsTests {
         #expect(model.overflow == 7)
     }
 
+    @Test("finished PRs past the threshold leave the chip row for the done chip")
+    func finishedPRsFoldIntoDone() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable),
+                        binding(3, .closed), binding(4, nil)]
+        let model = StatusBarView.prChips(bindings)
+        #expect(model.chips.map(\.label) == ["#2", "#4"])
+        #expect(model.overflow == 0)
+        #expect(model.overflowMenu.map(\.number) == [2, 4])
+        #expect(model.done.map(\.number) == [1, 3])
+    }
+
+    @Test("a lone merged PR keeps its chip and nothing folds")
+    func loneMergedKeepsChip() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable)]
+        let model = StatusBarView.prChips(bindings)
+        #expect(model.chips.map(\.label) == ["#1", "#2"])
+        #expect(model.done.isEmpty)
+        #expect(model.overflowMenu == bindings)
+    }
+
     @Test("a chip id is its binding's id, so the row is stable across refreshes")
     func chipIDMatchesBinding() {
         let one = binding(412, .mergeable)
