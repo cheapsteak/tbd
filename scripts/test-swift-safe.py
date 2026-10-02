@@ -1381,7 +1381,9 @@ class LockOpenerProbeFailureTests(unittest.TestCase):
 
         `lsof` answering nothing but answering is the honest-fallback state, and
         it must stay an empty tuple rather than becoming `None` along with the
-        failures.
+        failures.  Exit 1 with nothing on stderr is exactly what darwin's `lsof`
+        does for a file nobody has open, which is why the status alone cannot be
+        the discriminator.
         """
 
         def fake_run(argv, **kwargs):
@@ -1392,6 +1394,60 @@ class LockOpenerProbeFailureTests(unittest.TestCase):
             description = swift_safe._holder_description(self.lock_path)
         self.assertIn("the current holder is unidentified", description)
         self.assertNotIn("could not be asked", description)
+
+    def test_an_lsof_that_ran_and_failed_is_could_not_look_not_found_nothing(self):
+        """`lsof` can exit non-zero having answered nothing AND having failed.
+
+        Both look alike in the status — measured on darwin, `lsof -t -w` exits 1
+        for a file nobody has open and for a status error alike — so stderr is
+        the discriminator.  A failure there is "could not ask", and the pair of
+        cases below is what keeps the rule from collapsing in either direction.
+        """
+        complaint = "lsof: status error on the lock file: Permission denied"
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", complaint)
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertIsNone(swift_safe._lock_file_openers(self.lock_path))
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn("could not be asked", description)
+        self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_lock_file_that_is_gone_is_an_answer_and_not_a_failure(self):
+        """A complaining `lsof` about an absent path still means "nobody".
+
+        Nobody can have a file that does not exist open, so that is an answer.
+        It is settled by `stat` rather than by reading `lsof`'s complaint, which
+        is prose and not an interface — and a refusal, which complains in just
+        the same register, must still read as "could not look".
+        """
+        self.lock_path.unlink()
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, "", "lsof: status error: No such file or directory"
+            )
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+
+    def test_a_successful_lsof_is_trusted_even_if_it_complained(self):
+        """A warning beside a real answer must not throw the answer away.
+
+        Only a non-zero status makes stderr mean failure; `lsof` that exited 0
+        has answered, whatever else it said.
+        """
+
+        def fake_run(argv, **kwargs):
+            if argv[0] == "lsof":
+                return subprocess.CompletedProcess(argv, 0, "4242\n", "lsof: WARNING")
+            return subprocess.CompletedProcess(argv, 0, "4242 /usr/bin/sleep\n", "")
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(
+                swift_safe._lock_file_openers(self.lock_path), ((4242, "sleep"),)
+            )
 
 
 @unittest.skipIf(shutil.which("lsof") is None, "lsof is not installed here")
@@ -1465,6 +1521,57 @@ class LockOpenerProbeTests(unittest.TestCase):
         self.holder.close()
         self.lock_path.unlink()
         self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+
+    def test_the_real_lsof_cannot_distinguish_these_by_exit_status(self):
+        """The measurement the stderr discriminator rests on, against real `lsof`.
+
+        It is asserted here rather than taken on trust because the whole rule
+        above depends on it: darwin's `lsof -t -w` exits 1 BOTH for a file
+        nobody has open and for a status error, so a status-only check would
+        read every ordinary "nobody else has it open" as "I could not ask".
+        Stderr is what separates them — empty on the honest nothing, a complaint
+        on the failure.
+        """
+        nobody = Path(self.temp.name) / "nobody-has-this-open.lock"
+        nobody.write_text("x", encoding="utf-8")
+        quiet = subprocess.run(
+            ["lsof", "-t", "-w", "--", str(nobody)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        refused_dir = Path(self.temp.name) / "refused"
+        refused_dir.mkdir()
+        refused = refused_dir / "inner.lock"
+        refused.write_text("x", encoding="utf-8")
+        refused_dir.chmod(0o000)
+        try:
+            complaining = subprocess.run(
+                ["lsof", "-t", "-w", "--", str(refused)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            refused_dir.chmod(0o755)
+
+        self.assertNotEqual(quiet.returncode, 0, "the premise would be vacuous")
+        self.assertEqual(quiet.returncode, complaining.returncode)
+        self.assertEqual(quiet.stderr.strip(), "")
+        self.assertNotEqual(complaining.stderr.strip(), "")
+
+    def test_a_probe_the_filesystem_refuses_reports_that_it_could_not_look(self):
+        """Real `lsof`, real refusal: the failure must not read as "nobody"."""
+        refused_dir = Path(self.temp.name) / "refused-probe"
+        refused_dir.mkdir()
+        refused = refused_dir / "swift-build.lock"
+        refused.write_text(f"pid={_dead_pid()}\n", encoding="utf-8")
+        refused_dir.chmod(0o000)
+        try:
+            found = swift_safe._lock_file_openers(refused)
+        finally:
+            refused_dir.chmod(0o755)
+        self.assertIsNone(found)
 
 
 class AbandonedWaitTests(unittest.TestCase):

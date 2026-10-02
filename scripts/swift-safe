@@ -42,12 +42,12 @@ and show them live.  That claim is load-bearing rather than decorative, so it
 holds for the refusals too: the unsupported-subcommand usage line carries the
 prefix, and the argument validators' messages get it from ``_entry``, the single
 point every ``SystemExit`` funnels through.  A line without it is a line a
-watching human never sees until the build is over.  The holder writes
-``pid``/``cwd``/``command`` into the
-lock file after acquiring, and a waiter reads it back to say who it is queued
-behind; a heartbeat then repeats the wait's elapsed time so a human can tell a
-queued build from a hung one and an automated caller's stall watchdog sees
-liveness.
+watching human never sees until the build is over.
+
+The holder writes ``pid``/``cwd``/``command`` into the lock file after
+acquiring, and a waiter reads it back to say who it is queued behind; a
+heartbeat then repeats the wait's elapsed time so a human can tell a queued
+build from a hung one and an automated caller's stall watchdog sees liveness.
 
 When the recorded identity cannot explain the wait — an empty record, or a pid
 that is no longer running — the waiter asks the process table who still has
@@ -707,10 +707,10 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...] | None:
     queued wrapper from a compiler at a glance.
 
     Three return values, and keeping them apart is the point.  `None` means the
-    probe could not be run at all — no `lsof`, a refusal, or a timeout — and the
-    caller must report that it could not look.  `()` means it ran and found
-    nobody else, which is the honest "unidentified holder" fallback.  A
-    non-empty tuple is the answer.  Collapsing the first two into `()`, which is
+    probe could not answer — no `lsof`, a timeout, or an `lsof` that ran and
+    failed — and the caller must report that it could not look.  `()` means it
+    ran and found nobody else, which is the honest "unidentified holder"
+    fallback.  A non-empty tuple is the answer.  Collapsing the first two into `()`, which is
     what this did before, reproduces the exact misleading line the probe was
     added to remove — and does it on the wedged machine where `lsof` and `ps`
     are slowest, which is where the line is read.  None of the three fails the
@@ -742,6 +742,28 @@ def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...] | None:
         # timeout path too — and the one that most needs telling apart from an
         # empty result, since a probe that runs out of time is a probe on a busy
         # machine.
+        return None
+    # An `lsof` that ran but could not answer is also "could not look", and its
+    # EXIT STATUS cannot say which happened: measured on darwin, `lsof -t -w`
+    # exits 1 both for a file nobody has open and for a status error such as a
+    # missing path or a refused directory.  What separates them is stderr, which
+    # is empty on the honest nothing and carries a "status error" line plus a
+    # usage dump on a failure (`-w` suppresses warnings, not these).  So the
+    # discriminator is stderr and not the code — reading the code alone would
+    # turn every ordinary "nobody else has it open" into "I could not ask",
+    # which is the same confusion in the opposite direction.
+    if completed.returncode != 0 and completed.stderr.strip():
+        try:
+            lock_path.stat()
+        except FileNotFoundError:
+            # Except when the path is simply gone: nobody can have a file that
+            # does not exist open, so that is an ANSWER and not a failure to
+            # answer.  Settled by `stat` rather than by reading `lsof`'s
+            # complaint, which is prose and not an interface.  A refusal or any
+            # other stat error is the real "could not look" and falls through.
+            return ()
+        except OSError:
+            return None
         return None
     # Our own waiter holds the file open too; naming it would describe the
     # process doing the asking as a candidate for the thing blocking it.
