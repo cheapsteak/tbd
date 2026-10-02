@@ -112,7 +112,8 @@ extension WorktreeLifecycle {
         // unchanged since its last successful check is skipped — no merge-base,
         // no merge-tree. On failure (e.g. no origin remote yet) `tips` is empty
         // and every worktree falls through to the ungated legacy path.
-        let tips = (try? await git.refTips(repoPath: repo.path)) ?? [:]
+        let resolvedTips = try? await git.refTips(repoPath: repo.path)
+        let tips = resolvedTips ?? [:]
         let baseTip = tips["origin/\(repo.defaultBranch)"]
         await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
 
@@ -134,9 +135,16 @@ extension WorktreeLifecycle {
         // PR-poll trigger: a push moves `origin/<branch>`, and that makes the
         // worktree's PR check due now. The local tip is deliberately ignored —
         // a check before the push is wasted. Same tips map, no subprocess.
+        //
+        // Skipped when `refTips` failed: the empty map would read as "no
+        // remote ref" for every worktree, and a first sighting recorded that
+        // way is a nil baseline the next good sweep reports as a push — a
+        // trigger burst across the repo for nothing.
         await remoteTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
-        for wt in worktrees {
-            await remoteTipTracker.observe(worktreeID: wt.id, remoteTip: tips["origin/\(wt.branch)"])
+        if resolvedTips != nil {
+            for wt in worktrees {
+                await remoteTipTracker.observe(worktreeID: wt.id, remoteTip: tips["origin/\(wt.branch)"])
+            }
         }
 
         await withTaskGroup(of: Void.self) { group in

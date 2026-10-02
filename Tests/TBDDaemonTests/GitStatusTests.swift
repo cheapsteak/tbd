@@ -494,6 +494,61 @@ struct GitStatusTests {
         await lifecycle.refreshGitStatuses(repoID: repo.id)
         #expect(await moved.ids == [wt.id])
     }
+
+    /// A sweep whose `refTips` fails observes nothing, so it cannot leave a
+    /// nil baseline that the next good sweep would report as a push. The
+    /// checkout is moved away for the first sweep, so every git call in it
+    /// fails, and moved back for the second.
+    @Test func aFailedTipReadLeavesNoBaselineToTriggerOn() async throws {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
+        let suffix = UUID().uuidString
+        let repoDir = tempBase.appendingPathComponent("tbd-test-remotetip-fail-\(suffix)")
+        let awayDir = tempBase.appendingPathComponent("tbd-test-remotetip-fail-away-\(suffix)")
+        let originDir = tempBase.appendingPathComponent("tbd-test-remotetip-fail-origin-\(suffix).git")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoDir)
+            try? FileManager.default.removeItem(at: awayDir)
+            try? FileManager.default.removeItem(at: originDir)
+        }
+
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("echo 'line1' > f.txt && git add . && git commit -m 'initial'", at: repoDir)
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
+        try await runShell("git checkout -b tbd/pushed", at: repoDir)
+        try await runShell("echo 'a' > a.txt && git add . && git commit -m 'a'", at: repoDir)
+        try await runShell("git push -u origin tbd/pushed", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "test", defaultBranch: "main")
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "pushed", branch: "tbd/pushed",
+            path: repoDir.path + "/.tbd/worktrees/pushed", tmuxServer: "tbd-test")
+
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(), subscriptions: StateSubscriptionManager()
+        )
+        let moved = RemoteTipMoves()
+        await lifecycle.remoteTipTracker.setOnMoved { await moved.add($0) }
+
+        // The checkout is gone: `refTips` throws and the sweep observes nothing.
+        try FileManager.default.moveItem(at: repoDir, to: awayDir)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(await moved.ids.isEmpty)
+
+        // Back again, with origin/tbd/pushed where it always was: this is the
+        // first sighting, a baseline, and not a push.
+        try FileManager.default.moveItem(at: awayDir, to: repoDir)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(await moved.ids.isEmpty, "a failed tip read left a nil baseline that fired on the next sweep")
+    }
 }
 
 private actor RemoteTipMoves {
