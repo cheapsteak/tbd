@@ -948,6 +948,15 @@ assert_interrupt_tears_down_the_tree() {
     assert_eq "$label: the compiler below it is gone too" "dead" "$(await_death "$grand")"
     assert_contains "$label: the interruption is explained" \
         "$(cat "$d/stderr.txt")" "stopping the build"
+    # ...and explained ONLY in English. bash reports a job it reaped after a
+    # signal as "line NNN: 12345 Terminated: 15", naming this library and the
+    # whole build subshell — which reads like a script error at the one moment a
+    # human is looking for one, directly under a line that already said what
+    # happened.
+    assert_missing "$label: no job-control noise is left on stderr" \
+        "$(cat "$d/stderr.txt")" "Terminated:"
+    assert_missing "$label: and the library is not named as if it had failed" \
+        "$(cat "$d/stderr.txt")" "restart-build-lib.sh: line"
     # Teardown by recorded pid, never by pattern: a case that failed above must
     # not leave the fixture running.
     kill -9 "$grand" "$child" 2>/dev/null

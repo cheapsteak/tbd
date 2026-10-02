@@ -540,7 +540,15 @@ interrupt_governed_build() {
     # restart.sh outright instead of re-entering this.
     trap - INT TERM HUP
     printf 'restart.sh: interrupted — stopping the build so it cannot go on holding the shared build slot.\n' >&2
-    terminate_build_tree "$builder"
+    # Stderr is dropped, and only here. `terminate_build_tree` writes nothing to
+    # it by design, so the only thing this hides is bash's own job-death notice
+    # — a "line NNN: 12345 Terminated: 15" naming this file and the whole build
+    # subshell, which bash writes to the SHELL's stderr rather than the `kill`
+    # builtin's, so no redirection inside the function can reach it. It reports
+    # the signal we just sent on purpose, directly under a line that already
+    # says so in English, and it reads like a script error at the one moment a
+    # human is looking for one.
+    terminate_build_tree "$builder" 2>/dev/null
     rm -f "$build_log"
     exit "$BUILD_INTERRUPTED_STATUS"
 }
