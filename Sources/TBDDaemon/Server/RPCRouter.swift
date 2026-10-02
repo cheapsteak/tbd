@@ -550,7 +550,10 @@ public final class RPCRouter: Sendable {
         // reason: `weak`, so a discarded router is not kept alive by its own
         // scheduler, and a wake on a deallocated router sees no work.
         prPollScheduler.installHandlers(
-            facts: { [weak self] in await self?.pollScheduleFacts() ?? [] },
+            facts: { [weak self] in
+                guard let self else { return [] }
+                return await self.pollScheduleFacts()
+            },
             run: { [weak self] due in await self?.runScheduledPass(due) })
     }
 
@@ -1141,10 +1144,10 @@ public final class RPCRouter: Sendable {
     /// to the live terminals and rows here, so stamps for sessions and rows
     /// that left the fleet do not accumulate.
     ///
-    /// A DB read failure answers `[]`. The schedule then drops every item and
-    /// the next wake rebuilds them as due — the same as a restart — and the
-    /// warning makes that visible.
-    func pollScheduleFacts() async -> [PRPollWorktreeFacts] {
+    /// A DB read failure answers nil, and the scheduler keeps the schedule it
+    /// has: answering `[]` would drop every item, and the next good read would
+    /// rebuild the whole fleet as due at once.
+    func pollScheduleFacts() async -> [PRPollWorktreeFacts]? {
         do {
             let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
             let bindings = try await db.prBindings.listAll().filter { !$0.detached }
@@ -1174,8 +1177,8 @@ public final class RPCRouter: Sendable {
             }
         } catch {
             // `.private`, as in `PRPoller.tick`: a GRDB error carries its SQL.
-            routerLogger.warning("PR schedule facts unreadable, schedule emptied: \(error, privacy: .private)")
-            return []
+            routerLogger.warning("PR schedule facts unreadable, schedule kept as it was: \(error, privacy: .private)")
+            return nil
         }
     }
 

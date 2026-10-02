@@ -52,7 +52,7 @@ struct PRPollScheduledPassTests {
         await h.router.runScheduledPass(PRPollDue(discover: [], track: [h.key(7)]))
         #expect(try await h.bindingState(wt: 0, number: 7) == .merged)
         var schedule = PRPollSchedule()
-        schedule.reconcile(await h.router.pollScheduleFacts(), now: Date())
+        schedule.reconcile(try #require(await h.router.pollScheduleFacts()), now: Date())
         #expect(schedule.tier(of: .track(h.key(7))) == nil)
         #expect(schedule.tier(of: .discover(h.worktreeID(0))) == nil)
     }
@@ -66,7 +66,7 @@ struct PRPollScheduledPassTests {
             branchNodes: [7: "OPEN"])
         // Before the pass the active worktree's closed binding is in closed discovery.
         var before = PRPollSchedule()
-        before.reconcile(await h.router.pollScheduleFacts(), now: Date())
+        before.reconcile(try #require(await h.router.pollScheduleFacts()), now: Date())
         #expect(before.tier(of: .discover(h.worktreeID(0))) == .closedDiscovery)
 
         await h.router.runScheduledPass(PRPollDue(discover: [h.worktreeID(0)], track: []))
@@ -74,7 +74,7 @@ struct PRPollScheduledPassTests {
         #expect(await h.gh.numberedQueries().count == 1)
         #expect(try await h.bindingState(wt: 0, number: 7) == .mergeable)
         var schedule = PRPollSchedule()
-        schedule.reconcile(await h.router.pollScheduleFacts(), now: Date())
+        schedule.reconcile(try #require(await h.router.pollScheduleFacts()), now: Date())
         #expect(schedule.tier(of: .track(h.key(7))) == .waiting)
         #expect(schedule.tier(of: .discover(h.worktreeID(0))) == nil)
     }
@@ -89,7 +89,7 @@ struct PRPollScheduledPassTests {
         #expect(await h.gh.numberedQueries().isEmpty)
         #expect(try await h.bindingState(wt: 0, number: 7) == .closed)
         var schedule = PRPollSchedule()
-        schedule.reconcile(await h.router.pollScheduleFacts(), now: Date())
+        schedule.reconcile(try #require(await h.router.pollScheduleFacts()), now: Date())
         #expect(schedule.tier(of: .discover(h.worktreeID(0))) == .closedDiscovery)
         #expect(schedule.tier(of: .track(h.key(7))) == nil)
     }

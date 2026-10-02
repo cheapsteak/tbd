@@ -21,6 +21,14 @@ struct PRPollSchedulerTests {
         init(_ v: [PRPollWorktreeFacts]) { value = v }
         func set(_ v: [PRPollWorktreeFacts]) { value = v }
     }
+    /// Facts that can be switched to unreadable (nil).
+    actor FlakyFacts {
+        let value: [PRPollWorktreeFacts]
+        var readable = true
+        init(_ v: [PRPollWorktreeFacts]) { value = v }
+        func setReadable(_ r: Bool) { readable = r }
+        func read() -> [PRPollWorktreeFacts]? { readable ? value : nil }
+    }
     /// Lets a runner reach the scheduler that calls it.
     actor SchedulerBox {
         var scheduler: PRPollScheduler?
@@ -153,6 +161,46 @@ struct PRPollSchedulerTests {
         await s.trigger(worktreeID: a)
         await s.runOnce()
         #expect(await runs.dues.count == 2)
+    }
+
+    /// Facts that cannot be read (nil) keep the schedule: the item is still
+    /// there and still due on its own time, and once the facts return it is
+    /// not made due again at once, as a rebuilt schedule would make it.
+    @Test func unreadableFactsKeepTheItemsAndTheirDueTimes() async {
+        let dates = TestDateSource()
+        let a = UUID()
+        let facts = FlakyFacts([PRPollWorktreeFacts(
+            worktreeID: a, active: true, discoverable: true,
+            bindings: [PRPollBindingFact(key: key(1), state: .blocked)])])
+        let runs = Runs()
+        let s = PRPollScheduler(facts: { await facts.read() }, run: { await runs.add($0) },
+                                now: dates.provider, clock: TestClock<Duration>())
+        await s.runOnce()                      // t0: runs, next due at t0+120
+        await facts.setReadable(false)
+        dates.advance(by: 60)
+        await s.runOnce()                      // not due yet, and the item is kept
+        #expect(await runs.dues.count == 1)
+        dates.advance(by: 60)
+        await s.runOnce()                      // t0+120: due on the kept schedule
+        #expect(await runs.dues.map(\.track) == [[key(1)], [key(1)]])
+        await facts.setReadable(true)
+        await s.runOnce()                      // same instant: lastRun was kept, not reset
+        #expect(await runs.dues.count == 2)
+    }
+
+    /// The other branch: readable facts with the worktree gone drop its item.
+    @Test func readableFactsWithoutTheWorktreeDropItsItem() async {
+        let dates = TestDateSource()
+        let a = UUID()
+        let facts = blockedFacts(a)
+        let runs = Runs()
+        let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
+                                now: dates.provider, clock: TestClock<Duration>())
+        await s.runOnce()
+        await facts.set([])
+        dates.advance(by: 120)
+        await s.runOnce()
+        #expect(await runs.dues.count == 1)
     }
 
     @Test func kickCallsTheProbe() async {

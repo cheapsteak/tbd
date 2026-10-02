@@ -14,7 +14,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRPollSchedu
 ///
 /// Spec: docs/specs/2026-10-01-pr-polling-schedule-design.md.
 public actor PRPollScheduler {
-    public typealias FactsProvider = @Sendable () async -> [PRPollWorktreeFacts]
+    /// The fleet's current facts, or nil when they could not be read. Nil
+    /// keeps the schedule as it stands — items and due times — rather than
+    /// reconciling against an empty fleet, which would drop every item and
+    /// make the whole fleet due on the next good read.
+    public typealias FactsProvider = @Sendable () async -> [PRPollWorktreeFacts]?
     public typealias Runner = @Sendable (PRPollDue) async -> Void
 
     /// The facts and the runner. Passed to `init`, or — when their owner is
@@ -124,9 +128,24 @@ public actor PRPollScheduler {
     }
 
     /// One wake: rebuild, decide, run what is due. Tests call it directly.
+    ///
+    /// Must not be called while the loop started by `start()` is running: the
+    /// two would interleave at the runner's suspension and could hand the
+    /// runner overlapping due sets. The loop and tests are its only callers.
+    ///
+    /// A trigger that lands while the runner is busy is replayed after
+    /// `markRan`, so the item it names may run twice in a row — once in the
+    /// round that was already running and once right after. That one extra
+    /// point is the price of never losing a trigger.
+    ///
+    /// When the facts cannot be read (`FactsProvider` answers nil) the
+    /// schedule is not reconciled; what is already due under it still runs.
     public func runOnce() async {
-        let current = await facts()
-        schedule.reconcile(current, now: now())
+        if let current = await facts() {
+            schedule.reconcile(current, now: now())
+        } else {
+            logger.debug("pr schedule wake: facts unreadable, keeping the current schedule")
+        }
         let loads = schedule.loads()
         let decision = budget.decide(loads: loads, at: now())
         let due = schedule.due(at: now(), decision: decision)
