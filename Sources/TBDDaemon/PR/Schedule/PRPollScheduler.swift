@@ -188,7 +188,7 @@ public actor PRPollScheduler {
         guard seconds > 0 else { return }
         let delay = Duration.milliseconds(Int64((seconds * 1000).rounded(.up)))
         let clock = self.clock
-        let task = Task { try? await clock.sleep(for: delay) }
+        let task = Task { _ = try? await clock.sleep(for: delay) }
         sleeper = task
         await task.value
         if sleeper == task { sleeper = nil }
