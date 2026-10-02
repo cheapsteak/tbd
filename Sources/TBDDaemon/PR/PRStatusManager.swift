@@ -122,6 +122,12 @@ public actor PRStatusManager {
     private var onStatusPersist: (@Sendable (UUID, PRStatus?) async -> Void)?
 
     private var onObservationPersist: (@Sendable (UUID, PRObservation?) async -> Void)?
+    /// Fired for every `gh` response that says something about the GraphQL
+    /// budget (`GitHubRateLimitSignal.parse`). The poll scheduler's feed.
+    private var onRateLimitSignal: (@Sendable (GitHubRateLimitSignal) async -> Void)?
+    /// The most recent `.reading`. A `.limited` signal does not replace it,
+    /// because it carries no budget figures of its own.
+    private var latestRateLimit: GitHubRateLimitSignal?
 
     /// Worktrees whose cached PR head ref has been *attempted* in this daemon
     /// run (see the head-ref heal in `fetchAll`), whether or not the by-number
@@ -402,6 +408,31 @@ public actor PRStatusManager {
     /// "No attempt on record" is still expressed by never having fired.
     public func setOnObservationPersist(_ cb: @escaping @Sendable (UUID, PRObservation?) async -> Void) {
         self.onObservationPersist = cb
+    }
+
+    /// Register a callback fired for every GitHub GraphQL budget signal a `gh`
+    /// response carries: a `rateLimit` reading or a rate-limit error. Every
+    /// GitHub query selects `GitHubRateLimitSignal.selection`, so every
+    /// successful query produces one. GitLab calls never do.
+    public func setOnRateLimitSignal(_ cb: @escaping @Sendable (GitHubRateLimitSignal) async -> Void) {
+        self.onRateLimitSignal = cb
+    }
+
+    /// The most recent `rateLimit` reading, or nil before any GitHub query
+    /// has answered.
+    public func latestRateLimitReading() -> GitHubRateLimitSignal? { latestRateLimit }
+
+    /// Log a budget signal at info level and hand it to the scheduler's
+    /// callback. Called from `runGHResult`, the one `gh` choke point.
+    private func recordRateLimit(_ signal: GitHubRateLimitSignal) async {
+        switch signal {
+        case .reading(let cost, let remaining, let resetAt):
+            logger.info("graphql cost \(cost, privacy: .public) remaining \(remaining, privacy: .public) resetAt \(resetAt.ISO8601Format(), privacy: .public)")
+            latestRateLimit = signal
+        case .limited:
+            logger.warning("graphql rate limited")
+        }
+        await onRateLimitSignal?(signal)
     }
 
     /// Seed the observation map from persisted DB state at startup, so an
@@ -2087,7 +2118,8 @@ public actor PRStatusManager {
     /// The literal number must appear in both pullRequest(number:) and isRequired(pullRequestNumber:).
     static func prCheckQuery(owner: String, name: String, number: Int) -> String {
         """
-        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
+        { \(GitHubRateLimitSignal.selection)
+          repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
           commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) {
             pageInfo { hasNextPage }
             nodes {
@@ -2118,6 +2150,7 @@ public actor PRStatusManager {
     static func prByBranchQuery() -> String {
         """
         query($owner: String!, $name: String!, $branch: String!) {
+          \(GitHubRateLimitSignal.selection)
           repository(owner: $owner, name: $name) {
             pullRequests(headRefName: $branch, first: 10,
                          orderBy: {field: CREATED_AT, direction: DESC}) {
@@ -2598,6 +2631,7 @@ public actor PRStatusManager {
             .joined(separator: "\n    ")
         return """
         query($owner: String!, $name: String!) {
+          \(GitHubRateLimitSignal.selection)
           repository(owner: $owner, name: $name) {
             \(selections)
           }
@@ -2629,6 +2663,7 @@ public actor PRStatusManager {
         }.joined(separator: "\n    ")
         return """
         query(\(variables)) {
+          \(GitHubRateLimitSignal.selection)
           repository(owner: $owner, name: $name) {
             \(selections)
           }
@@ -2837,6 +2872,7 @@ public actor PRStatusManager {
     static func openPRsQuery() -> String {
         """
         query($owner: String!, $name: String!) {
+          \(GitHubRateLimitSignal.selection)
           repository(owner: $owner, name: $name) {
             pullRequests(states: [OPEN], first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
               nodes { number title headRefName isDraft isCrossRepository headRepositoryOwner { login } }
@@ -3654,14 +3690,22 @@ public actor PRStatusManager {
     }
 
     private nonisolated func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
+        let result: GHCommandResult?
         if let ghRunner {
-            return await ghRunner(args, repoPath)
+            result = await ghRunner(args, repoPath)
+        } else {
+            guard let ghPath = Self.resolvedGHPath else {
+                logger.debug("gh CLI not found in PATH")
+                return nil
+            }
+            result = await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath, clock: clock)
         }
-        guard let ghPath = Self.resolvedGHPath else {
-            logger.debug("gh CLI not found in PATH")
-            return nil
+        // Every GitHub GraphQL query selects `rateLimit`, so this is where its
+        // cost is seen. `gh repo view` and other non-GraphQL answers parse to nil.
+        if let result, let signal = GitHubRateLimitSignal.parse(result) {
+            await recordRateLimit(signal)
         }
-        return await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath, clock: clock)
+        return result
     }
 
     /// One `glab` invocation, through the injected seam when a test supplied one.
