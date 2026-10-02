@@ -22,8 +22,9 @@ struct MenuRow: Identifiable, Equatable {
 /// Two different orderings are used on purpose:
 /// - `iconBinding` picks the WORST state (via `PRBinding.worst(of:)`), because
 ///   one icon has to summarize every bound PR.
-/// - `statusBarChips` and `menuRows` preserve BIND ORDER. A row must not move
-///   under the user's cursor as CI states change underneath it.
+/// - `statusBarChips`, `statusBarGroups` and `menuRows` preserve BIND ORDER.
+///   A row must not move under the user's cursor as CI states change
+///   underneath it.
 enum PRBindingPresentation {
 
     /// The bindings every PR surface should render for one worktree.
@@ -116,6 +117,49 @@ enum PRBindingPresentation {
         return (chips, overflow)
     }
 
+    /// Whether a binding counts as finished for the status bar's done chip: its
+    /// last observed state is terminal (`.merged` or `.closed`), the same rule
+    /// `PRBinding.allResolved` judges by. A binding with no observed status is
+    /// open — nothing says it is done.
+    static func isFinished(_ binding: PRBinding) -> Bool {
+        binding.status?.state.isTerminal == true
+    }
+
+    /// How many finished PRs it takes before the status bar folds them into
+    /// one done chip. A single merged PR stays a normal chip: on its own it is
+    /// news — the worktree's work shipped — rather than clutter.
+    static let doneGroupThreshold = 2
+
+    /// The status bar's PR cluster, split into what renders as chips, what the
+    /// `+N` menu lists, and what folds into the done chip.
+    ///
+    /// With fewer than `doneGroupThreshold` finished bindings this is exactly
+    /// `statusBarChips` over every binding, the `+N` menu lists every binding,
+    /// and `done` is empty. Past it, the finished bindings leave the chip row
+    /// and land in `done`, and the cap, the overflow count and the `+N` menu
+    /// all cover the open bindings only. Both groups keep bind order — they are
+    /// order-preserving filters of one list — so nothing moves under the
+    /// cursor except a PR crossing from open to finished, which is the point.
+    static func statusBarGroups(
+        _ bindings: [PRBinding], limit: Int
+    ) -> (chips: [PRBinding], overflow: Int, overflowMenu: [PRBinding], done: [PRBinding]) {
+        var open: [PRBinding] = []
+        var done: [PRBinding] = []
+        for binding in bindings {
+            if isFinished(binding) {
+                done.append(binding)
+            } else {
+                open.append(binding)
+            }
+        }
+        guard done.count >= doneGroupThreshold else {
+            let selected = statusBarChips(bindings, limit: limit)
+            return (selected.chips, selected.overflow, bindings, [])
+        }
+        let selected = statusBarChips(open, limit: limit)
+        return (selected.chips, selected.overflow, open, done)
+    }
+
     /// Dropdown menu rows, in bind order — the same "don't move under the
     /// cursor" reasoning as `statusBarChips`. Each row's title carries the
     /// request named in its own forge's vocabulary, the one shared sentence
@@ -186,24 +230,55 @@ enum PRBindingPresentation {
     /// Tooltip for the status bar's `+N` overflow chip.
     ///
     /// The chip is labelled by how many PRs did NOT fit, but its menu lists
-    /// EVERY binding — the same rows the toolbar dropdown shows, deliberately,
-    /// so the two surfaces cannot describe one worktree differently. The wording
-    /// therefore has to lead with the whole list and mention the overflow count
-    /// second; "\(overflow) more pull requests" described a menu this one has
-    /// never shown.
+    /// EVERY binding it covers — the same rows the toolbar dropdown shows,
+    /// deliberately, so the two surfaces cannot describe one worktree
+    /// differently. The wording therefore has to lead with the whole list and
+    /// mention the overflow count second; "\(overflow) more pull requests"
+    /// described a menu this one has never shown.
     ///
     /// "pull request" here is the **aggregate** wording and stays put: this
     /// sentence counts a set, one worktree can hold bindings on both forges at
     /// once, and no forge's own noun would be true of that set. Only text
     /// naming ONE binding takes `refLabel` / `refNoun` — the rows this chip
     /// opens do, and each of them speaks its own forge.
-    static func overflowChipTooltip(total: Int, overflow: Int) -> String {
-        "Show all \(total) pull request\(total == 1 ? "" : "s") (\(overflow) not shown here)"
+    ///
+    /// `openOnly` is true when finished PRs fold into the done chip
+    /// (`statusBarGroups`): the menu and `total` then cover the open bindings
+    /// only, so the sentence says "open" rather than claiming the menu holds
+    /// every PR the worktree has. The done chip lists the rest.
+    static func overflowChipTooltip(total: Int, overflow: Int, openOnly: Bool = false) -> String {
+        "Show all \(overflowChipCount(total, openOnly: openOnly)) (\(overflow) not shown here)"
     }
 
     /// Accessibility label for the `+N` overflow chip. Same correction as
     /// `overflowChipTooltip`: the control opens the full list, not the remainder.
-    static func overflowChipAccessibilityLabel(total: Int, overflow: Int) -> String {
-        "Show all \(total) pull request\(total == 1 ? "" : "s"), \(overflow) not shown here"
+    static func overflowChipAccessibilityLabel(
+        total: Int, overflow: Int, openOnly: Bool = false
+    ) -> String {
+        "Show all \(overflowChipCount(total, openOnly: openOnly)), \(overflow) not shown here"
+    }
+
+    /// `"7 pull requests"`, or `"7 open pull requests"` when the done chip
+    /// holds the finished ones.
+    private static func overflowChipCount(_ total: Int, openOnly: Bool) -> String {
+        "\(total) \(openOnly ? "open " : "")pull request\(total == 1 ? "" : "s")"
+    }
+
+    /// The status bar's done chip label, e.g. `"✓ 5 done"`.
+    static func doneChipLabel(count: Int) -> String {
+        "\u{2713} \(count) done"
+    }
+
+    /// Tooltip for the done chip. Counts a set that can span both forges, so
+    /// it takes the aggregate "pull request" wording rather than any one
+    /// forge's noun — see `overflowChipTooltip`.
+    static func doneChipTooltip(count: Int) -> String {
+        "\(count) merged or closed pull request\(count == 1 ? "" : "s")"
+    }
+
+    /// Accessibility label for the done chip: the count, and that activating
+    /// it opens their list.
+    static func doneChipAccessibilityLabel(count: Int) -> String {
+        "Show \(count) merged or closed pull request\(count == 1 ? "" : "s")"
     }
 }

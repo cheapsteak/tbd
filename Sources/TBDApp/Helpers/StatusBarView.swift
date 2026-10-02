@@ -231,12 +231,14 @@ struct StatusBarView: View {
         let observation: PRObservation?
     }
 
-    /// How many chips the bar shows before the rest collapse into `+N`.
+    /// How many chips the bar shows before the rest collapse into `+N`. When
+    /// two or more PRs are finished and fold into the done chip, the limit
+    /// counts open PRs only (`PRBindingPresentation.statusBarGroups`).
     ///
     /// Seven is a judgement about how many numbers are worth scanning at a
     /// glance; past that the dropdown is the better surface. It is not a width
     /// calculation — nothing here consults the available width, and the
-    /// overflow count is a pure function of how many bindings there are.
+    /// overflow count is a pure function of the bindings and their states.
     ///
     /// It buys no width safety either, and the `layoutPriority(-1)` it carries
     /// does not provide any: the path/branch cluster beside it is at the same
@@ -248,10 +250,6 @@ struct StatusBarView: View {
     /// the real answer and is deliberately not built here.
     nonisolated static let prChipLimit = 7
 
-    /// The chip row for `bindings`, plus how many did not fit. Pure: delegates
-    /// the cap and the bind-order guarantee to `PRBindingPresentation` so the
-    /// status bar cannot disagree with the toolbar about which PRs are shown
-    /// or in what order.
     /// Whether the bar carries the selected worktree's first-message entry.
     ///
     /// Failures only. A `.pending` message is the pane banner's to announce —
@@ -269,6 +267,16 @@ struct StatusBarView: View {
         readback?.phase.undeliverableReason != nil
     }
 
+    /// The chip row for `bindings`, how many did not fit, the bindings the `+N`
+    /// menu lists, and the finished bindings folded into the done chip. Pure:
+    /// delegates the cap, the done-chip split and the bind-order guarantee to
+    /// `PRBindingPresentation.statusBarGroups` so the status bar cannot
+    /// disagree with the toolbar about which PRs are shown or in what order.
+    ///
+    /// When two or more PRs are finished, the cap and the overflow count cover
+    /// the open PRs only; otherwise they cover every binding and `done` is
+    /// empty.
+    ///
     /// `observation` is the worktree's last poll attempt, carried so the
     /// overlay can say when that attempt did not resolve — the same clause the
     /// toolbar and sidebar append. Without it a chip would render the more
@@ -277,8 +285,8 @@ struct StatusBarView: View {
         _ bindings: [PRBinding],
         limit: Int = prChipLimit,
         observation: PRObservation? = nil
-    ) -> (chips: [PRChip], overflow: Int) {
-        let selected = PRBindingPresentation.statusBarChips(bindings, limit: limit)
+    ) -> (chips: [PRChip], overflow: Int, overflowMenu: [PRBinding], done: [PRBinding]) {
+        let selected = PRBindingPresentation.statusBarGroups(bindings, limit: limit)
         let chips = selected.chips.map { binding in
             PRChip(
                 id: binding.id,
@@ -295,7 +303,7 @@ struct StatusBarView: View {
                 observation: observation
             )
         }
-        return (chips, selected.overflow)
+        return (chips, selected.overflow, selected.overflowMenu, selected.done)
     }
 
     /// What a chip's hover overlay says: one headline naming the PR, its state
@@ -685,7 +693,9 @@ private struct StatusBarHoverAffordance: ViewModifier {
 }
 
 /// The status bar's PR cluster: one chip per bound PR up to
-/// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest.
+/// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
+/// more merged or closed PRs, those fold into a trailing `✓ N done` chip and
+/// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
     /// The worktree's last poll attempt, so a chip's overlay can say when that
@@ -699,7 +709,27 @@ private struct PRChipCluster: View {
                 PRChipView(chip: chip)
             }
             if model.overflow > 0 {
-                PRChipOverflowMenu(bindings: bindings, overflow: model.overflow)
+                // The label counts what didn't fit; the menu lists everything
+                // it covers — the open PRs only while the done chip holds the
+                // rest. The wording says so — see
+                // `PRBindingPresentation.overflowChipTooltip`.
+                let total = model.overflowMenu.count
+                let openOnly = !model.done.isEmpty
+                PRChipMenu(
+                    bindings: model.overflowMenu,
+                    label: "+\(model.overflow)",
+                    tooltip: PRBindingPresentation.overflowChipTooltip(
+                        total: total, overflow: model.overflow, openOnly: openOnly),
+                    spokenLabel: PRBindingPresentation.overflowChipAccessibilityLabel(
+                        total: total, overflow: model.overflow, openOnly: openOnly))
+            }
+            if !model.done.isEmpty {
+                let count = model.done.count
+                PRChipMenu(
+                    bindings: model.done,
+                    label: PRBindingPresentation.doneChipLabel(count: count),
+                    tooltip: PRBindingPresentation.doneChipTooltip(count: count),
+                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count))
             }
         }
     }
@@ -923,9 +953,14 @@ private struct PRChipView: View {
     }
 }
 
-/// The `+N` chip. Clicking it drops down the same list the toolbar's multi-PR
-/// dropdown shows — `PRBindingPresentation.menuRows`, in bind order — so the
-/// two surfaces cannot describe the same worktree differently.
+/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N done`
+/// chip. Clicking it drops down rows built by the toolbar's multi-PR dropdown's
+/// own builder — `PRBindingPresentation.menuRows`, in bind order — so the two
+/// surfaces cannot describe the same PR differently. Without a done group the
+/// `+N` menu lists every binding, exactly the toolbar's list; with one, the
+/// `+N` menu lists the open bindings and the done chip the finished ones, and
+/// each row still reads as the toolbar's row for that PR does. Neither chip
+/// offers an untrack action; that lives on the individual chips.
 ///
 /// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
 /// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`
@@ -943,9 +978,11 @@ private struct PRChipView: View {
 /// properly. Sharing `menuRows` with the toolbar is what keeps the two surfaces
 /// from disagreeing; forking it for one field would give that up to duplicate
 /// what the overlay already says better.
-private struct PRChipOverflowMenu: View {
+private struct PRChipMenu: View {
     let bindings: [PRBinding]
-    let overflow: Int
+    let label: String
+    let tooltip: String
+    let spokenLabel: String
 
     @State private var isHovering = false
 
@@ -963,7 +1000,7 @@ private struct PRChipOverflowMenu: View {
                 .disabled(row.url == nil)
             }
         } label: {
-            Text("+\(overflow)")
+            Text(label)
                 .lineLimit(1)
                 .underline(isHovering)
                 .foregroundStyle(.secondary)
@@ -975,13 +1012,9 @@ private struct PRChipOverflowMenu: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        // The label counts what didn't fit; the menu lists everything. The
-        // wording says so — see `PRBindingPresentation.overflowChipTooltip`.
-        .help(PRBindingPresentation.overflowChipTooltip(
-            total: bindings.count, overflow: overflow))
+        .help(tooltip)
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
-        .accessibilityLabel(PRBindingPresentation.overflowChipAccessibilityLabel(
-            total: bindings.count, overflow: overflow))
+        .accessibilityLabel(spokenLabel)
     }
 }
 
