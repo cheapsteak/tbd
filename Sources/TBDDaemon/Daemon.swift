@@ -1228,6 +1228,14 @@ public final class Daemon: Sendable {
         await prManager.setOnRateLimitSignal { [weak rpcRouter] signal in
             await rpcRouter?.prPollScheduler.recordRateLimitSignal(signal)
         }
+        // A push seen by the git status sweep (`origin/<branch>` moved) makes
+        // that worktree's PR due now. Harmless when the legacy poller runs:
+        // the scheduler was never started, so a trigger only moves a due time
+        // in an idle in-memory schedule. The sweep below runs on a copy of
+        // `lifecycle`, which shares this tracker (an actor reference).
+        await lifecycle.remoteTipTracker.setOnMoved { [weak rpcRouter] id in
+            await rpcRouter?.prPollScheduler.trigger(worktreeID: id)
+        }
 
         self.router = rpcRouter
         // Post-construction wiring, same shape as `claudeUsagePoller` below:

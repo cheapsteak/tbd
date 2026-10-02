@@ -164,6 +164,21 @@ struct PRPollSchedulerTests {
         #expect(await kicks.count == 2)
     }
 
+    /// Flag-off branch of the remote-tip trigger: `Daemon` wires the trigger
+    /// unconditionally, but with `pr_poll_schedule_enabled` off the scheduler
+    /// is never started, so a trigger must run nothing — even with an item
+    /// that `runOnce` would run at once.
+    @Test func triggerOnAStoppedSchedulerRunsNothing() async {
+        let a = UUID()
+        let facts = blockedFacts(a)
+        let runs = Runs()
+        let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
+                                now: TestDateSource().provider, clock: TestClock<Duration>())
+        await s.trigger(worktreeID: a)
+        #expect(await runs.dues.isEmpty)
+        #expect(await s.isRunning == false)
+    }
+
     @Test func startIsIdempotentAndStopEndsTheLoop() async {
         let clock = TestClock<Duration>()
         let runs = Runs()

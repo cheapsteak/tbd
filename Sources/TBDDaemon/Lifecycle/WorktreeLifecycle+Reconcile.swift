@@ -131,6 +131,14 @@ extension WorktreeLifecycle {
                 repoID: repoID, worktreeID: wt.id, branchTip: branchTip, at: observedAt)
         }
 
+        // PR-poll trigger: a push moves `origin/<branch>`, and that makes the
+        // worktree's PR check due now. The local tip is deliberately ignored —
+        // a check before the push is wasted. Same tips map, no subprocess.
+        await remoteTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
+        for wt in worktrees {
+            await remoteTipTracker.observe(worktreeID: wt.id, remoteTip: tips["origin/\(wt.branch)"])
+        }
+
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
                 group.addTask {
