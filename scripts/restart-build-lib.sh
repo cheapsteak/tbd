@@ -462,12 +462,29 @@ describe_silent_build() {
 # cover it: that check only runs while the wrapper WAITS for the slot, and the
 # build being abandoned here already has it.)
 #
-# THE ORDER IS LOAD-BEARING. Descendants are enumerated BEFORE the root is
-# signalled. A dead root's children re-parent to launchd, and a walk rooted at
-# it then reports an empty tree while the compiler that holds the slot runs on
-# — the escaped-descendant shape this repo keeps finding. The walk is repeated
-# after the grace period, so anything the root forked while the first round was
-# in flight is caught too.
+# THE PROCESS GROUP IS THE MECHANISM, and that is why `run_governed_build`
+# launches the build under job control: the job is then a process-group leader
+# whose group id IS its own pid, so one `kill -TERM -<pid>` reaches every
+# process below it. Group membership is inherited and survives re-parenting, so
+# it covers descendants that have already orphaned to launchd — and it needs no
+# process table at all, which is the point: the machine this runs on is the one
+# where `ps` is slowest, and a teardown that could only enumerate what `ps`
+# would tell it would fail exactly when it is needed. A pid-directed kill of
+# the root alone is not a substitute: its children simply re-parent and carry
+# on holding the slot.
+#
+# Signalling `-$builder` is safe whether or not job control took. When it did,
+# that is the build's group; when it did not, the build shares the caller's
+# group and no group with that id exists at all, so the kill is an ESRCH no-op
+# rather than a signal to the shell doing the killing. Measured in bash 3.2 and
+# 5.2 alike. The pid and walk legs below are what carry the teardown in that
+# case, and they also cover anything that left the group by starting a session
+# of its own.
+#
+# The walk is therefore a supplement, not the mechanism — but its ORDER still
+# matters: descendants are enumerated BEFORE anything is signalled, because a
+# walk rooted at a dead root reports an empty tree. It is repeated after the
+# grace period for anything forked while the first round was in flight.
 #
 # SIGTERM THEN SIGKILL, AND NEVER SIGINT. SIGINT is the one signal this tree
 # has been made deaf to, so sending it would be a teardown that tears nothing
@@ -481,6 +498,7 @@ terminate_build_tree() {
     victims="$(build_descendant_processes "$builder" 2>/dev/null | awk '{print $1}')" \
         || victims=""
     for signal in TERM KILL; do
+        kill -"$signal" "-$builder" 2>/dev/null || true
         kill -"$signal" "$builder" 2>/dev/null || true
         for pid in $victims; do
             kill -"$signal" "$pid" 2>/dev/null || true
@@ -666,8 +684,26 @@ run_governed_build() {
     [ -z "$sdk_note" ] || printf 'note: %s\n' "$sdk_note" >&2
 
     status=0
+    # Job control, for the length of the launch and nothing else. With it on,
+    # bash puts the asynchronous job in a process group of its own whose id is
+    # the job's pid, which is what lets `terminate_build_tree` reach the whole
+    # tree with one signal and no process table. Restored immediately, and only
+    # to what the caller had: it is wanted for the `&` below and for nothing
+    # after it.
+    #
+    # The cost, stated because it is a real change: the build is no longer in
+    # the terminal's foreground process group, so a Ctrl-C or a hangup no longer
+    # reaches the compiler directly — the trap below is what ends it. That is
+    # the trade this makes deliberately, since the signal that did reach the
+    # tree was SIGINT, which the tree ignores. A `kill -9` aimed at restart.sh's
+    # own process group no longer reaches the build either; aim it at the
+    # build's own pid, which `ps` shows as its group leader.
+    local had_monitor=0
+    case "$-" in *m*) had_monitor=1 ;; esac
+    set -m
     (clear_sdk_overrides; cd "$repo_root" && scripts/swift-safe build "$@") > "$build_log" 2>&1 &
     builder=$!
+    [ "$had_monitor" = 1 ] || set +m
     # Saved before arming, and restored below, so this borrows the three
     # signals for the length of the build rather than taking them from a caller
     # that had its own use for them. An empty save means the caller had none,

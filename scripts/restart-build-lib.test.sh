@@ -988,6 +988,25 @@ test_a_build_interrupted_by_ctrl_c_is_torn_down_not_orphaned() {
     rm -rf "$d" "$shim"
 }
 
+# THE FINDING THE PROCESS GROUP ANSWERS. A teardown that can only signal what
+# `ps` enumerated fails on exactly the machine this PR targets: the one where
+# `ps` is slow enough to hit its own bound. Killing the root alone is no
+# substitute — its children re-parent to launchd and go on holding the
+# machine-global slot. So the teardown signals the build's process group, which
+# `run_governed_build` arranges by launching under job control, and this case
+# proves it does not need `ps` by taking `ps` away.
+test_an_interrupt_tears_the_tree_down_even_when_ps_cannot_answer() {
+    local d fake
+    d="$(mkunendingworktree)"
+    fake="$(mkhangingps)"
+    PATH="$fake:$PATH" TBD_RESTART_PROCESS_PROBE_SECONDS=1 \
+        bash -c "$RESTART_SHELL_BODY" "$HERE" "$d" > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree TERM "hanging ps"
+    rm -rf "$d" "$fake"
+}
+
 # The three signals are borrowed for the length of the build, not taken: a
 # caller with its own cleanup handler must still have it afterwards.
 test_the_callers_own_signal_handlers_are_borrowed_and_returned() {
