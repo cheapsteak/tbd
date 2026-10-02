@@ -262,14 +262,29 @@ describe_build_failure() {
 }
 
 # A positive integer setting, or its default when the environment's value is
-# missing or not one. A typo in a diagnostic knob must never fail a build.
+# missing or not one. A typo in a diagnostic knob must never fail a build, and
+# this function is the only thing standing between such a typo and arithmetic
+# in the watcher loop — so what it emits has to be safe to put in a `$(( ))`,
+# not merely digits.
+#
+# Two values are digits and still unsafe. A leading zero makes bash read the
+# number as OCTAL, so `08` is not 8 but an invalid octal literal: `$(( now + 08
+# ))` prints "value too great for base" and FAILS, which under restart.sh's
+# `set -e` takes down the watcher — and with it the build it was watching. And a
+# value past what bash arithmetic can hold fails the same way. So the value is
+# normalized to base 10 here with `10#`, bounded by length first (18 digits is
+# longer than any duration anyone means and inside what bash can hold), and
+# checked for positivity AFTER normalization, which is what makes `00` fall back
+# like the `0` it is.
 positive_integer_setting() {
-    local value="${1-}" fallback="$2"
+    local value="${1-}" fallback="$2" decimal
     case "$value" in
-        "" | *[!0-9]*) printf '%s' "$fallback" ;;
-        0) printf '%s' "$fallback" ;;
-        *) printf '%s' "$value" ;;
+        "" | *[!0-9]*) printf '%s' "$fallback"; return 0 ;;
     esac
+    [ "${#value}" -le 18 ] || { printf '%s' "$fallback"; return 0; }
+    decimal=$((10#$value))
+    [ "$decimal" -gt 0 ] || { printf '%s' "$fallback"; return 0; }
+    printf '%s' "$decimal"
 }
 
 # The poll interval is only ever handed to `sleep`, so a fraction is allowed

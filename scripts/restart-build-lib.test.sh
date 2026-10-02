@@ -1059,6 +1059,45 @@ test_bad_diagnostic_knobs_fall_back_to_their_defaults() {
         "$( TBD_RESTART_BUILD_SILENCE_SECONDS=42 build_silence_seconds )"
 }
 
+# A knob whose value is digits can still be arithmetic bash refuses: a leading
+# zero makes it OCTAL, so `08` is an invalid literal and `$(( now + 08 ))` fails
+# — which under restart.sh's `set -e` takes down the watcher, and with it the
+# build it was watching. The whole contract of this function is that a typo in a
+# diagnostic knob cannot fail a build, so what it emits has to be safe to put in
+# a `$(( ))` and not merely to look like a number.
+test_a_leading_zero_knob_does_not_abort_the_watcher() {
+    assert_eq "a leading zero is read as base 10, not octal" "8" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=08 build_silence_seconds )"
+    assert_eq "and so is the other invalid octal digit" "9" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=09 build_silence_seconds )"
+    assert_eq "a leading zero on a valid octal digit is still decimal" "7" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=07 build_silence_seconds )"
+    # Positivity is checked after normalization, so a padded zero falls back
+    # like the zero it is rather than becoming a bound of 0.
+    assert_eq "a padded zero falls back rather than spinning" "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=00 build_silence_seconds )"
+    assert_eq "a value too large for bash arithmetic falls back" "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=999999999999999999999 build_silence_seconds )"
+    # The same normalization protects the probe bound, which is multiplied.
+    assert_eq "the probe bound is normalized too" "8" \
+        "$( TBD_RESTART_PROCESS_PROBE_SECONDS=08 process_probe_seconds )"
+}
+
+# The assertion the finding is really about: the arithmetic the watcher does
+# with the knob must survive it. A build is run end to end with the adverse
+# value set, under restart.sh's own `set -e`, and must still return its status.
+test_a_leading_zero_knob_still_lets_a_build_report_its_status() {
+    local d; d="$(mkfakeworktree 75)"
+    local status=0
+    (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=08
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=09
+        run_under_restart_shell "$d" >/dev/null 2>&1
+    ) || status=$?
+    assert_eq "the build's own status survives an octal-looking knob" "75" "$status"
+    rm -rf "$d"
+}
+
 # --- restart.sh wiring --------------------------------------------------------
 #
 # Static checks: the guard is worth nothing if restart.sh stops calling it, and
