@@ -681,7 +681,7 @@ test_a_hanging_process_probe_is_abandoned_rather_than_waited_on() {
         export TBD_RESTART_PROCESS_PROBE_SECONDS=1
         export PATH="$fake:$PATH"
         # Three seconds is comfortably past the one-second bound and
-        # comfortably short of the fixture's own twenty.
+        # comfortably short of the twenty-second fixture.
         await_completion 30 build_descendant_processes 1
     )"
     assert_eq "a hanging ps is abandoned, not waited on" "finished" "$finished"
