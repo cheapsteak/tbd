@@ -86,6 +86,53 @@ EOF
     echo "$d"
 }
 
+# Build a throwaway "worktree" whose scripts/swift-safe stub never finishes and
+# records two pids: its own, and a grandchild's. The stub stands in for the
+# wrapper, the grandchild for the compiler below it — and the grandchild is the
+# half that matters, because a teardown that signals only the direct child
+# leaves it running and holding the machine-global build slot. Echoes $d.
+#
+# The grandchild self-reaps in 45s, so a case that fails before its teardown
+# bounds the leak rather than leaving a process nothing can reclaim.
+mkunendingworktree() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-unending.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+echo "swift-safe: still waiting for the shared build slot after 60s of 1800s (held by pid 1)" >&2
+sleep 45 &
+echo "\$!" > "$d/grandchild.pid"
+echo "\$\$" > "$d/child.pid"
+wait
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# A directory holding a python3 shim that restores SIGINT's DEFAULT disposition
+# and then execs its arguments.
+#
+# Needed because a backgrounded command is the one thing that cannot be sent a
+# meaningful SIGINT: bash sets SIGINT to SIG_IGN for its own asynchronous jobs,
+# SIG_IGN survives exec, and `trap` in a shell that inherited it is a no-op. A
+# harness has to put the runner in the background to signal it at all, so
+# without the shim the SIGINT case would assert against a disposition no
+# terminal ever produces. The shim gives the runner exactly the disposition
+# restart.sh has when a human runs it from a terminal — which is the case under
+# test. Echoes $d.
+mksigintshim() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-shim.XXXXXX")"
+    cat > "$d/shim.py" <<'EOF'
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+EOF
+    echo "$d"
+}
+
 # A directory holding a `ps` that never answers, to be put ahead of the real
 # one on PATH. This is the hazard the process probe has to survive: the
 # watcher must reach `wait` on the build for the build's status to be
@@ -225,15 +272,22 @@ kill_tree() {
 # and pass even against the piped implementation, which is worthless. So the
 # call goes through a subshell configured exactly like restart.sh, and the
 # subshell's own exit status is the answer.
+#
+# The body is a named constant because one case cannot use the wrapper: the
+# SIGINT case has to launch the same shell through a shim (see `mksigintshim`),
+# and a second copy of the script would be a second thing to keep in step.
+# Arguments: $0 = the directory holding the lib, $1 = the repo, $2.. = passed on.
+RESTART_SHELL_BODY='
+    set -e
+    # shellcheck source=/dev/null
+    source "$0/restart-build-lib.sh"
+    repo="$1"; shift
+    run_governed_build "$repo" "$@"
+'
+
 run_under_restart_shell() {
     local repo="$1"; shift
-    bash -c '
-        set -e
-        # shellcheck source=/dev/null
-        source "$0/restart-build-lib.sh"
-        repo="$1"; shift
-        run_governed_build "$repo" "$@"
-    ' "$HERE" "$repo" "$@"
+    bash -c "$RESTART_SHELL_BODY" "$HERE" "$repo" "$@"
 }
 
 # --- the ship/no-ship decision ------------------------------------------------
@@ -748,6 +802,132 @@ test_a_hanging_ps_cannot_strand_the_builds_exit_status() {
     # stub exits on its own, so this is a collection, not a kill.
     [ "$AWAITED_RESULT" = finished ] || wait "$runner" 2>/dev/null
     rm -rf "$d" "$fake"
+}
+
+# --- an interrupted build must not keep the shared slot ------------------------
+#
+# THE REGRESSION: watching a build means the build runs as an asynchronous job,
+# and bash gives such a job an IGNORED SIGINT whenever job control is off —
+# which it is in every script. SIG_IGN survives both fork and exec, so
+# scripts/swift-safe, SwiftPM and every compiler below them inherit it. Ctrl-C
+# then ends restart.sh and nothing else: the compiler runs on, holding the
+# machine-global build lock. That is the same stuck-lock state this file exists
+# to diagnose, produced by the diagnostic. So the interrupt is caught and the
+# tree signalled, and these cases pin that the GRANDchild dies too — a teardown
+# that reached only the direct child would leave the compiler behind.
+
+# "dead" once pid $1 is gone, or "alive" after ~5s.
+await_death() {
+    local pid="$1" waited=0
+    while [ "$waited" -lt 100 ]; do
+        kill -0 "$pid" 2>/dev/null || { echo dead; return 0; }
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo alive
+}
+
+# "found" once file $1 is non-empty, or "missing" after ~10s.
+await_file() {
+    local file="$1" waited=0
+    while [ "$waited" -lt 200 ]; do
+        [ -s "$file" ] && { echo found; return 0; }
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo missing
+}
+
+# Assert that interrupting the runner with signal $1 takes the whole build tree
+# with it. $2 names the case in the assertion text. The runner is started by the
+# caller, which leaves its pid in RUNNER_PID and the fixture in RUNNER_FIXTURE.
+assert_interrupt_tears_down_the_tree() {
+    local signal="$1" label="$2"
+    local d="$RUNNER_FIXTURE" runner="$RUNNER_PID"
+    assert_eq "$label: the stub build reached its grandchild" \
+        "found" "$(await_file "$d/grandchild.pid")"
+    local child grand
+    child="$(cat "$d/child.pid")"
+    grand="$(cat "$d/grandchild.pid")"
+
+    kill -"$signal" "$runner" 2>/dev/null
+    await_exit "$runner" 150 || true
+    assert_eq "$label: the runner returns rather than hanging" "finished" "$AWAITED_RESULT"
+    assert_eq "$label: it reports 130, so restart.sh ships nothing" "130" "$AWAITED_STATUS"
+    # The two halves of the finding. The wrapper is the direct child; the
+    # grandchild is what a kill of the direct child alone would orphan, and it
+    # is the process that would go on holding the machine-global build slot.
+    assert_eq "$label: the wrapper is gone" "dead" "$(await_death "$child")"
+    assert_eq "$label: the compiler below it is gone too" "dead" "$(await_death "$grand")"
+    assert_contains "$label: the interruption is explained" \
+        "$(cat "$d/stderr.txt")" "stopping the build"
+    # Teardown by recorded pid, never by pattern: a case that failed above must
+    # not leave the fixture running.
+    kill -9 "$grand" "$child" 2>/dev/null
+    [ "$AWAITED_RESULT" = finished ] || { kill -9 "$runner" 2>/dev/null; wait "$runner" 2>/dev/null; }
+}
+
+RUNNER_PID=""
+RUNNER_FIXTURE=""
+
+# `bash -c "$RESTART_SHELL_BODY"` and not `run_under_restart_shell`, because
+# backgrounding a FUNCTION makes `$!` the subshell bash forks for the function
+# — a shell with no handler of its own, whose death just orphans the runner
+# inside it. The signal has to reach the shell that armed the trap.
+test_a_build_interrupted_by_sigterm_is_torn_down_not_orphaned() {
+    local d; d="$(mkunendingworktree)"
+    bash -c "$RESTART_SHELL_BODY" "$HERE" "$d" > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree TERM "SIGTERM"
+    rm -rf "$d"
+}
+
+# Ctrl-C itself, with the signal disposition a terminal really produces. See
+# `mksigintshim` for why the shim is unavoidable in a harness.
+test_a_build_interrupted_by_ctrl_c_is_torn_down_not_orphaned() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        pass "the Ctrl-C case needs python3 to restore the signal's default — not run here"
+        return 0
+    fi
+    local d shim
+    d="$(mkunendingworktree)"
+    shim="$(mksigintshim)"
+    python3 "$shim/shim.py" "$BASH" -c "$RESTART_SHELL_BODY" "$HERE" "$d" \
+        > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree INT "Ctrl-C"
+    rm -rf "$d" "$shim"
+}
+
+# The three signals are borrowed for the length of the build, not taken: a
+# caller with its own cleanup handler must still have it afterwards.
+test_the_callers_own_signal_handlers_are_borrowed_and_returned() {
+    local body; body="$(cat "$HERE/restart-build-lib.sh")"
+    # shellcheck disable=SC2016 # literal, unexpanded strings searched in the lib
+    assert_contains "the caller's handlers are saved before arming" "$body" 'saved_traps="$(trap -p INT TERM HUP)"'
+    # shellcheck disable=SC2016
+    assert_contains "the build is trapped out of INT, TERM and HUP" "$body" 'INT TERM HUP'
+    # shellcheck disable=SC2016
+    assert_contains "and the saved handlers are put back" "$body" 'eval "$saved_traps"'
+
+    local d; d="$(mkfakeworktree 0)"
+    local out
+    out="$(bash -c '
+        set -e
+        source "$0/restart-build-lib.sh"
+        trap "echo caller-int" INT
+        trap "echo caller-term" TERM
+        run_governed_build "$1" >/dev/null 2>&1
+        echo "status=$?"
+        trap -p INT; trap -p TERM; trap -p HUP
+    ' "$HERE" "$d")"
+    assert_contains "an uninterrupted build still returns its own zero" "$out" "status=0"
+    assert_contains "the INT handler the caller installed is back" "$out" "echo caller-int"
+    assert_contains "the TERM handler the caller installed is back" "$out" "echo caller-term"
+    assert_missing "nothing of the build's own handler is left behind" "$out" "interrupt_governed_build"
+    rm -rf "$d"
 }
 
 test_the_lock_path_follows_the_wrappers_own_resolution() {

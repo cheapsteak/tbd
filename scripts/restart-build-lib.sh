@@ -23,6 +23,11 @@
 # the terminal as they are written, and a build that emits nothing at all for
 # several minutes gets its live processes described. Compiler output stays
 # buffered and trimmed — see `run_governed_build`.
+#
+# Watching a build means the build cannot be in the foreground, and an
+# asynchronous job is deaf to the one signal a human sends by hand. So the
+# interrupt has to be caught and the tree signalled deliberately — see
+# `terminate_build_tree`, whose comment carries the whole argument.
 
 # MARK: - Inherited SDK overrides
 #
@@ -199,6 +204,17 @@ MAX_REPORTED_BUILD_PROCESSES=6
 # answers immediately, and one that has not answered in five seconds is not
 # going to.
 DEFAULT_PROCESS_PROBE_SECONDS=5
+
+# How long a torn-down build tree is given to leave on SIGTERM before SIGKILL.
+# Short on purpose: a human has pressed Ctrl-C and is waiting, and the only
+# thing SIGTERM buys over SIGKILL is letting SwiftPM unlink its own partial
+# products. That is worth half a second and not worth more.
+BUILD_TEARDOWN_GRACE_SECONDS=0.5
+
+# The status an interrupted build reports: 128 + SIGINT, which is what a shell
+# reports for a command a signal ended. Non-zero, so restart.sh's own gate
+# ships nothing — see `build_status_permits_ship`.
+BUILD_INTERRUPTED_STATUS=130
 
 # May restart.sh ship what is in .build/<config>, given the status of the build
 # it just ran? Only a clean zero says yes. Deliberately not "is it one of the
@@ -432,6 +448,70 @@ describe_silent_build() {
     return 0
 }
 
+# Stop the build running as pid $1 and everything below it.
+#
+# WHY THIS IS NEEDED AT ALL. The build is an asynchronous job, and bash gives
+# such a job an IGNORED SIGINT whenever job control is off — which it is in
+# every script. SIG_IGN is inherited across both fork and exec, so
+# scripts/swift-safe, SwiftPM and every compiler below them ignore SIGINT too.
+# A terminal delivers Ctrl-C to the whole foreground process group, so the
+# signal does reach the entire tree and is discarded by all of it: restart.sh
+# exits and the compiler runs on, holding the machine-global build slot. That
+# is the stuck-lock incident this file exists to diagnose, produced by the
+# diagnostic itself. (scripts/swift-safe's own requester-death check does not
+# cover it: that check only runs while the wrapper WAITS for the slot, and the
+# build being abandoned here already has it.)
+#
+# THE ORDER IS LOAD-BEARING. Descendants are enumerated BEFORE the root is
+# signalled. A dead root's children re-parent to launchd, and a walk rooted at
+# it then reports an empty tree while the compiler that holds the slot runs on
+# — the escaped-descendant shape this repo keeps finding. The walk is repeated
+# after the grace period, so anything the root forked while the first round was
+# in flight is caught too.
+#
+# SIGTERM THEN SIGKILL, AND NEVER SIGINT. SIGINT is the one signal this tree
+# has been made deaf to, so sending it would be a teardown that tears nothing
+# down. SIGTERM first so SwiftPM can unlink its partial products; SIGKILL
+# after, because nothing here is obliged to honour SIGTERM.
+#
+# Always returns 0. Callers run under restart.sh's `set -e`, and a kill that
+# lost a race with a process leaving on its own must not become a failure.
+terminate_build_tree() {
+    local builder="$1" signal victims pid
+    victims="$(build_descendant_processes "$builder" 2>/dev/null | awk '{print $1}')" \
+        || victims=""
+    for signal in TERM KILL; do
+        kill -"$signal" "$builder" 2>/dev/null || true
+        for pid in $victims; do
+            kill -"$signal" "$pid" 2>/dev/null || true
+        done
+        [ "$signal" = TERM ] || break
+        sleep "$BUILD_TEARDOWN_GRACE_SECONDS"
+        victims="$victims $(build_descendant_processes "$builder" 2>/dev/null \
+            | awk '{print $1}')"
+    done
+    # The job is ours, so collect it: an unreaped child is the smallest
+    # unreclaimed resource there is, and this path exists to leave none.
+    wait "$builder" 2>/dev/null || true
+    return 0
+}
+
+# Handle an interrupt that arrived while the build running as pid $1 was being
+# watched, with its output log at $2.
+#
+# Exits rather than returning: returning would let the watcher loop resume and
+# go on waiting for a build that is already gone.
+interrupt_governed_build() {
+    local builder="$1" build_log="$2"
+    # Disarmed first, so a second Ctrl-C arriving while the teardown runs ends
+    # restart.sh outright instead of re-entering this.
+    trap - INT TERM HUP
+    printf 'restart.sh: interrupted — stopping the build so it cannot go on holding the shared build slot.\n' >&2
+    terminate_build_tree "$builder"
+    rm -f "$build_log"
+    exit "$BUILD_INTERRUPTED_STATUS"
+}
+
 # Watch the build log at $1 while the build running as pid $2 lives.
 #
 # Two jobs, one loop, and both are about a build that is not finishing:
@@ -529,10 +609,15 @@ follow_build_progress() {
 # line is the last thing it writes, so the tail keeps it. A `swift-safe:` line
 # near the end is therefore both streamed and trimmed; the duplicate is worth
 # less than either copy would be alone.
+#
+# An interrupt arriving while the build is watched is caught and the build torn
+# down (`interrupt_governed_build`). The caller's own handlers for those signals
+# are saved and put back, so a caller that installed its own cleanup still has
+# it once the build is over.
 run_governed_build() {
     local repo_root="$1"
     shift
-    local build_log status builder
+    local build_log status builder saved_traps
     build_log="$(mktemp "${TMPDIR:-/tmp}/tbd-restart-build.XXXXXX")" || return 1
 
     # Say what the build ignores before it runs, so a failure that survives the
@@ -544,8 +629,18 @@ run_governed_build() {
     status=0
     (clear_sdk_overrides; cd "$repo_root" && scripts/swift-safe build "$@") > "$build_log" 2>&1 &
     builder=$!
+    # Saved before arming, and restored below, so this borrows the three
+    # signals for the length of the build rather than taking them from a caller
+    # that had its own use for them. An empty save means the caller had none,
+    # and `trap -` then returns them to their default.
+    saved_traps="$(trap -p INT TERM HUP)"
+    # Single-quoted: the handler must read `builder` and `build_log` when the
+    # signal arrives, not freeze whatever they held at arming time.
+    trap 'interrupt_governed_build "$builder" "$build_log"' INT TERM HUP
     follow_build_progress "$build_log" "$builder"
     wait "$builder" || status=$?
+    trap - INT TERM HUP
+    [ -z "$saved_traps" ] || eval "$saved_traps"
 
     tail -3 "$build_log"
     rm -f "$build_log"
