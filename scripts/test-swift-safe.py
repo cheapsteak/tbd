@@ -593,6 +593,50 @@ class SwiftSafeTests(RunnerFixture):
                 self.assertIn(explanation, result.stderr)
                 self.assertEqual(result.stdout, "")
 
+    def test_every_line_this_wrapper_writes_carries_its_prefix(self):
+        """The module docstring's claim, asserted rather than asserted-in-prose.
+
+        It is load-bearing: `scripts/restart-build-lib.sh` separates this
+        wrapper's lines from buffered compiler output by that exact prefix and
+        streams only them, so a line without it is one a human watching a build
+        never sees until the build is over.  Two kinds of line used to lack it —
+        the unsupported-subcommand usage message, and every message an argument
+        validator raises through `SystemExit`.
+
+        Asserted over whole lines rather than by searching for one wording, so a
+        path added later is covered without anybody remembering to add it here.
+        A path that narrows `PATH` is deliberately not among these: it breaks
+        this script's own `#!/usr/bin/env python3`, so the unprefixed line would
+        be `env`'s and not this wrapper's.
+
+        The prefix is spelled out rather than read from `swift_safe.REPORT_PREFIX`
+        — a wrapper that lost the invariant would then fail this case by not
+        having the constant, which is a weaker thing to learn than that its
+        output is wrong.
+        """
+        prefix = "swift-safe: "
+        unprefixed_paths = (
+            (("package", "resolve"), {}),
+            (("build",), {"TBD_SWIFT_JOBS": "notanumber"}),
+            (("build",), {"TBD_SWIFT_JOBS": "0"}),
+            (("build", "--jobs", "8"), {"TBD_SWIFT_JOBS": "2"}),
+            (("build",), {"TBD_SWIFT_LOCK_TIMEOUT_SECONDS": "nan"}),
+            (("build", "--jobs"), {}),
+        )
+        for arguments, environment in unprefixed_paths:
+            with self.subTest(arguments=arguments, environment=environment):
+                result = self.run_runner(*arguments, **environment)
+                self.assertNotEqual(result.returncode, 0)
+                lines = [line for line in result.stderr.splitlines() if line.strip()]
+                # Without this the loop body is vacuous for a path that went
+                # quiet: zero lines all start with anything.
+                self.assertTrue(lines, "the path said nothing at all")
+                for line in lines:
+                    self.assertTrue(
+                        line.startswith(prefix),
+                        f"unprefixed stderr line: {line!r}",
+                    )
+
     def test_an_unsupported_subcommand_names_its_exit_status(self):
         result = self.run_runner("package", "resolve")
         self.assertNamesExitStatus(result, 64, "EX_USAGE")

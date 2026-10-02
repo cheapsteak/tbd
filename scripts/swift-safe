@@ -38,7 +38,12 @@ Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  Every line this wrapper writes is
 prefixed ``swift-safe:``, which is what lets a caller that buffers compiler
 output — ``scripts/restart-build-lib.sh`` does — separate these lines back out
-and show them live.  The holder writes ``pid``/``cwd``/``command`` into the
+and show them live.  That claim is load-bearing rather than decorative, so it
+holds for the refusals too: the unsupported-subcommand usage line carries the
+prefix, and the argument validators' messages get it from ``_entry``, the single
+point every ``SystemExit`` funnels through.  A line without it is a line a
+watching human never sees until the build is over.  The holder writes
+``pid``/``cwd``/``command`` into the
 lock file after acquiring, and a waiter reads it back to say who it is queued
 behind; a heartbeat then repeats the wait's elapsed time so a human can tell a
 queued build from a hung one and an automated caller's stall watchdog sees
@@ -130,6 +135,12 @@ import subprocess
 import sys
 import time
 
+
+# What every stderr line this wrapper writes about itself begins with.  Not
+# cosmetic: `scripts/restart-build-lib.sh` separates these lines from buffered
+# compiler output by this exact prefix and streams only them, so a line that
+# omits it is a line a watching human never sees while the build runs.
+REPORT_PREFIX = "swift-safe: "
 
 DEFAULT_JOBS = 2
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
@@ -507,7 +518,14 @@ def _lock_path() -> Path:
 
 
 def _report(message: str) -> None:
-    """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone."""
+    """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone.
+
+    Every stderr line this wrapper writes goes through here, so that the
+    `swift-safe:` prefix the module docstring promises has one place it can be
+    checked.  The prefix is written at the call sites rather than added here —
+    it keeps each message greppable as it reads — and `REPORT_PREFIX` is what
+    the paths that cannot spell it themselves use (see `_entry`).
+    """
     print(message, file=sys.stderr, flush=True)
 
 
@@ -928,9 +946,9 @@ def main(arguments: list[str]) -> int:
 
     if not arguments or arguments[0] not in SUPPORTED_SUBCOMMANDS:
         supported = "|".join(sorted(SUPPORTED_SUBCOMMANDS))
-        print(
-            f"usage: scripts/swift-safe <{supported}> [swift arguments...]",
-            file=sys.stderr,
+        _report(
+            f"swift-safe: usage: scripts/swift-safe <{supported}> "
+            "[swift arguments...]"
         )
         return 64
 
@@ -938,7 +956,7 @@ def main(arguments: list[str]) -> int:
     bounded = _bounded_arguments(subcommand, swift_arguments)
     swift = os.environ.get("TBD_SWIFT_BIN") or shutil.which("swift")
     if not swift:
-        print("swift-safe: swift executable not found", file=sys.stderr)
+        _report("swift-safe: swift executable not found")
         return 69
 
     path = _lock_path()
@@ -990,26 +1008,23 @@ def main(arguments: list[str]) -> int:
                 yield_after_seconds=yield_after,
             )
         except Yielded:
-            print(
+            _report(
                 f"swift-safe: still queued for {path} after {yield_after:g}s; "
                 "yielding the local build slot so this run can be verified "
-                "elsewhere",
-                file=sys.stderr,
+                "elsewhere"
             )
             return 76
         except Abandoned:
-            print(
+            _report(
                 "swift-safe: the process that requested this build exited while "
                 f"it was queued for {path}; abandoning the wait without starting "
-                "a build",
-                file=sys.stderr,
+                "a build"
             )
             return 75
         except TimeoutError:
-            print(
+            _report(
                 f"swift-safe: timed out after {timeout:g}s waiting for {path} "
-                f"({_holder_description(path)})",
-                file=sys.stderr,
+                f"({_holder_description(path)})"
             )
             return 75
 
@@ -1027,7 +1042,7 @@ def main(arguments: list[str]) -> int:
         try:
             os.execv(swift, [swift, *bounded])
         except OSError as error:
-            print(f"swift-safe: could not exec {swift}: {error}", file=sys.stderr)
+            _report(f"swift-safe: could not exec {swift}: {error}")
             return 71
 
 
@@ -1040,13 +1055,18 @@ def _entry(arguments: list[str]) -> int:
     exit 1, so it is printed here instead and the 1 named like any other status.
     A `SystemExit` carrying anything but a message is re-raised untouched; none
     is raised today, and guessing a status for one would be inventing a number.
+
+    The prefix is added HERE and not in each validator, because the validators
+    are where it would be forgotten: they raise from wherever they are called,
+    there are a dozen of them, and one more is a plausible future edit.  This is
+    the one place every one of them funnels through.
     """
     try:
         status = main(arguments)
     except SystemExit as refusal:
         if not isinstance(refusal.code, str):
             raise
-        _report(refusal.code)
+        _report(f"{REPORT_PREFIX}{refusal.code}")
         return _reported_status(1)
     return _reported_status(status)
 
