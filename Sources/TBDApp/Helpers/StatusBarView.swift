@@ -321,10 +321,11 @@ struct StatusBarView: View {
     /// with the toolbar and sidebar, so the three cannot describe one
     /// observation differently.
     ///
-    /// The card says nothing about what a click does. The chip's number opens
-    /// the PR, and the untrack xmark carries its own tooltip and accessibility
-    /// label (`iconSlotLabel`), so a sentence naming the gesture would only
-    /// restate them.
+    /// The card says nothing about what a click does. The chip's two targets
+    /// show that themselves — the number opens the PR, and the xmark takes on
+    /// a button's emphasis while the pointer is on it and carries its own
+    /// accessibility label (`iconSlotLabel`) — so a sentence naming the
+    /// gesture would only restate them.
     ///
     /// Pure, so the whole overlay can be asserted without a panel.
     nonisolated static func chipHoverCard(_ chip: PRChip, now: Date = Date()) -> HoverCardModel {

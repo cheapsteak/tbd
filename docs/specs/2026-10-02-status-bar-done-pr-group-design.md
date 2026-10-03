@@ -72,8 +72,8 @@ mutates no state, so the default-off flag rule does not apply.
 
 `PRStatus` is a display-tier cache refreshed by the PR poller. A PR merged
 moments ago can still read "Ready to merge" and stays an open chip until the
-next poll observes the merge. The chip's hover card already dates the reading,
-so the lag is visible rather than hidden.
+next poll observes the merge. The chip's hover card dates any reading older
+than five minutes, so a lag longer than that is visible rather than hidden.
 
 ## Testing
 
