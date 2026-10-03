@@ -163,6 +163,8 @@ struct GeneralSettingsTab: View {
                 ))
                 .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree. Each worktree can override this from its PR toolbar menu.")
 
+                prPollScheduleToggle
+
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
 
@@ -461,6 +463,22 @@ struct GeneralSettingsTab: View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    /// Schedule-based PR polling. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
+    /// which the daemon applies at once. Off by default (soaking).
+    @ViewBuilder
+    private var prPollScheduleToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Poll PRs on a schedule", isOn: Binding(
+            get: { capabilities?.prPollScheduleEnabled ?? Config.prPollScheduleDefault },
+            set: { newValue in Task { await appState.setPRPollScheduleEnabled(newValue) } }
+        ))
+        .help(Self.prPollScheduleHelp)
+    }
+
+    static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
+        + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds."
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.

@@ -1901,6 +1901,10 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =
         { [daemonClient] profileID, optOut in try await daemonClient.setProfilePoolOptOut(id: profileID, optOut: optOut) }
+    /// How `setPRPollScheduleEnabled` persists the schedule-based PR polling
+    /// gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

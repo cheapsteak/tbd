@@ -313,6 +313,11 @@ public enum RPCMethod {
     /// its own: `config.get` already carries the resolved value, as does
     /// `daemon.capabilities`.
     public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
+    /// The schedule-based PR polling gate (`pr_poll_schedule_enabled`). Takes
+    /// effect at once: the daemon stops the running PR driver and starts the
+    /// other. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -3613,6 +3618,15 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setPRPollScheduleEnabled` — the gate for schedule-based PR
+/// polling, which checks each pull request as often as its status needs within
+/// a GitHub API budget instead of every worktree on a fixed interval (default
+/// OFF during soak). Design: `docs/specs/2026-10-01-pr-polling-schedule-design.md`.
+public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
@@ -4002,6 +4016,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// budget, so callers construct with the older arguments and assign this
     /// after.
     public var profileBalancingEnabled: Bool
+    /// Whether schedule-based PR polling is on (`pr_poll_schedule_enabled`).
+    /// Default OFF while it soaks. Resolved through `Config.prPollScheduleDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4141,6 +4161,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // default rather than assuming it is off.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
+        // New field for the PR poll schedule gate. A daemon that does not send
+        // it has no schedule either, so fall through to the shipped default.
+        prPollScheduleEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
     }
 }
 

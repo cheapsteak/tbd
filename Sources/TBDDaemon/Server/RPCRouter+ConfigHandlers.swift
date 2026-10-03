@@ -578,4 +578,19 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the schedule-based PR polling gate (default OFF, soaking) and
+    /// apply it at once: the daemon stops the running PR driver and starts the
+    /// other (`PRPollDriverSwitch`). The switch is inert until the daemon arms
+    /// it at start-up, so in mock mode (and in a test's router) this only
+    /// writes the column. Design: docs/specs/2026-10-01-pr-polling-schedule-design.md.
+    func handleConfigSetPRPollScheduleEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetPRPollScheduleEnabledParams.self, from: paramsData)
+        try await db.config.setPRPollScheduleEnabled(params.enabled)
+        await prPollDriverSwitch.apply(PRPollDriver.kind(enabled: params.enabled))
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

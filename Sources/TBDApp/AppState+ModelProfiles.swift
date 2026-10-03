@@ -999,6 +999,21 @@ extension AppState {
         }
     }
 
+    // MARK: - PR polling schedule
+
+    /// Persist the schedule-based PR polling gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// swaps its PR driver at once; no restart.
+    func setPRPollScheduleEnabled(_ enabled: Bool) async {
+        do {
+            try await prPollScheduleFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set PR poll schedule: \(error, privacy: .public)")
+            showAlert("Failed to set PR polling: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a profile's pool opt-out, then reload profiles.
     func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
         do {

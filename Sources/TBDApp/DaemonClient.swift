@@ -1154,6 +1154,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the schedule-based PR polling gate (default OFF, soaking). The
+    /// daemon applies it at once, swapping its PR driver without a restart.
+    func setPRPollSchedule(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPRPollScheduleEnabled,
+            params: ConfigSetPRPollScheduleEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.

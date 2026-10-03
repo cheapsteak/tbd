@@ -93,6 +93,10 @@ public actor PRPoller {
         self.isForeground = gate
     }
 
+    /// Whether the loop is running — what a test of the live driver switch
+    /// (`PRPollDriverSwitch`) reads.
+    var isRunning: Bool { loopTask != nil }
+
     /// Start the periodic fetch. Idempotent — a second call is a no-op while a
     /// loop is already running.
     func start() {

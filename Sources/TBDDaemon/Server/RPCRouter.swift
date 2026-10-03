@@ -200,6 +200,11 @@ public final class RPCRouter: Sendable {
     public let prPollScheduler: PRPollScheduler
     /// In-memory hook and selection stamps the schedule reads activity from.
     public let activityLedger: WorktreeActivityLedger
+    /// Starts the one PR driver at daemon start (`Daemon.start()`, step 12f)
+    /// and swaps it live when `config.setPRPollScheduleEnabled` changes the
+    /// flag. Inert until the daemon arms it, so a router built in a test never
+    /// starts a driver because a flag was written.
+    public let prPollDriverSwitch: PRPollDriverSwitch
     /// When a scheduled pass last pruned the branch-facts cache against the
     /// whole fleet. A scheduled pass composes poll entries for the due rows
     /// only, and `branchTrackingCache.retain` over that subset would evict
@@ -439,11 +444,29 @@ public final class RPCRouter: Sendable {
         // against different candidate lists is what the cache exists to stop.
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
-        self.prPoller = PRPoller()
-        self.activityLedger = WorktreeActivityLedger()
+        let poller = PRPoller()
+        self.prPoller = poller
+        let ledger = WorktreeActivityLedger()
+        self.activityLedger = ledger
         // Placeholder handlers: the real ones need the fully formed router and
         // are installed at the end of `init`, beside `prPoller.installPass`.
-        self.prPollScheduler = PRPollScheduler(facts: { [] }, run: { _ in }, now: now, clock: clock)
+        let scheduler = PRPollScheduler(facts: { [] }, run: { _ in }, now: now, clock: clock)
+        self.prPollScheduler = scheduler
+        // The steps capture the three actors, not the router, so the switch
+        // keeps no router alive. Off→on stops the poller, enables the ledger
+        // (before the first wake reads it), then starts the scheduler; on→off
+        // reverses that. Every step is idempotent.
+        self.prPollDriverSwitch = PRPollDriverSwitch(steps: .init(
+            startLegacy: { await poller.start() },
+            stopLegacy: { await poller.stop() },
+            startSchedule: {
+                await ledger.setEnabled(true)
+                await scheduler.start()
+            },
+            stopSchedule: {
+                await scheduler.stop()
+                await ledger.setEnabled(false)
+            }))
         // Default the candidate source from the router's own stores rather
         // than leaving it nil: the rate-limit handler's suggestion reads it,
         // and a caller that forgets to pass one would otherwise disable it
@@ -895,6 +918,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetProfileBalancingEnabled:
                 return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
+            case RPCMethod.configSetPRPollScheduleEnabled:
+                return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1068,6 +1093,7 @@ public final class RPCRouter: Sendable {
         // Assigned rather than passed, for the same budget reason as the
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
+        result.prPollScheduleEnabled = config.prPollScheduleEnabled
         return try RPCResponse(result: result)
     }
 

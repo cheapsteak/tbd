@@ -2019,20 +2019,14 @@ public final class Daemon: Sendable {
             // Flag off: today's fixed-interval `PRPoller` (30s foreground,
             // 5min background — GitPollCadence.prInterval). Flag on
             // (`pr_poll_schedule_enabled`): the budgeted `PRPollScheduler`.
-            // Read once here; changing the flag takes a daemon restart.
+            // `PRPollDriverSwitch` starts the one the flag names and arms live
+            // switching, so `config.setPRPollScheduleEnabled` swaps drivers
+            // without a restart through the same steps. The poller's
+            // foreground gate is installed whichever driver starts, so a later
+            // live switch to the poller finds it paced by a real answer.
             let pollConfig = (try? await database.config.get()) ?? Config()
-            await PRPollDriver.start(
-                PRPollDriver.kind(for: pollConfig),
-                legacy: {
-                    await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
-                    await rpcRouter.prPoller.start()
-                },
-                schedule: {
-                    // The ledger records hook and selection stamps only for
-                    // the schedule; enabled before the first wake reads it.
-                    await rpcRouter.activityLedger.setEnabled(true)
-                    await rpcRouter.prPollScheduler.start()
-                })
+            await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
+            await rpcRouter.prPollDriverSwitch.start(PRPollDriver.kind(for: pollConfig))
 
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
