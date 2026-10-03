@@ -46,7 +46,8 @@ extension RPCRouter {
         // resolved row: this is a count of hook traffic, and traffic naming a
         // terminal that has since been deleted still happened. `retain` drops
         // the bookkeeping when the terminal leaves the fleet.
-        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: now())
+        let observedAt = now()
+        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: observedAt)
         askUserQuestionLog.debug("pending stored terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         // Resolve the worktree this terminal belongs to. If the terminal row
@@ -54,6 +55,10 @@ extension RPCRouter {
         // intentionally skip the notification — the pendingQuestions update
         // above is still useful for the transcript merger.
         if let terminal = try? await db.terminals.get(id: p.terminalID) {
+            // The PR schedule's activity is per worktree, so it needs the row
+            // this handler already resolves; a missing row has no worktree.
+            await activityLedger.recordHookEvent(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
             let message = Self.askUserQuestionMessage(fromInputJSON: p.inputJSON)
             do {
                 let notification = try await db.notifications.create(
@@ -93,10 +98,13 @@ extension RPCRouter {
     /// returns).
     func handleTerminalAskUserQuestionCleared(_ paramsData: Data) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionClearedParams.self, from: paramsData)
-        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: now())
+        let observedAt = now()
+        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: observedAt)
         askUserQuestionLog.debug("cleared received terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         if let terminal = try? await db.terminals.get(id: p.terminalID) {
+            await activityLedger.recordHookEvent(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
             do {
                 try await db.notifications.markRead(worktreeID: terminal.worktreeID)
             } catch {

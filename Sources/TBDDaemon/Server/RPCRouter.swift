@@ -191,6 +191,21 @@ public final class RPCRouter: Sendable {
     /// must never enumerate differently, and the router keeps the timer because
     /// `Daemon.start()` reaches it through the router to start the loop.
     public let prPoller: PRPoller
+    /// The budgeted PR schedule that replaces `prPoller` when
+    /// `pr_poll_schedule_enabled` is set. Exactly one of the two is started
+    /// (`PRPollDriver`, from `Daemon.start()`); the other stays inert. Its
+    /// facts and its pass live here for the reason `runPollPass` does — the
+    /// enumeration helpers are shared with `pr.refresh` — and are installed at
+    /// the end of `init`.
+    public let prPollScheduler: PRPollScheduler
+    /// In-memory hook and selection stamps the schedule reads activity from.
+    public let activityLedger: WorktreeActivityLedger
+    /// When a scheduled pass last pruned the branch-facts cache against the
+    /// whole fleet. A scheduled pass composes poll entries for the due rows
+    /// only, and `branchTrackingCache.retain` over that subset would evict
+    /// every row that merely was not due, so the full prune runs at most
+    /// hourly instead (`runScheduledPass`).
+    let lastFullPrune = OSAllocatedUnfairLock<Date?>(initialState: nil)
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
@@ -425,6 +440,10 @@ public final class RPCRouter: Sendable {
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
+        self.activityLedger = WorktreeActivityLedger()
+        // Placeholder handlers: the real ones need the fully formed router and
+        // are installed at the end of `init`, beside `prPoller.installPass`.
+        self.prPollScheduler = PRPollScheduler(facts: { [] }, run: { _ in }, now: now, clock: clock)
         // Default the candidate source from the router's own stores rather
         // than leaving it nil: the rate-limit handler's suggestion reads it,
         // and a caller that forgets to pass one would otherwise disable it
@@ -527,6 +546,15 @@ public final class RPCRouter: Sendable {
         // one) is not kept alive by its own poller; a pass on a deallocated
         // router is a no-op, which is the honest answer.
         prPoller.installPass { [weak self] in try await self?.runPollPass() }
+        // The schedule's facts and pass, on the same terms and for the same
+        // reason: `weak`, so a discarded router is not kept alive by its own
+        // scheduler, and a wake on a deallocated router sees no work.
+        prPollScheduler.installHandlers(
+            facts: { [weak self] in
+                guard let self else { return [] }
+                return await self.pollScheduleFacts()
+            },
+            run: { [weak self] due in await self?.runScheduledPass(due) })
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -1058,7 +1086,9 @@ public final class RPCRouter: Sendable {
     /// Return the daemon's PR snapshot. Serving only — this handler never
     /// drives a fetch.
     ///
-    /// `PRPoller` owns the clock, and it owns it alone. That is not tidiness:
+    /// The periodic driver owns the clock, and it owns it alone — `PRPoller`,
+    /// or `PRPollScheduler` when `pr_poll_schedule_enabled` is set, never both
+    /// (`PRPollDriver`). That is not tidiness:
     /// the merged-PR transition is edge-triggered on a cache change, so
     /// whichever path updates the cache consumes the edge. A second periodic
     /// driver here would swallow edges the first one's consumers (auto-archive,
@@ -1087,6 +1117,218 @@ public final class RPCRouter: Sendable {
         await mergeTrigger?.beginPollPass()
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+        let discovery = try await runDiscoveryLeg(worktrees, forceBranchMatch: false)
+        // A bindings-only row still counts as polled: its bound PRs refresh by
+        // number. The `gh` directory falls back to a bindings-only row's so a
+        // pass where no row was branch-matched never runs `gh` in the daemon's
+        // own cwd.
+        await refreshBindingStatuses(
+            polled: discovery.infos, bindingsOnly: discovery.bindingsOnlyIDs,
+            repoPath: discovery.infos.first?.worktreePath ?? discovery.bindingsOnlyFirstPath)
+        await pruneAfterPass(infos: discovery.infos,
+                             activeIDs: Set(discovery.infos.map(\.id)).union(discovery.bindingsOnlyIDs))
+    }
+
+    // MARK: - PR poll schedule
+
+    /// How often a scheduled pass prunes the branch-facts cache against the
+    /// whole fleet. See `lastFullPrune`.
+    static let scheduledFullPruneInterval: TimeInterval = 3600
+
+    /// The facts the PR schedule is rebuilt from on every wake: each pollable
+    /// active row, whether it is active, whether it has a branch discovery can
+    /// match on, and its live bindings with their stored states.
+    ///
+    /// Activity comes from the hook-fed session rows and the ledger's
+    /// in-memory stamps only — never from terminal text. The ledger is pruned
+    /// to the live terminals and rows here, so stamps for sessions and rows
+    /// that left the fleet do not accumulate.
+    ///
+    /// A DB read failure answers nil, and the scheduler keeps the schedule it
+    /// has: answering `[]` would drop every item, and the next good read would
+    /// rebuild the whole fleet as due at once.
+    func pollScheduleFacts() async -> [PRPollWorktreeFacts]? {
+        do {
+            let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+            let bindings = try await db.prBindings.listAll().filter { !$0.detached }
+            let terminals = try await db.terminals.list()
+            let repos = try await db.repos.list()
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+            let defaultBranchByRepo = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.defaultBranch) })
+            let bindingsByWorktree = Dictionary(grouping: bindings, by: \.worktreeID)
+            let terminalsByWorktree = Dictionary(grouping: terminals, by: \.worktreeID)
+            await activityLedger.retain(terminalIDs: Set(terminals.map(\.id)),
+                                        worktreeIDs: Set(worktrees.map(\.id)))
+            let stamps = await activityLedger.snapshot()
+            let current = now()
+            return worktrees.map { wt in
+                let active = WorktreeActivity.isActive(
+                    sessions: WorktreeActivity.facts(from: terminalsByWorktree[wt.id] ?? []),
+                    lastHookAt: stamps.hooks, lastSelectedAt: stamps.selections[wt.id], now: current)
+                let discoverable = Self.hasPollableBranch(
+                    wt, repoPathByID: repoPathByID, mirrorMeta: mirrorMeta,
+                    defaultBranchByRepo: defaultBranchByRepo)
+                let facts = (bindingsByWorktree[wt.id] ?? []).map {
+                    PRPollBindingFact(key: PRPollKey($0), state: $0.status?.state)
+                }
+                return PRPollWorktreeFacts(worktreeID: wt.id, active: active,
+                                           discoverable: discoverable, bindings: facts)
+            }
+        } catch {
+            // `.private`, as in `PRPoller.tick`: a GRDB error carries its SQL.
+            routerLogger.warning("PR schedule facts unreadable, schedule kept as it was: \(error, privacy: .private)")
+            return nil
+        }
+    }
+
+    /// One scheduled pass: discover the due branches, refresh the due PRs by
+    /// number, and settle what that implies — the scheduler's counterpart to
+    /// `runPollPass`, built from the same legs.
+    ///
+    /// Never throws: a DB enumeration failure costs this pass, logged as
+    /// `PRPoller.tick` logs it, and the scheduler marks the items as run so a
+    /// failing read does not turn into a tight retry loop.
+    func runScheduledPass(_ due: PRPollDue) async {
+        // Taken before anything is asked, so "observed by this pass" can be
+        // told apart from a cached value left by an earlier one.
+        let passStartedAt = now()
+        do {
+            try await runScheduledPassLegs(due, passStartedAt: passStartedAt)
+        } catch {
+            routerLogger.warning("scheduled PR pass skipped: \(error, privacy: .private)")
+        }
+    }
+
+    private func runScheduledPassLegs(_ due: PRPollDue, passStartedAt: Date) async throws {
+        // Open the pass before anything can observe a merge, as `runPollPass`
+        // does and for the same reason.
+        await mergeTrigger?.beginPollPass()
+        let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
+        var track = due.track
+
+        if !due.discover.isEmpty {
+            let discovered = worktrees.filter { due.discover.contains($0.id) }
+            // Every branch goes through the branch query, even a row with a
+            // stored PR number: a closed PR's branch is in discovery to learn
+            // whether that PR reopened or a newer one replaced it, and only
+            // the branch query answers with the newest PR for the branch.
+            let discovery = try await runDiscoveryLeg(discovered, forceBranchMatch: true)
+            // A PR this leg just bound is tracked in this same pass, inside the
+            // `beginPollPass` window opened above. Discovery of an already-
+            // merged PR with nothing bound fires the un-bound fallback from
+            // `fetchAll`; judging the new binding here lets the trigger dedupe
+            // that pass's two edges, as `runPollPass` does. Left to the next
+            // wake, a new pass window would let `evaluate` fan out again.
+            track.formUnion(discovery.newlyBound)
+            track.formUnion(await reopenedClosedKeys(among: Set(discovered.map(\.id)),
+                                                     observedSince: passStartedAt))
+        }
+
+        if !track.isEmpty {
+            let live = try await db.prBindings.listAll()
+            let owners = Set(live.filter { !$0.detached && track.contains(PRPollKey($0)) }.map(\.worktreeID))
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let plan = await pollEntries(worktrees.filter { owners.contains($0.id) },
+                                         repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
+            let trackStartedAt = now()
+            let report = await refreshBindingStatuses(
+                polled: plan.matched, bindingsOnly: Set(plan.bindingsOnly.map(\.id)),
+                repoPath: plan.matched.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath,
+                onlyKeys: track)
+            // A tracked worktree never reaches `fetchAll`, which is where the
+            // fixed poller keeps each worktree's observation and cached status
+            // current. Record both here, so `pr.list` and the freshness label
+            // stay as current as the bindings the pass just read. Stamped at
+            // the start of this leg: a credential refusal `refreshBindings`
+            // recorded during it is newer and stands.
+            for (worktreeID, fresh) in report.dueFreshness {
+                await prManager.recordBindingRefresh(
+                    worktreeID: worktreeID,
+                    status: fresh ? report.worstStatus[worktreeID] : nil,
+                    outcome: fresh ? .observed : .undetermined(cause: PRUndeterminedCause.queryFailed),
+                    at: trackStartedAt)
+            }
+        }
+
+        // `activeIDs` is the whole pollable fleet, never the due subset: a row
+        // that was not due this round still holds its PR facts.
+        let activeIDs = Set(worktrees.map(\.id))
+        let current = now()
+        let pruneInterval = Self.scheduledFullPruneInterval
+        let fullPruneDue = lastFullPrune.withLock { stamp in
+            stamp.map { current.timeIntervalSince($0) >= pruneInterval } ?? true
+        }
+        if fullPruneDue {
+            // The hourly full prune: compose every row's entry so the
+            // branch-facts cache is retained against the whole fleet.
+            let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+            let plan = await pollEntries(worktrees, repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
+            await pruneAfterPass(infos: plan.matched, activeIDs: activeIDs)
+            lastFullPrune.withLock { $0 = current }
+        } else {
+            // `pruneAfterPass` with this pass's partial entries would retain
+            // the branch-facts cache against the due rows alone and evict
+            // every row that was not due, so between full prunes only the PR
+            // facts are pruned.
+            await prManager.retain(active: activeIDs)
+        }
+    }
+
+    /// The keys of closed bindings whose PR discovery just found open again.
+    ///
+    /// Only a status THIS pass observed counts: a cached entry stamped before
+    /// `observedSince` is an earlier pass's answer — possibly days old — and
+    /// acting on it would re-query the closed PR by number every closed-
+    /// discovery round while its branch query keeps finding nothing.
+    ///
+    /// The branch query can answer with the same closed PR. `bind` then reports
+    /// it already bound and leaves the binding's stored status at `.closed`, so
+    /// on its own a reopened PR would stay on the closed-discovery tier
+    /// forever. When the status discovery just cached for a row names one of
+    /// that row's closed bindings and is not closed, that key is refreshed by
+    /// number in this same pass; its binding row then holds the open status
+    /// and the next reconcile tracks it on its proper tier. A different number
+    /// is a new PR, which discovery's own `bind` handles; the same PR still
+    /// closed changes nothing.
+    private func reopenedClosedKeys(among worktreeIDs: Set<UUID>,
+                                    observedSince: Date) async -> Set<PRPollKey> {
+        guard let live = try? await db.prBindings.listAll() else { return [] }
+        let statuses = await prManager.allStatuses()
+        var keys: Set<PRPollKey> = []
+        for binding in live where !binding.detached && worktreeIDs.contains(binding.worktreeID)
+            && binding.status?.state == .closed {
+            guard let cached = statuses[binding.worktreeID], cached.number == binding.number,
+                  cached.state != .closed,
+                  let observedAt = cached.observedAt, observedAt >= observedSince else { continue }
+            keys.insert(PRPollKey(binding))
+        }
+        return keys
+    }
+
+    /// What one discovery leg composed and matched: the rows matched by branch
+    /// (`infos`), and the rows polled for their bindings alone, with the first
+    /// such row's working directory as a `gh` fallback.
+    struct DiscoveryLegResult {
+        let infos: [PRStatusManager.PollWorktree]
+        let bindingsOnlyIDs: Set<UUID>
+        let bindingsOnlyFirstPath: String?
+        /// The keys of the bindings this leg created — branch matches and
+        /// provenance seeds whose `bind` answered `.bound`. A key that was
+        /// already bound is not here.
+        var newlyBound: Set<PRPollKey> = []
+    }
+
+    /// The discovery half of a poll pass: compose each row's poll entry, ask
+    /// the forge what PR each branch has, heal what that disproves, bind what
+    /// it discovers, and seed each row's provenance binding.
+    ///
+    /// `forceBranchMatch` sends every entry to `fetchAll` without its stored
+    /// PR number, so every branch goes through the branch query — which
+    /// answers with the newest PR for the branch, the one a closed PR's
+    /// successor would be. `runPollPass` passes false and behaves as it always
+    /// has.
+    func runDiscoveryLeg(_ worktrees: [Worktree], forceBranchMatch: Bool) async throws -> DiscoveryLegResult {
         // A remote row is matched on its session's LIVE branch (`meta.branch`
         // on the mirror's latest sighting), never on its stored branch. An
         // unreadable mirror is an empty map: every remote row is then
@@ -1095,7 +1337,15 @@ public final class RPCRouter: Sendable {
         let plan = await pollEntries(worktrees, repos: try await db.repos.list(), mirrorMeta: mirrorMeta)
         let infos = plan.matched
         let bindingsOnlyIDs = Set(plan.bindingsOnly.map(\.id))
-        let poll = await prManager.fetchAll(worktrees: infos)
+        var fetchInput: [PRStatusManager.PollWorktree] = infos
+        if forceBranchMatch {
+            fetchInput = infos.map { entry -> PRStatusManager.PollWorktree in
+                (id: entry.id, branch: entry.branch, upstreamBranch: entry.upstreamBranch,
+                 defaultBranch: entry.defaultBranch, pushBranch: entry.pushBranch,
+                 worktreePath: entry.worktreePath, prNumber: nil)
+            }
+        }
+        let poll = await prManager.fetchAll(worktrees: fetchInput)
         // A heal ran: the worktree was positively shown NOT to own this PR (its
         // head is a branch the worktree merely tracks, or the PR is in another
         // repo). Clearing the cache is not enough — a `branch` binding written
@@ -1110,18 +1360,25 @@ public final class RPCRouter: Sendable {
         // The branch matcher is one of the three binding discovery sources; the
         // coordinator owns the policy (repo validation, tombstones, cap), so a
         // match it rejects is simply not bound.
+        var newlyBound: Set<PRPollKey> = []
         for match in poll.discovered {
-            _ = await prBindingCoordinator.bind(worktreeID: match.worktreeID,
-                                                parsed: match.parsed, source: .branch)
+            if case .bound(let binding) = await prBindingCoordinator.bind(
+                worktreeID: match.worktreeID, parsed: match.parsed, source: .branch) {
+                newlyBound.insert(PRPollKey(binding))
+            }
         }
-        await seedProvenanceBindings(worktrees)
-        // A bindings-only row still counts as polled: its bound PRs refresh by
-        // number. The `gh` directory falls back to a bindings-only row's so a
-        // pass where no row was branch-matched never runs `gh` in the daemon's
-        // own cwd.
-        await refreshBindingStatuses(
-            polled: infos, bindingsOnly: bindingsOnlyIDs,
-            repoPath: infos.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath)
+        newlyBound.formUnion(await seedProvenanceBindings(worktrees))
+        return DiscoveryLegResult(infos: infos, bindingsOnlyIDs: bindingsOnlyIDs,
+                                  bindingsOnlyFirstPath: plan.bindingsOnly.first?.worktreePath,
+                                  newlyBound: newlyBound)
+    }
+
+    /// The end of a poll pass: drop what the fleet no longer holds.
+    ///
+    /// `activeIDs` is every row still in the fleet — a scheduler passes the
+    /// full pollable set here, never the subset that was due, or a row merely
+    /// not due this round would lose its facts.
+    func pruneAfterPass(infos: [PRStatusManager.PollWorktree], activeIDs: Set<UUID>) async {
         // Prune at the END so we never drop an entry this pass just populated,
         // and **unconditionally** — including when the enumeration came back
         // empty, which is the pass that has the most to prune.
@@ -1130,7 +1387,7 @@ public final class RPCRouter: Sendable {
         // of an attempt on a worktree that has left the fleet is not a fact
         // anyone can act on, and every `pr.list` payload would carry it. A
         // bindings-only row is still in the fleet.
-        await prManager.retain(active: Set(infos.map(\.id)).union(bindingsOnlyIDs))
+        await prManager.retain(active: activeIDs)
     }
 
     /// Bind the PR a worktree was *created from* — `Worktree.prNumber` — so a
@@ -1148,7 +1405,10 @@ public final class RPCRouter: Sendable {
     /// resolution. Detached numbers stay short-circuited here **and** are
     /// refused by `seedProvenance`, so a `tbd pr detach` is not undone by the
     /// next poll.
-    private func seedProvenanceBindings(_ worktrees: [Worktree]) async {
+    ///
+    /// Answers the keys of the bindings it created.
+    private func seedProvenanceBindings(_ worktrees: [Worktree]) async -> Set<PRPollKey> {
+        var seeded: Set<PRPollKey> = []
         for worktree in worktrees {
             guard let number = worktree.prNumber else { continue }
             guard let recorded = try? await db.prBindings.list(worktreeID: worktree.id,
@@ -1157,9 +1417,12 @@ public final class RPCRouter: Sendable {
             guard let parsed = await prRef(worktreeID: worktree.id, number: number) else {
                 continue
             }
-            _ = await prBindingCoordinator.seedProvenance(worktreeID: worktree.id,
-                                                          parsed: parsed)
+            if case .bound(let binding) = await prBindingCoordinator.seedProvenance(
+                worktreeID: worktree.id, parsed: parsed) {
+                seeded.insert(PRPollKey(binding))
+            }
         }
+        return seeded
     }
 
     /// Refresh every binding of the polled worktrees and persist what came back.
@@ -1182,11 +1445,26 @@ public final class RPCRouter: Sendable {
     /// pass (a remote row without a valid live branch). Their bindings refresh
     /// like any other; with no poll entry, the merge rule judges them against
     /// no branch candidates, so its ownership arm fails closed for that pass.
-    private func refreshBindingStatuses(
-        polled entries: [PRStatusManager.PollWorktree], bindingsOnly: Set<UUID>, repoPath: String?
-    ) async {
+    ///
+    /// `onlyKeys` narrows what is *asked*, never what is *judged*. Nil asks
+    /// about every binding, as a full poll pass does. A set asks about only
+    /// the bindings whose `PRPollKey` it holds, and asks once per key: one
+    /// representative binding goes to the forge and its fresh observation is
+    /// fanned out to every binding sharing that key. Every other binding folds
+    /// onto no observation and so keeps its stored status, but still takes
+    /// part in the worst-status write and the merge rule, which need the whole
+    /// worktree.
+    ///
+    /// The returned report is what the scheduled pass records at worktree
+    /// level (`DueBindingRefreshReport`); a full pass ignores it.
+    @discardableResult
+    func refreshBindingStatuses(
+        polled entries: [PRStatusManager.PollWorktree], bindingsOnly: Set<UUID>, repoPath: String?,
+        onlyKeys: Set<PRPollKey>? = nil
+    ) async -> DueBindingRefreshReport {
+        var report = DueBindingRefreshReport()
         let polled = Set(entries.map(\.id)).union(bindingsOnly)
-        guard let live = try? await db.prBindings.listAll() else { return }
+        guard let live = try? await db.prBindings.listAll() else { return report }
         let bindings = live.filter { polled.contains($0.worktreeID) }
         // Report the whole polled population before the early return, not just
         // the part with bindings. `evaluate` below only ever sees worktrees that
@@ -1195,9 +1473,22 @@ public final class RPCRouter: Sendable {
         // judged against a fired-guard that still held it.
         await mergeTrigger?.retainBound(
             polled: polled, bound: Set(bindings.map(\.worktreeID)))
-        guard !bindings.isEmpty else { return }
+        guard !bindings.isEmpty else { return report }
 
-        let observations = await prManager.refreshBindings(bindings, repoPath: repoPath)
+        let observations: [UUID: PRStatusManager.PRBindingObservation]
+        if let onlyKeys {
+            let due = await refreshDueBindings(bindings, onlyKeys: onlyKeys, repoPath: repoPath)
+            observations = due.observations
+            // A worktree's attempt resolved only if every due key it owns
+            // came back fresh.
+            for binding in bindings where onlyKeys.contains(PRPollKey(binding)) {
+                let fresh = due.freshKeys.contains(PRPollKey(binding))
+                report.dueFreshness[binding.worktreeID] =
+                    (report.dueFreshness[binding.worktreeID] ?? true) && fresh
+            }
+        } else {
+            observations = await prManager.refreshBindings(bindings, repoPath: repoPath)
+        }
         var refreshed: [PRBinding] = []
         refreshed.reserveCapacity(bindings.count)
         for binding in bindings {
@@ -1222,6 +1513,7 @@ public final class RPCRouter: Sendable {
         // green icon over a bound PR whose checks are failing. One indexed
         // SELECT per worktree that actually has bindings.
         for update in Self.worktreePRStatusUpdates(refreshed) {
+            report.worstStatus[update.worktreeID] = update.status
             guard let current = try? await db.worktrees.get(id: update.worktreeID),
                   current.prStatus?.sameValue(as: update.status) != true else { continue }
             try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
@@ -1259,6 +1551,92 @@ public final class RPCRouter: Sendable {
                     ownRepo: ownRepo)
             }
         }
+        return report
+    }
+
+    /// What a narrowed binding refresh learned, per worktree, for the
+    /// scheduled pass to record at worktree level.
+    struct DueBindingRefreshReport {
+        /// Every worktree owning at least one due key, and whether every due
+        /// key it owns was freshly observed. Empty for an un-narrowed refresh.
+        var dueFreshness: [UUID: Bool] = [:]
+        /// The worst-of status per worktree, as written to its `prStatus`
+        /// column. Never `.merged` (`worktreePRStatusUpdates`).
+        var worstStatus: [UUID: PRStatus] = [:]
+    }
+
+    /// The due half of a narrowed refresh: query one representative binding per
+    /// due key, and give its observation to every binding with that key. A
+    /// binding whose key is not due is absent from the result. `freshKeys`
+    /// names the due keys whose representative was freshly observed.
+    ///
+    /// Only a FRESH observation is fanned out. `refreshBindings` also answers
+    /// with fallbacks meaning "keep what is stored" — no data from `gh`, a
+    /// number that did not resolve, a failed check query — and each of those
+    /// carries the representative's own stored status. Handed to a sibling it
+    /// would overwrite the sibling's stored status with the representative's,
+    /// so the sibling gets no entry instead and folds onto itself. The
+    /// representative keeps its own entry either way, exactly as an un-narrowed
+    /// refresh would give it.
+    private func refreshDueBindings(
+        _ bindings: [PRBinding], onlyKeys: Set<PRPollKey>, repoPath: String?
+    ) async -> (observations: [UUID: PRStatusManager.PRBindingObservation], freshKeys: Set<PRPollKey>) {
+        let due = bindings.filter { onlyKeys.contains(PRPollKey($0)) }
+        var representatives: [PRBinding] = []
+        var representative: [PRPollKey: PRBinding] = [:]
+        for binding in due where representative[PRPollKey(binding)] == nil {
+            representative[PRPollKey(binding)] = binding
+            representatives.append(binding)
+        }
+        // Representatives go in bind order, not dictionary order, so the
+        // query's alias sequence is deterministic.
+        let raw = await prManager.refreshBindings(representatives, repoPath: repoPath)
+        var freshKeys: Set<PRPollKey> = []
+        for rep in representatives {
+            if let observed = raw[rep.id], Self.isFreshObservation(observed, of: rep) {
+                freshKeys.insert(PRPollKey(rep))
+            }
+        }
+        var observations: [UUID: PRStatusManager.PRBindingObservation] = [:]
+        for binding in due {
+            guard let rep = representative[PRPollKey(binding)], let observed = raw[rep.id] else {
+                continue
+            }
+            if binding.id == rep.id || freshKeys.contains(PRPollKey(rep)) {
+                observations[binding.id] = observed
+            }
+        }
+        return (observations, freshKeys)
+    }
+
+    /// Whether `refreshBindings` actually read this binding's PR this round,
+    /// rather than carrying its stored status forward.
+    ///
+    /// Every fresh observation is stamped with a new `observedAt`, and every
+    /// fallback path returns the binding's stored status untouched — never
+    /// re-stamped (see `PRStatusManager.refreshBindingGroup` and its GitLab
+    /// twin). So full `==` against the stored status, `observedAt` included,
+    /// is the discriminator; `sameValue(as:)`, which ignores the stamp, would
+    /// call an unchanged fresh reading a fallback. A binding never observed
+    /// before has no stored status, so anything returned for it is fresh.
+    static func isFreshObservation(
+        _ observed: PRStatusManager.PRBindingObservation, of binding: PRBinding
+    ) -> Bool {
+        observed.status != binding.status
+    }
+
+    /// Test seam: one binding refresh over every pollable row, as a full pass
+    /// composes it, narrowed by `onlyKeys`. Skips discovery and pruning, so a
+    /// test sees exactly what the refresh leg asks and writes.
+    func refreshBindingStatusesForTests(onlyKeys: Set<PRPollKey>?) async {
+        guard let rows = try? await db.worktrees.list(status: .active),
+              let repos = try? await db.repos.list() else { return }
+        let mirrorMeta = Self.mirrorMetaByOrigin((try? await db.remoteSessions.list()) ?? [])
+        let plan = await pollEntries(Self.pollableWorktrees(rows), repos: repos, mirrorMeta: mirrorMeta)
+        await refreshBindingStatuses(
+            polled: plan.matched, bindingsOnly: Set(plan.bindingsOnly.map(\.id)),
+            repoPath: plan.matched.first?.worktreePath ?? plan.bindingsOnly.first?.worktreePath,
+            onlyKeys: onlyKeys)
     }
 
     /// The binding a pass's observation implies — the row to persist AND the
@@ -1440,15 +1818,15 @@ public final class RPCRouter: Sendable {
         var plan = PollPlan()
         plan.matched.reserveCapacity(worktrees.count)
         for wt in worktrees {
-            // The one place a row's poll working directory is chosen. A remote
-            // row whose repo is gone resolves to nil and is simply not polled —
-            // there is no directory to run `git` or `gh` in.
-            guard let workingDirectory = Self.pollWorkingDirectory(wt, repoPathByID: pathByRepo) else {
+            // A remote row whose repo is gone resolves to nil and is simply not
+            // polled — there is no directory to run `git` or `gh` in.
+            guard let target = Self.pollTarget(
+                for: wt, repoPathByID: pathByRepo, mirrorMeta: mirrorMeta,
+                defaultBranchByRepo: defaultBranchByRepo) else {
                 continue
             }
-            switch Self.pollBranch(for: wt,
-                                   mirrorMeta: Self.mirrorOrigin(of: wt).flatMap { mirrorMeta[$0] },
-                                   defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] }) {
+            let workingDirectory = target.workingDirectory
+            switch target.choice {
             case .bindingsOnly:
                 plan.bindingsOnly.append((id: wt.id, worktreePath: workingDirectory))
             case .match(let branch):
@@ -1466,6 +1844,36 @@ public final class RPCRouter: Sendable {
             }
         }
         return plan
+    }
+
+    /// Where a row's poll runs and which branch it is matched on, or nil when
+    /// the row has no working directory and is skipped. The one place a row's
+    /// poll working directory is chosen, shared by `pollEntries` and
+    /// `hasPollableBranch` so the two cannot drift.
+    static func pollTarget(
+        for wt: Worktree, repoPathByID: [UUID: String],
+        mirrorMeta: [WorktreeOrigin: [String: String]], defaultBranchByRepo: [UUID: String]
+    ) -> (workingDirectory: String, choice: PollBranchChoice)? {
+        guard let workingDirectory = pollWorkingDirectory(wt, repoPathByID: repoPathByID) else {
+            return nil
+        }
+        let choice = pollBranch(for: wt,
+                                mirrorMeta: mirrorOrigin(of: wt).flatMap { mirrorMeta[$0] },
+                                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] })
+        return (workingDirectory, choice)
+    }
+
+    /// Whether a row is matched by branch on a pass: it has a working
+    /// directory AND a branch to match on. A row that fails either is never
+    /// sent to discovery — it is skipped, or refreshed for its bindings only.
+    static func hasPollableBranch(
+        _ wt: Worktree, repoPathByID: [UUID: String],
+        mirrorMeta: [WorktreeOrigin: [String: String]], defaultBranchByRepo: [UUID: String]
+    ) -> Bool {
+        guard let target = pollTarget(for: wt, repoPathByID: repoPathByID, mirrorMeta: mirrorMeta,
+                                      defaultBranchByRepo: defaultBranchByRepo),
+              case .match = target.choice else { return false }
+        return true
     }
 
     /// Which branch a row is matched on this pass.
@@ -1563,6 +1971,10 @@ public final class RPCRouter: Sendable {
         guard Self.isPollable(wt) else {
             return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
+        // The app sends this on selection, so it is the PR schedule's
+        // "the user is looking at this worktree" signal. Only a pollable row
+        // is stamped: an unpolled one has no schedule item to make due.
+        await activityLedger.recordSelection(worktreeID: wt.id, at: now())
         var repo: Repo?
         if let repoID = wt.repoID {
             repo = try await db.repos.get(id: repoID)
@@ -1679,6 +2091,9 @@ public final class RPCRouter: Sendable {
         switch await prBindingCoordinator.bind(worktreeID: params.worktreeID,
                                                parsed: parsed, source: source) {
         case .bound(let binding):
+            // Wake the PR schedule: its next reconcile sees the new binding,
+            // never yet observed, and makes it due at once.
+            await prPollScheduler.kick()
             return try RPCResponse(result: PRAttachResult(outcome: "bound", binding: binding))
         case .alreadyBound:
             return try RPCResponse(result: PRAttachResult(outcome: "alreadyBound"))

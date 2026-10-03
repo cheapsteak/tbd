@@ -620,6 +620,40 @@ public actor PRStatusManager {
         }
     }
 
+    /// The worktree-level record of a scheduled pass that refreshed this
+    /// worktree through its bindings alone (`RPCRouter.runScheduledPassLegs`).
+    ///
+    /// With `pr_poll_schedule_enabled` set, a tracked worktree never goes
+    /// through `fetchAll`, so without this its `PRObservation` and its cached
+    /// status would stand still from the moment it was first tracked — an
+    /// `.undetermined` from before would keep saying "the last check did not
+    /// resolve" while every binding was being read fine. This records the
+    /// attempt's outcome on the usual monotonic rail (`record`), and, when
+    /// `status` is given, takes it as the cached value: the worst-of binding
+    /// status the pass just wrote to the `prStatus` column.
+    ///
+    /// **Not through `apply`, on purpose.** `apply` fires `onMergedTransition`
+    /// on a non-merged → merged move, and that callback is the un-bound merge
+    /// fallback. This worktree has live bindings, so its merge edge belongs to
+    /// `AllResolvedMergeTrigger.evaluate`, which the same pass already ran. The
+    /// worst-of status never carries `.merged` today
+    /// (`RPCRouter.worktreePRStatusUpdates`), but a cache write that cannot
+    /// reach the merged callback at all makes "no second merge edge from the
+    /// scheduled pass" structural rather than a property of that filter, and a
+    /// `.merged` value is refused here too. Nor does it fire `onStatusPersist`:
+    /// the pass wrote the column itself, so a persist would be a second
+    /// identical UPDATE.
+    ///
+    /// A direct refresh that landed after `observedAt` holds newer data, so
+    /// the cache is left to it — the guard `fetchAll` applies to its own writes.
+    func recordBindingRefresh(worktreeID: UUID, status: PRStatus?,
+                              outcome: PRObservation.Outcome, at observedAt: Date) async {
+        if let status, status.state != .merged, !directRefreshLanded(worktreeID, after: observedAt) {
+            cache[worktreeID] = status
+        }
+        await record(outcome, for: worktreeID, at: observedAt)
+    }
+
     /// Clear the cached status of every head-ref-mismatched worktree and persist
     /// the clear (nil), so `hydrate` can't resurrect it after a daemon restart.
     ///
