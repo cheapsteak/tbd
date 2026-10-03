@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import pwd
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -592,6 +593,50 @@ class SwiftSafeTests(RunnerFixture):
                 self.assertIn(explanation, result.stderr)
                 self.assertEqual(result.stdout, "")
 
+    def test_every_line_this_wrapper_writes_carries_its_prefix(self):
+        """The module docstring's claim, asserted rather than asserted-in-prose.
+
+        It is load-bearing: `scripts/restart-build-lib.sh` separates this
+        wrapper's lines from buffered compiler output by that exact prefix and
+        streams only them, so a line without it is one a human watching a build
+        never sees until the build is over.  Two kinds of line used to lack it —
+        the unsupported-subcommand usage message, and every message an argument
+        validator raises through `SystemExit`.
+
+        Asserted over whole lines rather than by searching for one wording, so a
+        path added later is covered without anybody remembering to add it here.
+        A path that narrows `PATH` is deliberately not among these: it breaks
+        this script's own `#!/usr/bin/env python3`, so the unprefixed line would
+        be `env`'s and not this wrapper's.
+
+        The prefix is spelled out rather than read from `swift_safe.REPORT_PREFIX`
+        — a wrapper that lost the invariant would then fail this case by not
+        having the constant, which is a weaker thing to learn than that its
+        output is wrong.
+        """
+        prefix = "swift-safe: "
+        unprefixed_paths = (
+            (("package", "resolve"), {}),
+            (("build",), {"TBD_SWIFT_JOBS": "notanumber"}),
+            (("build",), {"TBD_SWIFT_JOBS": "0"}),
+            (("build", "--jobs", "8"), {"TBD_SWIFT_JOBS": "2"}),
+            (("build",), {"TBD_SWIFT_LOCK_TIMEOUT_SECONDS": "nan"}),
+            (("build", "--jobs"), {}),
+        )
+        for arguments, environment in unprefixed_paths:
+            with self.subTest(arguments=arguments, environment=environment):
+                result = self.run_runner(*arguments, **environment)
+                self.assertNotEqual(result.returncode, 0)
+                lines = [line for line in result.stderr.splitlines() if line.strip()]
+                # Without this the loop body is vacuous for a path that went
+                # quiet: zero lines all start with anything.
+                self.assertTrue(lines, "the path said nothing at all")
+                for line in lines:
+                    self.assertTrue(
+                        line.startswith(prefix),
+                        f"unprefixed stderr line: {line!r}",
+                    )
+
     def test_an_unsupported_subcommand_names_its_exit_status(self):
         result = self.run_runner("package", "resolve")
         self.assertNamesExitStatus(result, 64, "EX_USAGE")
@@ -1048,6 +1093,485 @@ class WaitReportingTests(unittest.TestCase):
         first = self.wait_messages()[0]
         self.assertIn("...", first)
         self.assertLess(len(first), 400)
+
+    # --- the holder the record cannot name -------------------------------
+    #
+    # The flock rides on an open file description, not on the process that
+    # wrote the record, so the two come apart: a build killed while its
+    # manifest hung left an orphan holding an inherited descriptor while the
+    # lock file still named the long-dead pid that opened it.  Waiters were
+    # told the recorded pid "is not running", which reads as a harmless stale
+    # file — about a lock nothing was ever going to release.  These cases
+    # inject the openers probe so they assert the wording, not `lsof`;
+    # `LockOpenerProbeTests` drives the real thing.
+
+    def test_a_stale_record_names_the_processes_holding_the_file_open(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ((37731, "tbd-manifest"),)
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("the lock is still held", description)
+        self.assertIn("pid 37731 (tbd-manifest)", description)
+        # The reading that misled: a held lock must never be described in
+        # words a reader can mistake for an abandoned file.
+        self.assertNotIn("unidentified", description)
+
+    def test_an_unrecorded_holder_still_names_a_visible_opener(self):
+        self.record("")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ((4242, "swift-frontend"),)
+        )
+        self.assertIn("has not recorded its identity yet", description)
+        self.assertIn("pid 4242 (swift-frontend)", description)
+
+    def test_a_probe_that_sees_nothing_keeps_the_honest_fallback(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ()
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("the current holder is unidentified", description)
+
+    def test_a_probe_that_could_not_run_says_so_rather_than_guessing(self):
+        """The third state, and the one the fallback used to swallow.
+
+        "nobody else has the file open" and "I could not ask" are opposite
+        conclusions.  Reported as the first, the second reproduces word for word
+        the line the incident turned on — a permanently held lock described as a
+        harmless stale file — and it does so on precisely the wedged machine
+        where `lsof` and `ps` are slowest.
+        """
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("could not be asked", description)
+        self.assertIn("the lock is still held", description)
+        self.assertIn("lsof", description)
+        self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_probe_that_could_not_run_is_not_the_same_line_as_one_that_saw_nothing(
+        self,
+    ):
+        """Mutation guard: the two states must not merely both be non-empty."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        could_not_look = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        saw_nothing = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ()
+        )
+        self.assertNotEqual(could_not_look, saw_nothing)
+        self.assertNotIn("could not be asked", saw_nothing)
+
+    def test_an_unrecorded_holder_also_distinguishes_a_probe_that_could_not_run(self):
+        self.record("")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: None
+        )
+        self.assertIn("has not recorded its identity yet", description)
+        self.assertIn("could not be asked", description)
+        self.assertIn("the lock is still held", description)
+
+    def test_a_probe_that_could_not_run_reaches_the_wait_line_itself(self):
+        """Not just the helper: the line a waiting human actually reads."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        with mock.patch.object(swift_safe, "_lock_file_openers", lambda _: None):
+            first = self.wait_messages()[0]
+        self.assertIn("waiting for the shared build slot", first)
+        self.assertIn("could not be asked", first)
+        self.assertNotIn("the current holder is unidentified", first)
+
+    def test_a_crowd_of_openers_is_capped_and_counted(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        crowd = tuple((100 + index, f"proc{index}") for index in range(7))
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: crowd
+        )
+        self.assertIn("pid 100 (proc0)", description)
+        self.assertIn(f"pid {100 + swift_safe.MAX_REPORTED_LOCK_OPENERS - 1}", description)
+        self.assertNotIn(f"pid {100 + swift_safe.MAX_REPORTED_LOCK_OPENERS} ", description)
+        self.assertIn(f"and {7 - swift_safe.MAX_REPORTED_LOCK_OPENERS} more", description)
+
+    def test_a_named_opener_reaches_the_wait_line_itself(self):
+        """Not just the helper: the line a waiting human actually reads."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        with mock.patch.object(
+            swift_safe, "_lock_file_openers", lambda _: ((37731, "tbd-manifest"),)
+        ):
+            first = self.wait_messages()[0]
+        self.assertIn("waiting for the shared build slot", first)
+        self.assertIn("pid 37731 (tbd-manifest)", first)
+
+
+class LockOpenerProbeBudgetTests(unittest.TestCase):
+    """The stated bound covers the WHOLE probe, both legs, and really bounds it.
+
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` is the per-heartbeat cost a reader is
+    told this fallback can add to a wait.  It used to bound only the `lsof`
+    leg while the naming leg carried an independent timeout of its own, so the
+    true worst case was their sum and the number written down was not the
+    number.  A bound nobody can act on is worse than no bound at all, because
+    it is believed.
+
+    The clock is faked rather than slept through: the point is the arithmetic
+    that splits the budget, and no test may spend five real seconds proving
+    it.
+    """
+
+    # Far enough from this process's pid to be nobody, and still parse.
+    OPENER_PID = 987654
+
+    def _timeouts(self, *, lsof_cost: float) -> dict[str, float]:
+        """The `timeout=` each leg is given, when `lsof` takes `lsof_cost`."""
+        seen: dict[str, float] = {}
+        clock = {"now": 1000.0}
+
+        def fake_run(argv, **kwargs):
+            seen[argv[0]] = kwargs.get("timeout")
+            if argv[0] == "lsof":
+                clock["now"] += lsof_cost
+                return subprocess.CompletedProcess(argv, 0, f"{self.OPENER_PID}\n", "")
+            return subprocess.CompletedProcess(
+                argv, 0, f"{self.OPENER_PID} /usr/bin/sleep\n", ""
+            )
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            with mock.patch.object(
+                swift_safe.time, "monotonic", lambda: clock["now"]
+            ):
+                found = swift_safe._lock_file_openers(Path("/nowhere/swift-build.lock"))
+        # Both legs really ran; a probe that short-circuited would make every
+        # assertion below vacuous.
+        self.assertEqual(found, ((self.OPENER_PID, "sleep"),))
+        self.assertEqual(sorted(seen), ["lsof", "ps"])
+        return seen
+
+    def test_the_two_legs_together_stay_inside_the_stated_bound(self):
+        """The finding itself: the sum, not each half, is what was promised.
+
+        The worst case is what the first leg actually spent (never more than
+        its own cap) plus what the second is still allowed, whatever the first
+        leg's cost turned out to be.
+        """
+        for lsof_cost in (0.0, 1.0, 4.0, 60.0):
+            with self.subTest(lsof_cost=lsof_cost):
+                seen = self._timeouts(lsof_cost=lsof_cost)
+                spent = min(lsof_cost, seen["lsof"])
+                self.assertLessEqual(
+                    spent + seen["ps"],
+                    swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+                )
+
+    def test_the_first_leg_is_capped_at_the_budget_less_the_floor(self):
+        seen = self._timeouts(lsof_cost=0.0)
+        self.assertEqual(
+            seen["lsof"],
+            swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+            - swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS,
+        )
+
+    def test_a_fast_first_leg_leaves_the_rest_of_the_budget_to_the_second(self):
+        seen = self._timeouts(lsof_cost=0.0)
+        self.assertEqual(
+            seen["ps"], swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+        )
+
+    def test_a_slow_first_leg_cannot_starve_the_second(self):
+        """The naming leg keeps its floor even when `lsof` spent its whole cap.
+
+        Starved, it would time out every time and report openers it could not
+        name — pids with no commands beside them, which is the half of the
+        answer a reader cannot act on.
+        """
+        seen = self._timeouts(
+            lsof_cost=swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+            - swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS
+        )
+        self.assertEqual(seen["ps"], swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS)
+
+    def test_an_overrunning_first_leg_still_leaves_the_floor(self):
+        """`lsof` cannot overrun its cap, but a clock jump must not go negative."""
+        seen = self._timeouts(lsof_cost=60.0)
+        self.assertEqual(seen["ps"], swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS)
+
+    def test_the_floor_leaves_the_first_leg_a_usable_cap(self):
+        """The split is only sane while the floor is a fraction of the budget."""
+        self.assertGreater(swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS, 0)
+        self.assertLess(
+            swift_safe.LOCK_OPENER_NAME_MINIMUM_SECONDS,
+            swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+        )
+
+
+class LockOpenerProbeFailureTests(unittest.TestCase):
+    """A probe that cannot complete is distinguishable from one that found nobody.
+
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` is a bound, which means the probe really
+    can run out of time, and the machine where it does is the busy one — the
+    state the whole fallback exists to describe.  A missing `lsof` is the other
+    way in, and reaches the same branch.  The failures are injected rather than
+    provoked: no test may spend the real five seconds, and no test may depend on
+    whether this machine has `lsof` installed.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.lock_path.write_text(f"pid={_dead_pid()}\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @contextlib.contextmanager
+    def _failing_probe(self, error):
+        def fake_run(argv, **kwargs):
+            raise error
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            yield
+
+    def _failures(self):
+        """Every way the probe can fail to run, named for the subTest."""
+        return (
+            (
+                "timeout",
+                subprocess.TimeoutExpired(
+                    cmd=["lsof"], timeout=swift_safe.LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+                ),
+            ),
+            ("missing lsof", FileNotFoundError(2, "No such file or directory", "lsof")),
+            ("refused", PermissionError(13, "Permission denied", "lsof")),
+        )
+
+    def test_the_timeout_is_caught_as_a_failure_and_not_as_an_empty_result(self):
+        # The containment that makes this branch reachable at all, asserted
+        # rather than assumed: `TimeoutExpired` is a `SubprocessError`, so the
+        # existing `except` really does swallow it.
+        self.assertTrue(
+            issubclass(subprocess.TimeoutExpired, subprocess.SubprocessError)
+        )
+        for name, error in self._failures():
+            with self.subTest(failure=name):
+                with self._failing_probe(error):
+                    self.assertIsNone(swift_safe._lock_file_openers(self.lock_path))
+
+    def test_a_failed_probe_reaches_the_description_as_could_not_look(self):
+        """End to end through the real probe, which is where it used to be lost."""
+        for name, error in self._failures():
+            with self.subTest(failure=name):
+                with self._failing_probe(error):
+                    description = swift_safe._holder_description(self.lock_path)
+                self.assertIn("which is not running", description)
+                self.assertIn("could not be asked", description)
+                self.assertIn("the lock is still held", description)
+                self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_probe_that_ran_and_found_nobody_returns_the_empty_tuple(self):
+        """The control leg: without it, `assertIsNone` above could pass for free.
+
+        `lsof` answering nothing but answering is the honest-fallback state, and
+        it must stay an empty tuple rather than becoming `None` along with the
+        failures.  Exit 1 with nothing on stderr is exactly what darwin's `lsof`
+        does for a file nobody has open, which is why the status alone cannot be
+        the discriminator.
+        """
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn("the current holder is unidentified", description)
+        self.assertNotIn("could not be asked", description)
+
+    def test_an_lsof_that_ran_and_failed_is_could_not_look_not_found_nothing(self):
+        """`lsof` can exit non-zero having answered nothing AND having failed.
+
+        Both look alike in the status — measured on darwin, `lsof -t -w` exits 1
+        for a file nobody has open and for a status error alike — so stderr is
+        the discriminator.  A failure there is "could not ask", and the pair of
+        cases below is what keeps the rule from collapsing in either direction.
+        """
+        complaint = "lsof: status error on the lock file: Permission denied"
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", complaint)
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertIsNone(swift_safe._lock_file_openers(self.lock_path))
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn("could not be asked", description)
+        self.assertNotIn("the current holder is unidentified", description)
+
+    def test_a_lock_file_that_is_gone_is_an_answer_and_not_a_failure(self):
+        """A complaining `lsof` about an absent path still means "nobody".
+
+        Nobody can have a file that does not exist open, so that is an answer.
+        It is settled by `stat` rather than by reading `lsof`'s complaint, which
+        is prose and not an interface — and a refusal, which complains in just
+        the same register, must still read as "could not look".
+        """
+        self.lock_path.unlink()
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, "", "lsof: status error: No such file or directory"
+            )
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+
+    def test_a_successful_lsof_is_trusted_even_if_it_complained(self):
+        """A warning beside a real answer must not throw the answer away.
+
+        Only a non-zero status makes stderr mean failure; `lsof` that exited 0
+        has answered, whatever else it said.
+        """
+
+        def fake_run(argv, **kwargs):
+            if argv[0] == "lsof":
+                return subprocess.CompletedProcess(argv, 0, "4242\n", "lsof: WARNING")
+            return subprocess.CompletedProcess(argv, 0, "4242 /usr/bin/sleep\n", "")
+
+        with mock.patch.object(swift_safe.subprocess, "run", fake_run):
+            self.assertEqual(
+                swift_safe._lock_file_openers(self.lock_path), ((4242, "sleep"),)
+            )
+
+
+@unittest.skipIf(shutil.which("lsof") is None, "lsof is not installed here")
+class LockOpenerProbeTests(unittest.TestCase):
+    """`_lock_file_openers` against a real lock file and real processes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def tearDown(self):
+        self.holder.close()
+        self.temp.cleanup()
+
+    def record(self, text: str) -> None:
+        self.holder.seek(0)
+        self.holder.truncate()
+        self.holder.write(text)
+        self.holder.flush()
+
+    @contextlib.contextmanager
+    def _orphan_opener(self):
+        """A process holding the lock file open through an INHERITED fd.
+
+        `exec 9< file` and then `exec sleep` collapse shell and sleep into one
+        process carrying a descriptor it never opened itself: the incident's
+        shape, and the reason the recorded pid is not the whole truth.  The
+        block is not entered until `lsof` can actually see it, so a slow probe
+        cannot masquerade as a probe that found nothing.
+        """
+        process = subprocess.Popen(
+            ["/bin/sh", "-c", 'exec 9< "$1"; exec sleep 30', "sh", str(self.lock_path)]
+        )
+        try:
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                found = swift_safe._lock_file_openers(self.lock_path)
+                if any(pid == process.pid for pid, _ in found):
+                    break
+                time.sleep(0.1)
+            yield process
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+
+    def test_a_live_opener_is_found_and_named(self):
+        with self._orphan_opener() as opener:
+            found = dict(swift_safe._lock_file_openers(self.lock_path))
+        self.assertIn(opener.pid, found)
+        self.assertEqual(found[opener.pid], "sleep")
+
+    def test_the_probe_never_reports_this_process(self):
+        # This process holds the lock file open for the whole fixture; naming
+        # it would offer the asker itself as a candidate for what blocks it.
+        with self._orphan_opener():
+            found = dict(swift_safe._lock_file_openers(self.lock_path))
+        self.assertNotIn(os.getpid(), found)
+
+    def test_the_description_names_a_live_holder_the_record_cannot(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\n")
+        with self._orphan_opener() as opener:
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn(f"pid {opener.pid} (sleep)", description)
+        self.assertNotIn("unidentified", description)
+
+    def test_a_missing_lock_file_probes_to_nothing_without_raising(self):
+        self.holder.close()
+        self.lock_path.unlink()
+        self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
+
+    def test_the_real_lsof_cannot_distinguish_these_by_exit_status(self):
+        """The measurement the stderr discriminator rests on, against real `lsof`.
+
+        It is asserted here rather than taken on trust because the whole rule
+        above depends on it: darwin's `lsof -t -w` exits 1 BOTH for a file
+        nobody has open and for a status error, so a status-only check would
+        read every ordinary "nobody else has it open" as "I could not ask".
+        Stderr is what separates them — empty on the honest nothing, a complaint
+        on the failure.
+        """
+        nobody = Path(self.temp.name) / "nobody-has-this-open.lock"
+        nobody.write_text("x", encoding="utf-8")
+        quiet = subprocess.run(
+            ["lsof", "-t", "-w", "--", str(nobody)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        refused_dir = Path(self.temp.name) / "refused"
+        refused_dir.mkdir()
+        refused = refused_dir / "inner.lock"
+        refused.write_text("x", encoding="utf-8")
+        refused_dir.chmod(0o000)
+        try:
+            complaining = subprocess.run(
+                ["lsof", "-t", "-w", "--", str(refused)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            refused_dir.chmod(0o755)
+
+        self.assertNotEqual(quiet.returncode, 0, "the premise would be vacuous")
+        self.assertEqual(quiet.returncode, complaining.returncode)
+        self.assertEqual(quiet.stderr.strip(), "")
+        self.assertNotEqual(complaining.stderr.strip(), "")
+
+    def test_a_probe_the_filesystem_refuses_reports_that_it_could_not_look(self):
+        """Real `lsof`, real refusal: the failure must not read as "nobody"."""
+        refused_dir = Path(self.temp.name) / "refused-probe"
+        refused_dir.mkdir()
+        refused = refused_dir / "swift-build.lock"
+        refused.write_text(f"pid={_dead_pid()}\n", encoding="utf-8")
+        refused_dir.chmod(0o000)
+        try:
+            found = swift_safe._lock_file_openers(refused)
+        finally:
+            refused_dir.chmod(0o755)
+        self.assertIsNone(found)
 
 
 class AbandonedWaitTests(unittest.TestCase):
