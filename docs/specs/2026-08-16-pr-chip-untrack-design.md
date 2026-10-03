@@ -60,19 +60,19 @@ repository or the session is touched, which is what makes the trade acceptable
 rather than costless. An in-app undo on the success path is the obvious
 improvement and is deliberately left for its own change.
 
-Two things narrow that cost rather than merely accepting it, and both work on
-the same problem: two click targets share about twenty points of width, and
-nothing about the pointer's position tells you which one it is on.
+What narrows that cost rather than merely accepting it works on one problem:
+two click targets share about twenty points of width, and nothing about the
+pointer's position tells you which one it is on. So **the xmark takes on a
+button's appearance while the pointer is actually over it**: full-strength
+foreground over a faint circular disc, drawn at exactly the size of the click
+region, so no pixel that looks like the control fails to act as one. Emphasis is
+reached through a `background` with its own fixed frame, which is sized by
+itself and never proposed to the layout, so the chip is the same width at rest,
+hovered, and emphasised.
 
-- **The hover overlay names the click under the cursor** — see below. It is the
-  surface already showing when a hand is on the chip, and it has room for a
-  sentence.
-- **The xmark takes on a button's appearance while the pointer is actually over
-  it**: full-strength foreground over a faint circular disc, drawn at exactly
-  the size of the click region, so no pixel that looks like the control fails to
-  act as one. Emphasis is reached through a `background` with its own fixed
-  frame, which is sized by itself and never proposed to the layout, so the chip
-  is the same width at rest, hovered, and emphasised.
+The hover overlay does not describe the click. It is about the PR — see below —
+and a sentence naming the gesture would restate what the chip's own two targets
+already show: the number opens, and the drawn, emphasised xmark untracks.
 
 A tooltip on the untrack target is not the mitigation, though the slot carries
 one for the accessibility phrasing it shares. The macOS help-tag delay is longer
@@ -80,12 +80,11 @@ than the overlay's 0.55s floor, so the card is already up by the time a tag
 would appear, and a second, smaller box saying less would arrive on top of it —
 if it arrived at all.
 
-Emphasis and wording read a **separate** hover flag, true only for the icon
-slot, while the glyph stays on the whole-chip flag. That split is what keeps a
-pointer travelling from the number onto the slot from flickering the xmark back
-to a dot. It also inherits the rule above unchanged: the untrack wording is
-shown only where the slot is *drawing* the xmark, so nothing on screen can offer
-to untrack while the slot is a status dot that would open.
+Emphasis reads a **separate** hover flag, true only for the icon slot, while
+the glyph stays on the whole-chip flag. That split is what keeps a pointer
+travelling from the number onto the slot from flickering the xmark back to a
+dot. Emphasis changes only how the xmark looks; what the slot does stays on the
+whole-chip flag, under the rule below.
 
 Two constraints govern the implementation:
 
@@ -282,32 +281,37 @@ payload, and a decision for its own spec rather than a detail of this one.
 
 ### Identifying a chip: the hover overlay
 
-Resting on a chip shows an overlay carrying the PR **number, title, state, and
-the age of that observation**. The title is the whole point: it is what turns
-`#412` into something a person can decide about.
+Resting on a chip shows an overlay carrying the PR's **title, number and
+state**, and — when it matters — the **age of that observation**. The title is
+the whole point: it is what turns `#412` into something a person can decide
+about.
 
-Those first three are **one headline**, not a labelled grid:
+The title **leads**, as the card's title line, with the reference and state on
+one line beneath it:
 
 ```
-PR#412 (Merged) - acme-relay: stop redeploying the shared relay just to add
-an event
+acme-relay: stop redeploying the shared relay just to add an event
+PR#412 · Merged
 ```
 
-They are read together — which PR, what state, what it is about — and a
-two-column table of them spent most of the card's width on the words "PR" and
-"State" saying what `#412` and "Merged" already say. Everything but the number
-is optional and degrades by **omission**: no state gives `PR#412 - <title>`,
-no title gives `PR#412 (Merged)`, neither gives `PR#412`, and no combination
-leaves an empty `()` or a separator with nothing after it. The headline wraps
-inside the card's width rather than widening it.
+The title leads because it is the one fact the chip itself cannot show — the
+number and the state's color are already on the bar under the pointer. The
+reference and state are one line rather than a labelled grid: a two-column table
+of them spent most of the card's width on the words "PR" and "State" saying what
+`#412` and "Merged" already say. Everything but the number is optional and
+degrades by **omission**: no state gives a bare `PR#412` under the title, and no
+title promotes the reference to the title line as `PR#412 (Merged)` — or `PR#412`
+with neither — with no second line repeating it. No combination leaves an empty
+`()` or a separator with nothing after it. The title wraps inside the card's
+width rather than widening it.
+
+The noun is the chip's own forge's (`MR#412` under a chip bound to a merge
+request), glued to the bare number the chip is already drawing.
 
 The state is **not** tinted with the PR palette. The status dot the pointer is
 resting on already carries that color, and this card colors words only for a
 caution the reader must not miss — a second colored copy of a fact three points
 away would compete with the title for the eye.
-
-The age is a muted caption directly under the headline. It dates the whole
-reading rather than the state alone, which is what it always did.
 
 **No description.** GitHub's GraphQL cannot return a truncated body — `body` and
 `bodyText` come whole — so any excerpt would be trimmed only after the bytes had
@@ -334,33 +338,31 @@ terms as `headBranch` and `baseRef`: **nil means "not observed", never
 "cleared"**, so a transient fetch failure cannot blank a title that is already
 on screen.
 
-A synthetic binding has no title, and the headline ends after the state rather
-than fabricating a placeholder — number, state and age are still worth showing,
-and the missing half is honest about a status that was hydrated rather than
-polled.
+A synthetic binding has no title, and the card leads with the reference and
+state rather than fabricating a placeholder — number, state and age are still
+worth showing, and the missing half is honest about a status that was hydrated
+rather than polled.
 
-The overlay states the observation's age because the cached `PRStatus` is
-display-tier and has been measured reading "Ready to merge" for PRs merged days
-earlier. Every surface that renders it must render its age with it.
+#### When the overlay states the reading's age
 
-#### The overlay also says what the click will do
+The cached `PRStatus` is display-tier and has been measured reading "Ready to
+merge" for PRs merged days earlier, so no surface may render a stale reading
+without its age. But a reading taken moments ago is not news on every hover, so
+the card stays quiet about its age while the reading is fresh and states it, as a
+row in the caution tint, when any of these holds:
 
-The card's one row names the action under the pointer: *Click to open this PR on
-GitHub* anywhere on the chip, *Click to stop tracking this PR in this worktree*
-while the pointer is on the xmark. The sentences describe the gesture and
-nothing else — the number and the state are in the headline above — and the untrack
-half names the worktree scope for the same reason the slot's label does: what is
-removed is an association TBD inferred, not the pull request.
+- **The reading is older than five minutes** (`chipStaleAfter`). The boundary is
+  that of `PRFreshness.checkedLabel`'s "checked just now" bucket, so the card is
+  silent exactly while that label would have said "just now", and the first age
+  it shows is "checked 5m ago".
+- **The reading was never observed** — "last checked at an unknown time".
+- **The worktree's last poll came back undetermined.** The warning then carries
+  the "last check did not resolve" clause after the age, even over a fresh
+  reading.
 
-The row is **always present and its text swaps**, never a row that appears when
-the pointer reaches the slot. A card that gained a line would grow under the
-hand that summoned it, which is the jitter this is meant to cure rather than
-cause. The card is sized to its content, so the two sentences would resize it on
-their own: each state therefore carries the other as a laid-out-but-hidden peer,
-pinning the row — and with it the card — to the larger of the two in both axes.
-The peer is a general property of an overlay row rather than something the chip
-does for itself, because any row whose text swaps while a card is up has this
-problem.
+In every case the warning is the whole `PRFreshness.clauses` sentence, age first,
+so the caveat always carries the age it qualifies and reads exactly as the
+toolbar and sidebar word it.
 
 #### Where the overlay sits, and how it is separated from the terminal
 
@@ -449,14 +451,13 @@ panel, is what sits a gap away from the anchor.
   omitting `title` leaves the stored value untouched rather than clearing it.
 - Title round-trips through the row, the RPC, and back.
 - Overlay content for a binding with a title, without one, and with no observed
-  status: the headline's four combinations of state and title, none of them
-  leaving an empty `()` or a trailing separator, and the age caption present in
-  every one — including the "unknown time" phrasing for a binding with no stamp.
-- The overlay's action row: the untrack sentence while the icon slot is the
-  target and the open sentence otherwise; the headline and the age caption
-  byte-identical between the two, with the two models still unequal so the swap
-  actually reaches the panel; each state reserving the other's sentence; and
-  both sentences surviving a chip with no title and one with no observed status.
+  status: the title line and the reference line across the four combinations of
+  state and title, none of them leaving an empty `()` or a trailing separator,
+  and no reference line under an untitled card.
+- The overlay's age warning: absent for a fresh reading up to the five-minute
+  boundary; present in the caution tint at and past it, for a binding with no
+  stamp ("unknown time"), and over a fresh reading whose last poll came back
+  undetermined; absent again once the last attempt settled.
 - Placement: an anchor with window room below keeps its card below; one at the
   bottom of its window flips above even though the screen has room beneath it,
   and clears the bar's padding rather than only the anchor; a window too short

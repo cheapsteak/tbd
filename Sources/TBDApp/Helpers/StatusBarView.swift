@@ -218,14 +218,14 @@ struct StatusBarView: View {
                 state: state, reason: reason, mergeQueuePosition: mergeQueuePosition)
         }
         /// The PR's title, or nil when it was never observed (a chip lifted
-        /// from a cached `Worktree.prStatus` has none). The hover overlay
-        /// omits the line rather than fabricating a placeholder.
+        /// from a cached `Worktree.prStatus` has none). The hover overlay then
+        /// leads with the reference and state rather than a placeholder.
         let title: String?
         /// When `state` was read. nil = never, which the overlay says out loud
         /// rather than passing the cached state off as current.
         let observedAt: Date?
         /// The worktree's last poll attempt, carried whole rather than as a
-        /// rendered clause so the overlay composes its caption through the same
+        /// rendered clause so the overlay composes its warning through the same
         /// `PRFreshness` the toolbar and sidebar use. A chip that omitted it
         /// would render the more confident of two readings of one fact.
         let observation: PRObservation?
@@ -306,111 +306,123 @@ struct StatusBarView: View {
         return (chips, selected.overflow, selected.overflowMenu, selected.done)
     }
 
-    /// What a chip's hover overlay says: one headline naming the PR, its state
-    /// and its title, the age of that reading beneath it, and what the click
-    /// under the pointer will do.
+    /// What a chip's hover overlay says: the PR's title as the card's title,
+    /// the reference and state beneath it (`PR#945 · Merged`), and — only when
+    /// it matters — a warning about the age of that reading.
     ///
-    /// The age is not decoration. `PRStatus` is a display-tier cache and was
-    /// measured reading "Ready to merge" for pull requests merged days earlier,
-    /// so no surface may render it as current truth — the wording comes from
-    /// `PRFreshness`, shared with the toolbar and sidebar so the three cannot
-    /// describe one observation differently.
+    /// A chip with no title has nothing to lead with, so its title line is the
+    /// reference and state together (`PR#945 (Merged)`) and no second line
+    /// repeats them. See `chipHeadline` and `chipReference`.
+    ///
+    /// The age is not decoration, but neither is it news on every hover. A
+    /// fresh reading says nothing about its age; a stale, never-observed or
+    /// unconfirmed one says so in the caution tint — see
+    /// `chipFreshnessWarning`. The wording comes from `PRFreshness`, shared
+    /// with the toolbar and sidebar, so the three cannot describe one
+    /// observation differently.
+    ///
+    /// The card says nothing about what a click does. The chip's two targets
+    /// show that themselves — the number opens the PR, and the xmark takes on
+    /// a button's emphasis while the pointer is on it and carries its own
+    /// accessibility label (`iconSlotLabel`) — so a sentence naming the
+    /// gesture would only restate them.
     ///
     /// Pure, so the whole overlay can be asserted without a panel.
-    ///
-    /// `untrackTarget` says the pointer is over the icon slot *while that slot
-    /// is drawing the xmark*, and only changes the wording of the action row —
-    /// the row is always present, so the card cannot grow or shrink under a
-    /// pointer travelling between the chip's two click targets.
-    nonisolated static func chipHoverCard(
-        _ chip: PRChip, untrackTarget: Bool = false, now: Date = Date()
-    ) -> HoverCardModel {
+    nonisolated static func chipHoverCard(_ chip: PRChip, now: Date = Date()) -> HoverCardModel {
         var model = HoverCardModel()
         model.title = chipHeadline(chip)
-        // Age first, then whether the last attempt to reconfirm it failed —
-        // composed by `PRFreshness` itself, not restated here, so this cannot
-        // drift from the toolbar and sidebar. It sits under the headline rather
-        // than beside the state, because it dates the whole reading.
-        model.titleCaption = PRFreshness.clauses(
-            observedAt: chip.observedAt, observation: chip.observation, now: now
-        ).joined(separator: " · ")
-        model.rows = [
-            // Always present: the chip has two click targets in about twenty
-            // points of width, and nothing else on screen says which one the
-            // pointer is on. The alternate wording rides along so the row is
-            // laid out for both sentences at once — see `HoverCardRow`.
-            HoverCardRow(
-                value: chipActionValue(untrackTarget: untrackTarget, forge: chip.forge),
-                valueStyle: .mutedItalic,
-                alternateValue: chipActionValue(untrackTarget: !untrackTarget, forge: chip.forge)
-            )
-        ]
+        // The reference line only exists under a real title: an untitled chip's
+        // headline already IS the reference, and repeating it would be noise.
+        if chipTitle(chip) != nil {
+            model.titleCaption = chipReference(chip)
+        }
+        if let warning = chipFreshnessWarning(chip, now: now) {
+            model.rows = [HoverCardRow(value: warning, tint: .caution)]
+        }
         return model
     }
 
-    /// The overlay's headline: `PR#412 (Checks failing) - Fix the login timeout`,
-    /// or `MR#412 (…)` under a chip bound to a merge request.
+    /// The overlay's title line: the PR's own title when it has one, otherwise
+    /// `PR#412 (Checks failing)`, or `MR#412 (…)` under a chip bound to a merge
+    /// request.
     ///
-    /// One line rather than a labelled grid. The three facts are read together —
-    /// which PR, what state, what it is about — and a two-column table of them
-    /// spent most of a card's width on the words "PR" and "State" saying what
-    /// `#412` and "Checks failing" already say.
-    ///
-    /// The noun is the chip's own `forge.refNoun`, and `refNoun` rather than
-    /// `refLabel` because the headline is glued to the number the chip is
-    /// *already drawing*: the chip renders the bare `#412` on both forges, so a
-    /// headline built from `refLabel` would answer `MR !412` over a chip
-    /// reading `#412`. The card must never call a merge request a PR while its
-    /// own action row one line below offers to open it on GitLab.
+    /// The title leads because it is the one fact the chip itself cannot show —
+    /// the number and the state's color are already on the bar under the
+    /// pointer. Without a title the card falls back to naming the request and
+    /// its state in one line, so it never opens on an empty slot.
     ///
     /// Everything but the number is optional and degrades by *omission*: a
     /// synthetic chip has no title, a never-polled binding has no state, and
-    /// neither an empty `()` nor a dangling separator may appear for either.
+    /// an empty `()` may appear for neither.
+    nonisolated static func chipHeadline(_ chip: PRChip) -> String {
+        if let title = chipTitle(chip) { return title }
+        let reference = "\(chip.forge.refNoun)\(chip.label)"
+        guard let state = chipState(chip) else { return reference }
+        return "\(reference) (\(state))"
+    }
+
+    /// The line under a titled chip's headline: `PR#412 · Checks failing`, or
+    /// the bare `PR#412` when no state has been observed — never a dangling
+    /// separator.
+    ///
+    /// The noun is the chip's own `forge.refNoun`, and `refNoun` rather than
+    /// `refLabel` because it is glued to the number the chip is *already
+    /// drawing*: the chip renders the bare `#412` on both forges, so a line
+    /// built from `refLabel` would answer `MR !412` over a chip reading `#412`.
     /// The state is deliberately not tinted with the PR palette — the dot the
     /// pointer is on already carries that color, and this card colors words
     /// only for a caution the reader must not miss.
-    nonisolated static func chipHeadline(_ chip: PRChip) -> String {
-        var headline = "\(chip.forge.refNoun)\(chip.label)"
-        // The status's own words when it has any, composed by the very function
-        // the overflow menu and the toolbar dropdown compose their rows with —
-        // including the queue clause a queued PR leads with. See
-        // `PRStatusPresentation.stateDescription`.
-        if let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !state.isEmpty {
-            headline += " (\(state))"
-        }
-        if let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !title.isEmpty {
-            headline += " - \(title)"
-        }
-        return headline
+    nonisolated static func chipReference(_ chip: PRChip) -> String {
+        let reference = "\(chip.forge.refNoun)\(chip.label)"
+        guard let state = chipState(chip) else { return reference }
+        return "\(reference) · \(state)"
     }
 
-    /// What the overlay's action row says the click under the pointer will do.
+    /// The chip's title with surrounding whitespace removed, or nil when it is
+    /// absent or blank.
+    private nonisolated static func chipTitle(_ chip: PRChip) -> String? {
+        guard let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else { return nil }
+        return title
+    }
+
+    /// The status's own words when it has any, composed by the very function
+    /// the overflow menu and the toolbar dropdown compose their rows with —
+    /// including the queue clause a queued PR leads with. See
+    /// `PRStatusPresentation.stateDescription`.
+    private nonisolated static func chipState(_ chip: PRChip) -> String? {
+        guard let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !state.isEmpty else { return nil }
+        return state
+    }
+
+    /// How old a chip's reading may be before its overlay says so.
     ///
-    /// Two sentences rather than a reuse of `untrackLabel` / `openLabel`: those
-    /// name the PR by number and the open one appends its state, both of which
-    /// the card has already said on its own rows. Here the subject is the click,
-    /// so the sentences start with the gesture and say nothing twice. The
-    /// untrack half still names the worktree scope, for the same reason
-    /// `untrackLabel` does — the gesture removes an association, not the PR.
+    /// `PRStatus` is a display-tier cache, and was measured reading "Ready to
+    /// merge" for pull requests merged days earlier, so a reading past this age
+    /// must not be rendered without its age. It IS the boundary of
+    /// `PRFreshness.checkedLabel`'s "checked just now" bucket
+    /// (`PRFreshness.justNowWindow`): the card stays quiet exactly while that
+    /// label would have said "just now", and the first age it does show is the
+    /// first one the label stops calling "just now".
+    nonisolated static let chipStaleAfter: TimeInterval = PRFreshness.justNowWindow
+
+    /// The caution under a chip's overlay, or nil when the reading is fresh and
+    /// the last attempt to reconfirm it did not fail.
     ///
-    /// Both sentences take the chip's own `forge`, so a GitLab-bound chip says
-    /// "MR" and "GitLab" where a GitHub-bound one says "PR" and "GitHub" — the
-    /// same vocabulary `refLabel` names the binding with, minus the number the
-    /// headline already carries. The card lays the pair out together, and a
-    /// chip has exactly one forge, so the width reservation still spans both
-    /// sentences it can swap between.
-    nonisolated static func chipActionValue(untrackTarget: Bool, forge: Forge) -> String {
-        untrackTarget ? chipUntrackActionValue(forge) : chipOpenActionValue(forge)
-    }
-
-    nonisolated static func chipOpenActionValue(_ forge: Forge) -> String {
-        "Click to open this \(forge.refNoun) on \(forge.displayName)"
-    }
-
-    nonisolated static func chipUntrackActionValue(_ forge: Forge) -> String {
-        "Click to stop tracking this \(forge.refNoun) in this worktree"
+    /// Shown when the reading is older than `chipStaleAfter`, was never
+    /// observed at all, or the worktree's last poll came back undetermined. In
+    /// every one of those cases it is the full `PRFreshness.clauses` sentence —
+    /// age first, then the undetermined clause — so the caveat always carries
+    /// the age it qualifies and reads exactly as the toolbar and sidebar word
+    /// it.
+    nonisolated static func chipFreshnessWarning(_ chip: PRChip, now: Date) -> String? {
+        let isStale = chip.observedAt.map { now.timeIntervalSince($0) >= Self.chipStaleAfter } ?? true
+        let isUnresolved = PRFreshness.undeterminedClause(chip.observation) != nil
+        guard isStale || isUnresolved else { return nil }
+        return PRFreshness.clauses(
+            observedAt: chip.observedAt, observation: chip.observation, now: now
+        ).joined(separator: " · ")
     }
 
     /// Tooltip and accessibility label for a chip's untrack target — the xmark
@@ -754,9 +766,9 @@ private struct PRChipView: View {
 
     @State private var isHovering = false
     /// The pointer is over the icon slot specifically, rather than anywhere on
-    /// the chip. Read ONLY for emphasis and for what the overlay says the click
-    /// will do — never for the glyph, which stays on `isHovering` so travelling
-    /// from the number onto the slot cannot flicker the xmark back to a dot.
+    /// the chip. Read ONLY for emphasis — never for the glyph, which stays on
+    /// `isHovering` so travelling from the number onto the slot cannot flicker
+    /// the xmark back to a dot.
     @State private var isSlotHovered = false
 
     /// The fixed square this chip's resting glyph and the untrack xmark share.
@@ -811,10 +823,10 @@ private struct PRChipView: View {
                 // The gap beside the number is part of the open target.
                 .contentShape(Rectangle())
                 // No `.help` here, deliberately: the hover overlay already
-                // names this PR, its state and the age of that reading, and a
-                // tooltip would surface a second, smaller box saying less on
-                // top of it. The icon slot keeps its tooltip because the
-                // overlay says nothing about what clicking the slot does.
+                // names this PR and its state, and a tooltip would surface a
+                // second, smaller box saying less on top of it. The icon slot
+                // keeps its tooltip because the overlay says nothing about
+                // what clicking the slot does.
                 // Accessibility is unaffected — the hint below carries the same
                 // sentence.
                 // Opens the DEFAULT BROWSER, not an in-app tab. Intentional,
@@ -849,14 +861,8 @@ private struct PRChipView: View {
         }
         // Anchored to the whole chip, so the overlay survives the pointer
         // moving from the number onto the xmark.
-        .hoverCard(StatusBarView.chipHoverCard(chip, untrackTarget: isUntrackTarget))
+        .hoverCard(StatusBarView.chipHoverCard(chip))
     }
-
-    /// The pointer is over the untrack target *and* the slot is drawing the
-    /// xmark — the same conjunction `iconSlotLabel` gates the slot's action on.
-    /// Anything the user is told about the click is derived from it, so the card
-    /// can never advertise untracking while the slot is showing a status dot.
-    private var isUntrackTarget: Bool { isHovering && isSlotHovered }
 
     /// The fixed-size leading slot: at rest the merge-queue bus for a queued PR
     /// and the status dot for every other, the untrack xmark while the chip is
@@ -912,10 +918,9 @@ private struct PRChipView: View {
                 // the glyph, so the click can never mean something other than
                 // what the slot is drawing — see `iconSlotLabel`.
                 .help(StatusBarView.iconSlotLabel(chip, isHovering: isHovering))
-                // Drives the emphasis and the overlay's action row, and nothing
-                // else: the glyph and the click both stay on the whole-chip
-                // `isHovering`, so this can only change what the user is TOLD,
-                // never what the slot does.
+                // Drives the emphasis and nothing else: the glyph and the click
+                // both stay on the whole-chip `isHovering`, so this can only
+                // change how the xmark LOOKS, never what the slot does.
                 .onHover { isSlotHovered = $0 }
                 .onTapGesture {
                     if isHovering { detach() } else { open() }
