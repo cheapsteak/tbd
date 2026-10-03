@@ -744,6 +744,23 @@ struct StatusBarViewChipsTests {
         #expect(card.rows.contains { $0.value.hasPrefix("and ") } == false)
     }
 
+    @Test("a done-card title collapses internal whitespace and is cut short past the card's limit")
+    func doneCardTitleIsBounded() {
+        let limit = StatusBarView.doneCardLeadLimit
+        let card = StatusBarView.doneChipHoverCard([
+            finished(1, title: "Fix the\nlogin\t\ttimeout"),
+            finished(2, title: String(repeating: "x", count: limit)),
+            finished(3, title: String(repeating: "y", count: limit + 1)),
+        ])
+        #expect(card.rows.map(\.value) == [
+            "Fix the login timeout",
+            String(repeating: "x", count: limit),
+            String(repeating: "y", count: limit - 1) + "\u{2026}",
+        ])
+        // The caption is never cut.
+        #expect(card.rows[2].caption == "PR #3 · Merged")
+    }
+
     @Test("the done card is sized to the status bar's text")
     func doneCardTextSize() {
         let card = StatusBarView.doneChipHoverCard([finished(1), finished(2)])

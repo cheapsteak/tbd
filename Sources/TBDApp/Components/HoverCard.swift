@@ -564,10 +564,12 @@ final class HoverCardController {
     private var interactionHooksInstalled = false
     private var menuObserver: NSObjectProtocol?
     private var mouseMonitor: Any?
-    /// The anchor whose dwell is still running — pointer over it, card not yet
-    /// shown. A menu opening cancels that dwell (`HoverDwellReducer.interrupted`)
-    /// so a click made before the card appeared cannot raise it over the menu.
-    private weak var dwellingAnchor: HoverCardAnchorNSView?
+    /// The anchors whose dwell is still running — pointer over them, card not
+    /// yet shown. A set, not one slot: AppKit can deliver the next anchor's
+    /// `mouseEntered` before the last one's `mouseExited`. A menu opening
+    /// cancels every such dwell (`HoverDwellReducer.interrupted`) so a click
+    /// made before a card appeared cannot raise it over the menu.
+    private let dwellingAnchors = NSHashTable<HoverCardAnchorNSView>.weakObjects()
 
     /// How long a click / menu-open suppresses the tooltip's warm reshow.
     /// Comfortably longer than the warm-grace window so a click can't be
@@ -594,9 +596,10 @@ final class HoverCardController {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.dwellingAnchor?.cancelDwell()
-                self?.dwellingAnchor = nil
-                self?.dismissForInteraction()
+                guard let self else { return }
+                for anchor in self.dwellingAnchors.allObjects { anchor.cancelDwell() }
+                self.dwellingAnchors.removeAllObjects()
+                self.dismissForInteraction()
             }
         }
 
@@ -644,12 +647,12 @@ final class HoverCardController {
 
     /// An anchor's pointer entered and its dwell timer started.
     fileprivate func dwellStarted(anchor: HoverCardAnchorNSView) {
-        dwellingAnchor = anchor
+        dwellingAnchors.add(anchor)
     }
 
     /// An anchor's dwell stopped — its card showed, or the pointer left.
     fileprivate func dwellStopped(anchor: HoverCardAnchorNSView) {
-        if dwellingAnchor === anchor { dwellingAnchor = nil }
+        dwellingAnchors.remove(anchor)
     }
 
     func hoverEnded(anchor: NSView) {

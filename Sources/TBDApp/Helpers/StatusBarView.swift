@@ -311,6 +311,11 @@ struct StatusBarView: View {
     /// capped to stay a glance; the chip's click menu lists every one.
     nonisolated static let doneCardRowLimit = 10
 
+    /// How many characters of a finished PR's title a done-card row shows
+    /// before an ellipsis — about three wrapped lines at the card's width, so
+    /// ten long titles cannot grow the card past the window it explains.
+    nonisolated static let doneCardLeadLimit = 120
+
     /// What the `✓ N done` chip's hover overlay says: the count as its title
     /// (`5 merged or closed pull requests`), then one row per finished PR in
     /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
@@ -318,7 +323,8 @@ struct StatusBarView: View {
     /// `PRBindingPresentation.doneReference` (`PR #930 · Merged`, `MR !931 ·
     /// Closed` on GitLab), the same words the chip's menu rows end with. A PR
     /// with neither title nor branch shows the reference as its value and no
-    /// caption, rather than the reference twice.
+    /// caption, rather than the reference twice. A title longer than
+    /// `doneCardLeadLimit` is cut short with an ellipsis.
     ///
     /// Past `doneCardRowLimit` the remainder collapses into a muted final row,
     /// `and N more`.
@@ -333,7 +339,9 @@ struct StatusBarView: View {
             guard let lead = PRBindingPresentation.doneLead(binding) else {
                 return HoverCardRow(value: reference)
             }
-            return HoverCardRow(value: lead, caption: reference)
+            return HoverCardRow(
+                value: PRBindingPresentation.clipped(lead, to: doneCardLeadLimit),
+                caption: reference)
         }
         let hidden = bindings.count - doneCardRowLimit
         if hidden > 0 {

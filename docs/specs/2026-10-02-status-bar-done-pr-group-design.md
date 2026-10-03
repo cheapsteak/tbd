@@ -46,8 +46,10 @@ on GitLab). A PR with neither title nor branch shows the reference and state as
 its value, with nothing beneath. The reference and state come from
 `PRBindingPresentation.doneReference`, which the menu rows below end with too,
 so the card and the menu describe each PR in the same words, each in its own
-forge's syntax. The card lists at most ten PRs; past that, a muted final row
-says "and N more". The chip carries no tooltip, since the card already says
+forge's syntax. A title's internal whitespace collapses to single spaces, and
+the card cuts a title past 120 characters short with an ellipsis, so ten long
+titles cannot grow it past the window. The card lists at most ten PRs; past
+that, a muted final row says "and N more". The chip carries no tooltip, since the card already says
 what one would. Clicking the chip, or opening any menu, before the card has
 appeared keeps it down until the pointer leaves the chip and returns.
 

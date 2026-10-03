@@ -200,7 +200,9 @@ enum PRBindingPresentation {
     }
 
     /// What a finished PR leads with on the done chip's surfaces: its title,
-    /// trimmed, or its head branch when it has no title. nil when it has
+    /// trimmed and with every internal run of whitespace (a newline or tab
+    /// included) collapsed to one space, or its head branch when it has no
+    /// title. nil when it has
     /// neither — a synthetic binding lifted from a legacy status carries no
     /// title or branch — and both surfaces then show `doneReference` alone.
     ///
@@ -210,10 +212,10 @@ enum PRBindingPresentation {
     /// a poorer reminder of what shipped than the title it shipped under.
     static func doneLead(_ binding: PRBinding) -> String? {
         for candidate in [binding.title, binding.headBranch] {
-            if let text = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !text.isEmpty {
-                return text
-            }
+            let words = (candidate ?? "")
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+            if !words.isEmpty { return words.joined(separator: " ") }
         }
         return nil
     }
@@ -239,9 +241,17 @@ enum PRBindingPresentation {
 
     /// How many characters of a finished PR's title the done chip's menu row
     /// shows before an ellipsis. AppKit does not truncate a menu item's title,
-    /// so one long title would otherwise widen the whole menu; the hover card
-    /// wraps, and shows the title in full.
+    /// so one long title would otherwise widen the whole menu. The hover card
+    /// wraps instead, under its own, longer `StatusBarView.doneCardLeadLimit`.
     static let doneMenuLeadLimit = 80
+
+    /// `text` cut to at most `limit` characters, the last of them an ellipsis
+    /// when anything was cut. Bounds a done-chip lead on surfaces that would
+    /// otherwise grow with it.
+    static func clipped(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return text.prefix(limit - 1).trimmingCharacters(in: .whitespaces) + "\u{2026}"
+    }
 
     /// The done chip's menu rows, in bind order: the PR's title (or head
     /// branch) first, then its `doneReference`, e.g.
@@ -258,11 +268,7 @@ enum PRBindingPresentation {
         bindings.map { binding in
             let reference = doneReference(binding)
             let title = doneLead(binding).map { (lead: String) -> String in
-                let shown = lead.count > doneMenuLeadLimit
-                    ? lead.prefix(doneMenuLeadLimit - 1)
-                        .trimmingCharacters(in: .whitespaces) + "\u{2026}"
-                    : lead
-                return "\(shown)  \(reference)"
+                "\(clipped(lead, to: doneMenuLeadLimit))  \(reference)"
             } ?? reference
             return MenuRow(
                 id: binding.id,
