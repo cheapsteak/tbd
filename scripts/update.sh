@@ -18,6 +18,7 @@
 #   scripts/update.sh --wake-only  # wake recovery-parked sessions, update nothing
 #   scripts/update.sh --auto       # non-interactive; what the daemon launches
 #   scripts/update.sh --remote <url>  # fetch from this URL instead of the default
+#   scripts/update.sh --from-release  # install CI's published build instead of compiling
 
 # MARK: - Constants
 #
@@ -51,6 +52,40 @@ HANDOVER_TIMEOUT=120
 # the process being stopped has already missed a two-minute deadline.
 HANDOVER_STOP_GRACE=5
 
+# Where the new binaries come from. `build` compiles them here, as every update
+# always has. `release` downloads the build the release workflow published for
+# a commit on main, verifies it, and installs that instead, so the update
+# spends no local CPU on the compile. Shipped as `build`: installing binaries
+# this machine did not compile replaces a load-bearing path, so it soaks
+# opt-in first. Graduation is flipping this constant. An operator opts in
+# without editing it — the update clone is checked out afresh by every update,
+# so an edit here would not survive — with, in order of precedence:
+#   --from-release                          this run only
+#   TBD_UPDATE_SOURCE=release               this environment
+#   echo release > ~/tbd/updates/update-source   every run, `auto` included
+# See docs/specs/2026-09-23-release-pipeline-design.md.
+UPDATE_SOURCE_DEFAULT=build
+
+# The rolling prerelease the release workflow publishes to. Its tag is moved to
+# each newly published commit, so it doubles as the ref the daemon's update
+# check compares against while the source is `release`.
+RELEASE_TAG=main-builds
+
+# How many commits back along main's first-parent history to look for a
+# published build when the head has none yet — a push whose build is still
+# running, or one CI cancelled because a newer push superseded it. It must
+# stay below the number of commits the release keeps assets for (RELEASE_KEEP,
+# 20, in scripts/ci/publish-release.sh), so every commit the walk can reach
+# still has its asset. At roughly 140 pushes to main a month, 10 commits is
+# about two days of main; a machine further behind than that is better served
+# by a local build of the head than by an older binary.
+# shellcheck disable=SC2034 # read by scripts/update-release-lib.sh
+RELEASE_WALKBACK=10
+
+# The workflow a verified attestation must name as its signer.
+# shellcheck disable=SC2034 # read by scripts/update-release-lib.sh
+RELEASE_WORKFLOW_PATH=.github/workflows/release.yml
+
 # MARK: - Derived paths
 
 UPDATE_SRC="$UPDATE_HOME/src"
@@ -63,6 +98,12 @@ APP_LOG="/tmp/tbdapp.log"
 INSTALLED_BUNDLE="/Applications/TBD.app"
 PREVIOUS_BUNDLE="$UPDATE_HOME/previous/TBD.app"
 CLI_INSTALL_PATH="$HOME/.local/bin/tbd"
+PREBUILT_HOME="$UPDATE_HOME/prebuilt"
+UPDATE_SOURCE_FILE="$UPDATE_HOME/update-source"
+# The ref the daemon's update check compares against. Written by this script
+# from the resolved update source: present and naming the release tag while
+# the source is `release`, absent (the daemon then reads main) otherwise.
+CHECK_REF_FILE="$UPDATE_HOME/check-ref"
 
 UPDATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -76,6 +117,7 @@ OPT_NO_WAKE=false
 OPT_WAKE_ONLY=false
 OPT_AUTO=false
 OPT_REMOTE=""
+OPT_FROM_RELEASE=false
 
 usage() {
     cat << 'EOF'
@@ -97,6 +139,9 @@ Options:
                    already running. Builds and installs nothing.
   --auto           Non-interactive. Logs to the update log only, and refuses
                    to run while another update holds the lock.
+  --from-release   Install the build CI published for the newest commit on
+                   main that has one, verified, instead of compiling. Falls
+                   back to a local build when none is published.
   --remote <url>   Fetch from this URL instead of the daemon worktree's
                    upstream (else origin) remote.
   --help           Show this message.
@@ -125,6 +170,7 @@ parse_args() {
                 fi
                 ;;
             --remote=*) OPT_REMOTE="${1#--remote=}" ;;
+            --from-release) OPT_FROM_RELEASE=true ;;
             --help|-h) usage; return 10 ;;
             *)
                 echo "error: unknown option $1" >&2
@@ -335,6 +381,23 @@ release_lock() {
     fi
 }
 
+# Set once main knows where the clone's .build/release is; the exit trap
+# reconciles ~/tbd/updates/prebuilt only after that point, under the lock.
+PREBUILT_RECONCILE_LINK=""
+PREBUILT_START_LIVE=""
+
+# Every exit from a run that took the lock: reconcile the prebuilt trees, then
+# drop the lock. Whatever branch the run left by — a dry run, a failed build, a
+# failed handover, a verification failure, a completed install — nothing it
+# downloaded outlives it unless it is now what .build/release points at.
+on_update_exit() {
+    if [ -n "$PREBUILT_RECONCILE_LINK" ]; then
+        reconcile_prebuilt "$PREBUILT_HOME" "$PREBUILT_RECONCILE_LINK" "$PREBUILT_START_LIVE" \
+            || log "WARNING: could not reconcile $PREBUILT_HOME"
+    fi
+    release_lock
+}
+
 # MARK: - Reading the running daemon
 
 # One field out of a JSON object, by dotted path. Empty output and a non-zero
@@ -471,7 +534,7 @@ maybe_reexec() {
     # them — the product list in restart-bundle-lib.sh, say — would otherwise
     # run the old copy against the new sources with nothing to trigger the hop.
     local name
-    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh restart-build-lib.sh; do
+    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh restart-build-lib.sh update-release-lib.sh; do
         if should_reexec "$UPDATE_SRC/scripts/$name" "$UPDATE_SCRIPT_DIR/$name"; then
             log "re-exec: the fetched $name differs from the running one"
             # Carry the lock across. `exec` replaces the image but keeps the
@@ -488,7 +551,12 @@ maybe_reexec() {
 
 build_products() {
     local repo_root="${1-}"
+    shift
     local product build_out
+    # The products to build: the arguments, else every runtime product. A
+    # release install passes only the ones the download does not carry.
+    local products=("$@")
+    [ "${#products[@]}" -gt 0 ] || products=("${RUNTIME_PRODUCTS[@]}")
 
     # The shared clang/Swift module cache is NOT selected here.
     # scripts/swift-safe points every governed compile at it, so this script,
@@ -503,7 +571,7 @@ build_products() {
     # with scripts/restart.sh; it includes TBDCLI because `tbd update` is run
     # through that binary, and an update that leaves the CLI behind reports a
     # version it is not.
-    for product in "${RUNTIME_PRODUCTS[@]}"; do
+    for product in "${products[@]}"; do
         log "building $product ($BUILD_CONFIG)"
         # Capture the status, THEN print. Piping the build into `tail` would
         # make the pipeline's status tail's, which is always zero.
@@ -1012,7 +1080,7 @@ run_check() {
         worktree="$(resolve_source_worktree "$status_json" || true)"
         remote_url="$(resolve_remote_url "$worktree" "$OPT_REMOTE" || true)"
         if [ -n "$remote_url" ]; then
-            head="$(git ls-remote "$remote_url" refs/heads/main 2>/dev/null | awk '{print $1}')"
+            head="$(git ls-remote "$remote_url" "$(check_ref_for_source "$(resolve_update_source)")" 2>/dev/null | awk '{print $1}')"
             if [ -n "$head" ]; then
                 latest="$head"
                 relation="$(local_relation "$worktree" "$running" "$head")"
@@ -1087,6 +1155,57 @@ local_relation() {
     fi
 }
 
+# MARK: - Update source
+
+# `build` or `release`: the --from-release flag, else TBD_UPDATE_SOURCE, else
+# the update-source file, else the shipped default. Anything unrecognized
+# reads as `build`, the path that installs nothing it did not compile.
+resolve_update_source() {
+    local value=""
+    if [ "$OPT_FROM_RELEASE" = true ]; then
+        value=release
+    elif [ -n "${TBD_UPDATE_SOURCE:-}" ]; then
+        value="$TBD_UPDATE_SOURCE"
+    elif [ -f "$UPDATE_SOURCE_FILE" ]; then
+        value="$(tr -d '[:space:]' < "$UPDATE_SOURCE_FILE" 2>/dev/null || true)"
+    else
+        value="$UPDATE_SOURCE_DEFAULT"
+    fi
+    case "$value" in
+        release|build) printf '%s\n' "$value" ;;
+        *)
+            log "WARNING: unknown update source '$value' — building locally" >&2
+            printf 'build\n'
+            ;;
+    esac
+}
+
+# The ref "latest" means for a given source. While the source is `release`,
+# only a published build is installable, so the check compares against the
+# tag the release workflow moves after each publish.
+check_ref_for_source() {
+    if [ "${1-}" = release ]; then
+        printf 'refs/tags/%s\n' "$RELEASE_TAG"
+    else
+        printf 'refs/heads/main\n'
+    fi
+}
+
+# Tell the daemon's update check which ref to compare against. The file is
+# the whole interface: present means "this ref", absent means main. A
+# one-off --from-release leaves it alone — the check follows the standing
+# choice, not a single run's flag.
+sync_check_ref() {
+    local standing
+    standing="$(OPT_FROM_RELEASE=false resolve_update_source)"
+    if [ "$standing" = release ]; then
+        mkdir -p "$UPDATE_HOME" 2>/dev/null || return 0
+        check_ref_for_source release > "$CHECK_REF_FILE" 2>/dev/null || true
+    else
+        rm -f "$CHECK_REF_FILE"
+    fi
+}
+
 # MARK: - main
 
 main() {
@@ -1097,6 +1216,8 @@ main() {
     source "$UPDATE_SCRIPT_DIR/restart-bundle-lib.sh"
     # shellcheck source=/dev/null
     source "$UPDATE_SCRIPT_DIR/restart-build-lib.sh"
+    # shellcheck source=/dev/null
+    source "$UPDATE_SCRIPT_DIR/update-release-lib.sh"
 
     # Run from inside another project's dev shell (nix/direnv, say), this
     # process inherits that shell's SDK and header overrides. They point the
@@ -1111,12 +1232,13 @@ main() {
     clear_sdk_overrides
 
     if [ "$OPT_CHECK" = true ]; then
+        sync_check_ref
         run_check
         return 0
     fi
 
     acquire_lock || return 1
-    trap release_lock EXIT
+    trap on_update_exit EXIT
 
     local status_json source_worktree old_commit
     status_json="$(daemon_status_json)"
@@ -1143,28 +1265,132 @@ main() {
     fetch_latest || return 1
     maybe_reexec "$@"
 
-    local new_commit build_dir
+    local new_commit build_dir update_source release_link previous_release_target=""
     new_commit="$(git -C "$UPDATE_SRC" rev-parse HEAD 2>/dev/null || true)"
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
+    release_link="$UPDATE_SRC/.build/release"
 
-    build_products "$UPDATE_SRC" || return 1
+    # Reconcile the prebuilt trees before anything is downloaded, and arm the
+    # same reconcile for every exit (on_update_exit). The tree live now is
+    # kept on the way out even when the link no longer names it, because
+    # until an install completes it is still what the daemon runs from.
+    PREBUILT_START_LIVE="$(link_target "$release_link" || true)"
+    PREBUILT_RECONCILE_LINK="$release_link"
+    reconcile_prebuilt "$PREBUILT_HOME" "$release_link"
 
-    # Stamp only now that the build actually succeeded. This used to run
-    # BEFORE build_products, on the theory that the sidecar should always
-    # name the same commit as the binaries beside it — but a build that then
-    # FAILED left the opposite: a sidecar naming the commit that was
-    # attempted, sitting next to binaries that were never touched, with
-    # nothing to ever put it right, since the only later write in this same
-    # clone is the next update's — success or failure. `$UPDATE_SRC` is one
-    # long-lived clone every update reuses (see docs/updating.md), so that
-    # wrong sidecar persists until this clone next builds successfully: any
-    # `tbd version` or manual inspection pointed at it in the meantime learns
-    # about a commit whose fix, or whose bug, was never actually built.
-    # Moving the write here removes the premature half entirely — there is
-    # now one write site, sequenced after success, so there is nothing to
-    # roll back on failure and no separate temp file to manage.
-    write_build_identity "$UPDATE_SRC" "$build_dir" || log "WARNING: no build identity stamped"
+    update_source="$(resolve_update_source)"
+    sync_check_ref
+
+    # MARK: Where the binaries come from
+    #
+    # `release` tries the published build first. What happens when there is
+    # none depends on who asked: a person running `tbd update` gets the local
+    # build they would have had anyway, while an unattended `--auto` run skips,
+    # because the whole point of the download is that nothing unattended
+    # compiles here, and the next check tries again. A machine the workflow
+    # does not publish for builds locally in both cases — "try again later"
+    # would mean never. A download that fails verification is neither: it
+    # stops the run, loudly, and nothing is built or installed.
+    local use_release=false release_status
+    if [ "$update_source" = release ] && [ "$BUILD_CONFIG" != release ]; then
+        log "--debug always builds locally: the release workflow publishes release builds only"
+    elif [ "$update_source" = release ]; then
+        release_status=0
+        acquire_release_build "$UPDATE_SRC" "$remote_url" "$old_commit" \
+            "$PREBUILT_HOME" "$OPT_AUTO" || release_status=$?
+        case "$release_status" in
+            "$RELEASE_OK")
+                use_release=true
+                new_commit="$RELEASE_COMMIT"
+                ;;
+            "$RELEASE_ALREADY_CURRENT")
+                log "the running build ${old_commit:-unknown} is already at or past the newest published build — nothing to install"
+                print_summary "$old_commit" "$old_commit" 0 0 0 0
+                return 0
+                ;;
+            "$RELEASE_UNSUPPORTED_ARCH")
+                log "building locally instead"
+                ;;
+            "$RELEASE_UNAVAILABLE")
+                if [ "$OPT_AUTO" = true ]; then
+                    log "no published build to install — skipping this unattended update; the next check tries again"
+                    return 0
+                fi
+                log "building locally instead"
+                ;;
+            *)
+                log_error "the published build failed verification — nothing was installed, and nothing will be built in its place"
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ "$use_release" = true ]; then
+        # The download is the build. Stamp its identity from the clone, which
+        # acquire_release_build left detached at the commit being installed,
+        # then record where it came from.
+        if write_build_identity "$UPDATE_SRC" "$RELEASE_TREE"; then
+            stamp_release_provenance "$RELEASE_TREE/TBDBuildIdentity.json" \
+                "$(manifest_field "$RELEASE_TREE" runUrl || true)" \
+                "$(manifest_field "$RELEASE_TREE" builtAt || true)" \
+                || log "WARNING: could not record the release provenance"
+        else
+            log "WARNING: no build identity stamped"
+        fi
+        # The products the download does not carry are built here, into
+        # SwiftPM's own directory, and copied into the tree. The link is
+        # handed to SwiftPM for the build and put back on failure, so a
+        # failed compile leaves a reboot respawning what is running now.
+        previous_release_target="$(link_target "$release_link" || true)"
+        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        local local_build_dir
+        if ! build_products "$UPDATE_SRC" "${RELEASE_LOCAL_PRODUCTS[@]}" ||
+            ! local_build_dir="$(swiftpm_build_dir "$UPDATE_SRC" "$BUILD_CONFIG")" ||
+            ! merge_local_products "$local_build_dir" "$RELEASE_TREE"; then
+            restore_release_link "$release_link" "$previous_release_target"
+            log_error "could not build ${RELEASE_LOCAL_PRODUCTS[*]} to go with the download — the running installation is untouched"
+            return 1
+        fi
+        if [ "$OPT_DRY_RUN" = true ]; then
+            restore_release_link "$release_link" "$previous_release_target"
+            log "dry run: downloaded and verified ${new_commit:-unknown} into $RELEASE_TREE, installing nothing"
+            print_summary "$old_commit" "$new_commit" \
+                "$(commits_advanced "$old_commit" "$new_commit" || true)" 0 0 0
+            return 0
+        fi
+        # Installing the download on disk is pointing .build/release at it:
+        # the handover, the app's reboot respawn and the CLI link all look
+        # there already. What it pointed at before is kept above, so a failed
+        # link or a failed handover can put it back.
+        if ! point_release_link "$release_link" "$RELEASE_TREE"; then
+            restore_release_link "$release_link" "$previous_release_target"
+            log_error "could not point $release_link at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
+            return 1
+        fi
+        log "pointed $release_link at $RELEASE_TREE"
+    else
+        # A local build owns .build/release: hand it back to SwiftPM if a
+        # download holds it.
+        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        build_products "$UPDATE_SRC" || return 1
+
+        # Stamp only now that the build actually succeeded. This used to run
+        # BEFORE build_products, on the theory that the sidecar should always
+        # name the same commit as the binaries beside it — but a build that then
+        # FAILED left the opposite: a sidecar naming the commit that was
+        # attempted, sitting next to binaries that were never touched, with
+        # nothing to ever put it right, since the only later write in this same
+        # clone is the next update's — success or failure. `$UPDATE_SRC` is one
+        # long-lived clone every update reuses (see docs/updating.md), so that
+        # wrong sidecar persists until this clone next builds successfully: any
+        # `tbd version` or manual inspection pointed at it in the meantime learns
+        # about a commit whose fix, or whose bug, was never actually built.
+        # Moving the write here removes the premature half entirely — there is
+        # now one write site, sequenced after success, so there is nothing to
+        # roll back on failure and no separate temp file to manage.
+        write_build_identity "$UPDATE_SRC" "$build_dir" || log "WARNING: no build identity stamped"
+    fi
 
     local advanced
     advanced="$(commits_advanced "$old_commit" "$new_commit" || true)"
@@ -1188,8 +1414,24 @@ main() {
     # costs a wasted build and nothing else. install_and_handover is where the
     # running installation moves, and it says at each line what undoing that
     # line costs.
-    install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon" \
-        || return 1
+    if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
+        # The previous app bundle is back; put the daemon path back with it,
+        # so a reboot respawns the build that is still running.
+        if [ "$use_release" = true ]; then
+            if [ -n "$previous_release_target" ]; then
+                point_release_link "$release_link" "$previous_release_target" \
+                    && log "pointed $release_link back at $previous_release_target"
+            else
+                rm -f "$release_link"
+            fi
+        fi
+        return 1
+    fi
+
+    # The install completed. The tree that was live when this run started is
+    # now the rollback, paired with ~/tbd/updates/previous/TBD.app; the exit
+    # reconcile keeps it and the new live tree and removes everything older.
+    record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
 
     refresh_installed_cli "$build_dir/TBDCLI"
 

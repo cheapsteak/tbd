@@ -18,9 +18,45 @@ private let updateLogger = Logger(subsystem: "com.tbd.daemon", category: "update
 /// relation table and the launch decision are all testable without a network,
 /// a git remote, or a subprocess.
 public actor UpdateChecker {
-    /// The ref that means "latest". TBD has no tags and no release workflow, so
-    /// latest is the head of `main` on the upstream remote.
+    /// The ref that means "latest" by default: the head of `main` on the
+    /// upstream remote.
     public static let mainRef = "refs/heads/main"
+
+    /// The ref that means "latest" for this installation, given the contents
+    /// of the check-ref file (`TBDConstants.updateCheckRefFile`), or nil when
+    /// there is none.
+    ///
+    /// `scripts/update.sh` writes that file while its update source is
+    /// `release`, naming the tag the release workflow moves after each
+    /// publish: only a published build is installable then, so a newer `main`
+    /// with no build yet is not an update. The choice lives in user-land and
+    /// this reads it; anything that is not a well-formed branch or tag ref
+    /// reads as `mainRef`, so a stray file can only ever restore the default.
+    public static func comparedRef(fileContents: String?) -> String {
+        guard let raw = fileContents?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty
+        else { return mainRef }
+        let prefixes = ["refs/heads/", "refs/tags/"]
+        guard let prefix = prefixes.first(where: { raw.hasPrefix($0) }) else { return mainRef }
+        let name = raw.dropFirst(prefix.count)
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._/-"))
+        guard !name.isEmpty,
+              !name.hasPrefix("-"), !name.hasPrefix("/"), !name.hasSuffix("/"),
+              !name.contains(".."), !name.contains("//"),
+              name.unicodeScalars.allSatisfy({ $0.isASCII && allowed.contains($0) })
+        else { return mainRef }
+        return raw
+    }
+
+    /// `comparedRef(fileContents:)` for the check-ref file under the TBD home
+    /// the environment names. Read on every tick, so an update that changes
+    /// the source takes effect at the next check without a restart.
+    public static func comparedRef(
+        environment: [String: String],
+        read: (URL) -> String? = { try? String(contentsOf: $0, encoding: .utf8) }
+    ) -> String {
+        comparedRef(fileContents: read(TBDConstants.updateCheckRefFile(environment: environment)))
+    }
 
     /// How often a running checker ticks, absent an override. One hour: the
     /// check is a single ref advertisement, and an operator who wants to know
@@ -50,7 +86,7 @@ public actor UpdateChecker {
     public typealias ModeReader = @Sendable () async -> UpdateMode
     /// Worktree path to the URL its `upstream` (else `origin`) remote names.
     public typealias RemoteResolver = @Sendable (String) async -> String?
-    /// `(remote URL, worktree)` to the commit `refs/heads/main` points at.
+    /// `(remote URL, worktree)` to the commit the compared ref points at (`comparedRef`).
     public typealias RemoteHeadReader = @Sendable (String, String) async -> String?
     /// `(ours, latest, worktree)` to whether `latest` contains `ours`. The
     /// answer separates the two ways the question goes undecided — a latest
@@ -215,7 +251,7 @@ public actor UpdateChecker {
             // network, not a new fact about this build: keep the last
             // observation rather than replacing it with `unknown`.
             updateLogger.debug(
-                "update: ls-remote gave no head for \(Self.mainRef, privacy: .public) at \(url, privacy: .public)")
+                "update: ls-remote gave no head for the compared ref at \(url, privacy: .public)")
             return
         }
 
