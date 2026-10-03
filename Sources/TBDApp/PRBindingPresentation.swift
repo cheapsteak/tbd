@@ -202,7 +202,7 @@ enum PRBindingPresentation {
     /// What a finished PR leads with on the done chip's surfaces: its title,
     /// trimmed, or its head branch when it has no title. nil when it has
     /// neither — a synthetic binding lifted from a legacy status carries no
-    /// title or branch — so each surface picks its own last resort.
+    /// title or branch — and both surfaces then show `doneReference` alone.
     ///
     /// The title leads there, where the `+N` menu leads with the reference,
     /// because a finished PR has no chip of its own: a folded PR's title is
@@ -218,26 +218,52 @@ enum PRBindingPresentation {
         return nil
     }
 
+    /// A finished PR's reference and state, e.g. `PR #930 · Merged` or
+    /// `MR !931 · Closed` — the one wording both done-chip surfaces use for
+    /// it, the menu row after its title and the hover card beneath it, so the
+    /// card and the menu one click away cannot spell one PR two ways.
+    ///
+    /// The reference is the binding's own `refLabel`, in its forge's syntax:
+    /// a finished PR has no chip drawing a bare `#930` for it to agree with.
+    /// The state is `PRStatusPresentation.stateDescription`, the sentence the
+    /// `+N` menu and the toolbar compose with, dropped when blank so the line
+    /// never ends in a dangling separator.
+    static func doneReference(_ binding: PRBinding) -> String {
+        let reference = binding.refLabel
+        guard let state = binding.status
+                .map({ PRStatusPresentation.stateDescription(for: $0) })?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !state.isEmpty else { return reference }
+        return "\(reference) · \(state)"
+    }
+
+    /// How many characters of a finished PR's title the done chip's menu row
+    /// shows before an ellipsis. AppKit does not truncate a menu item's title,
+    /// so one long title would otherwise widen the whole menu; the hover card
+    /// wraps, and shows the title in full.
+    static let doneMenuLeadLimit = 80
+
     /// The done chip's menu rows, in bind order: the PR's title (or head
-    /// branch) first, then the reference and state, e.g.
+    /// branch) first, then its `doneReference`, e.g.
     /// `"Fix the login timeout  PR #930 · Merged"` or
     /// `"Trim the relay  MR !931 · Closed"`. A binding with neither title nor
-    /// branch reads as the reference alone.
+    /// branch reads as the reference alone. A lead longer than
+    /// `doneMenuLeadLimit` is cut short with an ellipsis.
     ///
     /// A done-chip builder of its own rather than `menuRows`, so the `+N` menu
-    /// and the toolbar dropdown keep sharing one row shape. The reference half
-    /// takes the same per-binding `refLabel` and the same
-    /// `PRStatusPresentation.stateDescription` sentence `menuRows` does, so a
-    /// PR still cannot be described two ways. Rows render through
+    /// and the toolbar dropdown keep sharing one row shape. Rows render through
     /// `menuRowsID` exactly as `menuRows`' do — the key reads only `id`,
     /// `title` and `url`.
     static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
-            var reference = binding.refLabel
-            if let status = binding.status {
-                reference += " · \(PRStatusPresentation.stateDescription(for: status))"
-            }
-            let title = doneLead(binding).map { "\($0)  \(reference)" } ?? reference
+            let reference = doneReference(binding)
+            let title = doneLead(binding).map { lead in
+                let shown = lead.count > doneMenuLeadLimit
+                    ? lead.prefix(doneMenuLeadLimit - 1)
+                        .trimmingCharacters(in: .whitespaces) + "\u{2026}"
+                    : lead
+                return "\(shown)  \(reference)"
+            } ?? reference
             return MenuRow(
                 id: binding.id,
                 number: binding.number,
@@ -321,7 +347,7 @@ enum PRBindingPresentation {
     /// The done chip's hover-card title. Counts a set that can span both
     /// forges, so it takes the aggregate "pull request" wording rather than
     /// any one forge's noun — see `overflowChipTooltip`.
-    static func doneChipTooltip(count: Int) -> String {
+    static func doneChipCardTitle(count: Int) -> String {
         "\(count) merged or closed pull request\(count == 1 ? "" : "s")"
     }
 

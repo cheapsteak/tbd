@@ -40,12 +40,16 @@ set can span both forges.
 Hovering it raises a compact, read-only hover card in the same style as a PR
 chip's (`StatusBarView.doneChipHoverCard`). The card's title is the count ("5
 merged or closed pull requests"), and it lists the finished PRs in bind order,
-one row each: the PR's title as the value, falling back to its head branch and
-then to its reference (`PR #930`), with the reference and state beneath it
-(`PR#930 · Merged`, `MR#930 · Merged` on GitLab), built by the same
-`chipReference` a chip's own card uses. The card lists at most ten PRs; past
-that, a muted final row says "and N more". The chip carries no tooltip, since
-the card already says what one would.
+one row each: the PR's title as the value, falling back to its head branch,
+with the reference and state beneath it (`PR #930 · Merged`, `MR !930 · Merged`
+on GitLab). A PR with neither title nor branch shows the reference and state as
+its value, with nothing beneath. The reference and state come from
+`PRBindingPresentation.doneReference`, which the menu rows below end with too,
+so the card and the menu describe each PR in the same words, each in its own
+forge's syntax. The card lists at most ten PRs; past that, a muted final row
+says "and N more". The chip carries no tooltip, since the card already says
+what one would. Clicking the chip, or opening any menu, before the card has
+appeared keeps it down until the pointer leaves the chip and returns.
 
 Titles lead because a finished PR has no chip of its own: once folded, its
 title is shown nowhere else on the status bar, and a merged branch name is a
@@ -53,8 +57,9 @@ poorer reminder of what shipped than its title.
 
 Clicking the chip opens a menu of the same PRs in bind order, built by
 `PRBindingPresentation.doneMenuRows`: each row leads with the title (or the head
-branch when there is none), then the reference and state (`Fix the login
-timeout  PR #930 · Merged`). The `+N` menu and the toolbar dropdown keep their
+branch when there is none, cut short with an ellipsis past 80 characters, since
+AppKit widens a menu to its longest item), then the reference and state (`Fix
+the login timeout  PR #930 · Merged`). The `+N` menu and the toolbar dropdown keep their
 shared `menuRows` shape. Choosing a row opens the PR in the default browser, as
 the `+N` menu does. It offers no untrack action, matching the `+N` menu.
 

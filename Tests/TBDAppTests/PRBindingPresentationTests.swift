@@ -301,9 +301,9 @@ struct PRBindingPresentationTests {
     @Test("the done chip names its count, singular and plural")
     func doneChipWording() {
         #expect(PRBindingPresentation.doneChipLabel(count: 5) == "\u{2713} 5 done")
-        #expect(PRBindingPresentation.doneChipTooltip(count: 5)
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 5)
                     == "5 merged or closed pull requests")
-        #expect(PRBindingPresentation.doneChipTooltip(count: 1)
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 1)
                     == "1 merged or closed pull request")
         #expect(PRBindingPresentation.doneChipAccessibilityLabel(count: 5)
                     == "Show 5 merged or closed pull requests")
@@ -353,6 +353,31 @@ struct PRBindingPresentationTests {
             "PR #6 · Merged",
             "MR !7 · Merged",
         ])
+    }
+
+    @Test("a blank status reason leaves no dangling separator on a done row")
+    func doneMenuRowsBlankReason() {
+        let url = "https://github.com/acme/acme-prod/pull/8"
+        let b = PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                          number: 8, url: url, title: "Fix it",
+                          status: PRStatus(number: 8, url: url, state: .merged, reason: "  "),
+                          source: .hook)
+        #expect(PRBindingPresentation.doneReference(b) == "PR #8")
+        #expect(PRBindingPresentation.doneMenuRows([b])[0].title == "Fix it  PR #8")
+    }
+
+    @Test("a long title is cut short in the done menu, never the reference")
+    func doneMenuRowsTruncateLongTitles() {
+        let limit = PRBindingPresentation.doneMenuLeadLimit
+        let exact = String(repeating: "a", count: limit)
+        let long = String(repeating: "b", count: limit + 40)
+        let rows = PRBindingPresentation.doneMenuRows([
+            finished(1, title: exact),
+            finished(2, title: long),
+        ])
+        #expect(rows[0].title == "\(exact)  PR #1 · Merged")
+        #expect(rows[1].title
+                == "\(String(repeating: "b", count: limit - 1))\u{2026}  PR #2 · Merged")
     }
 
     @Test("the done menu's rows do not change the shared +N / toolbar rows")

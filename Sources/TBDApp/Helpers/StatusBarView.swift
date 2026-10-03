@@ -287,27 +287,23 @@ struct StatusBarView: View {
         observation: PRObservation? = nil
     ) -> (chips: [PRChip], overflow: Int, overflowMenu: [PRBinding], done: [PRBinding]) {
         let selected = PRBindingPresentation.statusBarGroups(bindings, limit: limit)
-        let chips = selected.chips.map { prChip($0, observation: observation) }
+        let chips = selected.chips.map { binding in
+            PRChip(
+                id: binding.id,
+                worktreeID: binding.worktreeID,
+                number: binding.number,
+                label: "#\(binding.number)",
+                forge: Forge.forURL(binding.url),
+                url: URL(string: binding.url),
+                state: binding.status?.state,
+                mergeQueuePosition: binding.status?.mergeQueuePosition,
+                reason: binding.status.map { $0.reason ?? $0.state.displayReason },
+                title: binding.title,
+                observedAt: binding.status?.observedAt,
+                observation: observation
+            )
+        }
         return (chips, selected.overflow, selected.overflowMenu, selected.done)
-    }
-
-    /// One binding as a chip value — the single place a `PRChip` is built, so
-    /// the chip row and the done chip's card read a binding identically.
-    nonisolated static func prChip(_ binding: PRBinding, observation: PRObservation? = nil) -> PRChip {
-        PRChip(
-            id: binding.id,
-            worktreeID: binding.worktreeID,
-            number: binding.number,
-            label: "#\(binding.number)",
-            forge: Forge.forURL(binding.url),
-            url: URL(string: binding.url),
-            state: binding.status?.state,
-            mergeQueuePosition: binding.status?.mergeQueuePosition,
-            reason: binding.status.map { $0.reason ?? $0.state.displayReason },
-            title: binding.title,
-            observedAt: binding.status?.observedAt,
-            observation: observation
-        )
     }
 
     /// How many finished PRs the done chip's card lists before summarising the
@@ -317,11 +313,12 @@ struct StatusBarView: View {
 
     /// What the `✓ N done` chip's hover overlay says: the count as its title
     /// (`5 merged or closed pull requests`), then one row per finished PR in
-    /// bind order — the PR's title as the value, and beneath it the same
-    /// reference line a chip's own card shows (`PR#930 · Merged`, `MR#931 ·
-    /// Closed` on GitLab), built by `chipReference` so the two cards cannot word
-    /// one PR differently. A PR with no title falls back to its head branch,
-    /// then to its reference (`PR #930`).
+    /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
+    /// the title, else the head branch) and beneath it the PR's
+    /// `PRBindingPresentation.doneReference` (`PR #930 · Merged`, `MR !931 ·
+    /// Closed` on GitLab), the same words the chip's menu rows end with. A PR
+    /// with neither title nor branch shows the reference as its value and no
+    /// caption, rather than the reference twice.
     ///
     /// Past `doneCardRowLimit` the remainder collapses into a muted final row,
     /// `and N more`.
@@ -330,11 +327,13 @@ struct StatusBarView: View {
     nonisolated static func doneChipHoverCard(_ bindings: [PRBinding]) -> HoverCardModel {
         var model = HoverCardModel()
         model.textSize = .compact
-        model.title = PRBindingPresentation.doneChipTooltip(count: bindings.count)
+        model.title = PRBindingPresentation.doneChipCardTitle(count: bindings.count)
         model.rows = bindings.prefix(doneCardRowLimit).map { binding in
-            HoverCardRow(
-                value: PRBindingPresentation.doneLead(binding) ?? binding.refLabel,
-                caption: chipReference(prChip(binding)))
+            let reference = PRBindingPresentation.doneReference(binding)
+            guard let lead = PRBindingPresentation.doneLead(binding) else {
+                return HoverCardRow(value: reference)
+            }
+            return HoverCardRow(value: lead, caption: reference)
         }
         let hidden = bindings.count - doneCardRowLimit
         if hidden > 0 {

@@ -673,33 +673,39 @@ struct StatusBarViewChipsTests {
             finished(901, title: "Add retries"),
         ])
         #expect(card.title == "3 merged or closed pull requests")
-        #expect(card.title == PRBindingPresentation.doneChipTooltip(count: 3))
+        #expect(card.title == PRBindingPresentation.doneChipCardTitle(count: 3))
         #expect(card.titleCaption == nil)
         #expect(card.rows.map(\.value) == ["Fix the login timeout", "Trim the relay", "Add retries"])
         #expect(card.rows.map(\.caption) == [
-            "PR#930 · \(PRMergeableState.merged.displayReason)",
-            "PR#912 · \(PRMergeableState.closed.displayReason)",
-            "PR#901 · \(PRMergeableState.merged.displayReason)",
+            "PR #930 · Merged",
+            "PR #912 · Closed",
+            "PR #901 · Merged",
         ])
         #expect(card.rows.allSatisfy { $0.valueStyle == .plain && $0.tint == .normal })
     }
 
-    @Test("the done card's caption is the chip card's reference line")
-    func doneCardCaptionMatchesChipReference() {
-        let binding = finished(930, title: "Fix it")
-        let card = StatusBarView.doneChipHoverCard([binding, finished(931)])
-        #expect(card.rows[0].caption
-                == StatusBarView.chipReference(StatusBarView.prChip(binding)))
+    @Test("the done card's caption ends the done menu's row for the same PR")
+    func doneCardCaptionMatchesMenuRow() throws {
+        let bindings = [finished(930, title: "Fix it"),
+                        finished(41, .closed, title: "Trim the relay", gitlab: true)]
+        let card = StatusBarView.doneChipHoverCard(bindings)
+        let menu = PRBindingPresentation.doneMenuRows(bindings)
+        for (row, menuRow) in zip(card.rows, menu) {
+            let caption = try #require(row.caption)
+            #expect(menuRow.title == "\(row.value)  \(caption)")
+        }
     }
 
-    @Test("an untitled finished PR falls back to its branch, then to its reference")
+    @Test("an untitled finished PR falls back to its branch, then to its reference alone")
     func doneCardTitleFallback() {
         let card = StatusBarView.doneChipHoverCard([
             finished(1, title: "   ", headBranch: "fix-login"),
             finished(2, headBranch: "  "),
             finished(3),
         ])
-        #expect(card.rows.map(\.value) == ["fix-login", "PR #2", "PR #3"])
+        #expect(card.rows.map(\.value) == ["fix-login", "PR #2 · Merged", "PR #3 · Merged"])
+        // The reference is the value, so it is not repeated beneath it.
+        #expect(card.rows.map(\.caption) == ["PR #1 · Merged", nil, nil])
     }
 
     @Test("a GitLab row in the done card says MR, never PR")
@@ -708,11 +714,12 @@ struct StatusBarViewChipsTests {
             finished(41, title: "Trim the relay", gitlab: true),
             finished(42, gitlab: true),
         ])
-        #expect(card.rows[0].caption == "MR#41 · \(PRMergeableState.merged.displayReason)")
-        #expect(card.rows[1].value == "MR !42")
+        #expect(card.rows[0].caption == "MR !41 · Merged")
+        #expect(card.rows[1].value == "MR !42 · Merged")
+        #expect(card.rows[1].caption == nil)
         for row in card.rows {
             #expect(row.value.contains(Forge.github.refNoun) == false)
-            #expect(row.caption?.contains(Forge.github.refNoun) == false)
+            #expect((row.caption ?? "").contains(Forge.github.refNoun) == false)
         }
     }
 
