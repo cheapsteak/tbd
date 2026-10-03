@@ -199,6 +199,55 @@ enum PRBindingPresentation {
         }
     }
 
+    /// What a finished PR leads with on the done chip's surfaces: its title,
+    /// trimmed, or its head branch when it has no title. nil when it has
+    /// neither — a synthetic binding lifted from a legacy status carries no
+    /// title or branch — so each surface picks its own last resort.
+    ///
+    /// The title leads there, where the `+N` menu leads with the reference,
+    /// because a finished PR has no chip of its own: a folded PR's title is
+    /// otherwise shown nowhere on the status bar, and a merged branch name is
+    /// a poorer reminder of what shipped than the title it shipped under.
+    static func doneLead(_ binding: PRBinding) -> String? {
+        for candidate in [binding.title, binding.headBranch] {
+            if let text = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !text.isEmpty {
+                return text
+            }
+        }
+        return nil
+    }
+
+    /// The done chip's menu rows, in bind order: the PR's title (or head
+    /// branch) first, then the reference and state, e.g.
+    /// `"Fix the login timeout  PR #930 · Merged"` or
+    /// `"Trim the relay  MR !931 · Closed"`. A binding with neither title nor
+    /// branch reads as the reference alone.
+    ///
+    /// A done-chip builder of its own rather than `menuRows`, so the `+N` menu
+    /// and the toolbar dropdown keep sharing one row shape. The reference half
+    /// takes the same per-binding `refLabel` and the same
+    /// `PRStatusPresentation.stateDescription` sentence `menuRows` does, so a
+    /// PR still cannot be described two ways. Rows render through
+    /// `menuRowsID` exactly as `menuRows`' do — the key reads only `id`,
+    /// `title` and `url`.
+    static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
+        bindings.map { binding in
+            var reference = binding.refLabel
+            if let status = binding.status {
+                reference += " · \(PRStatusPresentation.stateDescription(for: status))"
+            }
+            let title = doneLead(binding).map { "\($0)  \(reference)" } ?? reference
+            return MenuRow(
+                id: binding.id,
+                number: binding.number,
+                title: title,
+                url: URL(string: binding.url),
+                state: binding.status?.state
+            )
+        }
+    }
+
     /// The `.id` key for a `Menu` rendering `menuRows`, keyed on what those
     /// rows actually draw. AppKit materializes an `NSMenu` ONCE and later
     /// SwiftUI state changes do not reach it, so without a key that moves when
@@ -269,9 +318,9 @@ enum PRBindingPresentation {
         "\u{2713} \(count) done"
     }
 
-    /// Tooltip for the done chip. Counts a set that can span both forges, so
-    /// it takes the aggregate "pull request" wording rather than any one
-    /// forge's noun — see `overflowChipTooltip`.
+    /// The done chip's hover-card title. Counts a set that can span both
+    /// forges, so it takes the aggregate "pull request" wording rather than
+    /// any one forge's noun — see `overflowChipTooltip`.
     static func doneChipTooltip(count: Int) -> String {
         "\(count) merged or closed pull request\(count == 1 ? "" : "s")"
     }
