@@ -366,6 +366,30 @@ struct HoverDwellReducerTests {
         #expect(r.shouldShow(now: at(5.30), lastDismissedAt: nil, isCardVisible: false) == false)
         #expect(r.shouldShow(now: at(5.50), lastDismissedAt: nil, isCardVisible: false) == true)
     }
+
+    // MARK: A menu opened mid-dwell
+
+    @Test func interruptionKeepsTheCardDownUntilReentry() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Clicked open a menu at 0.10, before the floor. No mouseMoved arrives
+        // while the menu tracks, so the pointer reads as at rest throughout.
+        r.interrupted()
+        #expect(cold(&r, 0.60) == false)
+        #expect(r.shouldShow(now: at(0.70), lastDismissedAt: at(0.10), isCardVisible: false) == false)
+        #expect(cold(&r, 5.0) == false)
+        // Leaving and returning re-arms the gate.
+        r.exited()
+        r.entered(now: at(6.0))
+        #expect(cold(&r, 6.50) == true)
+    }
+
+    @Test func interruptionWithoutEntryIsANoOp() {
+        var r = fresh()
+        r.interrupted()
+        r.entered(now: t0)
+        #expect(cold(&r, 0.50) == true)
+    }
 }
 
 @Suite("HoverCardTiming — standard constants")

@@ -211,6 +211,17 @@ struct HoverDwellReducer: Equatable {
         }
     }
 
+    /// A menu opened while this hover was still dwelling. Latches the gate
+    /// shut until the pointer leaves and comes back, exactly as a shown card
+    /// latches it: a pull-down menu opens beside its anchor, so the pointer
+    /// never exits and, with no `mouseMoved` arriving during menu tracking,
+    /// it reads as at rest — without this the card would open over the menu
+    /// the moment the interaction suppression lapsed.
+    mutating func interrupted() {
+        guard enteredAt != nil else { return }
+        didShow = true
+    }
+
     /// Pointer left the anchor — clears all state.
     mutating func exited() {
         enteredAt = nil
@@ -553,6 +564,10 @@ final class HoverCardController {
     private var interactionHooksInstalled = false
     private var menuObserver: NSObjectProtocol?
     private var mouseMonitor: Any?
+    /// The anchor whose dwell is still running — pointer over it, card not yet
+    /// shown. A menu opening cancels that dwell (`HoverDwellReducer.interrupted`)
+    /// so a click made before the card appeared cannot raise it over the menu.
+    private weak var dwellingAnchor: HoverCardAnchorNSView?
 
     /// How long a click / menu-open suppresses the tooltip's warm reshow.
     /// Comfortably longer than the warm-grace window so a click can't be
@@ -579,6 +594,8 @@ final class HoverCardController {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.dwellingAnchor?.cancelDwell()
+                self?.dwellingAnchor = nil
                 self?.dismissForInteraction()
             }
         }
@@ -623,6 +640,16 @@ final class HoverCardController {
     func requestShow(anchor: NSView, model: HoverCardModel) {
         if let suppressUntil, Date() < suppressUntil { return }
         show(anchor: anchor, model: model)
+    }
+
+    /// An anchor's pointer entered and its dwell timer started.
+    fileprivate func dwellStarted(anchor: HoverCardAnchorNSView) {
+        dwellingAnchor = anchor
+    }
+
+    /// An anchor's dwell stopped — its card showed, or the pointer left.
+    fileprivate func dwellStopped(anchor: HoverCardAnchorNSView) {
+        if dwellingAnchor === anchor { dwellingAnchor = nil }
     }
 
     func hoverEnded(anchor: NSView) {
@@ -776,6 +803,15 @@ private final class HoverCardAnchorNSView: NSView {
         // Common mode so the poll keeps ticking during scrolls/tracking loops.
         RunLoop.main.add(timer, forMode: .common)
         dwellTimer = timer
+        HoverCardController.shared.dwellStarted(anchor: self)
+    }
+
+    /// A menu opened before this anchor's card showed: stop polling and keep
+    /// the card down until the pointer leaves and returns.
+    func cancelDwell() {
+        dwellTimer?.invalidate()
+        dwellTimer = nil
+        reducer.interrupted()
     }
 
     private func evaluateDwell() {
@@ -791,6 +827,7 @@ private final class HoverCardAnchorNSView: NSView {
             controller.requestShow(anchor: self, model: model)
             dwellTimer?.invalidate()
             dwellTimer = nil
+            controller.dwellStopped(anchor: self)
         }
     }
 
@@ -799,6 +836,7 @@ private final class HoverCardAnchorNSView: NSView {
         dwellTimer = nil
         lastMouseLocation = nil
         reducer.exited()
+        HoverCardController.shared.dwellStopped(anchor: self)
         HoverCardController.shared.hoverEnded(anchor: self)
     }
 }
