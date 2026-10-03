@@ -733,6 +733,39 @@ struct HolderDetachHandbackTests {
         var attach: Task<Void, Never>?
     }
 
+    /// Holds the panel's holder reader at its close, on the reader's own
+    /// thread, and records the close in the shared event log when it lets go.
+    ///
+    /// In production the close lands within one poll interval of the stop, so
+    /// a handback that never waited for it still usually detaches *after* it —
+    /// the fast pass's scheduling delays alone outlast 200 ms — and a probe of
+    /// the descriptor at detach time passes with or without the wait. Holding
+    /// the close removes that luck: while it is held, a detach can only arrive
+    /// by not waiting, and it then lands in the log ahead of "pty closed".
+    ///
+    /// Blocks a dedicated reader `Thread`, never a cooperative-pool one, and
+    /// the wait is bounded by `TestGate.deadline`.
+    private final class ReaderCloseGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var heldReader: HolderStreamReader?
+        private let gate = DispatchSemaphore(value: 0)
+        private let log: EventLog
+
+        init(log: EventLog) { self.log = log }
+
+        /// The reader parked at its close, once it has reached it.
+        var reader: HolderStreamReader? { lock.withLock { heldReader } }
+
+        /// The reader's `beforeClose` hook.
+        func hold(_ reader: HolderStreamReader) {
+            lock.withLock { heldReader = reader }
+            gate.waitForGate("the panel's holder reader, held just before its close")
+            log.append("pty closed")
+        }
+
+        func release() { gate.signal() }
+    }
+
     /// The daemon has confirmed — its claim is recorded — and the panel is
     /// torn down before it hears so: the ack's answer resumes a panel that
     /// never set the state `cleanup()`'s detach reads. The attach is live by
@@ -740,21 +773,52 @@ struct HolderDetachHandbackTests {
     /// panel was showing: a release with an empty preamble would leave the
     /// daemon resuming from the screen it vended, dropping everything the
     /// panel painted since.
+    ///
+    /// By the time the ack's answer resumes the panel, `cleanup()` has already
+    /// stopped the reader and dropped the coordinator's reference to it, so
+    /// the handback has to be handed the reader to wait on — asked of the
+    /// coordinator, it would find none and detach with the pty still open.
+    /// The reader's close is held (see `ReaderCloseGate`) and let go only once
+    /// the handback is parked on it, or once a detach has arrived without
+    /// waiting; the log then says which happened.
     @MainActor
     @Test("a panel torn down while its ack is in flight hands back the attach with its screen")
     func teardownDuringTheAckReleasesTheClaim() async throws {
         let fixture = try Fixture(preamble: "SHOWN-BEFORE-THE-ACK\r\n")
         defer { fixture.tearDown() }
         let coordinator = fixture.coordinator
-        fixture.stub.beforeReadyReturns = {
+        let stub = fixture.stub
+        let closeGate = ReaderCloseGate(log: stub.log)
+        // Released on every exit, so a failing run cannot leave the reader
+        // thread parked for the gate's full deadline.
+        defer { closeGate.release() }
+        coordinator.holderReaderBeforeClose = { reader in closeGate.hold(reader) }
+        stub.beforeReadyReturns = {
             await MainActor.run { coordinator.cleanup() }
         }
 
         await fixture.attach()
+        try await waitFor(
+            "the handback to park on the reader's close, or to detach without it",
+            observed: {
+                "close awaited: \(closeGate.reader?.hasCloseWaiters ?? false), detaches: \(stub.detaches.count)"
+            }
+        ) {
+            closeGate.reader?.hasCloseWaiters == true || !stub.detaches.isEmpty
+        }
+        closeGate.release()
         try await waitForDetach(fixture)
+        // Every handback and release registered for this terminal has sent
+        // its RPCs once this returns, so the counts below are final.
+        await fixture.state.holderHandbackLedger.awaitSettled(terminalID: fixture.terminalID)
 
-        #expect(fixture.stub.readyCalls == 1, "a confirmed attach must not be acked twice")
-        let detach = try #require(fixture.stub.detaches.first)
+        #expect(stub.log.events == ["attach", "ready", "pty closed", "detach"], """
+            the handback must reach the daemon only after the panel's reader has closed the pty: \
+            the daemon resumes its drain on receipt, so a detach ahead of the close puts two \
+            readers on one pty: \(stub.log.events)
+            """)
+        #expect(stub.readyCalls == 1, "a confirmed attach must not be acked twice")
+        let detach = try #require(stub.detaches.first)
         #expect(detach.generation == Self.generation, """
             the release named a different attach, so the daemon's claim under \
             \(Self.generation) still stands and every later attach is refused
@@ -769,11 +833,8 @@ struct HolderDetachHandbackTests {
             a confirmed attach was handed back without the screen its panel was showing: \
             \(detach.preamble.count) preamble bytes, replaying to \(replay.screenText())
             """)
-        // Long enough for a second detach to have arrived — a release task
-        // and a teardown handback both sending would show up here.
-        try? await Task.sleep(for: .milliseconds(600))
-        #expect(fixture.stub.detaches.count == 1, """
-            a confirmed attach was handed back \(fixture.stub.detaches.count) times
+        #expect(stub.detaches.count == 1, """
+            a confirmed attach was handed back \(stub.detaches.count) times
             """)
     }
 
@@ -883,24 +944,33 @@ struct HolderDetachHandbackTests {
     /// The release is for abandoned attaches only. A live panel owns the pty
     /// until it is torn down, and a detach before then would put the daemon's
     /// drain on a descriptor this panel is still reading.
+    ///
+    /// Asserted structurally rather than over a window: every release a panel
+    /// can send is registered with the handback ledger before the attach
+    /// returns, so a live attach that leaves the ledger empty has nothing
+    /// queued that could detach it.
     @MainActor
     @Test("a live attach sends no detach until its panel is torn down")
     func aLiveAttachSendsNoDetachUntilCleanup() async throws {
         let fixture = try Fixture()
         defer { fixture.tearDown() }
+        let ledger = fixture.state.holderHandbackLedger
         await fixture.attach()
 
-        // Long enough for a release task to have run: the reader's poll
-        // interval is 200 ms, and the assertion is that nothing arrives at all.
-        try? await Task.sleep(for: .milliseconds(600))
         #expect(fixture.stub.readyCalls == 1)
+        #expect(!ledger.isInFlight(terminalID: fixture.terminalID), """
+            a live attach left work registered for its terminal — a release queued against a \
+            panel that is still reading the pty
+            """)
         #expect(fixture.stub.detaches.isEmpty, """
             a live panel detached its own attach while still reading the pty
             """)
 
         fixture.coordinator.cleanup()
         try await waitForDetach(fixture)
-        try? await Task.sleep(for: .milliseconds(600))
+        // Every handback and release registered for this terminal has sent
+        // its RPCs once this returns, so the count below is final.
+        await ledger.awaitSettled(terminalID: fixture.terminalID)
         #expect(fixture.stub.detaches.count == 1, """
             a torn-down live panel handed its session back more than once: \
             \(fixture.stub.detaches.count) detaches

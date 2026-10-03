@@ -691,6 +691,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// already run that block, so it reads `false` whether the ordering is
         /// right or wrong. Without this the invariant has no failing test.
         var onHolderReaderWillStart: (@MainActor () -> Void)?
+        /// Handed to the holder reader this panel builds, which runs it on its
+        /// own thread just before it closes the descriptor. Unset in
+        /// production. A test holds the close here so that a handback which
+        /// skipped waiting for it cannot pass by arriving late anyway — see
+        /// `HolderStreamReader.beforeClose`.
+        var holderReaderBeforeClose: (@Sendable (HolderStreamReader) -> Void)?
         private var groupedViewerProcessRunning = false
         private var groupedViewerProcessGeneration: UInt64 = 0
         private var groupedViewerConfirmationStarted = false
@@ -1120,7 +1126,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let ledger = handbackLedger(appState)
             if await ledger.awaitSettled(terminalID: panelID) {
                 logger.info(
-                    "holder attach waited for a predecessor's handback terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderHandbackWait"
+                    "holder attach waited for an earlier panel's attach or handback to settle terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderHandbackWait"
                 )
             }
             // Teardown can land across the wait: a panel torn down while its
@@ -1237,7 +1243,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             let holder = viewHolder
             let reader = HolderStreamReader(
-                label: panelID.uuidString, fd: attachment.ptyFD
+                label: panelID.uuidString, fd: attachment.ptyFD,
+                beforeClose: holderReaderBeforeClose
             ) { chunk in
                 let bytes = [UInt8](chunk)
                 holder.feed(bytes[...])
@@ -1286,17 +1293,25 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             //
             // The attach is live — acked, with a reader that has been feeding
             // the view since before the ack — so it is handed back the way any
-            // live attach is, through `detachHolderSession`, carrying the
-            // screen the reader drained rather than an empty preamble that
-            // would drop it. `cleanup()` has already run (that is what raised
-            // `isTornDown`) and found `holderAttach` nil, so this is the only
-            // detach; `detachHolderSession` clears `holderAttach` before
-            // anything else, stops the reader, and sends the detach even when
-            // the view has been released.
+            // live attach is, through `detachHolderSession`, carrying what the
+            // view had drawn rather than an empty preamble that would drop it.
+            // Not quite everything the reader drained: `cleanup()` cleared the
+            // view holder, so a chunk the reader took after that never reached
+            // the view and is lost with this panel. `cleanup()` has already run
+            // (that is what raised `isTornDown`) and found `holderAttach` nil,
+            // so this is the only detach.
+            //
+            // **The reader is passed in, because the coordinator no longer has
+            // it.** `cleanup()`'s own `detachHolderSession` already stopped it
+            // and cleared `holderReader`, so a handback that asked the
+            // coordinator for the reader to wait on would get none, skip the
+            // wait, and send `pane.detach` while the reader thread could still
+            // be inside its last poll on the pty — the daemon resuming its
+            // drain beside it, two readers on one pty.
             guard !isTornDown else {
                 removeLatencyTap()
                 holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
-                detachHolderSession()
+                detachHolderSession(stoppedReader: reader)
                 return
             }
             // The probe's first legal moment: the daemon has acked, so this
@@ -1381,24 +1396,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// in that state is never drained and refuses every later attach, so
         /// the placard comes back on every reopen until the daemon restarts.
         ///
-        /// - `attach.ready` goes first. Before the ack the daemon holds the
-        ///   attach as pending, and a detach naming it does not clear it; the
-        ///   ack turns it into a claim — or, past the daemon's ready timeout,
-        ///   is refused with the timeout's claim already recorded, or, for a
-        ///   superseded attach, is refused with nothing standing — and the
-        ///   detach that follows hands back whatever claim resulted.
-        /// - The detach carries an empty preamble: this panel either never
-        ///   painted live output or is no longer showing it, so the daemon
-        ///   resumes from the screen its suspended reader kept.
+        /// The release itself is `HolderAttaching.releaseUnconfirmedAttach` —
+        /// `attach.ready`, then `pane.detach` with an empty preamble — shared
+        /// with the client's release of an attach whose descriptor never
+        /// arrived; its doc carries why the ack goes first.
         ///
         /// **The caller must already be off the descriptor**, exactly as for
         /// `detachHolderSession`: the daemon resumes its drain on receipt. A
         /// descriptor the caller closed itself is gone already; one a reader
-        /// owns is awaited here before anything is sent. Both RPCs' failures
-        /// are logged and dropped — there is no retry that helps. Read the
-        /// detach's answer narrowly: the daemon replies `ok` whether or not it
-        /// found a claim to clear, so an error means the request never reached
-        /// it, and a success proves only that it arrived.
+        /// owns is awaited here before anything is sent.
         ///
         /// Registered with the ledger so a successor panel for this terminal
         /// waits for the release instead of being refused for the claim it is
@@ -1412,35 +1418,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let panelID = self.panelID
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
-                do {
-                    try await client.ready(
-                        worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                        generation: generation)
-                } catch {
-                    logger.info("""
-                        holder abandoned attach \(generation, privacy: .public) for terminal \
-                        \(panelID, privacy: .public): attach.ready failed (refused, or never \
-                        reached the daemon), detaching anyway: \
-                        \(error.localizedDescription, privacy: .public)
-                        """)
-                }
-                do {
-                    try await client.detach(
-                        worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                        generation: generation, snapshotPreamble: Data())
-                    logger.info("""
-                        holder sent pane.detach for abandoned attach \(generation, privacy: .public) \
-                        for terminal \(panelID, privacy: .public); the daemon answers ok whether \
-                        or not a claim stood, so this confirms delivery, not a cleared claim
-                        """)
-                } catch {
-                    logger.error("""
-                        holder abandoned attach \(generation, privacy: .public) for terminal \
-                        \(panelID, privacy: .public): pane.detach never reached the daemon, so \
-                        any claim under this generation still stands: \
-                        \(error.localizedDescription, privacy: .public)
-                        """)
-                }
+                await client.releaseUnconfirmedAttach(
+                    worktreeID: worktreeID, paneID: "", terminalID: panelID,
+                    generation: generation, kind: "abandoned")
             }
             ledger.register(terminalID: panelID, task: release)
         }
@@ -1537,11 +1517,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// with the process, which is the same evidence a completed detach
         /// carries, and reclaiming the session on that evidence is app-liveness
         /// arbitration rather than anything a teardown can do.
+        ///
+        /// - Parameter stoppedReader: A reader the caller holds that the
+        ///   coordinator no longer does — one a previous call already stopped
+        ///   and cleared. The handback waits for it to close exactly as for
+        ///   the coordinator's own; without it a second call would find no
+        ///   reader to wait on and send the detach with the pty still open.
         @MainActor
-        private func detachHolderSession() {
+        private func detachHolderSession(stoppedReader: HolderStreamReader? = nil) {
             let attach = holderAttach
             holderAttach = nil
-            let reader = stopHolderReader()
+            let reader = stopHolderReader() ?? stoppedReader
             guard let attach, let appState else {
                 viewHolder.clear()
                 return
