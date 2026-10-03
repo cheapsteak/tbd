@@ -104,11 +104,85 @@ struct HolderAttachClient: HolderAttaching {
             promise.cancel()
             throw HolderAttachError.missingGeneration
         }
-        let fd = try await promise.value(timeout: fdTimeout)
+        let fd: Int32
+        do {
+            fd = try await promise.value(timeout: fdTimeout)
+        } catch {
+            // **The daemon holds this attach as pending under `generation`,
+            // and this throw is the last place that number exists.** The
+            // caller never receives it, so nothing it does on failure can
+            // release the attach — and the daemon's ready timeout turns a
+            // pending attach into a viewer claim on its own, which refuses
+            // every later attach to the session while this app lives. So the
+            // release happens here, before the throw.
+            //
+            // No descriptor is held to close first: the promise settled
+            // without one, and settling deregistered the waiter, so a vend
+            // that lands later is closed by the sidecar's no-waiter path.
+            await releaseUndeliveredAttach(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation, cause: error)
+            throw error
+        }
         return HolderAttachment(
             ptyFD: fd,
             generation: generation,
             snapshotPreamble: result.snapshotPreamble ?? Data())
+    }
+
+    /// Release an attach `attach.request` minted but whose descriptor never
+    /// reached this client: ack it, then detach it with an empty preamble.
+    ///
+    /// The ack comes first because the daemon holds the attach as pending and
+    /// a detach naming a pending attach does not clear it. Acking turns it
+    /// into a claim — or, past the daemon's ready timeout, is refused with the
+    /// timeout's claim already recorded — and the detach then hands that
+    /// claim back. The preamble is empty because nothing was ever painted, so
+    /// the daemon resumes from the screen its own reader kept.
+    ///
+    /// Run in an unstructured task and awaited, so a cancelled caller still
+    /// sends both RPCs: cancellation is one of the ways the descriptor fails
+    /// to arrive. Failures are logged and dropped — the caller is already
+    /// failing with the error that matters, and no retry from this frame
+    /// helps. The daemon answers a detach `ok` whether or not it cleared a
+    /// claim, so a detach error means the request never reached it, while a
+    /// success proves only that it arrived.
+    private func releaseUndeliveredAttach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        cause: any Error
+    ) async {
+        logger.info("""
+            holder attach \(generation, privacy: .public) for terminal \
+            \(terminalID, privacy: .public) never received its descriptor \
+            (\(cause.localizedDescription, privacy: .public)); releasing it
+            """)
+        let client = self
+        await Task {
+            do {
+                try await client.ready(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                    generation: generation)
+            } catch {
+                logger.info("""
+                    holder attach \(generation, privacy: .public) for terminal \
+                    \(terminalID, privacy: .public): attach.ready failed while releasing an \
+                    undelivered attach (refused, or never reached the daemon), detaching anyway: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+            do {
+                try await client.detach(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                    generation: generation, snapshotPreamble: Data())
+            } catch {
+                logger.error("""
+                    holder attach \(generation, privacy: .public) for terminal \
+                    \(terminalID, privacy: .public): pane.detach did not reach the daemon \
+                    while releasing an undelivered attach: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }.value
     }
 
     /// Ack that a reader is on the descriptor. The daemon releases its own

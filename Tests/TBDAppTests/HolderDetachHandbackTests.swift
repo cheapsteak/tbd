@@ -708,7 +708,9 @@ struct HolderDetachHandbackTests {
 
         await fixture.attach()
 
-        #expect(fixture.stub.readyCalls == 1, "the attach must have been refused for this to mean anything")
+        // At least one: the refusal also queues a release that re-sends the
+        // ack, and that one may already have gone out.
+        #expect(fixture.stub.readyCalls >= 1, "the attach must have been refused for this to mean anything")
         #expect(fixture.coordinator.outgoingQueueForTesting.isPasteOpenForTesting == false, """
             the paste lease outlived this panel's ownership of the pty: it is released only on \
             teardown, so a refused attach leaves the daemon waiting on a paste nobody can close
@@ -731,14 +733,18 @@ struct HolderDetachHandbackTests {
         var attach: Task<Void, Never>?
     }
 
+    /// The daemon has confirmed — its claim is recorded — and the panel is
+    /// torn down before it hears so: the ack's answer resumes a panel that
+    /// never set the state `cleanup()`'s detach reads. The attach is live by
+    /// then, so it is handed back the way a live one is, with the screen the
+    /// panel was showing: a release with an empty preamble would leave the
+    /// daemon resuming from the screen it vended, dropping everything the
+    /// panel painted since.
     @MainActor
-    @Test("a panel torn down while its ack is in flight detaches the attach the daemon confirmed")
+    @Test("a panel torn down while its ack is in flight hands back the attach with its screen")
     func teardownDuringTheAckReleasesTheClaim() async throws {
-        let fixture = try Fixture()
+        let fixture = try Fixture(preamble: "SHOWN-BEFORE-THE-ACK\r\n")
         defer { fixture.tearDown() }
-        // The daemon has confirmed — its claim is recorded — and the panel is
-        // torn down before it hears so: the ack's answer resumes a panel that
-        // never set the state `cleanup()`'s detach reads.
         let coordinator = fixture.coordinator
         fixture.stub.beforeReadyReturns = {
             await MainActor.run { coordinator.cleanup() }
@@ -757,7 +763,18 @@ struct HolderDetachHandbackTests {
             the release was sent while this process still held the pty: the daemon resumes its \
             drain on receipt, so two readers were on one pty
             """)
-        #expect(fixture.stub.detaches.count == 1)
+        let replay = HeadlessReplay()
+        replay.feed(detach.preamble)
+        #expect(replay.screenText().contains("SHOWN-BEFORE-THE-ACK"), """
+            a confirmed attach was handed back without the screen its panel was showing: \
+            \(detach.preamble.count) preamble bytes, replaying to \(replay.screenText())
+            """)
+        // Long enough for a second detach to have arrived — a release task
+        // and a teardown handback both sending would show up here.
+        try? await Task.sleep(for: .milliseconds(600))
+        #expect(fixture.stub.detaches.count == 1, """
+            a confirmed attach was handed back \(fixture.stub.detaches.count) times
+            """)
     }
 
     @MainActor
@@ -789,14 +806,17 @@ struct HolderDetachHandbackTests {
             """)
     }
 
-    /// The ack can be refused *after* the daemon's ready timeout has already
-    /// recorded a claim under this generation — the timeout drops the pending
-    /// attach, so the late ack is refused as superseded while the claim it
-    /// left stands. A detach naming that generation is the only thing that
-    /// clears it; where no claim stands, the daemon refuses the detach and
-    /// nothing is lost.
+    /// A failed ack proves nothing about the daemon's state. It may never have
+    /// arrived — every RPC opens a fresh socket, and a refused connect fails
+    /// with the attach still pending, where a detach alone clears nothing and
+    /// the daemon's ready timeout later records a claim. Or it arrived after
+    /// that timeout and was refused as superseded, with the timeout's claim
+    /// standing under this generation. Re-sending the ack and then detaching
+    /// releases the claim on both branches: a pending attach is confirmed by
+    /// the second ack, a timed-out one refuses it with the claim intact, and
+    /// the detach hands back whichever claim resulted.
     @MainActor
-    @Test("a panel whose attach.ready was refused still detaches that attach")
+    @Test("a panel whose attach.ready failed acknowledges again and then detaches")
     func aRefusedAckStillReleasesTheClaim() async throws {
         let fixture = try Fixture(readyFails: true)
         defer { fixture.tearDown() }
@@ -804,7 +824,12 @@ struct HolderDetachHandbackTests {
         await fixture.attach()
         try await waitForDetach(fixture)
 
-        #expect(fixture.stub.readyCalls == 1, "a refused ack must not be retried")
+        #expect(fixture.stub.log.events == ["attach", "ready", "ready", "detach"], """
+            a failed ack must be re-sent before the detach — an ack that never reached the daemon \
+            leaves the attach pending, and a detach alone does not clear a pending attach: \
+            \(fixture.stub.log.events)
+            """)
+        #expect(fixture.stub.readyGenerations == [Self.generation, Self.generation])
         let detach = try #require(fixture.stub.detaches.first)
         #expect(detach.generation == Self.generation)
         #expect(detach.descriptorState == .closed, """
