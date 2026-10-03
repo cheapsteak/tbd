@@ -202,9 +202,9 @@ enum PRBindingPresentation {
     /// What a finished PR leads with on the done chip's surfaces: its title,
     /// trimmed and with every internal run of whitespace (a newline or tab
     /// included) collapsed to one space, or its head branch when it has no
-    /// title. nil when it has
-    /// neither — a synthetic binding lifted from a legacy status carries no
-    /// title or branch — and both surfaces then show `doneReference` alone.
+    /// title. nil when it has neither — a synthetic binding lifted from a
+    /// legacy status carries no title or branch — and both surfaces then show
+    /// `doneReference` alone.
     ///
     /// The title leads there, where the `+N` menu leads with the reference,
     /// because a finished PR has no chip of its own: a folded PR's title is
