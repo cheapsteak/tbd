@@ -34,14 +34,6 @@ struct HoverCardRow: Equatable {
     var tint: HoverCardTint
     /// Muted caption line under the value (drift warnings, staleness notes).
     var caption: String?
-    /// Another string this row's `value` may swap to while the card is up.
-    ///
-    /// Drawn **hidden but laid out**, so the row reserves the larger of the two
-    /// in both axes and the card is exactly the same size whichever is showing.
-    /// A card that resized on a swap would jump under the pointer that summoned
-    /// it — the jitter a live-updating row exists to avoid, not to cause. Set it
-    /// on both states of a swapping row, each naming the other.
-    var alternateValue: String?
 
     init(label: String? = nil,
          value: String,
@@ -49,8 +41,7 @@ struct HoverCardRow: Equatable {
          valueStyle: HoverCardTextStyle = .plain,
          monospacedDigits: Bool = false,
          tint: HoverCardTint = .normal,
-         caption: String? = nil,
-         alternateValue: String? = nil) {
+         caption: String? = nil) {
         self.label = label
         self.value = value
         self.chip = chip
@@ -58,7 +49,6 @@ struct HoverCardRow: Equatable {
         self.monospacedDigits = monospacedDigits
         self.tint = tint
         self.caption = caption
-        self.alternateValue = alternateValue
     }
 }
 
@@ -448,25 +438,7 @@ struct HoverCardView: View {
         }
     }
 
-    /// The value, over an invisible copy of whatever it may swap to. `.hidden()`
-    /// removes the peer from the drawing but not from the layout, so the row is
-    /// sized for both strings at once and a swap moves no pixel but the text.
-    @ViewBuilder
     private func valueText(_ row: HoverCardRow) -> some View {
-        if let alternate = row.alternateValue {
-            ZStack(alignment: .topLeading) {
-                styledText(alternate, style: row.valueStyle, monospacedDigits: row.monospacedDigits)
-                    .font(.system(size: 12))
-                    .hidden()
-                    .accessibilityHidden(true)
-                visibleValue(row)
-            }
-        } else {
-            visibleValue(row)
-        }
-    }
-
-    private func visibleValue(_ row: HoverCardRow) -> some View {
         styledText(row.value, style: row.valueStyle, monospacedDigits: row.monospacedDigits)
             .font(.system(size: 12))
             .foregroundStyle(valueColor(row))
