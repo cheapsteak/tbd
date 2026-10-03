@@ -400,11 +400,12 @@ struct StatusBarView: View {
     ///
     /// `PRStatus` is a display-tier cache, and was measured reading "Ready to
     /// merge" for pull requests merged days earlier, so a reading past this age
-    /// must not be rendered without its age. Five minutes matches the boundary
-    /// of `PRFreshness.checkedLabel`'s "checked just now" bucket: the card stays
-    /// quiet exactly while that label would have said "just now", and the first
-    /// age it does show is "checked 5m ago".
-    nonisolated static let chipStaleAfter: TimeInterval = 5 * 60
+    /// must not be rendered without its age. It IS the boundary of
+    /// `PRFreshness.checkedLabel`'s "checked just now" bucket
+    /// (`PRFreshness.justNowWindow`): the card stays quiet exactly while that
+    /// label would have said "just now", and the first age it does show is the
+    /// first one the label stops calling "just now".
+    nonisolated static let chipStaleAfter: TimeInterval = PRFreshness.justNowWindow
 
     /// The caution under a chip's overlay, or nil when the reading is fresh and
     /// the last attempt to reconfirm it did not fail.
