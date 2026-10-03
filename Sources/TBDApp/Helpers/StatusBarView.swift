@@ -751,7 +751,7 @@ private struct StatusBarHoverAffordance: ViewModifier {
 
 /// The status bar's PR cluster: one chip per bound PR up to
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
-/// more merged or closed PRs, those fold into a trailing `✓ N done` chip and
+/// more merged or closed PRs, those fold into a leading `✓ N done` chip and
 /// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
@@ -762,6 +762,20 @@ private struct PRChipCluster: View {
     var body: some View {
         let model = StatusBarView.prChips(bindings, observation: observation)
         HStack(spacing: 6) {
+            // Leading, ahead of the open chips: bind order puts the oldest PRs
+            // on the left and they usually finish first, so a PR folds into the
+            // chip beside it and the row reads oldest to newest.
+            if !model.done.isEmpty {
+                let count = model.done.count
+                // No tooltip: the hover card already leads with the count the
+                // tooltip would say, and both would stack over the chip.
+                PRChipMenu(
+                    rows: PRBindingPresentation.doneMenuRows(model.done),
+                    label: PRBindingPresentation.doneChipLabel(count: count),
+                    tooltip: nil,
+                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
+                    hoverCard: StatusBarView.doneChipHoverCard(model.done))
+            }
             ForEach(model.chips) { chip in
                 PRChipView(chip: chip)
             }
@@ -779,17 +793,6 @@ private struct PRChipCluster: View {
                         total: total, overflow: model.overflow, openOnly: openOnly),
                     spokenLabel: PRBindingPresentation.overflowChipAccessibilityLabel(
                         total: total, overflow: model.overflow, openOnly: openOnly))
-            }
-            if !model.done.isEmpty {
-                let count = model.done.count
-                // No tooltip: the hover card already leads with the count the
-                // tooltip would say, and both would stack over the chip.
-                PRChipMenu(
-                    rows: PRBindingPresentation.doneMenuRows(model.done),
-                    label: PRBindingPresentation.doneChipLabel(count: count),
-                    tooltip: nil,
-                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
-                    hoverCard: StatusBarView.doneChipHoverCard(model.done))
             }
         }
     }

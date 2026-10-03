@@ -21,9 +21,15 @@ worktree's work shipped.
 
 **Layout** – when grouping applies, the PR cluster renders, left to right:
 
+- one done chip, `✓ N done`
 - the open PRs as chips, in bind order, up to `prChipLimit`
 - the existing `+N` menu for open PRs past the limit
-- one done chip, `✓ N done`
+
+The done chip leads because bind order puts the oldest PRs on the left, and
+those usually finish first. A finishing PR folds into the chip beside it rather
+than vanishing from one end of the row while a count changes at the other, and
+the row reads oldest to newest: done, open, then the newest PRs at the right
+edge.
 
 The chip limit and the `+N` count apply to open PRs only, and so does the `+N`
 menu: it lists every open PR, and its tooltip and accessibility label say so
