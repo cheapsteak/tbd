@@ -1126,6 +1126,22 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Teardown can land across the wait: a panel torn down while its
             // predecessor was still detaching must not attach at all.
             guard !isTornDown else { return }
+            // **Held in the ledger for as long as this attach is unsettled.**
+            // A successor built in the same update as this panel's teardown
+            // would otherwise find the ledger empty and ask while this attach
+            // is still pending — refused as already pending, or as owned by a
+            // viewer once the ack lands — before this panel has had a chance
+            // to register the release below. Finished on every exit; a release
+            // registered before then replaces it, and `awaitSettled` moves on
+            // to that. Withdrawn synchronously as well as finished, so the
+            // ledger stops reporting this attach the moment it returns.
+            let (attachSettledSignal, attachSettled) = AsyncStream.makeStream(of: Void.self)
+            let attachSettling = Task { for await _ in attachSettledSignal {} }
+            ledger.register(terminalID: panelID, task: attachSettling)
+            defer {
+                attachSettled.finish()
+                ledger.withdraw(terminalID: panelID, task: attachSettling)
+            }
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
@@ -1149,9 +1165,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // deliberately clears the flag on the copy.
             _ = fcntl(attachment.ptyFD, F_SETFD, FD_CLOEXEC)
             // Teardown can land across any await. Nothing owns the descriptor
-            // yet, so this is the one place it is closed from outside a reader.
+            // yet, so this is the one place it is closed from outside a reader
+            // — and closed before the release, which hands the session back.
             guard !isTornDown else {
                 Darwin.close(attachment.ptyFD)
+                releaseAbandonedHolderAttach(
+                    client: client, ledger: ledger, worktreeID: worktreeID,
+                    generation: attachment.generation, reader: nil, acknowledged: false)
                 return
             }
             if !attachment.snapshotPreamble.isEmpty {
@@ -1167,6 +1187,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             guard !isTornDown else {
                 Darwin.close(attachment.ptyFD)
+                releaseAbandonedHolderAttach(
+                    client: client, ledger: ledger, worktreeID: worktreeID,
+                    generation: attachment.generation, reader: nil, acknowledged: false)
                 return
             }
             // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
@@ -1227,23 +1250,36 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
                     generation: attachment.generation)
             } catch {
-                // A refused ack means the daemon has not accounted for this
-                // descriptor — stop reading it and say so on the panel. No
-                // detach goes with it: this panel never owned the session, and
-                // a handback naming an attach the daemon refused would be
-                // refused again by its generation check.
+                // A refused ack ends this panel's hold on the descriptor — stop
+                // reading it and say so on the panel. A detach still goes with
+                // it, because a refusal does not prove the daemon holds no
+                // claim: an ack that arrives after the daemon's ready timeout is
+                // refused as superseded, and that timeout has already recorded
+                // a viewer claim under this very generation, which nothing else
+                // clears while this app lives. Where no claim stands, the daemon
+                // refuses the detach and nothing is lost.
                 stopHolderReader()
                 viewHolder.clear()
                 removeLatencyTap()
+                releaseAbandonedHolderAttach(
+                    client: client, ledger: ledger, worktreeID: worktreeID,
+                    generation: attachment.generation, reader: reader, acknowledged: true)
                 feedHolderAttachFailure(
                     reason: "attach.ready refused: \(error.localizedDescription)",
                     into: terminalView)
                 return
             }
+            // Torn down while the ack was in flight: the daemon has confirmed
+            // this attach and recorded the viewer claim, but `holderAttach` was
+            // never set, so `cleanup()`'s detach found nothing to hand back.
+            // The release is this path's own.
             guard !isTornDown else {
                 stopHolderReader()
                 viewHolder.clear()
                 removeLatencyTap()
+                releaseAbandonedHolderAttach(
+                    client: client, ledger: ledger, worktreeID: worktreeID,
+                    generation: attachment.generation, reader: reader, acknowledged: true)
                 return
             }
             // The probe's first legal moment: the daemon has acked, so this
@@ -1255,10 +1291,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             registerLatencyProbe()
             // Recorded with the injection claim below and for the same reason:
             // both are true exactly while this panel owns the pty. The detach
-            // reads it to decide whether there is a session to hand back, so a
-            // panel whose ack was refused sends none — it never took ownership,
-            // and a handback naming an attach the daemon did not confirm would
-            // be refused by its generation check anyway.
+            // reads it to decide whether there is a live session to hand back
+            // with its screen; every exit above that abandons the attach hands
+            // it back through `releaseAbandonedHolderAttach` instead.
             holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
             // Claimed only once the attach is live: before the ack the daemon
             // is still the session's writer, and an injection routed here in
@@ -1314,6 +1349,77 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // keystroke went nowhere until the user pressed Tab.
             claimKeyboardFocusAndClickRouting(on: terminalView)
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
+        }
+
+        /// Hand back an attach this panel abandoned after `client.attach`
+        /// vended it a descriptor: torn down before the ack, torn down while
+        /// the ack was in flight, or refused at the ack.
+        ///
+        /// Each of those leaves, or can leave, a daemon viewer claim standing
+        /// under `generation`, and nothing else clears one while this app is
+        /// alive — `cleanup()`'s detach only hands back an attach that went
+        /// live, and the app-liveness verdict needs the app to die. A session
+        /// in that state is never drained and refuses every later attach, so
+        /// the placard comes back on every reopen until the daemon restarts.
+        ///
+        /// - `acknowledged: false` sends `attach.ready` first. Before the ack
+        ///   the daemon holds the attach as pending, and a detach naming it is
+        ///   refused; the ack turns it into a claim — or, past the daemon's
+        ///   ready timeout, is refused with the timeout's claim already
+        ///   recorded — and the detach that follows clears it either way.
+        /// - The detach carries an empty preamble: this panel either never
+        ///   painted live output or is no longer showing it, so the daemon
+        ///   resumes from the screen its suspended reader kept.
+        ///
+        /// **The caller must already be off the descriptor**, exactly as for
+        /// `detachHolderSession`: the daemon resumes its drain on receipt. A
+        /// descriptor the caller closed itself is gone already; one a reader
+        /// owns is awaited here before anything is sent. Both RPCs' failures
+        /// are logged and dropped — there is no retry that helps, and a
+        /// refusal is the expected answer wherever no claim stood.
+        ///
+        /// Registered with the ledger so a successor panel for this terminal
+        /// waits for the release instead of being refused for the claim it is
+        /// about to clear.
+        @MainActor
+        private func releaseAbandonedHolderAttach(
+            client: any HolderAttaching, ledger: HolderHandbackLedger,
+            worktreeID: UUID, generation: UInt64,
+            reader: HolderStreamReader?, acknowledged: Bool
+        ) {
+            let panelID = self.panelID
+            let release = Task { @MainActor in
+                await reader?.awaitClosed()
+                if !acknowledged {
+                    do {
+                        try await client.ready(
+                            worktreeID: worktreeID, paneID: "", terminalID: panelID,
+                            generation: generation)
+                    } catch {
+                        logger.info("""
+                            holder abandoned attach \(generation, privacy: .public) for terminal \
+                            \(panelID, privacy: .public): attach.ready refused, detaching anyway: \
+                            \(error.localizedDescription, privacy: .public)
+                            """)
+                    }
+                }
+                do {
+                    try await client.detach(
+                        worktreeID: worktreeID, paneID: "", terminalID: panelID,
+                        generation: generation, snapshotPreamble: Data())
+                    logger.info("""
+                        holder released abandoned attach \(generation, privacy: .public) for \
+                        terminal \(panelID, privacy: .public)
+                        """)
+                } catch {
+                    logger.info("""
+                        holder abandoned attach \(generation, privacy: .public) for terminal \
+                        \(panelID, privacy: .public): pane.detach refused, as expected when the \
+                        daemon held no claim: \(error.localizedDescription, privacy: .public)
+                        """)
+                }
+            }
+            ledger.register(terminalID: panelID, task: release)
         }
 
         /// Stop the holder reader and release every claim this panel held on

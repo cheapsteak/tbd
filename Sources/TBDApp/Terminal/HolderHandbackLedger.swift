@@ -41,6 +41,19 @@ final class HolderHandbackLedger {
         }
     }
 
+    /// Drops `task`'s entry for `terminalID` now, rather than on the
+    /// completion hop `register` schedules — but only while the entry is still
+    /// that task, so a newer registration survives.
+    ///
+    /// For a caller that finishes a registered task itself and wants the
+    /// ledger to say so by the time it returns: an attach's own "still
+    /// settling" entry, withdrawn as the attach ends, would otherwise read as
+    /// in flight for one more actor turn.
+    func withdraw(terminalID: UUID, task: Task<Void, Never>) {
+        guard inFlight[terminalID] == task else { return }
+        inFlight[terminalID] = nil
+    }
+
     /// Whether a handback is currently in flight for `terminalID`.
     func isInFlight(terminalID: UUID) -> Bool {
         inFlight[terminalID] != nil
