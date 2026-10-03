@@ -52,6 +52,21 @@ struct HoverCardRow: Equatable {
     }
 }
 
+/// Point sizes for a hover card's text.
+///
+/// `.compact` is for cards raised from the status bar, so the card reads at the
+/// size of the text it explains. Everything else uses `.regular`.
+enum HoverCardTextSize: Equatable {
+    case regular
+    case compact
+
+    var title: CGFloat { self == .regular ? 12 : 11 }
+    var rowValue: CGFloat { self == .regular ? 12 : 11 }
+    var rowLabel: CGFloat { self == .regular ? 11 : 10 }
+    var caption: CGFloat { 10 }
+    var chip: CGFloat { self == .regular ? 10 : 9 }
+}
+
 /// The full content of a hover card: a title slot plus structured rows.
 /// Pure data — composition is unit-testable without any AppKit machinery.
 struct HoverCardModel: Equatable {
@@ -60,15 +75,18 @@ struct HoverCardModel: Equatable {
     /// Muted caption line directly under the title.
     var titleCaption: String?
     var rows: [HoverCardRow]
+    var textSize: HoverCardTextSize
 
     init(title: String? = nil,
          titleStyle: HoverCardTextStyle = .plain,
          titleCaption: String? = nil,
-         rows: [HoverCardRow] = []) {
+         rows: [HoverCardRow] = [],
+         textSize: HoverCardTextSize = .regular) {
         self.title = title
         self.titleStyle = titleStyle
         self.titleCaption = titleCaption
         self.rows = rows
+        self.textSize = textSize
     }
 }
 
@@ -373,7 +391,7 @@ struct HoverCardView: View {
                     styledText(title,
                                style: model.titleStyle,
                                monospacedDigits: false)
-                        .font(.system(size: 12,
+                        .font(.system(size: model.textSize.title,
                                       weight: model.titleStyle == .mutedItalic ? .regular : .semibold))
                         .foregroundStyle(model.titleStyle == .mutedItalic ? Color.secondary : Color.primary)
                     if let caption = model.titleCaption {
@@ -387,7 +405,7 @@ struct HoverCardView: View {
                         GridRow {
                             if let label = row.label {
                                 Text(label)
-                                    .font(.system(size: 11))
+                                    .font(.system(size: model.textSize.rowLabel))
                                     .foregroundStyle(.secondary)
                                     .gridColumnAlignment(.leading)
                                 valueCell(row)
@@ -425,7 +443,7 @@ struct HoverCardView: View {
                 valueText(row)
                 if let chip = row.chip {
                     Text(chip)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: model.textSize.chip, weight: .medium))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Color.primary.opacity(0.08)))
@@ -440,7 +458,7 @@ struct HoverCardView: View {
 
     private func valueText(_ row: HoverCardRow) -> some View {
         styledText(row.value, style: row.valueStyle, monospacedDigits: row.monospacedDigits)
-            .font(.system(size: 12))
+            .font(.system(size: model.textSize.rowValue))
             .foregroundStyle(valueColor(row))
     }
 
@@ -462,7 +480,7 @@ struct HoverCardView: View {
 
     private func captionText(_ string: String) -> some View {
         Text(string)
-            .font(.system(size: 10))
+            .font(.system(size: model.textSize.caption))
             .foregroundStyle(.tertiary)
     }
 }

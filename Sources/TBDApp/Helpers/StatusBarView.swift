@@ -330,6 +330,7 @@ struct StatusBarView: View {
     /// Pure, so the whole overlay can be asserted without a panel.
     nonisolated static func chipHoverCard(_ chip: PRChip, now: Date = Date()) -> HoverCardModel {
         var model = HoverCardModel()
+        model.textSize = .compact
         model.title = chipHeadline(chip)
         // The reference line only exists under a real title: an untitled chip's
         // headline already IS the reference, and repeating it would be noise.

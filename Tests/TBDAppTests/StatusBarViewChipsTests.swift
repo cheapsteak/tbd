@@ -218,6 +218,14 @@ struct StatusBarViewChipsTests {
         #expect(card.rows.isEmpty)
     }
 
+    @Test("the chip card is sized to the status bar's text; a default card is regular")
+    func overlayTextSize() {
+        let card = StatusBarView.chipHoverCard(
+            chip(state: .merged, title: "Fix it"), now: Self.now)
+        #expect(card.textSize == .compact)
+        #expect(HoverCardModel().textSize == .regular)
+    }
+
     @Test("an untitled chip's title line is the reference and state, with no line beneath")
     func overlayWithoutTitle() {
         let card = StatusBarView.chipHoverCard(
