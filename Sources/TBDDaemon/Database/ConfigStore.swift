@@ -172,6 +172,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.profileBalancingEnabledDefault`, never through
     /// `?? false`.
     var profile_balancing_enabled: Bool?
+    /// Schedule-based PR polling gate. **Genuinely tri-state**: the
+    /// `20261002143454_config_pr_poll_schedule` migration carries no SQL default, so
+    /// `nil` means "never chose". Resolve it through
+    /// `Config.prPollScheduleDefault`, never through `?? false`.
+    var pr_poll_schedule_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -267,7 +272,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
         remoteTranscriptDefault: Bool = Config.remoteTranscriptEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault,
-        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault
+        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
+        prPollScheduleDefault: Bool = Config.prPollScheduleDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -354,6 +360,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
             // Profile balancing gate — NOT `?? false`.
             profileBalancingEnabled: profile_balancing_enabled ?? profileBalancingDefault,
+            // PR poll schedule gate — NOT `?? false`.
+            prPollScheduleEnabled: pr_poll_schedule_enabled ?? prPollScheduleDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -890,6 +898,17 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the schedule-based PR polling gate. Written on every call, so
+    /// either value is the explicit gesture that lifts the column out of NULL.
+    public func setPRPollScheduleEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
