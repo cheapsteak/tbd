@@ -21,9 +21,15 @@ worktree's work shipped.
 
 **Layout** – when grouping applies, the PR cluster renders, left to right:
 
+- one done chip, `✓ N done`
 - the open PRs as chips, in bind order, up to `prChipLimit`
 - the existing `+N` menu for open PRs past the limit
-- one done chip, `✓ N done`
+
+The done chip leads because bind order puts the oldest PRs on the left, and
+those usually finish first. A finishing PR folds into the chip beside it rather
+than vanishing from one end of the row while a count changes at the other, and
+the row reads oldest to newest: done, open, then the newest PRs at the right
+edge.
 
 The chip limit and the `+N` count apply to open PRs only, and so does the `+N`
 menu: it lists every open PR, and its tooltip and accessibility label say so
@@ -32,14 +38,38 @@ wording is unchanged. When every PR is finished, the cluster is the done chip
 alone.
 
 **The done chip** – a borderless menu styled like the `+N` chip: secondary text,
-hover underline, pointing-hand cursor through `StatusBarHoverAffordance`, and a
-help tooltip and accessibility label naming the count ("5 merged or closed
-pull requests"), in the aggregate "pull request" noun the `+N` chip uses because
-the set can span both forges. Its menu lists the finished PRs in bind order through
-`PRBindingPresentation.menuRows`, so each row reads like the toolbar's and the
-`+N` menu's (`PR #930  Merged  fix-login`). Choosing a row opens the PR in the
-default browser, as the `+N` menu does. It offers no untrack action, matching
-the `+N` menu.
+hover underline, and pointing-hand cursor through `StatusBarHoverAffordance`.
+Its accessibility label names the count ("Show 5 merged or closed pull
+requests"), in the aggregate "pull request" noun the `+N` chip uses because the
+set can span both forges.
+
+Hovering it raises a compact, read-only hover card in the same style as a PR
+chip's (`StatusBarView.doneChipHoverCard`). The card's title is the count ("5
+merged or closed pull requests"), and it lists the finished PRs in bind order,
+one row each: the PR's title as the value, falling back to its head branch,
+with the reference and state beneath it (`PR #930 · Merged`, `MR !930 · Merged`
+on GitLab). A PR with neither title nor branch shows the reference and state as
+its value, with nothing beneath. The reference and state come from
+`PRBindingPresentation.doneReference`, which the menu rows below end with too,
+so the card and the menu describe each PR in the same words, each in its own
+forge's syntax. A title's internal whitespace collapses to single spaces, and
+the card cuts a title past 120 characters short with an ellipsis, so ten long
+titles cannot grow it past the window. The card lists at most ten PRs; past
+that, a muted final row says "and N more". The chip carries no tooltip, since the card already says
+what one would. Clicking the chip, or opening any menu, before the card has
+appeared keeps it down until the pointer leaves the chip and returns.
+
+Titles lead because a finished PR has no chip of its own: once folded, its
+title is shown nowhere else on the status bar, and a merged branch name is a
+poorer reminder of what shipped than its title.
+
+Clicking the chip opens a menu of the same PRs in bind order, built by
+`PRBindingPresentation.doneMenuRows`: each row leads with the title (or the head
+branch when there is none, cut short with an ellipsis past 80 characters, since
+AppKit widens a menu to its longest item), then the reference and state (`Fix
+the login timeout  PR #930 · Merged`). The `+N` menu and the toolbar dropdown keep their
+shared `menuRows` shape. Choosing a row opens the PR in the default browser, as
+the `+N` menu does. It offers no untrack action, matching the `+N` menu.
 
 That leaves a grouped PR with no untrack gesture in the app: the chip's leading
 icon was the only one, and the PR no longer has a chip. `tbd pr detach` still

@@ -306,6 +306,50 @@ struct StatusBarView: View {
         return (chips, selected.overflow, selected.overflowMenu, selected.done)
     }
 
+    /// How many finished PRs the done chip's card lists before summarising the
+    /// rest as "and N more". The card is read-only and cannot scroll, so it is
+    /// capped to stay a glance; the chip's click menu lists every one.
+    nonisolated static let doneCardRowLimit = 10
+
+    /// How many characters of a finished PR's title a done-card row shows
+    /// before an ellipsis — about three wrapped lines at the card's width, so
+    /// ten long titles cannot grow the card past the window it explains.
+    nonisolated static let doneCardLeadLimit = 120
+
+    /// What the `✓ N done` chip's hover overlay says: the count as its title
+    /// (`5 merged or closed pull requests`), then one row per finished PR in
+    /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
+    /// the title, else the head branch) and beneath it the PR's
+    /// `PRBindingPresentation.doneReference` (`PR #930 · Merged`, `MR !931 ·
+    /// Closed` on GitLab), the same words the chip's menu rows end with. A PR
+    /// with neither title nor branch shows the reference as its value and no
+    /// caption, rather than the reference twice. A title longer than
+    /// `doneCardLeadLimit` is cut short with an ellipsis.
+    ///
+    /// Past `doneCardRowLimit` the remainder collapses into a muted final row,
+    /// `and N more`.
+    ///
+    /// Pure, so the whole overlay can be asserted without a panel.
+    nonisolated static func doneChipHoverCard(_ bindings: [PRBinding]) -> HoverCardModel {
+        var model = HoverCardModel()
+        model.textSize = .compact
+        model.title = PRBindingPresentation.doneChipCardTitle(count: bindings.count)
+        model.rows = bindings.prefix(doneCardRowLimit).map { binding in
+            let reference = PRBindingPresentation.doneReference(binding)
+            guard let lead = PRBindingPresentation.doneLead(binding) else {
+                return HoverCardRow(value: reference)
+            }
+            return HoverCardRow(
+                value: PRBindingPresentation.clipped(lead, to: doneCardLeadLimit),
+                caption: reference)
+        }
+        let hidden = bindings.count - doneCardRowLimit
+        if hidden > 0 {
+            model.rows.append(HoverCardRow(value: "and \(hidden) more", valueStyle: .mutedItalic))
+        }
+        return model
+    }
+
     /// What a chip's hover overlay says: the PR's title as the card's title,
     /// the reference and state beneath it (`PR#945 · Merged`), and — only when
     /// it matters — a warning about the age of that reading.
@@ -707,7 +751,7 @@ private struct StatusBarHoverAffordance: ViewModifier {
 
 /// The status bar's PR cluster: one chip per bound PR up to
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
-/// more merged or closed PRs, those fold into a trailing `✓ N done` chip and
+/// more merged or closed PRs, those fold into a leading `✓ N done` chip and
 /// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
@@ -718,6 +762,20 @@ private struct PRChipCluster: View {
     var body: some View {
         let model = StatusBarView.prChips(bindings, observation: observation)
         HStack(spacing: 6) {
+            // Leading, ahead of the open chips: bind order puts the oldest PRs
+            // on the left and they usually finish first, so a PR folds into the
+            // chip beside it and the row reads oldest to newest.
+            if !model.done.isEmpty {
+                let count = model.done.count
+                // No tooltip: the hover card already leads with the count the
+                // tooltip would say, and both would stack over the chip.
+                PRChipMenu(
+                    rows: PRBindingPresentation.doneMenuRows(model.done),
+                    label: PRBindingPresentation.doneChipLabel(count: count),
+                    tooltip: nil,
+                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
+                    hoverCard: StatusBarView.doneChipHoverCard(model.done))
+            }
             ForEach(model.chips) { chip in
                 PRChipView(chip: chip)
             }
@@ -729,20 +787,12 @@ private struct PRChipCluster: View {
                 let total = model.overflowMenu.count
                 let openOnly = !model.done.isEmpty
                 PRChipMenu(
-                    bindings: model.overflowMenu,
+                    rows: PRBindingPresentation.menuRows(model.overflowMenu),
                     label: "+\(model.overflow)",
                     tooltip: PRBindingPresentation.overflowChipTooltip(
                         total: total, overflow: model.overflow, openOnly: openOnly),
                     spokenLabel: PRBindingPresentation.overflowChipAccessibilityLabel(
                         total: total, overflow: model.overflow, openOnly: openOnly))
-            }
-            if !model.done.isEmpty {
-                let count = model.done.count
-                PRChipMenu(
-                    bindings: model.done,
-                    label: PRBindingPresentation.doneChipLabel(count: count),
-                    tooltip: PRBindingPresentation.doneChipTooltip(count: count),
-                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count))
             }
         }
     }
@@ -960,13 +1010,14 @@ private struct PRChipView: View {
 }
 
 /// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N done`
-/// chip. Clicking it drops down rows built by the toolbar's multi-PR dropdown's
-/// own builder — `PRBindingPresentation.menuRows`, in bind order — so the two
-/// surfaces cannot describe the same PR differently. Without a done group the
-/// `+N` menu lists every binding, exactly the toolbar's list; with one, the
-/// `+N` menu lists the open bindings and the done chip the finished ones, and
-/// each row still reads as the toolbar's row for that PR does. Neither chip
-/// offers an untrack action; that lives on the individual chips.
+/// chip. Clicking it drops down the rows its caller built, in bind order. The
+/// `+N` chip's rows come from the toolbar's multi-PR dropdown's own builder —
+/// `PRBindingPresentation.menuRows` — so the two surfaces cannot describe the
+/// same PR differently: without a done group it lists every binding, exactly
+/// the toolbar's list, and with one it lists the open bindings. The done chip's
+/// rows come from `PRBindingPresentation.doneMenuRows`, which lead with each
+/// PR's title. Neither chip offers an untrack action; that lives on the
+/// individual chips.
 ///
 /// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
 /// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`
@@ -978,22 +1029,24 @@ private struct PRChipView: View {
 /// takes an `.id` keyed on the rendered rows (`PRBindingPresentation.menuRowsID`)
 /// and is recreated whenever their text or targets change.
 ///
-/// It still renders **no PR title**, and that is a decision rather than an
-/// omission: titles reach the chips through the hover overlay, an ordinary
-/// SwiftUI view re-evaluated on every change, which has room to show one
-/// properly. Sharing `menuRows` with the toolbar is what keeps the two surfaces
-/// from disagreeing; forking it for one field would give that up to duplicate
-/// what the overlay already says better.
+/// The `+N` menu renders **no PR title**, and that is a decision rather than
+/// an omission: the PRs it lists are open, their titles reach the chips through
+/// the hover overlay, and sharing `menuRows` with the toolbar is what keeps the
+/// two surfaces from disagreeing. The done chip is the exception because its
+/// PRs have no chips: there, the title is the one thing that says what each
+/// finished PR was, so its rows lead with it and its hover card lists them.
 private struct PRChipMenu: View {
-    let bindings: [PRBinding]
+    let rows: [MenuRow]
     let label: String
-    let tooltip: String
+    /// nil when a hover card says what the tooltip would — two boxes over one
+    /// chip, the larger one saying more.
+    let tooltip: String?
     let spokenLabel: String
+    var hoverCard: HoverCardModel?
 
     @State private var isHovering = false
 
     var body: some View {
-        let rows = PRBindingPresentation.menuRows(bindings)
         Menu {
             ForEach(rows) { row in
                 // The default browser, matching the chips beside it — see
@@ -1018,8 +1071,9 @@ private struct PRChipMenu: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(tooltip)
+        .help(tooltip ?? "")
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        .hoverCard(hoverCard)
         .accessibilityLabel(spokenLabel)
     }
 }

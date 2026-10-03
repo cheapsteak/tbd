@@ -301,14 +301,96 @@ struct PRBindingPresentationTests {
     @Test("the done chip names its count, singular and plural")
     func doneChipWording() {
         #expect(PRBindingPresentation.doneChipLabel(count: 5) == "\u{2713} 5 done")
-        #expect(PRBindingPresentation.doneChipTooltip(count: 5)
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 5)
                     == "5 merged or closed pull requests")
-        #expect(PRBindingPresentation.doneChipTooltip(count: 1)
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 1)
                     == "1 merged or closed pull request")
         #expect(PRBindingPresentation.doneChipAccessibilityLabel(count: 5)
                     == "Show 5 merged or closed pull requests")
         #expect(PRBindingPresentation.doneChipAccessibilityLabel(count: 1)
                     == "Show 1 merged or closed pull request")
+    }
+
+    // MARK: - The done chip's menu rows
+
+    private func finished(_ n: Int, _ state: PRMergeableState = .merged,
+                          title: String? = nil, headBranch: String? = nil,
+                          url: String? = nil) -> PRBinding {
+        let url = url ?? "https://github.com/acme/acme-prod/pull/\(n)"
+        return PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                         number: n, url: url, headBranch: headBranch, title: title,
+                         status: PRStatus(number: n, url: url, state: state),
+                         source: .hook)
+    }
+
+    @Test("done menu rows lead with the title, then the reference and state, in bind order")
+    func doneMenuRowsLeadWithTitle() {
+        let bindings = [
+            finished(930, title: "Fix the login timeout", headBranch: "fix-login"),
+            finished(912, .closed, title: " Trim the relay "),
+        ]
+        let rows = PRBindingPresentation.doneMenuRows(bindings)
+        #expect(rows.map(\.number) == [930, 912])
+        #expect(rows.map(\.title) == [
+            "Fix the login timeout  PR #930 · Merged",
+            "Trim the relay  PR #912 · Closed",
+        ])
+        #expect(rows.map(\.id) == bindings.map(\.id))
+        #expect(rows[0].url == URL(string: bindings[0].url))
+        #expect(rows[0].state == .merged)
+    }
+
+    @Test("an untitled done menu row falls back to the branch, then to the reference alone")
+    func doneMenuRowsFallBack() {
+        let gitlab = "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/7"
+        let rows = PRBindingPresentation.doneMenuRows([
+            finished(5, title: "  ", headBranch: "fix-login"),
+            finished(6),
+            finished(7, url: gitlab),
+        ])
+        #expect(rows.map(\.title) == [
+            "fix-login  PR #5 · Merged",
+            "PR #6 · Merged",
+            "MR !7 · Merged",
+        ])
+    }
+
+    @Test("a blank status reason leaves no dangling separator on a done row")
+    func doneMenuRowsBlankReason() {
+        let url = "https://github.com/acme/acme-prod/pull/8"
+        let b = PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                          number: 8, url: url, title: "Fix it",
+                          status: PRStatus(number: 8, url: url, state: .merged, reason: "  "),
+                          source: .hook)
+        #expect(PRBindingPresentation.doneReference(b) == "PR #8")
+        #expect(PRBindingPresentation.doneMenuRows([b])[0].title == "Fix it  PR #8")
+    }
+
+    @Test("a long title is cut short in the done menu, never the reference")
+    func doneMenuRowsTruncateLongTitles() {
+        let limit = PRBindingPresentation.doneMenuLeadLimit
+        let exact = String(repeating: "a", count: limit)
+        let long = String(repeating: "b", count: limit + 40)
+        let rows = PRBindingPresentation.doneMenuRows([
+            finished(1, title: exact),
+            finished(2, title: long),
+        ])
+        #expect(rows[0].title == "\(exact)  PR #1 · Merged")
+        #expect(rows[1].title
+                == "\(String(repeating: "b", count: limit - 1))\u{2026}  PR #2 · Merged")
+    }
+
+    @Test("the done menu's rows do not change the shared +N / toolbar rows")
+    func doneMenuRowsLeaveMenuRowsAlone() {
+        let b = finished(930, title: "Fix the login timeout", headBranch: "fix-login")
+        #expect(PRBindingPresentation.menuRows([b])[0].title == "PR #930  Merged  fix-login")
+        // A title change re-materializes the done menu.
+        let retitled = PRBinding(id: b.id, worktreeID: b.worktreeID, owner: b.owner,
+                                 repo: b.repo, number: b.number, url: b.url,
+                                 headBranch: b.headBranch, title: "Fix the login timeouts",
+                                 status: b.status, source: b.source, boundAt: b.boundAt)
+        #expect(PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([b]))
+                != PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([retitled])))
     }
 
     @Test("menu rows keep bind order, not severity order")

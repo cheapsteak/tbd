@@ -642,4 +642,128 @@ struct StatusBarViewChipsTests {
             #expect(label.contains("#412") == false)
         }
     }
+
+    // MARK: - The done chip's hover card
+
+    private func finished(
+        _ number: Int,
+        _ state: PRMergeableState = .merged,
+        title: String? = nil,
+        headBranch: String? = nil,
+        gitlab: Bool = false
+    ) -> PRBinding {
+        let url = gitlab
+            ? "https://gitlab.acme.example/acme/group/acme-prod/-/merge_requests/\(number)"
+            : "https://github.com/acme/acme-prod/pull/\(number)"
+        return PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+            number: number, url: url,
+            headBranch: headBranch,
+            title: title,
+            status: PRStatus(number: number, url: url, state: state),
+            source: .hook
+        )
+    }
+
+    @Test("the done card counts the PRs and lists each title over its reference, in bind order")
+    func doneCardListsTitlesInBindOrder() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(930, title: "Fix the login timeout", headBranch: "fix-login"),
+            finished(912, .closed, title: "  Trim the relay  "),
+            finished(901, title: "Add retries"),
+        ])
+        #expect(card.title == "3 merged or closed pull requests")
+        #expect(card.title == PRBindingPresentation.doneChipCardTitle(count: 3))
+        #expect(card.titleCaption == nil)
+        #expect(card.rows.map(\.value) == ["Fix the login timeout", "Trim the relay", "Add retries"])
+        #expect(card.rows.map(\.caption) == [
+            "PR #930 · Merged",
+            "PR #912 · Closed",
+            "PR #901 · Merged",
+        ])
+        #expect(card.rows.allSatisfy { $0.valueStyle == .plain && $0.tint == .normal })
+    }
+
+    @Test("the done card's caption ends the done menu's row for the same PR")
+    func doneCardCaptionMatchesMenuRow() throws {
+        let bindings = [finished(930, title: "Fix it"),
+                        finished(41, .closed, title: "Trim the relay", gitlab: true)]
+        let card = StatusBarView.doneChipHoverCard(bindings)
+        let menu = PRBindingPresentation.doneMenuRows(bindings)
+        for (row, menuRow) in zip(card.rows, menu) {
+            let caption = try #require(row.caption)
+            #expect(menuRow.title == "\(row.value)  \(caption)")
+        }
+    }
+
+    @Test("an untitled finished PR falls back to its branch, then to its reference alone")
+    func doneCardTitleFallback() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(1, title: "   ", headBranch: "fix-login"),
+            finished(2, headBranch: "  "),
+            finished(3),
+        ])
+        #expect(card.rows.map(\.value) == ["fix-login", "PR #2 · Merged", "PR #3 · Merged"])
+        // The reference is the value, so it is not repeated beneath it.
+        #expect(card.rows.map(\.caption) == ["PR #1 · Merged", nil, nil])
+    }
+
+    @Test("a GitLab row in the done card says MR, never PR")
+    func doneCardGitLabSaysMR() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(41, title: "Trim the relay", gitlab: true),
+            finished(42, gitlab: true),
+        ])
+        #expect(card.rows[0].caption == "MR !41 · Merged")
+        #expect(card.rows[1].value == "MR !42 · Merged")
+        #expect(card.rows[1].caption == nil)
+        for row in card.rows {
+            #expect(row.value.contains(Forge.github.refNoun) == false)
+            #expect((row.caption ?? "").contains(Forge.github.refNoun) == false)
+        }
+    }
+
+    @Test("the done card lists ten PRs, then a muted 'and N more'")
+    func doneCardCapsAtTen() {
+        let bindings = (1...13).map { finished($0, title: "PR \($0)") }
+        let card = StatusBarView.doneChipHoverCard(bindings)
+        #expect(StatusBarView.doneCardRowLimit == 10)
+        #expect(card.title == "13 merged or closed pull requests")
+        #expect(card.rows.count == 11)
+        #expect(card.rows.prefix(10).map(\.value) == (1...10).map { "PR \($0)" })
+        let more = card.rows[10]
+        #expect(more.value == "and 3 more")
+        #expect(more.valueStyle == .mutedItalic)
+        #expect(more.caption == nil)
+    }
+
+    @Test("exactly ten finished PRs fill the done card with no summary row")
+    func doneCardExactlyTen() {
+        let card = StatusBarView.doneChipHoverCard((1...10).map { finished($0, title: "PR \($0)") })
+        #expect(card.rows.count == 10)
+        #expect(card.rows.contains { $0.value.hasPrefix("and ") } == false)
+    }
+
+    @Test("a done-card title collapses internal whitespace and is cut short past the card's limit")
+    func doneCardTitleIsBounded() {
+        let limit = StatusBarView.doneCardLeadLimit
+        let card = StatusBarView.doneChipHoverCard([
+            finished(1, title: "Fix the\nlogin\t\ttimeout"),
+            finished(2, title: String(repeating: "x", count: limit)),
+            finished(3, title: String(repeating: "y", count: limit + 1)),
+        ])
+        #expect(card.rows.map(\.value) == [
+            "Fix the login timeout",
+            String(repeating: "x", count: limit),
+            String(repeating: "y", count: limit - 1) + "\u{2026}",
+        ])
+        // The caption is never cut.
+        #expect(card.rows[2].caption == "PR #3 · Merged")
+    }
+
+    @Test("the done card is sized to the status bar's text")
+    func doneCardTextSize() {
+        let card = StatusBarView.doneChipHoverCard([finished(1), finished(2)])
+        #expect(card.textSize == .compact)
+    }
 }
