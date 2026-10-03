@@ -1125,6 +1125,93 @@ EOF
         "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$sidecar")"
 }
 
+# A failed compile names its first errors, not SwiftPM's last lines, and the
+# full output survives in build.log next to update.log.
+test_a_failed_build_reports_its_first_errors() {
+    local case_dir out update_log build_log
+    case_dir="$(mkcase first-errors-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "Compiling GRDBSQLite shim.h"
+echo "shim.h:1:10: error: 'sqlite3.h' file not found" >&2
+echo "CLIInstaller.swift:31:13: error: let 'logger' is not concurrency-safe" >&2
+i=0
+while [ "$i" -lt 30 ]; do echo "noise line $i"; i=$((i + 1)); done
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+
+    out="$(run_update "$case_dir")"
+    if [ "$?" -ne 0 ]; then
+        pass "a compile failure exits non-zero"
+    else
+        fail "a compile failure exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    build_log="$case_dir/home/tbd/updates/build.log"
+    assert_contains "the output names the first error" "sqlite3.h' file not found" "$out"
+    assert_contains "the output names the second error" "is not concurrency-safe" "$out"
+    assert_not_contains "the output skips the trailing noise" "noise line 29" "$out"
+    assert_contains "update.log names the first error" "sqlite3.h' file not found" "$update_log"
+    assert_contains "update.log points at the full output" "full build output: $build_log" "$update_log"
+    assert_not_contains "a compile failure is not called a slot timeout" "waiting for the build slot" "$update_log"
+    assert_contains "build.log keeps the full output" "noise line 29" "$(cat "$build_log")"
+}
+
+# swift-safe's 75 means the build never got the machine-wide slot. Nothing was
+# compiled, and saying "failed" sends the reader hunting for a compile error.
+test_a_slot_timeout_is_not_reported_as_a_compile_failure() {
+    local case_dir out update_log
+    case_dir="$(mkcase slot-timeout-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "swift-safe: timed out after 1800s waiting for the build lock" >&2
+exit 75
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "hold the slot"
+
+    out="$(run_update "$case_dir")"
+    if [ "$?" -ne 0 ]; then
+        pass "a slot timeout exits non-zero"
+    else
+        fail "a slot timeout exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    assert_contains "a slot timeout says so" "timed out waiting for the build slot" "$out"
+    assert_contains "update.log records the slot timeout" "nothing was compiled" "$update_log"
+    assert_not_contains "a slot timeout is not called a compile failure" "failed (exit" "$update_log"
+    assert_contains "a slot timeout still says the installation is untouched" \
+        "the running installation is untouched" "$out"
+}
+
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log() {
+    local case_dir out update_log
+    case_dir="$(mkcase auto-failure-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "Compiling module"
+echo "source.swift:10:5: error: 'foo' is not defined" >&2
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+
+    out="$(run_update "$case_dir" --auto)"
+    if [ "$?" -ne 0 ]; then
+        pass "a build failure with --auto exits non-zero"
+    else
+        fail "a build failure with --auto exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    assert_eq "--auto prints nothing to the terminal (silent)" "" "$out"
+    assert_contains "the error excerpt goes to update.log when --auto is set" \
+        "'foo' is not defined" "$update_log"
+    assert_contains "the failure message goes to update.log when --auto is set" \
+        "the running installation is untouched" "$update_log"
+}
+
 test_auto_logs_without_printing() {
     local case_dir out
     case_dir="$(mkcase auto-case)"
@@ -1779,6 +1866,9 @@ test_dry_run_builds_but_installs_nothing
 test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
 test_a_failed_build_leaves_the_previous_stamp_alone
+test_a_failed_build_reports_its_first_errors
+test_a_slot_timeout_is_not_reported_as_a_compile_failure
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log
 test_the_build_ignores_an_inherited_dev_shell_sdk
 test_an_xcode_sdk_selection_is_kept
 test_keep_build_env_switch_turns_the_scrub_off
