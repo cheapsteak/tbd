@@ -257,7 +257,7 @@ enum PRBindingPresentation {
     static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
             let reference = doneReference(binding)
-            let title = doneLead(binding).map { lead in
+            let title = doneLead(binding).map { (lead: String) -> String in
                 let shown = lead.count > doneMenuLeadLimit
                     ? lead.prefix(doneMenuLeadLimit - 1)
                         .trimmingCharacters(in: .whitespaces) + "\u{2026}"
