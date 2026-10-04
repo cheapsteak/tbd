@@ -189,6 +189,58 @@ struct PRPollScheduleToggleTests {
         #expect(await sw.active == .schedule)
     }
 
+    /// Start-up reads the persisted kind inside the serialized section, so a
+    /// toggle racing it cannot leave the driver disagreeing with the column. A
+    /// write that lands while the switch is unarmed only persists — and the
+    /// start that follows reads it and arms the matching driver. The reverse
+    /// order swaps the armed driver. Either way the two agree.
+    @Test func startArmsTheDriverTheColumnNamesWhicheverOrderAToggleLands() async throws {
+        // Toggle first, while unarmed: it persists, and start reads it.
+        do {
+            let log = StepLog()
+            let sw = Self.makeSwitch(log)
+            let column = Column()
+            try await sw.apply(.schedule) { await column.set(.schedule) }
+            #expect(await sw.active == nil)
+            await sw.start(readKind: { await column.value ?? .legacyPoller })
+            #expect(await log.steps == ["startSchedule"])
+            #expect(await sw.active == .schedule)
+            #expect(await sw.active == column.value)
+        }
+        // Start first: it arms from the column, and the toggle swaps.
+        do {
+            let log = StepLog()
+            let sw = Self.makeSwitch(log)
+            let column = Column()
+            await sw.start(readKind: { await column.value ?? .legacyPoller })
+            try await sw.apply(.schedule) { await column.set(.schedule) }
+            #expect(await log.steps == ["startLegacy", "stopLegacy", "startSchedule"])
+            #expect(await sw.active == column.value)
+        }
+        // Concurrent: whichever lands first, the driver matches the column.
+        for _ in 0..<5 {
+            let log = StepLog()
+            let sw = Self.makeSwitch(log)
+            let column = Column()
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await sw.start(readKind: {
+                        await Task.yield()
+                        return await column.value ?? .legacyPoller
+                    })
+                }
+                group.addTask {
+                    _ = try? await sw.apply(.schedule) {
+                        await Task.yield()
+                        await column.set(.schedule)
+                    }
+                }
+            }
+            #expect(await sw.active == .schedule)
+            #expect(await sw.active == column.value)
+        }
+    }
+
     /// Shutdown stops both drivers and disarms: a toggle landing afterwards
     /// still writes its column but starts nothing.
     @Test func stopAllDisarmsSoALaterApplyOnlyPersists() async throws {

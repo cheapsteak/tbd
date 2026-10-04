@@ -38,15 +38,20 @@ public enum PRPollDriver {
 /// The one place that starts, stops and swaps the periodic PR driver, so
 /// daemon start-up, a live flag change and shutdown cannot drift apart.
 ///
-/// - `start(_:)` is the daemon's start-up step: it starts the driver `kind`
-///   names and nothing else, and arms the switch. Called again with the other
-///   kind it swaps; with the same kind it does nothing.
+/// - `start(readKind:)` is the daemon's start-up step: inside the serialized
+///   section it reads the persisted flag, starts the driver it names and
+///   nothing else, and arms the switch. The read and the arm are one step, so
+///   a toggle racing start-up (the RPC socket is already serving) either
+///   finishes first — and the read sees its write — or queues behind the arm
+///   and swaps the armed driver. Called again with the other kind it swaps;
+///   with the same kind it does nothing. `start(_:)` is the same with a fixed
+///   kind.
 /// - `apply(_:persist:)` is the live switch the
 ///   `config.setPRPollScheduleEnabled` handler calls. It writes the column
 ///   (`persist`) and then stops the running driver and starts the other, both
 ///   inside one serialized section, so concurrent writes cannot leave the
 ///   column saying one thing while the other driver runs. The switch half does
-///   nothing until `start(_:)` has armed it — so a daemon in mock mode, and
+///   nothing until `start(readKind:)` has armed it — so a daemon in mock mode, and
 ///   every router a test builds, never starts a driver because a flag was
 ///   written — and nothing when `kind` already runs.
 /// - `stopAll()` is shutdown: it stops both drivers and disarms the switch, so
@@ -87,7 +92,7 @@ public actor PRPollDriverSwitch {
     }
 
     private let steps: Steps
-    /// The driver running now; nil until `start(_:)` arms the switch, and
+    /// The driver running now; nil until `start(readKind:)` arms the switch, and
     /// again after `stopAll()` disarms it.
     public private(set) var active: PRPollDriver.Kind?
     private var tail: Task<Void, Never>?
@@ -96,15 +101,26 @@ public actor PRPollDriverSwitch {
         self.steps = steps
     }
 
-    /// Start-up: start the driver `kind` names, and arm live switching. The
-    /// other driver is left untouched — it was never started.
+    /// Start-up: read the persisted kind, start the driver it names, and arm
+    /// live switching — the read inside the serialized section, the same way
+    /// `apply(_:persist:)` writes inside it, so no toggle can land between the
+    /// read and the arm. The other driver is left untouched — it was never
+    /// started.
+    public func start(readKind: @escaping @Sendable () async -> PRPollDriver.Kind) async {
+        await serialized { sw in
+            let kind = await readKind()
+            await sw.arm(kind)
+        }
+    }
+
+    /// `start(readKind:)` with a fixed kind.
     public func start(_ kind: PRPollDriver.Kind) async {
-        await serialized { await $0.arm(kind) }
+        await start(readKind: { kind })
     }
 
     /// Live switch: run `persist` (the column write), then stop the running
     /// driver and start the one `kind` names. A failed write throws and
-    /// switches nothing. The switch is a no-op before `start(_:)`, after
+    /// switches nothing. The switch is a no-op before `start(readKind:)`, after
     /// `stopAll()`, and when `kind` already runs; the write happens regardless.
     public func apply(_ kind: PRPollDriver.Kind,
                       persist: @escaping @Sendable () async throws -> Void = {}) async throws {

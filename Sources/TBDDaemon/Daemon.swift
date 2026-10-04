@@ -2021,12 +2021,17 @@ public final class Daemon: Sendable {
             // (`pr_poll_schedule_enabled`): the budgeted `PRPollScheduler`.
             // `PRPollDriverSwitch` starts the one the flag names and arms live
             // switching, so `config.setPRPollScheduleEnabled` swaps drivers
-            // without a restart through the same steps. The poller's
+            // without a restart through the same steps. The flag is read
+            // inside the switch's serialized section: the socket is already
+            // serving, and a toggle landing between a read here and the arm
+            // would leave the driver disagreeing with the column. The poller's
             // foreground gate is installed whichever driver starts, so a later
             // live switch to the poller finds it paced by a real answer.
-            let pollConfig = (try? await database.config.get()) ?? Config()
             await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
-            await rpcRouter.prPollDriverSwitch.start(PRPollDriver.kind(for: pollConfig))
+            let pollConfigStore = database.config
+            await rpcRouter.prPollDriverSwitch.start(readKind: {
+                PRPollDriver.kind(for: (try? await pollConfigStore.get()) ?? Config())
+            })
 
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
