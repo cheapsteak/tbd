@@ -93,6 +93,10 @@ public actor PRPoller {
         self.isForeground = gate
     }
 
+    /// Whether the loop is running — what a test of the live driver switch
+    /// (`PRPollDriverSwitch`) reads.
+    var isRunning: Bool { loopTask != nil }
+
     /// Start the periodic fetch. Idempotent — a second call is a no-op while a
     /// loop is already running.
     func start() {
@@ -117,6 +121,19 @@ public actor PRPoller {
     func stop() {
         loopTask?.cancel()
         loopTask = nil
+    }
+
+    /// Stop the loop and return only once it has exited, so a tick that was
+    /// mid-pass finishes before the caller goes on (it is cancelled with the
+    /// loop, so it ends quickly). `PRPollDriverSwitch` stops
+    /// through this so the scheduler it starts next never overlaps this pass
+    /// (whose `fetchAll` single-flight would otherwise silently swallow the
+    /// first scheduled discovery).
+    func stopAndWait() async {
+        let task = loopTask
+        loopTask = nil
+        task?.cancel()
+        await task?.value
     }
 
     /// The interval to wait next, re-evaluated on every tick of the gated sleep

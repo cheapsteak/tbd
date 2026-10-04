@@ -349,8 +349,14 @@ The shipped default lives in one place, `Config.prPollScheduleDefault`, and is
 change in the same commit as the migration, with the new field optional.
 
 Flag off: today's `PRPoller` loop and `runPollPass` run unchanged. Flag on: the
-scheduler runs instead. Both branches are tested. To enable for the soak, set
-the column to 1 on the singleton `config` row. Graduation: after a soak with
+scheduler runs instead. Both branches are tested. To enable for the soak, turn
+on "Poll PRs on a schedule" in Settings → General → Worktrees, or run
+`tbd config set pr-poll-schedule on`; both go through
+`config.setPRPollScheduleEnabled`. The change takes effect at once, with no
+restart: the daemon stops the running driver and starts the other through
+`PRPollDriverSwitch`, the same type that starts the driver at daemon start, so
+the two paths cannot drift. Switches are serialized, so quick toggles never
+leave both drivers running. Graduation: after a soak with
 cost logs showing the projected and actual spend, flip the Swift default; later,
 delete the flag and the old loop.
 

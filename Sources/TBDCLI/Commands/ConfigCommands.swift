@@ -24,6 +24,7 @@ struct ConfigGet: AsyncParsableCommand {
             "auto-hibernate-on-merge: \(config.autoHibernateOnMergeDefault ? "on" : "off")",
             "update-mode: \(config.updateMode.rawValue)",
             "remote-transcript: \(config.remoteTranscriptEnabled ? "on" : "off")",
+            "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
 
@@ -48,14 +49,19 @@ struct ConfigSet: AsyncParsableCommand {
     /// value argument is allowed to be. The value therefore arrives as a raw
     /// string and is parsed per key, rather than as a type that could only ever
     /// express one key's vocabulary.
-    static let onOffKeys = ["auto-archive-on-merge", "auto-hibernate-on-merge", "remote-transcript"]
+    static let onOffKeys = [
+        "auto-archive-on-merge", "auto-hibernate-on-merge", "remote-transcript", "pr-poll-schedule",
+    ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
-    @Argument(help: "Setting key (auto-archive-on-merge, auto-hibernate-on-merge, remote-transcript, update-mode)")
+    @Argument(help: """
+        Setting key (auto-archive-on-merge, auto-hibernate-on-merge, remote-transcript, \
+        pr-poll-schedule, update-mode)
+        """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults and remote-transcript; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, remote-transcript and pr-poll-schedule; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -74,6 +80,13 @@ struct ConfigSet: AsyncParsableCommand {
                 + "transcripts can show a Transcript pane beside the terminal."
         case ("remote-transcript", .off):
             return "Set remote-transcript to off. Remote sessions show only their terminal."
+        case ("pr-poll-schedule", .on):
+            return "Set pr-poll-schedule to on. TBD checks each pull request as often as its "
+                + "status needs, within a GitHub API budget. Takes effect now."
+        case ("pr-poll-schedule", .off):
+            return "Set pr-poll-schedule to off. TBD checks every worktree's pull request "
+                + "every 30 seconds while the app is in front, and every 5 minutes otherwise. "
+                + "Takes effect now."
         default:
             return "Set \(key) default to \(value.rawValue)."
         }
@@ -137,6 +150,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetRemoteTranscriptEnabled,
                 params: ConfigSetRemoteTranscriptEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "pr-poll-schedule":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetPRPollScheduleEnabled,
+                params: ConfigSetPRPollScheduleEnabledParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)

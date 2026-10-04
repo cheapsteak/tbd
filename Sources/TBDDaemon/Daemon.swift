@@ -2019,20 +2019,19 @@ public final class Daemon: Sendable {
             // Flag off: today's fixed-interval `PRPoller` (30s foreground,
             // 5min background — GitPollCadence.prInterval). Flag on
             // (`pr_poll_schedule_enabled`): the budgeted `PRPollScheduler`.
-            // Read once here; changing the flag takes a daemon restart.
-            let pollConfig = (try? await database.config.get()) ?? Config()
-            await PRPollDriver.start(
-                PRPollDriver.kind(for: pollConfig),
-                legacy: {
-                    await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
-                    await rpcRouter.prPoller.start()
-                },
-                schedule: {
-                    // The ledger records hook and selection stamps only for
-                    // the schedule; enabled before the first wake reads it.
-                    await rpcRouter.activityLedger.setEnabled(true)
-                    await rpcRouter.prPollScheduler.start()
-                })
+            // `PRPollDriverSwitch` starts the one the flag names and arms live
+            // switching, so `config.setPRPollScheduleEnabled` swaps drivers
+            // without a restart through the same steps. The flag is read
+            // inside the switch's serialized section: the socket is already
+            // serving, and a toggle landing between a read here and the arm
+            // would leave the driver disagreeing with the column. The poller's
+            // foreground gate is installed whichever driver starts, so a later
+            // live switch to the poller finds it paced by a real answer.
+            await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
+            let pollConfigStore = database.config
+            await rpcRouter.prPollDriverSwitch.start(readKind: {
+                PRPollDriver.kind(for: (try? await pollConfigStore.get()) ?? Config())
+            })
 
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
@@ -2183,11 +2182,12 @@ public final class Daemon: Sendable {
             await runner.apply(mode: .off)
         }
 
-        // Stop the daemon-clock PR poll — whichever driver runs; `stop` is a
-        // no-op on the one that was never started.
+        // Stop the daemon-clock PR poll — whichever driver runs — through the
+        // switch, which waits for a pass in flight and disarms, so a toggle
+        // landing while the socket is still up cannot restart a loop that
+        // would outlive shutdown. Stopping a never-started driver is a no-op.
         if let router = self.router {
-            await router.prPoller.stop()
-            await router.prPollScheduler.stop()
+            await router.prPollDriverSwitch.stopAll()
         }
 
         // Stop the supervision heartbeat. `status.json` is left exactly as the
