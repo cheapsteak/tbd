@@ -16,6 +16,42 @@ struct PRPollScheduleToggleTests {
         func add(_ step: String) { steps.append(step) }
     }
 
+    actor Column {
+        var value: PRPollDriver.Kind?
+        func set(_ kind: PRPollDriver.Kind) { value = kind }
+    }
+
+    /// A runner probe whose calls block on a gate until released.
+    actor RunProbe {
+        var calls = 0
+        var finished = 0
+        var inFlight = 0
+        var maxInFlight = 0
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func enter() {
+            calls += 1
+            inFlight += 1
+            maxInFlight = max(maxInFlight, inFlight)
+        }
+        func leave() {
+            inFlight -= 1
+            finished += 1
+        }
+        func waitForGate() async {
+            if isOpen { return }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waiters.append(continuation)
+            }
+        }
+        func release() {
+            isOpen = true
+            for waiter in waiters { waiter.resume() }
+            waiters = []
+        }
+    }
+
     private static func makeSwitch(_ log: StepLog) -> PRPollDriverSwitch {
         PRPollDriverSwitch(steps: .init(
             startLegacy: { await log.add("startLegacy") },
@@ -61,48 +97,48 @@ struct PRPollScheduleToggleTests {
         #expect(await sw.active == .schedule)
     }
 
-    @Test func enablingStopsThePollerThenStartsTheScheduler() async {
+    @Test func enablingStopsThePollerThenStartsTheScheduler() async throws {
         let log = StepLog()
         let sw = Self.makeSwitch(log)
         await sw.start(.legacyPoller)
-        await sw.apply(.schedule)
+        try await sw.apply(.schedule)
         #expect(await log.steps == ["startLegacy", "stopLegacy", "startSchedule"])
         #expect(await sw.active == .schedule)
     }
 
-    @Test func disablingStopsTheSchedulerThenStartsThePoller() async {
+    @Test func disablingStopsTheSchedulerThenStartsThePoller() async throws {
         let log = StepLog()
         let sw = Self.makeSwitch(log)
         await sw.start(.schedule)
-        await sw.apply(.legacyPoller)
+        try await sw.apply(.legacyPoller)
         #expect(await log.steps == ["startSchedule", "stopSchedule", "startLegacy"])
         #expect(await sw.active == .legacyPoller)
     }
 
-    @Test func enablingTwiceIsANoOp() async {
+    @Test func enablingTwiceIsANoOp() async throws {
         let log = StepLog()
         let sw = Self.makeSwitch(log)
         await sw.start(.legacyPoller)
-        await sw.apply(.schedule)
-        await sw.apply(.schedule)
+        try await sw.apply(.schedule)
+        try await sw.apply(.schedule)
         #expect(await log.steps == ["startLegacy", "stopLegacy", "startSchedule"])
     }
 
-    @Test func disablingWhileThePollerRunsIsANoOp() async {
+    @Test func disablingWhileThePollerRunsIsANoOp() async throws {
         let log = StepLog()
         let sw = Self.makeSwitch(log)
         await sw.start(.legacyPoller)
-        await sw.apply(.legacyPoller)
+        try await sw.apply(.legacyPoller)
         #expect(await log.steps == ["startLegacy"])
     }
 
     /// Mock mode, and every router a test builds: nothing armed the switch, so
     /// a flag write starts nothing.
-    @Test func applyBeforeStartRunsNothing() async {
+    @Test func applyBeforeStartRunsNothing() async throws {
         let log = StepLog()
         let sw = Self.makeSwitch(log)
-        await sw.apply(.schedule)
-        await sw.apply(.legacyPoller)
+        try await sw.apply(.schedule)
+        try await sw.apply(.legacyPoller)
         #expect(await log.steps.isEmpty)
         #expect(await sw.active == nil)
     }
@@ -115,7 +151,7 @@ struct PRPollScheduleToggleTests {
         await sw.start(.legacyPoller)
         await withTaskGroup(of: Void.self) { group in
             for i in 0..<10 {
-                group.addTask { await sw.apply(i.isMultiple(of: 2) ? .schedule : .legacyPoller) }
+                group.addTask { _ = try? await sw.apply(i.isMultiple(of: 2) ? .schedule : .legacyPoller) }
             }
         }
         var running: Set<String> = []
@@ -130,6 +166,125 @@ struct PRPollScheduleToggleTests {
             #expect(running.count <= 1, "both drivers running after \(step)")
         }
         #expect(running.count == 1)
+    }
+
+    /// A second start (the arming path with a driver already active) swaps
+    /// to a different kind.
+    @Test func aSecondStartWithTheOtherKindSwaps() async {
+        let log = StepLog()
+        let sw = Self.makeSwitch(log)
+        await sw.start(.legacyPoller)
+        await sw.start(.schedule)
+        #expect(await log.steps == ["startLegacy", "stopLegacy", "startSchedule"])
+        #expect(await sw.active == .schedule)
+    }
+
+    /// The other branch: a second start with the same kind does nothing.
+    @Test func aSecondStartWithTheSameKindIsANoOp() async {
+        let log = StepLog()
+        let sw = Self.makeSwitch(log)
+        await sw.start(.schedule)
+        await sw.start(.schedule)
+        #expect(await log.steps == ["startSchedule"])
+        #expect(await sw.active == .schedule)
+    }
+
+    /// Shutdown stops both drivers and disarms: a toggle landing afterwards
+    /// still writes its column but starts nothing.
+    @Test func stopAllDisarmsSoALaterApplyOnlyPersists() async throws {
+        let log = StepLog()
+        let sw = Self.makeSwitch(log)
+        await sw.start(.legacyPoller)
+        await sw.stopAll()
+        #expect(await sw.active == nil)
+        let column = Column()
+        try await sw.apply(.schedule) { await column.set(.schedule) }
+        #expect(await column.value == .schedule)
+        #expect(await log.steps == ["startLegacy", "stopLegacy", "stopSchedule"])
+    }
+
+    /// A failed write throws and switches nothing.
+    @Test func aFailedPersistThrowsAndSwitchesNothing() async {
+        struct Boom: Error {}
+        let log = StepLog()
+        let sw = Self.makeSwitch(log)
+        await sw.start(.legacyPoller)
+        await #expect(throws: Boom.self) {
+            try await sw.apply(.schedule) { throw Boom() }
+        }
+        #expect(await log.steps == ["startLegacy"])
+        #expect(await sw.active == .legacyPoller)
+    }
+
+    /// The write happens inside the serialized section: concurrent opposite
+    /// toggles always end with the running driver matching the column.
+    @Test func concurrentOppositeAppliesEndWithTheDriverMatchingTheColumn() async {
+        for _ in 0..<5 {
+            let log = StepLog()
+            let sw = Self.makeSwitch(log)
+            let column = Column()
+            await sw.start(.legacyPoller)
+            await withTaskGroup(of: Void.self) { group in
+                for kind in [PRPollDriver.Kind.schedule, .legacyPoller, .schedule, .legacyPoller] {
+                    group.addTask {
+                        _ = try? await sw.apply(kind) {
+                            // A suspension between the write and the switch,
+                            // where a concurrent call could interleave if the
+                            // two were not one section.
+                            await Task.yield()
+                            await column.set(kind)
+                        }
+                    }
+                }
+            }
+            #expect(await sw.active == column.value)
+        }
+    }
+
+    // MARK: - A stop waits for the pass in flight
+
+    /// `stopAndWait` returns only after a `run` that was in flight finishes,
+    /// and a `start` right after it never overlaps that run.
+    @Test func schedulerStopAndWaitWaitsForTheRunInFlight() async {
+        let dates = TestDateSource()
+        let probe = RunProbe()
+        let facts = [PRPollWorktreeFacts(
+            worktreeID: UUID(), active: true, discoverable: true,
+            bindings: [PRPollBindingFact(
+                key: PRPollKey(host: "github.com", owner: "acme", repo: "acme-prod", number: 1),
+                state: .blocked)])]
+        let s = PRPollScheduler(
+            facts: { facts },
+            run: { _ in
+                await probe.enter()
+                await probe.waitForGate()
+                await probe.leave()
+            },
+            now: dates.provider)
+
+        await s.start()
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await probe.calls == 1
+        } == .satisfied)
+
+        let stopper = Task { () -> Int in
+            await s.stopAndWait()
+            return await probe.finished
+        }
+        // The stop has begun (it clears the loop first) while the run is held.
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await s.isRunning == false
+        } == .satisfied)
+        await probe.release()
+        #expect(await stopper.value == 1, "the stop returned before the run in flight finished")
+
+        dates.advance(by: 3600)
+        await s.start()
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await probe.finished == 2
+        } == .satisfied)
+        #expect(await probe.maxInFlight == 1, "two runs overlapped")
+        await s.stopAndWait()
     }
 
     // MARK: - Through the router
@@ -175,8 +330,31 @@ struct PRPollScheduleToggleTests {
         #expect(await router.activityLedger.isEnabled == false)
         #expect(await router.prPoller.isRunning == true)
 
-        await router.prPoller.stop()
-        await router.prPollScheduler.stop()
+        await router.prPollDriverSwitch.stopAll()
+        #expect(await router.prPoller.isRunning == false)
+        #expect(await router.prPollScheduler.isRunning == false)
+    }
+
+    /// Two concurrent RPCs with opposite values, against an armed router:
+    /// whatever order they land in, the running driver matches the column.
+    @Test func concurrentRPCsLeaveTheColumnAndTheDriverAgreeing() async throws {
+        let (router, db) = try Self.makeRouterAndDB()
+        await router.prPollDriverSwitch.start(.legacyPoller)
+        await withTaskGroup(of: Void.self) { group in
+            for enabled in [true, false] {
+                group.addTask {
+                    guard let request = try? RPCRequest(
+                        method: RPCMethod.configSetPRPollScheduleEnabled,
+                        params: ConfigSetPRPollScheduleEnabledParams(enabled: enabled))
+                    else { return }
+                    _ = await router.handle(request)
+                }
+            }
+        }
+        let column = try await db.config.get().prPollScheduleEnabled
+        #expect(await router.prPollScheduler.isRunning == column)
+        #expect(await router.prPoller.isRunning == !column)
+        await router.prPollDriverSwitch.stopAll()
     }
 
     @Test func capabilitiesCarryTheFlagInBothStates() async throws {

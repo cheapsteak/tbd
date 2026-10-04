@@ -123,6 +123,18 @@ public actor PRPoller {
         loopTask = nil
     }
 
+    /// Stop the loop and return only once it has exited, so a tick that was
+    /// mid-pass finishes before the caller goes on. `PRPollDriverSwitch` stops
+    /// through this so the scheduler it starts next never overlaps this pass
+    /// (whose `fetchAll` single-flight would otherwise silently swallow the
+    /// first scheduled discovery).
+    func stopAndWait() async {
+        let task = loopTask
+        loopTask = nil
+        task?.cancel()
+        await task?.value
+    }
+
     /// The interval to wait next, re-evaluated on every tick of the gated sleep
     /// so a foreground transition (or the app disappearing) changes the cadence
     /// within one tick.

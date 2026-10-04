@@ -455,16 +455,17 @@ public final class RPCRouter: Sendable {
         // The steps capture the three actors, not the router, so the switch
         // keeps no router alive. Off→on stops the poller, enables the ledger
         // (before the first wake reads it), then starts the scheduler; on→off
-        // reverses that. Every step is idempotent.
+        // reverses that. Every step is idempotent, and each stop waits for a
+        // pass in flight to finish so the next driver never overlaps it.
         self.prPollDriverSwitch = PRPollDriverSwitch(steps: .init(
             startLegacy: { await poller.start() },
-            stopLegacy: { await poller.stop() },
+            stopLegacy: { await poller.stopAndWait() },
             startSchedule: {
                 await ledger.setEnabled(true)
                 await scheduler.start()
             },
             stopSchedule: {
-                await scheduler.stop()
+                await scheduler.stopAndWait()
                 await ledger.setEnabled(false)
             }))
         // Default the candidate source from the router's own stores rather

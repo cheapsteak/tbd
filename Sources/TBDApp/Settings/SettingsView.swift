@@ -478,7 +478,8 @@ struct GeneralSettingsTab: View {
     }
 
     static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
-        + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds."
+        + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
+        + "while TBD is in front, and every 5 minutes otherwise."
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.

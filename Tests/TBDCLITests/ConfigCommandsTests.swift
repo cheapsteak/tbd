@@ -151,7 +151,8 @@ struct ConfigCommandsTests {
             + "status needs, within a GitHub API budget. Takes effect now.")
         #expect(ConfigSet.confirmation(key: "pr-poll-schedule", value: .off)
             == "Set pr-poll-schedule to off. TBD checks every worktree's pull request "
-            + "every 30 seconds while the app is in front. Takes effect now.")
+            + "every 30 seconds while the app is in front, and every 5 minutes otherwise. "
+            + "Takes effect now.")
     }
 
     @Test func prPollScheduleIsAnOnOffKey() throws {

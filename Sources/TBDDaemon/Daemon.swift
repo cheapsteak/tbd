@@ -2177,11 +2177,12 @@ public final class Daemon: Sendable {
             await runner.apply(mode: .off)
         }
 
-        // Stop the daemon-clock PR poll — whichever driver runs; `stop` is a
-        // no-op on the one that was never started.
+        // Stop the daemon-clock PR poll — whichever driver runs — through the
+        // switch, which waits for a pass in flight and disarms, so a toggle
+        // landing while the socket is still up cannot restart a loop that
+        // would outlive shutdown. Stopping a never-started driver is a no-op.
         if let router = self.router {
-            await router.prPoller.stop()
-            await router.prPollScheduler.stop()
+            await router.prPollDriverSwitch.stopAll()
         }
 
         // Stop the supervision heartbeat. `status.json` is left exactly as the

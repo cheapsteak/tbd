@@ -100,6 +100,28 @@ public actor PRPollScheduler {
         sleeper = nil
     }
 
+    /// Stop the loop and return only once it has exited — including a pass
+    /// that was mid-`run` when the stop landed, which runs to completion.
+    /// `stop()` returns at once and leaves that pass running, so a `start()`
+    /// right after it would begin a second loop whose wake overlaps the old
+    /// pass: duplicate queries, `isRunningDue` cleared under the new run (a
+    /// trigger lost), and two pass starts. `PRPollDriverSwitch` stops through
+    /// this so a live switch, however quick, never overlaps two passes.
+    ///
+    /// What survives a stop, deliberately: the schedule's due times, the
+    /// budget's last reading, and a pending kick. All are in-memory facts that
+    /// stay true or age harmlessly — a restart that reads stale due times runs
+    /// those items sooner, never later — and keeping the budget means a quick
+    /// off→on does not forget a rate-limit brake.
+    public func stopAndWait() async {
+        let task = loopTask
+        loopTask = nil
+        task?.cancel()
+        sleeper?.cancel()
+        sleeper = nil
+        await task?.value
+    }
+
     /// Wake the loop now. `async` only so the test probe can be awaited.
     public func kick() async {
         kickPending = true
@@ -205,6 +227,8 @@ public actor PRPollScheduler {
         // Something is already due (a trigger replayed after the last run):
         // wake again at once rather than asking the clock for a zero sleep.
         guard seconds > 0 else { return }
+        // A stop that landed during the wake: arm no sleeper for it to miss.
+        guard !Task.isCancelled else { return }
         let delay = Duration.milliseconds(Int64((seconds * 1000).rounded(.up)))
         let clock = self.clock
         let task = Task { _ = try? await clock.sleep(for: delay) }
