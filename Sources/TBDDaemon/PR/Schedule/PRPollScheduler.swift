@@ -100,9 +100,11 @@ public actor PRPollScheduler {
         sleeper = nil
     }
 
-    /// Stop the loop and return only once it has exited — including a pass
-    /// that was mid-`run` when the stop landed, which runs to completion.
-    /// `stop()` returns at once and leaves that pass running, so a `start()`
+    /// Stop the loop and return only once it has exited, waiting for a pass
+    /// that was mid-`run` when the stop landed to finish. That pass is
+    /// cancelled with the loop, so it ends quickly: in-flight `gh` calls are
+    /// killed and later ones never launch, leaving its items stamped as ran
+    /// with undetermined results — the same as under `stop()`. `stop()` returns at once and leaves that pass running, so a `start()`
     /// right after it would begin a second loop whose wake overlaps the old
     /// pass: duplicate queries, `isRunningDue` cleared under the new run (a
     /// trigger lost), and two pass starts. `PRPollDriverSwitch` stops through

@@ -317,18 +317,25 @@ struct PRPollScheduleToggleTests {
     @Test func anArmedRouterSwapsTheRealDriversLive() async throws {
         let (router, _) = try Self.makeRouterAndDB()
         await router.prPollDriverSwitch.start(.legacyPoller)
-        #expect(await router.prPoller.isRunning == true)
-        #expect(await router.prPollScheduler.isRunning == false)
+        // Cleanup must run even when a step throws: real loops left running
+        // would outlive the test. `defer` cannot await, hence the do/catch.
+        do {
+            #expect(await router.prPoller.isRunning == true)
+            #expect(await router.prPollScheduler.isRunning == false)
 
-        try await Self.setEnabled(router, true)
-        #expect(await router.prPoller.isRunning == false)
-        #expect(await router.prPollScheduler.isRunning == true)
-        #expect(await router.activityLedger.isEnabled == true)
+            try await Self.setEnabled(router, true)
+            #expect(await router.prPoller.isRunning == false)
+            #expect(await router.prPollScheduler.isRunning == true)
+            #expect(await router.activityLedger.isEnabled == true)
 
-        try await Self.setEnabled(router, false)
-        #expect(await router.prPollScheduler.isRunning == false)
-        #expect(await router.activityLedger.isEnabled == false)
-        #expect(await router.prPoller.isRunning == true)
+            try await Self.setEnabled(router, false)
+            #expect(await router.prPollScheduler.isRunning == false)
+            #expect(await router.activityLedger.isEnabled == false)
+            #expect(await router.prPoller.isRunning == true)
+        } catch {
+            await router.prPollDriverSwitch.stopAll()
+            throw error
+        }
 
         await router.prPollDriverSwitch.stopAll()
         #expect(await router.prPoller.isRunning == false)
@@ -351,10 +358,15 @@ struct PRPollScheduleToggleTests {
                 }
             }
         }
-        let column = try await db.config.get().prPollScheduleEnabled
-        #expect(await router.prPollScheduler.isRunning == column)
-        #expect(await router.prPoller.isRunning == !column)
+        // Read everything, then stop unconditionally, then judge: a throwing
+        // read must not leave real loops running in the test process.
+        let column = try? await db.config.get().prPollScheduleEnabled
+        let schedulerRunning = await router.prPollScheduler.isRunning
+        let pollerRunning = await router.prPoller.isRunning
         await router.prPollDriverSwitch.stopAll()
+        let persisted = try #require(column)
+        #expect(schedulerRunning == persisted)
+        #expect(pollerRunning == !persisted)
     }
 
     @Test func capabilitiesCarryTheFlagInBothStates() async throws {

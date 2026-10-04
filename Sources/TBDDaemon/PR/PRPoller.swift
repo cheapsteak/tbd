@@ -124,7 +124,8 @@ public actor PRPoller {
     }
 
     /// Stop the loop and return only once it has exited, so a tick that was
-    /// mid-pass finishes before the caller goes on. `PRPollDriverSwitch` stops
+    /// mid-pass finishes before the caller goes on (it is cancelled with the
+    /// loop, so it ends quickly). `PRPollDriverSwitch` stops
     /// through this so the scheduler it starts next never overlaps this pass
     /// (whose `fetchAll` single-flight would otherwise silently swallow the
     /// first scheduled discovery).

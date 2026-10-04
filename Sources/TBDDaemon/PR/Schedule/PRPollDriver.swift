@@ -56,8 +56,9 @@ public enum PRPollDriver {
 /// Transitions are serialized: each waits for the previous one to finish, so
 /// two quick toggles can never leave both drivers running. (An actor alone
 /// does not give that — its methods interleave at every `await`.) The stop
-/// steps must wait for an in-flight pass to finish (`stopAndWait`), or a
-/// quick off→on would overlap the old pass with the new driver's first one.
+/// steps must wait for an in-flight pass to finish (`stopAndWait`; the pass is
+/// cancelled, so it ends quickly), or a quick off→on would overlap the old
+/// pass with the new driver's first one.
 ///
 /// A disable leaves the scheduler's in-memory state behind — its due times,
 /// its budget reading, a pending kick — and the ledger's recency stamps. All
