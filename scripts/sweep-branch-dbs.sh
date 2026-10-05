@@ -26,6 +26,10 @@
 #
 # The run REFUSES (exit 1, drops nothing) when the scan has no roots, when a
 # --root glob matches no directory, or when the scan found zero worktree paths.
+# With --apply it also refuses when the TBD worktree listing is unavailable
+# (daemon down, tbd or jq missing), unless --no-tbd says to skip that listing:
+# otherwise every TBD worktree outside the --root globs would read as an orphan.
+# A dry-run in that state still reports, and says the report is incomplete.
 # It SKIPS (exit 0, drops nothing) when Postgres is unreachable or in recovery.
 # Dry-run is the default; --apply performs the drops.
 #
@@ -39,6 +43,9 @@
 #   --root GLOB      glob expanding to worktree directories; repeatable. TBD's own
 #                    non-archived worktrees (`tbd worktree list --json`) are always
 #                    added when the CLI is available.
+#   --no-tbd         skip the TBD worktree listing on purpose; the --root globs
+#                    are then the whole scan, and --apply no longer refuses for
+#                    a missing listing
 #   --worktree PATH  single-target mode: consider only PATH's database
 #   --apply          drop for real (default is a dry-run report)
 #   --dry-run        explicit dry-run (the default)
@@ -55,6 +62,7 @@
 #   BRANCHDB_MAINTENANCE_DB database psql connects to (default: postgres)
 
 LABEL_MAX=54
+NO_TBD=false   # set by --no-tbd; read by collect_live_paths (in a subshell)
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -131,7 +139,8 @@ human_bytes() {
 # collect_live_paths ROOT_GLOB... -> newline-separated worktree paths on stdout.
 # Returns 2 if any glob matched no directory (a typo'd root would make its
 # worktrees' databases look orphaned), 1 if there were no roots at all (no
-# --root and no TBD listing), else 0.
+# --root and no TBD listing), 3 if the roots were fine but the TBD listing was
+# wanted and unavailable (the scan is incomplete), else 0.
 collect_live_paths() {
   local g p n any_root=false ok=0 json tbd_paths
   for g in "$@"; do
@@ -142,17 +151,22 @@ collect_live_paths() {
     done < <(compgen -G "$g" || true)
     if (( n == 0 )); then log "REFUSE: --root '$g' matched no directory"; ok=2; fi
   done
-  if json="$(_tbd_list_json 2>/dev/null)" && command -v jq >/dev/null 2>&1 \
+  local tbd_failed=false
+  if [[ "$NO_TBD" == "true" ]]; then
+    log "TBD worktree listing skipped (--no-tbd): the --root globs are the whole scan"
+  elif json="$(_tbd_list_json 2>/dev/null)" && command -v jq >/dev/null 2>&1 \
      && tbd_paths="$(printf '%s' "$json" | jq -r '.[] | select(.status != "archived") | .path' 2>/dev/null)"; then
     any_root=true
     [[ -n "$tbd_paths" ]] && printf '%s\n' "$tbd_paths"
   else
     log "warning: TBD worktree listing unavailable (tbd or jq missing, or the call failed)"
+    tbd_failed=true
   fi
   if [[ "$any_root" != "true" ]]; then
     log "no roots: pass --root, or make \`tbd worktree list --json\` available"
     (( ok == 0 )) && ok=1
   fi
+  if [[ "$tbd_failed" == "true" ]] && (( ok == 0 )); then ok=3; fi
   return "$ok"
 }
 
@@ -211,6 +225,7 @@ main() {
       --root)     [[ -n "${2:-}" ]] || { usage; return 2; }; roots+=("$2"); shift 2 ;;
       --worktree) target="${2:-}"; shift 2 || { usage; return 2; } ;;
       --apply)    apply=true; shift ;;
+      --no-tbd)   NO_TBD=true; shift ;;
       --dry-run)  apply=false; shift ;;
       --host)     [[ -n "${2:-}" ]] || { usage; return 2; }; CONN_ARGS+=(-h "$2"); shift 2 ;;
       --port)     [[ -n "${2:-}" ]] || { usage; return 2; }; CONN_ARGS+=(-p "$2"); shift 2 ;;
@@ -225,14 +240,23 @@ main() {
   local scan_status=$?
 
   if [[ -n "$target" ]]; then
-    # Single-target mode names its database explicitly, so having no roots is
-    # only a warning; a --root that matched nothing still refuses.
+    # Single-target mode names its database explicitly, so having no roots or
+    # no TBD listing is only a warning; a --root that matched nothing still
+    # refuses.
     if (( scan_status == 2 )); then log "REFUSE: incomplete scan; dropping nothing"; return 1; fi
     single_target "$prefix" "$target" "$apply" "$live"
     return $?
   fi
 
-  if (( scan_status != 0 )); then log "REFUSE: incomplete scan; dropping nothing"; return 1; fi
+  if (( scan_status == 3 )); then
+    if [[ "$apply" == "true" ]]; then
+      log "REFUSE: the TBD worktree listing is unavailable, so TBD worktrees outside --root would read as orphans; dropping nothing (pass --no-tbd to sweep on the --root globs alone)"
+      return 1
+    fi
+    echo "INCOMPLETE: the TBD worktree listing is unavailable; ORPHAN rows below may belong to live TBD worktrees, and --apply would refuse"
+  elif (( scan_status != 0 )); then
+    log "REFUSE: incomplete scan; dropping nothing"; return 1
+  fi
   if [[ -z "$live" ]]; then
     log "REFUSE: the scan found zero worktree paths; an empty scan is never read as 'everything is an orphan'"
     return 1

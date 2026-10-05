@@ -48,11 +48,15 @@ EOF
 }
 
 # _run FAKEDIR ARGS... -> combined output of the script with every seam faked.
-# The TBD listing is "unavailable" (`false`) unless TBD_JSON names a file, so no
-# case can ever reach a real `tbd`.
+# The TBD listing is an empty fleet (`[]`) by default, a file's contents when
+# TBD_JSON names one, and a failing call when TBD_JSON=fail, so no case can
+# ever reach a real `tbd`.
 _run() {
   local f="$1"; shift
-  local tbd_cmd=false; [[ -n "${TBD_JSON:-}" ]] && tbd_cmd="cat $(printf '%q' "$TBD_JSON")"
+  local tbd_cmd="echo '[]'"
+  case "${TBD_JSON:-}" in
+    "") ;; fail) tbd_cmd=false ;; *) tbd_cmd="cat $(printf '%q' "$TBD_JSON")" ;;
+  esac
   BRANCHDB_PSQL_CMD="$f/psql" BRANCHDB_DROPDB_CMD="$f/dropdb" \
   BRANCHDB_TBD_LIST_CMD="$tbd_cmd" \
   BRANCHDB_DF_CMD="printf 'Filesystem 1K-blocks Used Available\nfake 100 50 1000\n'" \
@@ -183,7 +187,7 @@ test_refuses_empty_scan() {
   _fixture
   mkdir -p "$T/empty"
   local out rc
-  out="$(_run "$F" --prefix app_db_ --apply)"; rc=$?
+  out="$(TBD_JSON=fail _run "$F" --prefix app_db_ --apply)"; rc=$?
   assert_eq "no roots and no tbd -> exit 1" 1 "$rc"
   assert_contains "no-roots refusal explained" "$out" "REFUSE"
   out="$(_run "$F" --prefix app_db_ --root "$T/empty/*" --apply)"; rc=$?
@@ -213,6 +217,49 @@ test_tbd_listing_is_a_root() {
   local out; out="$(TBD_JSON="$T/tbd.json" _run "$F" --prefix app_db_ --root "$T/wt/*/*")"
   assert_contains "tbd-listed worktree keeps its db" "$out" "KEEP live app_db_gone_branch"
   assert_contains "archived worktree does not keep its db" "$out" "ORPHAN app_db_old"
+  rm -rf "$T"
+}
+
+test_apply_refuses_when_tbd_listing_fails() {
+  _fixture
+  local out rc; out="$(TBD_JSON=fail _run "$F" --prefix app_db_ --root "$T/wt/*/*" --apply)"; rc=$?
+  assert_eq "apply with a failed listing -> exit 1" 1 "$rc"
+  assert_contains "refusal names the listing" "$out" "REFUSE: the TBD worktree listing is unavailable"
+  assert_contains "refusal points at --no-tbd" "$out" "--no-tbd"
+  assert_eq "failed listing dropped nothing" "" "$(_dropped)"
+  assert_eq "failed listing never queried postgres" "" "$(cat "$F/psql.log")"
+  rm -rf "$T"
+}
+
+test_apply_with_no_tbd_proceeds_on_roots_alone() {
+  _fixture
+  local out rc; out="$(TBD_JSON=fail _run "$F" --prefix app_db_ --root "$T/wt/*/*" --no-tbd --apply)"; rc=$?
+  assert_eq "--no-tbd apply exits 0" 0 "$rc"
+  assert_contains "--no-tbd announced" "$out" "TBD worktree listing skipped (--no-tbd)"
+  assert_lacks "--no-tbd does not warn of a failure" "$out" "listing unavailable"
+  assert_eq "--no-tbd drops the orphan" "app_db_gone_branch" "$(_dropped)"
+  out="$(_run "$F" --prefix app_db_ --no-tbd --apply)"; rc=$?
+  assert_eq "--no-tbd with no --root still refuses" 1 "$rc"
+  rm -rf "$T"
+}
+
+test_dry_run_with_failed_listing_warns_and_reports() {
+  _fixture
+  local out rc; out="$(TBD_JSON=fail _run "$F" --prefix app_db_ --root "$T/wt/*/*")"; rc=$?
+  assert_eq "dry-run with a failed listing exits 0" 0 "$rc"
+  assert_contains "listing failure warned" "$out" "listing unavailable"
+  assert_contains "report marked incomplete" "$out" "INCOMPLETE:"
+  assert_contains "says --apply would refuse" "$out" "--apply would refuse"
+  assert_contains "still reports the orphan" "$out" "ORPHAN app_db_gone_branch"
+  assert_eq "dry-run dropped nothing" "" "$(_dropped)"
+  rm -rf "$T"
+}
+
+test_single_target_ignores_failed_listing() {
+  _fixture
+  local out rc; out="$(TBD_JSON=fail _run "$F" --prefix app_db_ --worktree "$T/wt/repo/Feature-One" --apply)"; rc=$?
+  assert_eq "single mode with a failed listing exits 0" 0 "$rc"
+  assert_eq "single mode still drops its target" "app_db_feature_one" "$(_dropped)"
   rm -rf "$T"
 }
 

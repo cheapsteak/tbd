@@ -124,7 +124,7 @@ Everything else is removed by default. Use `--dry-run` to preview. See the Env v
 
 ## Branch database sweep (`scripts/sweep-branch-dbs.sh`)
 
-For projects that give each worktree its own database on a local Postgres, named `<prefix><label>` from the worktree's basename. It drops the ones no live worktree matches across TBD's worktree list and every `--root` glob. Unlike its siblings it is a dry-run report by default (`--apply` drops), requires `--prefix`, and is never launched by `scripts/restart.sh` or launchd. `--worktree <path>` targets a single database, for use from a repo's `archive` hook. Safety rules, the label rule and the hook recipe: [`docs/specs/2026-10-05-branch-db-sweep-design.md`](specs/2026-10-05-branch-db-sweep-design.md).
+For projects that give each worktree its own database on a local Postgres, named `<prefix><label>` from the worktree's basename. It drops the ones no live worktree matches across TBD's worktree list and every `--root` glob. Unlike its siblings it is a dry-run report by default (`--apply` drops), requires `--prefix`, refuses `--apply` when TBD's worktree list cannot be read (unless `--no-tbd`), and is never launched by `scripts/restart.sh` or launchd. `--worktree <path>` targets a single database, for use from a repo's `archive` hook. Safety rules, the label rule and the hook recipe: [`docs/specs/2026-10-05-branch-db-sweep-design.md`](specs/2026-10-05-branch-db-sweep-design.md).
 
 ## Swift build admission
 

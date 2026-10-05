@@ -47,8 +47,10 @@ change in free disk space, as its sibling scripts do.
   for example `--root "$HOME/tbd/worktrees/*/*"`; the option repeats, so
   worktrees made by other tools are covered by adding their roots. Every
   non-archived worktree that `tbd worktree list --json` reports is added
-  automatically. If the `tbd` CLI or `jq` is unavailable the script warns and
-  continues on its `--root` globs alone; with no `--root` either, it refuses.
+  automatically. When that listing is unavailable (the daemon is down, or the
+  `tbd` CLI or `jq` is missing) a dry run still reports, marked incomplete, and
+  `--apply` refuses (see Safety rules). `--no-tbd` skips the listing on purpose,
+  making the `--root` globs the whole scan.
 - **Connection** – psql and dropdb run with the standard Postgres environment
   (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` and the rest), plus `--host` and
   `--port` passed straight through. They connect to the `postgres` maintenance
@@ -84,6 +86,16 @@ therefore resolved toward KEEP.
   root's databases look orphaned. In single-target mode the database is named
   explicitly, so having no roots is only a warning, but a `--root` that matches
   nothing still refuses.
+- **A missing TBD listing blocks `--apply`.** If `tbd worktree list --json`
+  cannot be read, every TBD worktree outside the `--root` globs would read as an
+  orphan, and the likeliest cause, a stopped daemon, says nothing about whether
+  those worktrees are alive. So a sweep with `--apply` then exits non-zero
+  before querying Postgres and drops nothing. A dry run still prints its report,
+  with an `INCOMPLETE` line saying the ORPHAN rows may belong to live TBD
+  worktrees and that `--apply` would refuse. An operator whose roots genuinely
+  cover everything passes `--no-tbd`, which skips the listing and says so in
+  the output. Single-target mode is unaffected, because its target is named
+  explicitly; the listing only feeds its shared-database check.
 - **A server that is not ready is skipped.** Before listing anything the script
   asks `SELECT pg_is_in_recovery()`. If the answer is anything other than
   false, or if the connection fails for any reason, it reports `SKIP` and exits
@@ -179,8 +191,10 @@ worktree. Every external command sits behind an environment seam
 `BRANCHDB_DF_CMD`), and the harness supplies fakes driven by files in a temp
 directory. It covers the label rule, both matching directions, the refusal on
 an empty or partial scan, the skip on recovery and on connection failure, the
-connection re-check at drop time, protected names, and single-target mode. The
-recovery skip, the connection re-check and the empty-scan refusal were each
+connection re-check at drop time, the refusal of `--apply` on a missing TBD
+listing together with its `--no-tbd` and dry-run branches, protected names, and
+single-target mode. The recovery skip, the connection re-check, the empty-scan
+refusal and the missing-listing refusal were each
 disabled in turn to confirm a case goes red. The harness runs in CI with the
 other bash-only script harnesses.
 
