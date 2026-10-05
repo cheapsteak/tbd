@@ -91,30 +91,32 @@ struct MessageComposerView: View {
                 onRemove: { removeAttachment($0) },
                 hoveredNumber: hoveredAttachment,
                 onHover: { hoveredAttachment = $0 })
-            HStack(alignment: .bottom, spacing: 8) {
-                MessageComposerTextView(
-                    command: command,
-                    isEnabled: state.isEnabled && !isSending,
-                    onTextChange: { text, caret, hasMarkedText in
-                        draft.text = text
-                        controller?.update(
+            MessageComposerTextView(
+                command: command,
+                isEnabled: state.isEnabled && !isSending,
+                onTextChange: { text, caret, hasMarkedText in
+                    draft.text = text
+                    controller?.update(
+                        text: text, selectionLocation: caret,
+                        hasMarkedText: hasMarkedText)
+                    (handle.view as? ComposerTextView)?.argumentHint =
+                        ComposerArgumentHint.hint(
                             text: text, selectionLocation: caret,
-                            hasMarkedText: hasMarkedText)
-                        (handle.view as? ComposerTextView)?.argumentHint =
-                            ComposerArgumentHint.hint(
-                                text: text, selectionLocation: caret,
-                                commands: controller?.inventoryCommands ?? [])
-                    },
-                    onSubmit: { text in submit(text) },
-                    onEscape: { appState.focusTranscript(key) },
-                    onImageData: { stage($0) },
-                    menuIsOpen: { controller?.isOpen ?? false },
-                    onMenuAction: { handleMenu($0) },
-                    onViewReady: { view in adopt(view) })
+                            commands: controller?.inventoryCommands ?? [])
+                },
+                onSubmit: { text in submit(text) },
+                onEscape: { appState.focusTranscript(key) },
+                onImageData: { stage($0) },
+                menuIsOpen: { controller?.isOpen ?? false },
+                onMenuAction: { handleMenu($0) },
+                onViewReady: { view in adopt(view) })
                 .frame(minHeight: 32, maxHeight: 132)
-                sendButton
-            }
-            .padding(8)
+                // Room for the send glyph, so typed text never runs under it.
+                .padding(.trailing, 22)
+                .overlay(alignment: .bottomTrailing) {
+                    sendButton.padding(.bottom, 8)
+                }
+                .padding(8)
         }
         .background(.background.secondary)
         .overlay(alignment: .topLeading) {
@@ -574,9 +576,12 @@ struct MessageComposerView: View {
             if isSending {
                 ProgressView().controlSize(.small)
             } else {
-                Text(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
+                Image(systemName: "return")
             }
         }
+        // A hint glyph in the field's corner, not a column beside it.
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
         // **No key equivalent.** `ComposerKeyRouter` already maps Cmd+Return to
         // `.submit`, and a SwiftUI key equivalent is live for the whole WINDOW
         // while the composer is mounted — so a button shortcut here would fire
@@ -584,9 +589,13 @@ struct MessageComposerView: View {
         // pressing Cmd+Return means the terminal they are typing into. The
         // router owns the key; the button stays clickable.
         .disabled(!state.isEnabled || isSending || !Self.maySubmit(text: draft.text, draft: draft))
-        .help(Self.sendButtonHelp(state: state))
-        // The label is the terminal's name and changes with it; the identifier
-        // does not, which is the whole point of having both.
+        .help(
+            Self.sendButtonLabel(state: state, terminalLabel: targetLabel) + " — "
+                + Self.sendButtonHelp(state: state))
+        // The glyph names nobody, so the label carries the target. It is the
+        // terminal's name and changes with it; the identifier does not, which
+        // is the whole point of having both.
+        .accessibilityLabel(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
         .accessibilityIdentifier(ComposerAccessibility.send)
     }
 
