@@ -67,7 +67,8 @@ exit 1
 EOF
 chmod +x "$ROOT/fakes/"*
 export SWEEP_FW_TBD_BIN="$ROOT/fakes/tbd" SWEEP_FW_GH_BIN="$ROOT/fakes/gh" SWEEP_FW_FETCH_BIN="$ROOT/fakes/fetch"
-export SWEEP_FW_LSOF_CMD='printf ""'
+NO_LIVE="printf 'p1\\nfcwd\\nn/\\n'"   # one unrelated cwd: a working lsof that sees nothing under any fixture
+export SWEEP_FW_LSOF_CMD="$NO_LIVE"
 export SWEEP_FW_REQUIRE_SEAMS=1
 
 # run the script as a subprocess; refuse outright if a seam were somehow unset
@@ -88,7 +89,7 @@ new_case() {
   export TBD_HOME="$T/tbdhome"
   export FAKE_DIR="$T/fake"
   echo "[]" > "$FAKE_DIR/tbd-repos.json"; echo "[]" > "$FAKE_DIR/tbd-wts.json"; echo "[]" > "$FAKE_DIR/tbd-archived.json"
-  export SWEEP_FW_LSOF_CMD='printf ""'
+  export SWEEP_FW_LSOF_CMD="$NO_LIVE"
   REPO="$T/repo"
   git init -q -b main "$REPO"
   echo base > "$REPO/README"; git -C "$REPO" add README; git -C "$REPO" commit -qm "base"
@@ -206,6 +207,32 @@ test_live_cwd_in_sibling_prefix_does_not_count() {
   mkdir -p "$T/wts/feat-ab"
   export SWEEP_FW_LSOF_CMD="printf 'p1\nfcwd\nn%s\n' '$T/wts/feat-ab'"
   assert_contains "prefix sibling is not under" "$(run_sweep --repo "$REPO")" "AUTO merged-pr#7 $WT"
+}
+
+test_empty_or_failing_lsof_makes_sweep_keep_everything() {
+  local seam out
+  for seam in 'printf ""' 'false' 'printf "p1\nfcwd\nn/\n"; exit 1'; do
+    new_case; mk_auto feat-a
+    export SWEEP_FW_LSOF_CMD="$seam"
+    out="$(run_sweep --repo "$REPO" --apply)"
+    assert_contains "lsof [$seam] -> check unavailable" "$out" "KEEP live-check-unavailable $WT"
+    assert_contains "lsof [$seam] -> warned" "$out" "live-process check unavailable"
+    assert_dir "lsof [$seam] -> nothing auto-removed" "$WT"
+  done
+}
+
+test_empty_or_failing_lsof_makes_salvage_remove_refuse() {
+  local seam out st
+  for seam in 'printf ""' 'false'; do
+    new_case; mk_wt feat-op; echo x > "$WT/untracked.txt"
+    export SWEEP_FW_LSOF_CMD="$seam"
+    out="$(run_sweep --salvage-remove "$WT" --apply)"; st=$?
+    assert_eq "lsof [$seam] -> refuse exit 2" "2" "$st"
+    assert_contains "lsof [$seam] -> refusal explained" "$out" "cannot check for live processes"
+    assert_dir "lsof [$seam] -> worktree survives" "$WT"
+    assert_no_dir "lsof [$seam] -> no salvage step ran" "$TBD_HOME/salvage"
+    assert_eq "lsof [$seam] -> no salvage ref" "" "$(git -C "$REPO" for-each-ref refs/salvage)"
+  done
 }
 
 test_recently_modified_file_is_kept() {

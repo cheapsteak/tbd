@@ -89,7 +89,13 @@ A candidate is `AUTO` only when every condition holds. Anything uncertain is
 - **No live process** – one `lsof -d cwd,txt` pass; a candidate is kept when any
   process has its cwd, its executable or a mapped binary under the path. Paths
   are canonicalized on both sides, so macOS `/tmp` and `/private/tmp` compare
-  equal. If `lsof` is unavailable every candidate is kept.
+  equal. The check fails closed: if `lsof` is missing, exits non-zero, or
+  prints nothing, every otherwise-eligible candidate is `KEEP
+  live-check-unavailable` and nothing is auto-removed. Empty output counts as
+  a failure because a working `lsof` always reports at least the script's own
+  cwd; reading silence as "nothing is live" would let a broken, denied or
+  timed-out scan wave every worktree past the one guard that protects a
+  running session.
 - **Idle** – no file in the worktree, and neither the worktree's gitdir `HEAD`
   nor its `index`, modified within `--idle-hours` (default 24). An unreadable
   tree counts as recently touched.
@@ -128,8 +134,9 @@ steps in order, and the removal happens only if every earlier step succeeded:
 5. A copy of `.context/`.
 6. `git worktree remove --force --force <path>` from the owning repo.
 
-The operator tier refuses outright when a live process has its cwd or a binary
-under the path. It removes a locked worktree, since naming one explicitly is the
+The operator tier refuses outright, before any salvage step, when a live process
+has its cwd or a binary under the path, and equally when the live-process check
+is unavailable under the same fail-closed rule as the auto tier. It removes a locked worktree, since naming one explicitly is the
 operator's decision.
 
 The salvage root is `--salvage-dir`, or `${TBD_HOME:-$HOME/tbd}/salvage` by

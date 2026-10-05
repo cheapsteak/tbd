@@ -19,6 +19,8 @@
 #     a merged PR that does NOT contain HEAD is reported FOLLOW-UP and never removed;
 #   - clean tree: `git status --porcelain` empty apart from the untracked `.context/`;
 #   - no live process with its cwd, or an executable/mapped binary, under the path;
+#     an lsof that is missing, exits non-zero or prints nothing makes the check
+#     unavailable, and every candidate is then KEEP live-check-unavailable;
 #   - idle: no file (nor the worktree's gitdir HEAD/index) modified within --idle-hours.
 # Default is a dry-run report, one line per candidate: `<TIER> <reason> <path>`.
 # `--apply` removes AUTO candidates only: `.context/` is copied into the salvage dir
@@ -29,7 +31,8 @@
 #   untracked files (capped by --untracked-cap-mb; over the cap the removal aborts
 #   unless --allow-untracked-loss), a copy of .context/, then
 #   `git worktree remove --force --force`. Any failed step blocks the removal.
-#   There is no `rm -rf` fallback anywhere in this script.
+#   It refuses before any salvage step when a live process is under the path or the
+#   live-process check is unavailable. There is no `rm -rf` fallback anywhere.
 #
 # Usage:
 #   scripts/sweep-foreign-worktrees.sh [--repo PATH]... [--idle-hours N]   # report
@@ -40,7 +43,8 @@
 # Test seams (env):
 #   SWEEP_FW_TBD_BIN    executable standing in for `tbd`          (default: tbd)
 #   SWEEP_FW_GH_BIN     executable standing in for `gh`           (default: gh)
-#   SWEEP_FW_LSOF_CMD   command emitting `lsof -d cwd,txt -Fn`    (default: that lsof)
+#   SWEEP_FW_LSOF_CMD   command emitting `lsof -d cwd,txt -Fn`    (default: that lsof;
+#                       empty output or a non-zero exit means "check unavailable")
 #   SWEEP_FW_FETCH_BIN  executable run as `<bin> <repo> <oid>` to fetch a PR head
 #                       absent locally (default: git fetch origin <oid>)
 #   SWEEP_FW_REQUIRE_SEAMS  when 1, refuse to run unless all four seams above are set
@@ -144,12 +148,29 @@ registered_repos() {
   printf '%s\n' "$json" | jq -r '.[].path' 2>/dev/null
 }
 
-# live_dirs -> canonical directory of every live process cwd and every executable or
-# mapped binary (`txt`). A binary contributes its parent dir, so "under the worktree"
-# is a prefix test. Unique dirs are canonicalized once each to keep this cheap.
+# live_dirs (stdin: `lsof -d cwd,txt -Fn` output) -> canonical directory of every
+# live process cwd and every executable or mapped binary (`txt`). A binary
+# contributes its parent dir, so "under the worktree" is a prefix test. Unique dirs
+# are canonicalized once each to keep this cheap.
 live_dirs() {
-  { _lsof_lines | awk '/^f/ { fd=substr($0,2); next } /^n\// { p=substr($0,2); if (fd == "cwd") print p; else { sub(/\/[^\/]*$/, "", p); print p } }' \
+  { awk '/^f/ { fd=substr($0,2); next } /^n\// { p=substr($0,2); if (fd == "cwd") print p; else { sub(/\/[^\/]*$/, "", p); print p } }' \
       | sort -u | while IFS= read -r d; do canon_path "$d"; done | sort -u; } || true
+}
+
+# scan_live -> sets LIVE_DIRS, and LIVE_OK=1 only when the scan is trustworthy.
+# Fails closed: no lsof, a non-zero lsof exit, or an empty result all leave
+# LIVE_OK=0. Empty output is itself the failure signal, because a working lsof
+# always reports at least this script's own cwd — reading it as "nothing live"
+# would wave every worktree past the one guard that protects a running session.
+scan_live() {
+  LIVE_OK=0; LIVE_DIRS=""
+  _lsof_available || return 0
+  local raw st=0
+  raw="$(_lsof_lines)" || st=$?
+  (( st == 0 )) || return 0
+  LIVE_DIRS="$(printf '%s\n' "$raw" | live_dirs)"
+  [[ -n "$LIVE_DIRS" ]] || return 0
+  LIVE_OK=1
 }
 
 has_live_process() {  # has_live_process CANON_WT
@@ -354,8 +375,8 @@ salvage_remove() {  # salvage_remove PATH APPLY CAP_MB ALLOW_LOSS
   local managed; managed="$(managed_paths)" || die "cannot read TBD's worktree list; refusing"
   grep -qxF -- "$wt" <<< "$managed" && die "refusing: TBD manages $wt (use TBD to archive it)"
 
-  _lsof_available || die "cannot check for live processes (no lsof); refusing"
-  LIVE_DIRS="$(live_dirs)"
+  scan_live
+  [[ "$LIVE_OK" == "1" ]] || die "cannot check for live processes (lsof missing, failed, or reported nothing); refusing"
   has_live_process "$wt" && die "refusing: a live process has its cwd or a binary under $wt"
 
   local sha; sha="$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null)" || die "cannot resolve HEAD in $wt"
@@ -464,8 +485,8 @@ main() {
     validated+=("$top")
   done
 
-  LIVE_OK=0; LIVE_DIRS=""
-  if _lsof_available; then LIVE_OK=1; LIVE_DIRS="$(live_dirs)"; fi
+  scan_live
+  [[ "$LIVE_OK" == "1" ]] || log "live-process check unavailable (lsof missing, failed, or reported nothing): nothing will be auto-removed"
   sweep "$apply" ${validated[@]+"${validated[@]}"}
 }
 
