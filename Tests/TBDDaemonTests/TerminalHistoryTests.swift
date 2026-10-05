@@ -143,7 +143,8 @@ import Testing
             worktree: fx.worktree,
             tmuxServer: fx.worktree.tmuxServer,
             terminalID: fx.terminal.id,
-            windowID: fx.terminal.tmuxWindowID)
+            windowID: fx.terminal.tmuxWindowID,
+            paneID: fx.terminal.tmuxPaneID)
 
         // Teardown still ran.
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
@@ -156,6 +157,43 @@ import Testing
         let path = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "setup hook output\n")
+    }
+
+    /// A hook tab's setup wait can run arbitrarily long, so the tmux server
+    /// can be recreated (window/pane numbering reset) before this teardown
+    /// runs. A mismatched pane must neither be captured (leaking a live
+    /// stranger's screen into this row's Closed Terminals history) nor
+    /// killed — see PR #902.
+    /// An unreadable probe (a wedged server) refuses too: unknown is not gone.
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func closeHookTerminalLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(
+        _ refusal: RefusingPaneAnswer
+    ) async throws {
+        let fx = try await makeFixture(label: TerminalLabel.preSession, kind: .shell, claudeSessionID: nil)
+        defer { fx.cleanup() }
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunCapturePane: { _, _ in "setup hook output\n" },
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
+        let lifecycle = WorktreeLifecycle(
+            db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+
+        await lifecycle.closeHookTerminal(
+            worktree: fx.worktree,
+            tmuxServer: fx.worktree.tmuxServer,
+            terminalID: fx.terminal.id,
+            windowID: fx.terminal.tmuxWindowID,
+            paneID: fx.terminal.tmuxPaneID)
+
+        // The row is still torn down — it's the tmux-side action that's gated.
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane owned by a different terminal must never be kill-windowed: \(recorder.snapshot())")
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.isEmpty,
+                "a stranger's screen must never be captured into this row's Closed Terminals history")
     }
 
     // MARK: - Capture on archive
