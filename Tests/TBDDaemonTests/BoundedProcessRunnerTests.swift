@@ -298,6 +298,108 @@ struct BoundedProcessRunnerTests {
         #expect((String(data: stderr, encoding: .utf8) ?? "").contains("err"))
     }
 
+    // MARK: - A failed spawn must not outlive the call
+
+    /// A spawn that fails must release its `Process` and every pipe descriptor
+    /// it created. The termination handler reaches the `Process` through the
+    /// deadline, and Foundation clears a termination handler only after it
+    /// fires — which a throwing `run()` never does — so an unbroken cycle keeps
+    /// the `Process` and its pipes' write ends alive forever. A daemon polling
+    /// git in deleted worktree folders leaked two descriptors per poll that way
+    /// until pipe(2) hit EMFILE and every spawn in the process failed.
+    ///
+    /// The hook records a weak reference and the identity (device, inode) of
+    /// each descriptor. A descriptor counts as released once it is closed or
+    /// names a different file: the suite runs in parallel, so a sibling test may
+    /// already have been handed the same number.
+    @Test func aFailedSpawnDoesNotOutliveTheCall() async throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let probe = SpawnProbe()
+        await #expect(throws: (any Error).self) {
+            _ = try await runBoundedProcess(
+                executable: "/bin/echo", arguments: [],
+                currentDirectory: dir.appendingPathComponent("gone").path,
+                timeout: .seconds(10), didCreateProcess: probe.record)
+        }
+        await Self.expectReleased(probe)
+    }
+
+    /// The same, with a stdin payload: the stdin pipe is created too, and the
+    /// child never received either of its ends.
+    @Test func aFailedSpawnWithStdinDoesNotOutliveTheCall() async throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let probe = SpawnProbe()
+        await #expect(throws: (any Error).self) {
+            _ = try await runBoundedProcess(
+                executable: "/bin/echo", arguments: [],
+                currentDirectory: dir.appendingPathComponent("gone").path,
+                stdin: Data("x".utf8),
+                timeout: .seconds(10), didCreateProcess: probe.record)
+        }
+        #expect(probe.descriptorCount == 4, "expected stdout, stderr and both stdin ends")
+        await Self.expectReleased(probe)
+    }
+
+    @Test func aFailedSpawnOfAMissingExecutableDoesNotOutliveTheCall() async throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let probe = SpawnProbe()
+        await #expect(throws: (any Error).self) {
+            _ = try await runBoundedProcess(
+                executable: dir.appendingPathComponent("no-such-tool").path, arguments: [],
+                currentDirectory: nil,
+                timeout: .seconds(10), didCreateProcess: probe.record)
+        }
+        await Self.expectReleased(probe)
+    }
+
+    /// A failed spawn leaves nothing behind that breaks the next one.
+    @Test func aSpawnAfterAFailedSpawnSucceeds() async throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await #expect(throws: (any Error).self) {
+            _ = try await runBoundedProcess(
+                executable: "/bin/echo", arguments: [],
+                currentDirectory: dir.appendingPathComponent("gone").path,
+                timeout: .seconds(10))
+        }
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/echo", arguments: ["hi"],
+            currentDirectory: nil, timeout: .seconds(10))
+        guard case .completed(let status, let stdout, _) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        #expect(String(data: stdout, encoding: .utf8) == "hi\n")
+    }
+
+    /// The check that refuses the nil-backed `Pipe` Foundation returns when
+    /// pipe(2) fails. Exercised directly: exhausting the descriptor table to
+    /// reach the real failure would break every test sharing this process.
+    @Test func isPipeDescriptorAcceptsOnlyAnOpenPipe() throws {
+        var ends: [Int32] = [-1, -1]
+        try #require(pipe(&ends) == 0)
+        #expect(isPipeDescriptor(ends[0]))
+        #expect(isPipeDescriptor(ends[1]))
+        // A high number no concurrent open(2) or pipe(2) will be handed, so it
+        // stays closed between the close and the check.
+        let high = fcntl(ends[0], F_DUPFD_CLOEXEC, 3000)
+        close(ends[0])
+        close(ends[1])
+        try #require(high >= 3000)
+        close(high)
+        #expect(!isPipeDescriptor(high), "a closed descriptor is not a pipe")
+        #expect(!isPipeDescriptor(-1))
+
+        let devNull = open("/dev/null", O_RDONLY)
+        try #require(devNull >= 0)
+        #expect(!isPipeDescriptor(devNull))
+        close(devNull)
+    }
+
     // MARK: - The deadline path must not block the shared watchdog
 
     /// A child that IGNORES SIGTERM must still be gone when the call returns,
@@ -547,5 +649,80 @@ struct BoundedProcessRunnerTests {
     /// children) counts as alive so the wait reports rather than passing blind.
     private static func isAlive(_ pid: pid_t) -> Bool {
         kill(pid, 0) == 0 || errno != ESRCH
+    }
+
+    /// Waits for the probed `Process` to deallocate and each recorded descriptor
+    /// to be released. Polled because the deadline's clock armer is a cancelled
+    /// `Task` that drops its capture only once it next runs.
+    private static func expectReleased(
+        _ probe: SpawnProbe, sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        #expect(probe.descriptorCount >= 2, "the hook recorded no pipe descriptors",
+                sourceLocation: sourceLocation)
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { probe.processIsGone && probe.heldDescriptors.isEmpty }
+        if outcome == .timedOut {
+            let alive = !probe.processIsGone
+            let held = probe.heldDescriptors
+            Issue.record(
+                "failed spawn outlived the call: process alive=\(alive), still-open descriptors=\(held)",
+                sourceLocation: sourceLocation)
+        }
+    }
+}
+
+/// What `didCreateProcess` saw: a weak reference to the `Process` and the
+/// identity of every pipe descriptor it was configured with.
+private final class SpawnProbe: @unchecked Sendable {
+    private struct Descriptor {
+        let fd: Int32
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    private let lock = NSLock()
+    private weak var process: Process?
+    private var descriptors: [Descriptor] = []
+
+    var record: @Sendable (Process) -> Void {
+        { [self] process in
+            var found: [Descriptor] = []
+            let handles = [
+                (process.standardOutput as? Pipe)?.fileHandleForWriting,
+                (process.standardError as? Pipe)?.fileHandleForWriting,
+                (process.standardInput as? Pipe)?.fileHandleForReading,
+                (process.standardInput as? Pipe)?.fileHandleForWriting
+            ]
+            for case let handle? in handles {
+                let fd = handle.fileDescriptor
+                if let identity = Self.identity(of: fd) {
+                    found.append(Descriptor(fd: fd, device: identity.device, inode: identity.inode))
+                }
+            }
+            lock.withLock {
+                self.process = process
+                descriptors = found
+            }
+        }
+    }
+
+    var descriptorCount: Int { lock.withLock { descriptors.count } }
+    var processIsGone: Bool { lock.withLock { process == nil } }
+
+    /// Recorded descriptors that are still open on the same file.
+    var heldDescriptors: [Int32] {
+        lock.withLock {
+            descriptors.filter { recorded in
+                guard let now = Self.identity(of: recorded.fd) else { return false }
+                return now.device == recorded.device && now.inode == recorded.inode
+            }.map(\.fd)
+        }
+    }
+
+    private static func identity(of fd: Int32) -> (device: dev_t, inode: ino_t)? {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        return (info.st_dev, info.st_ino)
     }
 }
