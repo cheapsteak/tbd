@@ -37,6 +37,17 @@ struct TabCloseContext: Equatable {
     let tabID: UUID
 }
 
+/// In-memory limit-hit state for a terminal (app-local, not persisted).
+/// Built from a `TerminalLimitHitDelta` and used to render the limit banner
+/// in `TerminalPanelView`.
+struct TerminalLimitHit: Equatable {
+    let profileID: UUID?
+    let resetsAt: Date
+    let limitType: String
+    let suggestedProfileID: UUID?
+    let receivedAt: Date
+}
+
 /// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
 /// unique within one server, so it is always paired with `worktreeID` — the
 /// same keying as the daemon router and `SidecarInputHeader`.
@@ -217,6 +228,11 @@ final class AppState {
     var terminals: [UUID: [Terminal]] = [:] {
         didSet { sidebarHibernationCache.removeAll() }
     }
+    /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
+    /// ID to the limit hit information. Cleared when the terminal starts working,
+    /// changes profile, is removed, or the user dismisses. Used to render the
+    /// limit banner.
+    var limitHits: [UUID: TerminalLimitHit] = [:]
     /// Ordering watermark for transcript presentation snapshots whose value
     /// did not change. Kept outside `Terminal` so a two-second poll confirming
     /// the same state does not publish a different row solely because its
@@ -751,6 +767,14 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
+    /// Whether a remote session's detail pane shows its transcript beside the
+    /// terminal. One standing preference for every remote session, not a
+    /// per-session fact, so a newly viewed session follows it. Unset reads as
+    /// open, so the first remote session a user views shows its transcript;
+    /// the toolbar toggle stores an explicit `true`/`false`.
+    var remoteTranscriptOpen: Bool = true {
+        didSet { userDefaults.set(remoteTranscriptOpen, forKey: Self.remoteTranscriptOpenKey) }
+    }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -860,17 +884,21 @@ final class AppState {
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
-    /// Per-terminal composer drafts. `@ObservationIgnored` because each
+    /// Composer drafts, keyed by target. `@ObservationIgnored` because each
     /// `ComposerDraft` is itself `@Observable` — an observable registry would
     /// republish every composer in the app whenever any one of them appeared.
-    @ObservationIgnored var composerDrafts: [UUID: ComposerDraft] = [:]
-    /// Weak composer text views keyed by terminal, so Cmd+/ can move focus into
+    @ObservationIgnored var composerDrafts: [ComposerKey: ComposerDraft] = [:]
+    /// Weak composer text views keyed by target, so Cmd+/ can move focus into
     /// one. `@ObservationIgnored` for the same reason `terminalFocusTargets` is:
     /// focus is not state anything renders from.
-    @ObservationIgnored var composerFocusTargets: [UUID: ComposerFocusTarget] = [:]
-    /// Weak transcript tables keyed by terminal, so Escape in the composer can
+    @ObservationIgnored var composerFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// Weak transcript tables keyed by composer target, so Escape in the composer can
     /// hand focus back to what the person was reading.
-    @ObservationIgnored var transcriptFocusTargets: [UUID: ComposerFocusTarget] = [:]
+    @ObservationIgnored var transcriptFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// The sync driver behind each remote transcript pane on screen, held
+    /// weakly — the pane owns it — so a composer send can ask for an
+    /// immediate sync without a reference to the pane.
+    @ObservationIgnored var remoteTranscriptSyncDrivers: [RemoteSessionSelection: WeakRemoteTranscriptSyncDriver] = [:]
     /// Suspended callers waiting for one spawn's `SessionStart`, keyed by
     /// terminal. `@ObservationIgnored` for the same reason as the two above:
     /// nothing renders from it.
@@ -1839,6 +1867,22 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
         }
+    /// How `setRemoteTranscriptEnabled` persists the remote-transcript gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored
+    lazy var remoteTranscriptFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in
+            try await daemonClient.setRemoteTranscriptEnabled(enabled: enabled)
+        }
+    /// How a remote transcript pane runs `remote.transcriptSync` — injectable
+    /// so the pane can be driven in a test with no daemon.
+    @ObservationIgnored
+    lazy var remoteTranscriptSyncer:
+        @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult =
+        { [daemonClient] selection in
+            try await daemonClient.remoteTranscriptSync(
+                provider: selection.provider, sessionID: selection.sessionID)
+        }
     /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
     /// for the same reason as `controlModeSetter`.
     @ObservationIgnored
@@ -1856,6 +1900,18 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptStreamingEnabled(enabled: enabled)
         }
+    /// How `setProfileBalancingEnabled` persists the profile-balancing soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profileBalancingFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setProfileBalancing(enabled: enabled) }
+    /// How `setProfilePoolOptOut` persists a profile's pool opt-out —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] profileID, optOut in try await daemonClient.setProfilePoolOptOut(id: profileID, optOut: optOut) }
+    /// How `setPRPollScheduleEnabled` persists the schedule-based PR polling
+    /// gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
@@ -2125,7 +2181,6 @@ final class AppState {
     /// Storm indicator for observability and tests.
     @ObservationIgnored private(set) var skippedPollCycles = 0
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
-    let notificationSoundPlayer = NotificationSoundPlayer()
     let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
@@ -2133,6 +2188,8 @@ final class AppState {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    /// Named in the remote-transcript spec; left unprefixed to match it.
+    static let remoteTranscriptOpenKey = "remoteTranscriptOpen"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     /// Emits a debounced event when the network path changes or the machine
@@ -2167,6 +2224,7 @@ final class AppState {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
+        remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
@@ -2747,6 +2805,14 @@ final class AppState {
             handleRemoteSessionAttentionDelta(d)
         case .remoteSessionReconnectRequested(let d):
             reconnectRemoteSession(RemoteSessionSelection(provider: d.provider, sessionID: d.sessionID))
+        case .terminalLimitHit(let d):
+            limitHits[d.terminalID] = TerminalLimitHit(
+                profileID: d.profileID,
+                resetsAt: d.resetsAt,
+                limitType: d.limitType,
+                suggestedProfileID: d.suggestedProfileID,
+                receivedAt: Date()
+            )
         default:
             break
         }
@@ -2972,6 +3038,11 @@ final class AppState {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
+        // Clear any limit hit when the terminal transitions to working
+        // (design 2026-09-05 §7.1)
+        if delta.activityState == .working {
+            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
+        }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
             // Claude and shell activity deltas remain raw last-arrival state;
             // provenance ordering is part of the Codex presentation fix only.
@@ -3054,6 +3125,8 @@ final class AppState {
             return
         }
         terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
+        // Clear any limit hit when the profile changes (design 2026-09-05 §7.1)
+        if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
@@ -3218,8 +3291,8 @@ final class AppState {
             unreadByWorktree[notification.worktreeID] = incoming
         }
 
-        // Fire sound + macOS notification
-        notificationSoundPlayer.playIfEnabled(for: notification.type)
+        // Post the macOS notification. Its sound rides on the notification,
+        // so Focus and Do Not Disturb silence both together.
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,

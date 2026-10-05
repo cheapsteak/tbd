@@ -81,7 +81,7 @@ struct TranscriptLinkClickRoutingTests {
 
     @Test func clickedLink_handsTheTargetToTheClosure() throws {
         try withTempTree { root in
-            let view = TranscriptBubbleTextView(frame: .zero)
+            let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
             var received: [TranscriptLinkTarget] = []
             view.onLinkClicked = { received.append($0) }
             let path = root + "/sub/f.md"
@@ -97,7 +97,7 @@ struct TranscriptLinkClickRoutingTests {
     // nothing happens, not "something else happens".
     @Test func clickedLink_withNoHandler_isInertAndStillSwallowed() throws {
         try withTempTree { root in
-            let view = TranscriptBubbleTextView(frame: .zero)
+            let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
             view.onLinkClicked = nil
             let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/sub/f.md")!
             #expect(view.textView(view, clickedOnLink: url, at: 0) == true)
@@ -109,7 +109,7 @@ struct TranscriptLinkClickRoutingTests {
     // can carry — reach AppKit's default handling. Swallowing it would make
     // those links silently dead.
     @Test func clickedUnroutableLink_fallsThroughToAppKit() {
-        let view = TranscriptBubbleTextView(frame: .zero)
+        let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
         var received: [TranscriptLinkTarget] = []
         view.onLinkClicked = { received.append($0) }
         #expect(view.textView(view, clickedOnLink: URL(string: "mailto:a@b.c")!, at: 0) == false)
@@ -120,7 +120,7 @@ struct TranscriptLinkClickRoutingTests {
     // legal value for it, so the delegate parses that shape too.
     @Test func clickedLink_asAString_isParsedAndRouted() throws {
         try withTempTree { root in
-            let view = TranscriptBubbleTextView(frame: .zero)
+            let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
             var received: [TranscriptLinkTarget] = []
             view.onLinkClicked = { received.append($0) }
             let path = root + "/sub/f.md"
@@ -131,7 +131,7 @@ struct TranscriptLinkClickRoutingTests {
     }
 
     @Test func clickedLink_asAnUnparseableValue_fallsThroughToAppKit() {
-        let view = TranscriptBubbleTextView(frame: .zero)
+        let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
         view.onLinkClicked = { _ in Issue.record("must not route") }
         #expect(view.textView(view, clickedOnLink: NSNumber(value: 7), at: 0) == false)
     }
@@ -141,7 +141,7 @@ struct TranscriptLinkClickRoutingTests {
     // is not there.
     @Test func clickedFileURL_thatNamesNothing_fallsThroughToAppKit() throws {
         try withTempTree { root in
-            let view = TranscriptBubbleTextView(frame: .zero)
+            let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
             view.onLinkClicked = { _ in Issue.record("must not route") }
             let url = URL(fileURLWithPath: root + "/nope.md")
             #expect(view.textView(view, clickedOnLink: url, at: 0) == false)
@@ -153,7 +153,7 @@ struct TranscriptLinkClickRoutingTests {
     // be routed into the viewer or revealed in Finder.
     @Test func clickedTbdFileURL_thatNamesNothing_fallsThroughToAppKit() throws {
         try withTempTree { root in
-            let view = TranscriptBubbleTextView(frame: .zero)
+            let view = TranscriptBubbleTextView(usingTextLayoutManager: false)
             view.onLinkClicked = { _ in Issue.record("must not route") }
             let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/nope.md")!
             #expect(view.textView(view, clickedOnLink: url, at: 0) == false)

@@ -6,12 +6,15 @@ import SwiftUI
 /// document can correlate attachments with `TranscriptRenderNode` values when
 /// the attributed string is rebuilt during streaming.
 ///
-/// Reachable only via `MarkdownAttributedRenderer.render` → `visitTable`, which
-/// is now a whole-document test seam: the live bubble path (`renderBlocks`)
-/// breaks tables out as native `MessageBlock.table`s instead, and the table
-/// renderer measures rows with its own inline `NSHostingController.sizeThatFits`
-/// rather than calling `TranscriptCardSizing` below. Kept because the render/
-/// tableData seams and their tests still exercise the attachment path. (#129)
+/// Reachable only via `MarkdownAttributedRenderer.render` → `visitTable`, a
+/// whole-document test seam. The live bubble path (`renderBlocks`) must never
+/// put one into prose: its prose views are TextKit 1, and this attachment
+/// draws only through TextKit 2's `viewProvider`. So `renderBlocks` breaks
+/// every table — top-level, or nested in a list item or blockquote — out as a
+/// native `MessageBlock.table`, and the table renderer measures rows with its
+/// own inline `NSHostingController.sizeThatFits` rather than calling
+/// `TranscriptCardSizing` below. Kept because the render/tableData seams and
+/// their tests still exercise the attachment path. (#129)
 @MainActor
 final class TranscriptCardAttachment: NSTextAttachment {
     let nodeID: String

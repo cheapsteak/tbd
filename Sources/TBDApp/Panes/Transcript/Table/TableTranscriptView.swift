@@ -1618,13 +1618,18 @@ struct TableTranscriptView: NSViewRepresentable {
 
                     // GFM grid row — with leading pipes, or, since cmark-gfm accepts
                     // it, without them, in which case the row is only recognisable
-                    // by the delimiter line underneath it.
-                    if line.contains("|"),
-                       pendingTableRows > 0 || line.hasPrefix("|")
-                        || (index < lines.count && Self.isTableDelimiter(lines[index])) {
+                    // by the delimiter line underneath it. A table inside a
+                    // blockquote (`> | A | B |`, or nested `> > |`) is lifted out
+                    // and drawn as its own grid block, so its rows are tested with
+                    // the quote markers stripped.
+                    let row = Self.strippingBlockquoteMarkers(line[...])
+                    if row.contains("|"),
+                       pendingTableRows > 0 || row.hasPrefix("|")
+                        || (index < lines.count
+                            && Self.isTableDelimiter(Self.strippingBlockquoteMarkers(lines[index]))) {
                         // The `|---|` separator draws as a border rather than a row,
                         // so it is not counted.
-                        let cells = line.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
+                        let cells = row.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
                         if !cells.isEmpty { pendingTableRows += 1 }
                         lastUnitWasListItem = false
                         inListContext = false
@@ -1758,6 +1763,16 @@ struct TableTranscriptView: NSViewRepresentable {
                     if width >= 4 { return width }
                 }
                 return width
+            }
+
+            /// `line` without its leading blockquote markers: each `>` and the
+            /// spaces or tabs around it, however deeply nested (`> > | A |`).
+            private static func strippingBlockquoteMarkers(_ line: Substring) -> Substring {
+                var rest = line.drop(while: { $0 == " " || $0 == "\t" })
+                while rest.first == ">" {
+                    rest = rest.dropFirst().drop(while: { $0 == " " || $0 == "\t" })
+                }
+                return rest
             }
 
             /// Whether `line` is a GFM table delimiter row — `| --- | --- |` or the

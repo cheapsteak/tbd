@@ -89,6 +89,20 @@ struct TmuxPresenceTests {
         #expect(TmuxPresenceClassifier.windowPresence(for: error) == .unknown)
     }
 
+    /// A spawn that failed never reached tmux. Descriptor exhaustion surfaces
+    /// as EMFILE from the runner, or as EBADF from `Process.run()` when
+    /// Foundation hands back a pipe it could not create; neither is evidence.
+    @Test func spawnFailureIsUnknown() {
+        let errors: [Error] = [
+            POSIXError(.EMFILE),
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EBADF))
+        ]
+        for error in errors {
+            #expect(TmuxPresenceClassifier.windowPresence(for: error) == .unknown, "\(error)")
+            #expect(TmuxPresenceClassifier.serverPresence(for: error) == .unknown, "\(error)")
+        }
+    }
+
     @Test func unrecognisedFailureIsUnknown() {
         let error = TmuxError.commandFailed(
             command: "tmux -L tbd-abc list-panes -t @7", status: 1,

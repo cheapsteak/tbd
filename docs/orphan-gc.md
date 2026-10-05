@@ -30,6 +30,9 @@ These get reaped:
 - **Unreferenced retained transcripts** — JSONL files under `~/tbd/transcripts/` that no
   `retained_transcript` row points at, and receipt rows whose provider-stated expiry has
   passed (see below).
+- **Untracked remote transcript caches** — `~/tbd/remote-transcripts/<provider>/<session>/`
+  directories that no undismissed `remote_session` row or unarchived `worktree` row refers
+  to and that nothing has written to within `gcGraceSeconds` (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -240,17 +243,17 @@ the CLI is where a quarantine path is read.
 
 ## Retained transcripts
 
-A provider that declares `retain`, `import` or `recall` can hold a conversation in its
-own durable store and hand back an opaque key; TBD records the receipt in
-`retained_transcript` and a `recall` writes the JSONL under
+A provider that declares `transcript.retain`, `transcript.import` or
+`transcript.recall` can hold a conversation in its own durable store and hand back an opaque key; TBD records the receipt in
+`retained_transcript` and a `transcript recall` writes the JSONL under
 `~/tbd/transcripts/<provider>/<key>.jsonl`. Both halves are durable resources with no
 owner once the thing that motivated them is gone, so `OrphanGC` is their named
 reconciler — see
 [`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`](specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md),
 "Reclamation".
 
-**Why it is load-bearing rather than tidiness.** The teleport flow calls `import` and
-then `create`. A `create` that fails after a successful `import` leaves a retained blob
+**Why it is load-bearing rather than tidiness.** The teleport flow calls `transcript import`
+and then `create`. A `create` that fails after a successful `transcript import` leaves a retained blob
 on the provider and a row here that nothing will ever use, because the session it was
 going to seed was never made. No creation path can close that window — the provider
 commits its side before TBD learns whether the second call will succeed — so the standing
@@ -294,8 +297,8 @@ reason:
   because the contract gives no way to enumerate a provider's keys. Dropping such a row
   strands the blob forever.
 - **Grace window** (`grace`) — a file whose newer of creation and modification is younger
-  than `gcGraceSeconds` (default 3600s / 1h) is kept. `recall` writes the file before it
-  records the path on the row, and this is the window that covers it. A file whose dates
+  than `gcGraceSeconds` (default 3600s / 1h) is kept. `transcript recall` writes the file
+  before it records the path on the row, and this is the window that covers it. A file whose dates
   cannot be read keeps as `unknown-age`.
 - **Unreadable rows skip the leg** (`rows-unreadable`) — never read as "no file is
   referenced".
@@ -308,6 +311,54 @@ reason:
 by the worktree a reap removed, and neither half here has one. Nothing is lost that a
 restore could return either: the transcript still lives on the provider until its own
 expiry, and `tbd remote recall <key>` fetches it again.
+
+## Remote transcript caches
+
+`remote.transcriptSync` keeps a remote session's conversation in
+`~/tbd/remote-transcripts/<provider>/<session>/` (`transcript.jsonl` beside
+`state.json`), and a directory outlives the request that created it. `OrphanGC` is its
+named reconciler — see
+[`docs/specs/2026-09-25-remote-session-transcript-design.md`](specs/2026-09-25-remote-session-transcript-design.md),
+"Reclaiming the cache". A successful `remote.delete` or `remote.dismiss` removes the
+session's directory at once (`RemoteTranscriptSync.discard`, which also stops a fetch in
+flight for that session from writing its page back); that is prompt cleanup, best effort,
+and the sweep is the guarantee behind it.
+
+**Under `gcEnabled` alone**, with no soak flag of its own: the cache is a rebuildable copy of
+the provider's transcript, so a session un-dismissed or unarchived after its cache was
+reclaimed simply refetches.
+A dry run plans without touching disk, as every leg does.
+
+A session is tracked while a `remote_session` row for it has `dismissed = 0` or a
+`worktree` row for it has a status other than `archived`. A directory is reclaimed
+(`REAP remote-transcript-cache`) only when all three hold:
+
+- **No unarchived `worktree` row refers to it** by `providerName` / `providerSessionID`.
+  The pairs are read as raw columns, so an unarchived row that fails to decode still
+  counts.
+- **No undismissed `remote_session` row refers to it.** An undismissed `gone` row still
+  counts: the session is still listed.
+- **Nothing in it was written within `gcGraceSeconds`** (default 3600s / 1h), the grace
+  window every other leg uses — the newest creation or modification date of the directory
+  and its entries, against the date seam. The window keeps a sync that raced a dismiss
+  from losing its file mid-write.
+
+Row absence alone would not do. Dismissing sets `dismissed = 1` and keeps the row, and
+archiving keeps the worktree row, so a sweep that waited for rows to disappear would never
+reclaim a dismissed or archived session's cache — which is what a dismiss whose eager
+removal failed, or a delete that timed out after the provider acted, leaves behind.
+`remote.transcriptSync` refuses a dismissed session, so a pane still open after a dismiss
+cannot rebuild its cache.
+
+Directory names are the escaped components `TBDConstants.remoteTranscriptDir` writes, so
+the leg compares each row by the path that helper gives it under the same root the walk
+reads, never by unescaping a name found on disk. Every doubt keeps: a tracked session
+(`tracked-session`), a directory inside the grace window or undatable (`grace`,
+`unknown-age`), unreadable
+rows (`rows-unreadable`, which skips the leg), and a failed removal (`remove-failed`).
+Only `<root>/<provider>/<session>` directories are candidates; stray files and emptied
+provider directories are left alone. No reap record is written: nothing here could be
+restored that a sync would not rebuild.
 
 ## Cadence and the `gcEnabled` gate
 

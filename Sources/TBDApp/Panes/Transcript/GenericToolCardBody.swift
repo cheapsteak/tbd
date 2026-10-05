@@ -8,10 +8,17 @@ struct GenericToolCardBody: View {
     let inputTruncatedTo: Int?
     let result: ToolResult?
     let terminalID: UUID?
+    /// The transcript file to read a full body from when there is no
+    /// terminal — see `TranscriptFullBodySource`.
+    let detailPath: String?
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
     @Environment(AppState.self) var appState
+
+    var fullBodySource: TranscriptFullBodySource? {
+        TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -27,7 +34,7 @@ struct GenericToolCardBody: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                if let cap = inputTruncatedTo, fullInputJSON == nil, fullBodySource != nil {
                     TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
                         Task { await fetchFullInput() }
                     }
@@ -44,7 +51,7 @@ struct GenericToolCardBody: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                if let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
+                if let cap = r.truncatedTo, fullResultText == nil, fullBodySource != nil {
                     TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
                         Task { await fetchFull() }
                     }
@@ -69,18 +76,14 @@ struct GenericToolCardBody: View {
     }
 
     private func fetchFull() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
-            await MainActor.run { fullResultText = r.text }
+        if let r = await fullBodySource?.fetch(itemID: id, appState: appState) {
+            fullResultText = r.text
         }
     }
 
     private func fetchFullInput() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input", path: path) {
-            await MainActor.run { fullInputJSON = r.text }
+        if let r = await fullBodySource?.fetch(itemID: "\(id)#input", appState: appState) {
+            fullInputJSON = r.text
         }
     }
 }

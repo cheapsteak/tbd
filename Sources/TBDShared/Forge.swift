@@ -51,23 +51,16 @@ public extension Forge {
     }
 
     /// The same vocabulary `refLabel` composes its label from, for the
-    /// sentences that name a request the surface has ALREADY numbered — a
-    /// hover card whose headline says `PR#412` may not say the number twice,
-    /// but it still must not call a merge request a PR. Composed into
+    /// lines glued to a number the surface is ALREADY drawing — the status-bar
+    /// chip shows a bare `#412` on both forges, so its hover card reads
+    /// `MR#412` rather than `MR !412`, but it still must not call a merge
+    /// request a PR. Composed into
     /// `refLabel` rather than kept beside it, so there is one noun per forge
     /// and no second table to drift.
     var refNoun: String {
         switch self {
         case .github: return "PR"
         case .gitlab: return "MR"
-        }
-    }
-
-    /// What the forge calls itself, for text naming where a click lands.
-    var displayName: String {
-        switch self {
-        case .github: return "GitHub"
-        case .gitlab: return "GitLab"
         }
     }
 }

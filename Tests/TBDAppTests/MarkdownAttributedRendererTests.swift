@@ -412,7 +412,201 @@ struct MarkdownAttributedRendererTests {
         #expect(tableCount == 2)
     }
 
+    // A table nested in a list item or blockquote must come out as its own
+    // `.table` block too. Left in the prose it would be a
+    // `TranscriptCardAttachment`, which draws only through TextKit 2 and so
+    // vanishes on the bubble's TextKit 1 prose view.
+    @Test("renderBlocks: a table inside a list item is lifted into its own table block")
+    func blocksTableInListItemIsLifted() {
+        let md = """
+        - item one
+
+          | A | B |
+          |---|---|
+          | 1 | 2 |
+
+        - item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertNestedTableLifted(blocks, before: "item one", after: "item two")
+    }
+
+    @Test("renderBlocks: a table inside a blockquote is lifted into its own table block")
+    func blocksTableInBlockquoteIsLifted() {
+        let md = """
+        > Quoted intro.
+        >
+        > | A | B |
+        > |---|---|
+        > | 1 | 2 |
+
+        Trailing paragraph.
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertNestedTableLifted(blocks, before: "Quoted intro.", after: "Trailing paragraph.")
+    }
+
+    // A list item that OPENS with a table leaves only its marker ("• " or
+    // "1. ") before the placeholder. That slice must be dropped rather than
+    // drawn as a lone bullet block above the table.
+    @Test("renderBlocks: a bulleted item that opens with a table leaves no lone bullet")
+    func blocksBulletedItemOpeningWithTableHasNoLoneMarker() {
+        let md = """
+        - | A | B |
+          |---|---|
+          | 1 | 2 |
+        - item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertItemOpeningWithTable(blocks, nextItem: "• item two")
+    }
+
+    @Test("renderBlocks: a numbered item that opens with a table leaves no lone number")
+    func blocksNumberedItemOpeningWithTableHasNoLoneMarker() {
+        let md = """
+        1. | A | B |
+           |---|---|
+           | 1 | 2 |
+        2. item two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertItemOpeningWithTable(blocks, nextItem: "2. item two")
+    }
+
+    // A LATER item that opens with a table leaves its marker at the END of the
+    // slice before the placeholder, after the earlier items' text. That
+    // trailing marker must be trimmed while the earlier text survives.
+    @Test("renderBlocks: a later bulleted item that opens with a table leaves no trailing bullet")
+    func blocksLaterBulletedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        - intro
+        - | A | B |
+          |---|---|
+          | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "• intro")
+    }
+
+    @Test("renderBlocks: a later numbered item that opens with a table leaves no trailing number")
+    func blocksLaterNumberedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        1. intro
+        2. | A | B |
+           |---|---|
+           | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "1. intro")
+    }
+
+    @Test("renderBlocks: a nested item that opens with a table leaves no trailing bullet")
+    func blocksNestedItemOpeningWithTableHasNoTrailingMarker() {
+        let md = """
+        - outer
+          - | A | B |
+            |---|---|
+            | 1 | 2 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
+        assertLaterItemOpeningWithTable(blocks, before: "• outer")
+    }
+
     // MARK: - Helpers
+
+    /// Asserts `blocks` OPENS with the lifted A|B table — no prose block before
+    /// it — and continues with prose starting `nextItem`, and that the private
+    /// list-marker tag never reaches rendered prose.
+    func assertItemOpeningWithTable(_ blocks: [MessageBlock], nextItem: String) {
+        guard case .table(let data)? = blocks.first else {
+            Issue.record("the first block must be the table, not a lone marker: \(blocks)")
+            return
+        }
+        #expect(data.header.map(\.string) == ["A", "B"])
+        let prose = blocks.compactMap { block -> NSAttributedString? in
+            if case .prose(let s) = block { return s }
+            return nil
+        }
+        #expect(prose.count == 1)
+        #expect(prose.first?.string.hasPrefix(nextItem) == true, "\(prose.map(\.string))")
+        for s in prose {
+            var tagged = false
+            s.enumerateAttribute(NSAttributedString.Key("tbdListMarker"),
+                                 in: NSRange(location: 0, length: s.length)) { v, _, _ in
+                if v != nil { tagged = true }
+            }
+            #expect(!tagged, "the list-marker tag must not leave the renderer")
+        }
+    }
+
+    /// Asserts `blocks` holds exactly one A|B table, that the prose before it
+    /// contains `before`, and that no prose block consists of, or ends with, a
+    /// bare list marker ("•" or "N.").
+    func assertLaterItemOpeningWithTable(_ blocks: [MessageBlock], before: String) {
+        let tableIndices = blocks.indices.filter { index in
+            if case .table = blocks[index] { return true }
+            return false
+        }
+        #expect(tableIndices.count == 1, "\(blocks)")
+        guard let tableIndex = tableIndices.first, case .table(let data) = blocks[tableIndex] else {
+            Issue.record("expected a lifted table block: \(blocks)")
+            return
+        }
+        #expect(data.header.map(\.string) == ["A", "B"])
+        let bareMarker = #/(^|\s)(•|\d+\.)$/#
+        for block in blocks {
+            guard case .prose(let s) = block else { continue }
+            let trimmed = s.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(!trimmed.isEmpty, "no empty prose block")
+            #expect(trimmed.firstMatch(of: bareMarker) == nil,
+                    "prose must not end with a bare marker: \(s.string.debugDescription)")
+        }
+        let proseBefore = blocks[..<tableIndex].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        #expect(proseBefore.contains(before), "prose before the table: \(proseBefore.debugDescription)")
+    }
+
+    /// Asserts `blocks` is prose containing `before`, then exactly one A|B table,
+    /// then prose containing `after` — and that no prose block carries an
+    /// attachment (a `TranscriptCardAttachment` or any other) or the lifted
+    /// table's placeholder character.
+    func assertNestedTableLifted(_ blocks: [MessageBlock], before: String, after: String) {
+        var tables: [TranscriptTableData] = []
+        var tableIndex: Int?
+        for (index, block) in blocks.enumerated() {
+            switch block {
+            case .table(let data):
+                tables.append(data)
+                tableIndex = index
+            case .prose(let s):
+                var hasAttachment = false
+                s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+                    if v != nil { hasAttachment = true }
+                }
+                #expect(!hasAttachment, "prose must not carry a table attachment: \(s.string)")
+                #expect(!s.string.contains("\u{FFFC}"), "prose must not carry a placeholder: \(s.string)")
+                #expect(!s.string.hasPrefix("\n"), "prose after a lifted table must not open on a blank line")
+            case .image:
+                Issue.record("unexpected image block")
+            }
+        }
+        #expect(tables.count == 1)
+        #expect(tables.first?.columnCount == 2)
+        #expect(tables.first?.header.map(\.string) == ["A", "B"])
+        guard let tableIndex else { return }
+        let proseBefore = blocks[..<tableIndex].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        let proseAfter = blocks[(tableIndex + 1)...].compactMap { block -> String? in
+            if case .prose(let s) = block { return s.string }
+            return nil
+        }.joined()
+        #expect(proseBefore.contains(before), "prose before the table: \(proseBefore)")
+        #expect(proseAfter.contains(after), "prose after the table: \(proseAfter)")
+    }
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
         (s.string as NSString).range(of: substring)

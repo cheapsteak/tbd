@@ -56,6 +56,68 @@ protocol HolderAttaching: Sendable {
     ) async throws
 }
 
+extension HolderAttaching {
+    /// Release an attach the daemon minted but this app never confirmed:
+    /// `attach.ready`, then `pane.detach` with an empty preamble. The one
+    /// sequence behind every such release — an attach whose descriptor never
+    /// arrived, and one a panel abandoned before or at its ack.
+    ///
+    /// The ack goes first because the daemon holds the attach as pending and a
+    /// detach naming a pending attach does not clear it. Acking turns it into
+    /// a claim — or, past the daemon's ready timeout, is refused with the
+    /// timeout's claim already recorded, or, for a superseded attach, is
+    /// refused with nothing standing — and the detach then hands back
+    /// whichever claim resulted. Re-sending an ack is safe on every one of
+    /// those branches. The preamble is empty because the caller either never
+    /// painted live output or is no longer showing it, so the daemon resumes
+    /// from the screen its own reader kept.
+    ///
+    /// **The caller must already be off the descriptor**: the daemon resumes
+    /// its drain on receipt of the detach. Both RPCs' failures are logged and
+    /// dropped — there is no retry that helps. The daemon answers a detach
+    /// `ok` whether or not it found a claim to clear, so a detach error means
+    /// the request never reached it, and a success proves only that it
+    /// arrived.
+    ///
+    /// - Parameter kind: Names the release in the log lines — what kind of
+    ///   attach this was ("undelivered", "abandoned").
+    func releaseUnconfirmedAttach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        kind: String
+    ) async {
+        do {
+            try await ready(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation)
+        } catch {
+            logger.info("""
+                holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
+                terminal \(terminalID, privacy: .public): attach.ready failed while releasing \
+                it (refused, or never reached the daemon), detaching anyway: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
+        do {
+            try await detach(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation, snapshotPreamble: Data())
+            logger.info("""
+                holder sent pane.detach for \(kind, privacy: .public) attach \
+                \(generation, privacy: .public) for terminal \(terminalID, privacy: .public); \
+                the daemon answers ok whether or not a claim stood, so this confirms delivery, \
+                not a cleared claim
+                """)
+        } catch {
+            logger.error("""
+                holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
+                terminal \(terminalID, privacy: .public): pane.detach never reached the daemon, \
+                so any claim under this generation still stands: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
+    }
+}
+
 /// Drives the daemon's holder attach handshake: `attach.request` for the pty
 /// and the screen that was on it, then `attach.ready` once the caller is
 /// draining.
@@ -104,11 +166,54 @@ struct HolderAttachClient: HolderAttaching {
             promise.cancel()
             throw HolderAttachError.missingGeneration
         }
-        let fd = try await promise.value(timeout: fdTimeout)
+        let fd: Int32
+        do {
+            fd = try await promise.value(timeout: fdTimeout)
+        } catch {
+            // **The daemon holds this attach as pending under `generation`,
+            // and this throw is the last place that number exists.** The
+            // caller never receives it, so nothing it does on failure can
+            // release the attach — and the daemon's ready timeout turns a
+            // pending attach into a viewer claim on its own, which refuses
+            // every later attach to the session while this app lives. So the
+            // release happens here, before the throw.
+            //
+            // No descriptor is held to close first: the promise settled
+            // without one, and settling deregistered the waiter, so a vend
+            // that lands later is closed by the sidecar's no-waiter path.
+            await releaseUndeliveredAttach(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation, cause: error)
+            throw error
+        }
         return HolderAttachment(
             ptyFD: fd,
             generation: generation,
             snapshotPreamble: result.snapshotPreamble ?? Data())
+    }
+
+    /// Release an attach `attach.request` minted but whose descriptor never
+    /// reached this client, through `releaseUnconfirmedAttach` — nothing was
+    /// ever painted, so the empty preamble it sends loses nothing.
+    ///
+    /// Run in an unstructured task and awaited, so a cancelled caller still
+    /// sends both RPCs: cancellation is one of the ways the descriptor fails
+    /// to arrive. The caller is already failing with the error that matters.
+    private func releaseUndeliveredAttach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        cause: any Error
+    ) async {
+        logger.info("""
+            holder attach \(generation, privacy: .public) for terminal \
+            \(terminalID, privacy: .public) never received its descriptor \
+            (\(cause.localizedDescription, privacy: .public)); releasing it
+            """)
+        let client = self
+        await Task {
+            await client.releaseUnconfirmedAttach(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation, kind: "undelivered")
+        }.value
     }
 
     /// Ack that a reader is on the descriptor. The daemon releases its own
@@ -162,6 +267,17 @@ final class HolderStreamReader: @unchecked Sendable {
     private let fd: Int32
     private let label: String
     private let onChunk: @Sendable (Data) -> Void
+    /// Runs on the reader thread after the loop has exited and immediately
+    /// before the descriptor is closed. Unset in production.
+    ///
+    /// A seam because the close is the one event the handback's ordering is
+    /// about, and in production it lands within one poll interval of the stop
+    /// — so a detach that skipped `awaitClosed()` usually reaches its peer
+    /// *after* the close anyway, under any scheduling delay at all, and a test
+    /// that only probes the descriptor at detach time passes whether or not
+    /// the wait is there. A test holds the close here to make "the detach
+    /// waited for it" the only way the detach can arrive after it.
+    private let beforeClose: (@Sendable (HolderStreamReader) -> Void)?
     private let stateLock = NSLock()
     private var stopped = false
     private var thread: Thread?
@@ -177,10 +293,23 @@ final class HolderStreamReader: @unchecked Sendable {
     /// an idle session costs 5 wakeups a second.
     private static let pollIntervalMilliseconds: Int32 = 200
 
-    init(label: String, fd: Int32, onChunk: @escaping @Sendable (Data) -> Void) {
+    init(
+        label: String, fd: Int32,
+        beforeClose: (@Sendable (HolderStreamReader) -> Void)? = nil,
+        onChunk: @escaping @Sendable (Data) -> Void
+    ) {
         self.label = label
         self.fd = fd
+        self.beforeClose = beforeClose
         self.onChunk = onChunk
+    }
+
+    /// Whether anyone is parked in `awaitClosed()` right now. For tests: it is
+    /// how one observes that a handback is waiting on this close rather than
+    /// racing it.
+    var hasCloseWaiters: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return !closeWaiters.isEmpty
     }
 
     private var isStopped: Bool {
@@ -290,6 +419,7 @@ final class HolderStreamReader: @unchecked Sendable {
             }
             if revents & POLLHUP != 0 { break }
         }
+        beforeClose?(self)
         Darwin.close(fd)
         noteClosed()
         logger.info("holder reader exited \(self.label, privacy: .public)")

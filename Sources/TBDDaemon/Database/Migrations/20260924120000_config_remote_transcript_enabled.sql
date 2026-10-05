@@ -1,0 +1,13 @@
+-- Gate for the remote session transcript: remote.transcriptSync, the remote
+-- transcript pane, and (together with transcript_composer_enabled) the remote
+-- composer. Design: docs/specs/2026-09-25-remote-session-transcript-design.md.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0). The shipped default lives in exactly one place:
+-- Config.remoteTranscriptEnabledDefault.
+--
+-- A config column rather than an app UserDefaults key because the daemon's
+-- remote.transcriptSync handler enforces the gate and cannot read the app's
+-- defaults.
+ALTER TABLE config ADD COLUMN remote_transcript_enabled INTEGER;
