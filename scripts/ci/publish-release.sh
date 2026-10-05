@@ -41,7 +41,10 @@ asset="$(release_asset_name "$commit")"
 
 if ! gh release view "$tag" >/dev/null 2>&1; then
     # First publish ever: creating the release creates the tag at this commit.
-    gh release create "$tag" --prerelease --latest=false --target "$commit" \
+    # The assets go in the same call, which gh holds as a draft until they are
+    # uploaded, so the tag never names a commit whose build is not published.
+    gh release create "$tag" "$dist/$asset" "$dist/$asset.sha256" \
+        --prerelease --latest=false --target "$commit" \
         --title "main builds" \
         --notes "Release builds of recent commits on main, for \`tbd update --from-release\`. The tag names the newest published commit. Assets are named by commit; each has a .sha256 and a build-provenance attestation (\`gh attestation verify <archive> --repo $GH_REPO\`). This is not a versioned release."
 fi

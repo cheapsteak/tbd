@@ -2182,6 +2182,49 @@ test_release_completed_install_keeps_the_replaced_tree_as_rollback() {
         "$home/1111111111111111111111111111111111111111" "$(cat "$home/.previous" 2>/dev/null)"
 }
 
+# A local build hands .build/release to SwiftPM; every way the run can end
+# short of a completed install must put it back on the downloaded tree that
+# is running, or a reboot respawns a partial or missing TBDDaemon.
+test_local_build_short_of_an_install_restores_the_downloaded_link() {
+    local case_dir out live how
+    for how in compile handover dry-run sign; do
+        case_dir="$(mkcase_release_live "local-restore-$how")"
+        live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+        case "$how" in
+            compile) out="$(FAKE_BUILD_FAILS_PRODUCT=TBDDaemon \
+                    run_update_release "$case_dir"; printf 'rc=%s\n' "$?")" ;;
+            handover) out="$(FAKE_HANDOVER_FAILS=1 \
+                    run_update_release "$case_dir"; printf 'rc=%s\n' "$?")" ;;
+            dry-run) out="$(run_update_release "$case_dir" --dry-run; printf 'rc=%s\n' "$?")" ;;
+            sign)
+                printf '#!/bin/sh\nexit 1\n' > "$case_dir/bin/codesign"
+                out="$(run_update_release "$case_dir"; printf 'rc=%s\n' "$?")"
+                ;;
+        esac
+        assert_contains "a local build is what ran ($how)" "building TBDDaemon" "$out"
+        if [ "$how" = dry-run ]; then
+            assert_contains "a local dry run succeeds" "rc=0" "$out"
+        else
+            assert_contains "a local build that fails at $how fails the run" "rc=1" "$out"
+        fi
+        assert_eq "a local build that stops at $how points the link back at the running download" \
+            "$live" "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    done
+}
+
+test_release_failed_signing_restores_the_link() {
+    local case_dir out live
+    case_dir="$(mkcase_release_live release-sign-fails)"
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    printf '#!/bin/sh\nexit 1\n' > "$case_dir/bin/codesign"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "a failed signing fails the run" "rc=1" "$out"
+    assert_not_contains "a failed signing hands nothing over" "handover-daemon" "$out"
+    assert_eq "a failed signing points the link back at the running build" "$live" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+}
+
 test_local_build_takes_the_link_back_from_a_download() {
     local link home
     home="$TEST_TMP/yield/prebuilt"
@@ -2504,6 +2547,8 @@ test_release_failed_link_restores_the_running_link
 test_release_failed_runs_never_grow_the_prebuilt_home
 test_release_completed_install_keeps_the_replaced_tree_as_rollback
 test_local_build_takes_the_link_back_from_a_download
+test_local_build_short_of_an_install_restores_the_downloaded_link
+test_release_failed_signing_restores_the_link
 
 if [ "$FAIL" -ne 0 ]; then
     echo "SOME UPDATE TESTS FAILED"

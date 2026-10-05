@@ -29,12 +29,15 @@ on:
 
 permissions: {}
 
-# One publish at a time, newest wins. A superseded commit gets no asset, which
-# costs nothing: an update always wants the newest commit that has one, and
-# walks back along main to find it.
-concurrency:
-  group: release-main
-  cancel-in-progress: true
+# One build-and-publish at a time, newest wins. A superseded commit gets no
+# asset, which costs nothing: an update always wants the newest commit that
+# has one, and walks back along main to find it. The group is set on each job
+# rather than on the workflow: a workflow-level group is entered before any
+# job's `if:` is evaluated, so a run the gate below skips (a failed Test run
+# on main, a pull request's Test run) would still cancel the in-flight build
+# or publish of a good commit, and nothing would retrigger it. A job skipped
+# by its `if:` never enters its group. Both jobs share the one group, so a
+# newer commit's build also supersedes an older commit's pending publish.
 
 jobs:
   build:
@@ -45,6 +48,9 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    concurrency:
+      group: release-main
+      cancel-in-progress: true
     runs-on: macos-26
     # A cold release build of all five published products, unmeasured on this
     # runner when this was written; the debug equivalent of the test job's
@@ -111,6 +117,9 @@ jobs:
   publish:
     name: release-publish
     needs: build
+    concurrency:
+      group: release-main
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

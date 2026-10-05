@@ -1307,6 +1307,7 @@ main() {
     maybe_reexec "$@"
 
     local new_commit build_dir update_source release_link previous_release_target=""
+    local release_link_moved=false
     new_commit="$(git -C "$UPDATE_SRC" rev-parse HEAD 2>/dev/null || true)"
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
@@ -1409,12 +1410,20 @@ main() {
             log_error "could not point $release_link at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
             return 1
         fi
+        release_link_moved=true
         log "pointed $release_link at $RELEASE_TREE"
     else
         # A local build owns .build/release: hand it back to SwiftPM if a
-        # download holds it.
+        # download holds it. What it named is kept, and every exit short of a
+        # completed install puts it back, so a failed compile or handover
+        # leaves a reboot respawning the downloaded tree that is running now
+        # rather than a partial or missing TBDDaemon.
+        previous_release_target="$(link_target "$release_link" || true)"
         release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
-        build_products "$UPDATE_SRC" || return 1
+        if ! build_products "$UPDATE_SRC"; then
+            restore_release_link "$release_link" "$previous_release_target"
+            return 1
+        fi
 
         # Stamp only now that the build actually succeeded. This used to run
         # BEFORE build_products, on the theory that the sidecar should always
@@ -1436,7 +1445,25 @@ main() {
     local advanced
     advanced="$(commits_advanced "$old_commit" "$new_commit" || true)"
 
+    # Put .build/release back where it was when this run started. After the
+    # link was pointed at the download it goes back to exactly what it named;
+    # before that (and on the local-build path) only a download it was taken
+    # from needs putting back, since SwiftPM's own directory is SwiftPM's.
+    put_release_link_back() {
+        if [ "$release_link_moved" = true ]; then
+            if [ -n "$previous_release_target" ]; then
+                point_release_link "$release_link" "$previous_release_target" \
+                    && log "pointed $release_link back at $previous_release_target"
+            else
+                rm -f "$release_link"
+            fi
+        else
+            restore_release_link "$release_link" "$previous_release_target"
+        fi
+    }
+
     if [ "$OPT_DRY_RUN" = true ]; then
+        put_release_link_back
         log "dry run: built $BUILD_CONFIG at ${new_commit:-unknown}, installing nothing"
         print_summary "$old_commit" "$new_commit" "$advanced" 0 0 0
         return 0
@@ -1444,12 +1471,17 @@ main() {
 
     log "assembling and installing the app bundle"
     assemble_app_bundle "$UPDATE_SRC" "$build_dir" "$PATH" || {
+        put_release_link_back
         log_error "could not assemble the app bundle"
         return 1
     }
     local bundle_dir
     bundle_dir="$(bundle_dir_for_build "$build_dir")"
-    sign_app_bundle "$bundle_dir" || { log_error "could not sign the app bundle"; return 1; }
+    sign_app_bundle "$bundle_dir" || {
+        put_release_link_back
+        log_error "could not sign the app bundle"
+        return 1
+    }
 
     # Up to here nothing outside the update clone has changed: walking away
     # costs a wasted build and nothing else. install_and_handover is where the
@@ -1458,14 +1490,7 @@ main() {
     if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
         # The previous app bundle is back; put the daemon path back with it,
         # so a reboot respawns the build that is still running.
-        if [ "$use_release" = true ]; then
-            if [ -n "$previous_release_target" ]; then
-                point_release_link "$release_link" "$previous_release_target" \
-                    && log "pointed $release_link back at $previous_release_target"
-            else
-                rm -f "$release_link"
-            fi
-        fi
+        put_release_link_back
         return 1
     fi
 
