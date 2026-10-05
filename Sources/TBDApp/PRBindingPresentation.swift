@@ -261,9 +261,7 @@ enum PRBindingPresentation {
     /// `doneMenuLeadLimit` is cut short with an ellipsis.
     ///
     /// A done-chip builder of its own rather than `menuRows`, so the `+N` menu
-    /// and the toolbar dropdown keep sharing one row shape. Rows render through
-    /// `menuRowsID` exactly as `menuRows`' do — the key reads only `id`,
-    /// `title` and `url`.
+    /// and the toolbar dropdown keep sharing one row shape.
     static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
             let reference = doneReference(binding)
@@ -280,12 +278,13 @@ enum PRBindingPresentation {
         }
     }
 
-    /// The `.id` key for a `Menu` rendering `menuRows`, keyed on what those
-    /// rows actually draw. AppKit materializes an `NSMenu` ONCE and later
+    /// An `.id` key for a SwiftUI `Menu` rendering `menuRows`, keyed on what
+    /// those rows actually draw. AppKit materializes an `NSMenu` ONCE and later
     /// SwiftUI state changes do not reach it, so without a key that moves when
     /// the rows do, a row reads stale for as long as the menu lives — the
     /// constraint `PRButtonLabel.prSplitButtonID` exists for, in the smaller
-    /// shape a plain menu needs.
+    /// shape a plain menu needs. The status bar's menu chips do not need it:
+    /// they build their `NSMenu` from the current rows on every click.
     ///
     /// Keyed on the composed `title` rather than on any one field, because the
     /// title is the whole of what a row renders and it folds in every input
