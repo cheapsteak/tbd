@@ -623,7 +623,7 @@ struct MessageComposerView: View {
         case .notRunning:
             return "Claude is not running here. Sending resumes the session with this "
                 + "message as its first prompt. Images are sent as file paths for Claude to "
-                + "read, not as attachments."
+                + "read, not as attachments. Claude can read images up to about 500 KB."
         case .running, .blocked, .hidden, .unavailable:
             return "Return sends, Shift+Return breaks the line."
         }
