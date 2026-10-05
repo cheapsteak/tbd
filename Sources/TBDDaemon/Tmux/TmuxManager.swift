@@ -42,12 +42,14 @@ public enum PaneSendTarget: Sendable, Equatable {
 /// The answer `TmuxManager.paneOwnership` gives before a coordinate-destroying
 /// teardown: only `.owned` permits it. See that method for the policy.
 public enum PaneOwnership: Sendable, Equatable {
-    /// The pane is this terminal's, carries no identity, or is already gone.
+    /// The pane is this terminal's, carries no identity, or is already gone
+    /// (including its whole tmux server being positively absent).
     case owned
     /// The pane positively answers with a different terminal's id.
     case ownedByAnother(terminalID: String)
     /// The consultation could not be run (tmux timed out or failed to spawn),
-    /// or could not reach the server (`PaneSendTarget.unreachable`).
+    /// or could not reach a server not positively known to be gone
+    /// (`PaneSendTarget.unreachable`).
     case unverifiable(reason: String)
 
     public var permitsTeardown: Bool { self == .owned }
@@ -1485,7 +1487,11 @@ public struct TmuxManager: Sendable {
     /// Three answers, and only `.owned` permits the teardown:
     /// - **`.owned`** – the pane answers with this terminal's id, carries no
     ///   id at all (unstamped), or tmux positively reports it `.absent` — a
-    ///   reachable server answered and this pane is not on it.
+    ///   reachable server answered and this pane is not on it — or the pane
+    ///   could not be reached and `probeServer` positively reports the whole
+    ///   server `.absent` (tmux's own "no server running" answer, e.g. after
+    ///   a reboot). Any teardown would target that same socket, so with no
+    ///   server behind it there is no stranger it could destroy.
     ///   Refusing on an unstamped or already-gone pane would turn an ordinary
     ///   teardown of an already-dead window into a new failure, so absence of
     ///   an identity is not treated as disagreement.
@@ -1495,7 +1501,8 @@ public struct TmuxManager: Sendable {
     ///   exited still answers `.dead` and must still be caught).
     /// - **`.unverifiable`** – the consultation could not be run at all (tmux
     ///   timed out on a wedged server, or failed to spawn), or it ran but
-    ///   could not reach the server (`PaneSendTarget.unreachable`). That is "we do not
+    ///   could not reach the server (`PaneSendTarget.unreachable`) and the
+    ///   server's absence was not positively confirmed. That is "we do not
     ///   know", not "gone", so the teardown is refused. This is the same
     ///   policy the reconcile sweep applies (an unreadable identity is not
     ///   evidence of staleness — keep the row) and the one `AgentReaper`
@@ -1528,6 +1535,11 @@ public struct TmuxManager: Sendable {
         case .live(let id), .dead(let id): paneTerminalID = id
         case .absent: paneTerminalID = nil
         case .unreachable:
+            // A definitively gone server holds no pane at all, stranger or
+            // otherwise — the post-reboot case recreate exists for. Only
+            // tmux's own positive "no server" answer counts (`.absent`); a
+            // probe that merely failed (`.unknown`) stays unverifiable.
+            if await probeServer(server: server) == .absent { return .owned }
             return .unverifiable(
                 reason: "tmux server \(server) could not be reached to read pane \(paneID)")
         }

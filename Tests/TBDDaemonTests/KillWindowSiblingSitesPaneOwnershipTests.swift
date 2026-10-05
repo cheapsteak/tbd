@@ -268,6 +268,93 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
                 "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
     }
+
+    // MARK: - terminal.recreateWindow against a dead server
+
+    /// The post-reboot case recreate exists for: the repo's tmux server is
+    /// gone, so the pane probe and its reachability probe both fail
+    /// (`.unreachable`). tmux positively reports no server behind the socket
+    /// (`probeServer` → `.absent`), and a dead server holds no stranger pane,
+    /// so the guard must not block the rebuild — on either branch.
+    @Test(arguments: [TerminalKind.shell, TerminalKind.codex])
+    func recreateWindowProceedsWhenTheServerIsPositivelyGone(_ kind: TerminalKind) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-kwss-recreate-dead-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let repo = try await db.repos.create(
+            path: dir.path, displayName: "acme", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
+            tmuxServer: "tbd-kwss-recreate-dead")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: kind == .codex ? "Codex" : nil, kind: kind)
+
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable },
+            dryRunServerPresence: { _ in .absent })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager("kwss-recreate-dead-\(kind.rawValue)"),
+            actuationLog: makeTestActuationLog())
+
+        let resp = try await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(resp.success, "a dead server must not block the rebuild recreate exists for: \(resp.error ?? "")")
+        let replaced = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(replaced.tmuxWindowID != "@2" || replaced.tmuxPaneID != "%2",
+                "the row must be re-pointed at the rebuilt window")
+    }
+
+    /// The other side of that line: an unreachable pane on a server NOT
+    /// positively known to be gone stays "we do not know" and still refuses.
+    @Test(arguments: [TmuxPresence.alive, TmuxPresence.unknown])
+    func recreateWindowStillRefusesAnUnreachablePaneOnAServerNotProvablyGone(
+        _ serverPresence: TmuxPresence
+    ) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-kwss-recreate-unreach-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let repo = try await db.repos.create(
+            path: dir.path, displayName: "acme", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
+            tmuxServer: "tbd-kwss-recreate-unreach")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
+
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable },
+            dryRunServerPresence: { _ in serverPresence })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager("kwss-recreate-unreach"),
+            actuationLog: makeTestActuationLog())
+
+        let resp = try await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(!resp.success, "an unreachable pane on a server not provably gone must still refuse")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "an unverified pane must never be kill-windowed: \(recorder.snapshot())")
+    }
 }
 
 /// The two pane answers that must refuse a teardown: a positive mismatch, and

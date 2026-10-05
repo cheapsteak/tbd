@@ -149,6 +149,59 @@ struct TerminalDeletePaneOwnershipTests {
         #expect(outcome["reason"] == nil)
     }
 
+    /// A tab closed after a reboot: the repo's tmux server is gone, so the
+    /// pane is `.unreachable` and tmux positively reports no server
+    /// (`probeServer` → `.absent`). A dead server holds no stranger pane, so
+    /// the close proceeds as it did before the guard existed rather than
+    /// being logged as a failed consultation.
+    @Test func proceedsWhenTheServerIsPositivelyGone() async throws {
+        let fx = try await makeFixture()
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable },
+            dryRunServerPresence: { _ in .absent })
+        let logPath = Self.actuationLogPath()
+        let router = RPCRouter(
+            db: fx.db,
+            lifecycle: WorktreeLifecycle(
+                db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: ActuationLog(path: logPath))
+
+        let resp = try await close(router, fx.terminal.id)
+
+        #expect(resp.success)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
+                "a dead server must not turn the close into a refusal: \(recorder.snapshot())")
+        let outcome = try #require(try Self.outcomes(at: logPath).last)
+        #expect(outcome["result"] as? String == "dispatched")
+    }
+
+    /// An unreachable pane on a server that is NOT positively gone is still
+    /// "we do not know": the kill is refused.
+    @Test func refusesWhenThePaneIsUnreachableOnAServerNotProvablyGone() async throws {
+        let fx = try await makeFixture()
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable },
+            dryRunServerPresence: { _ in .unknown })
+        let router = RPCRouter(
+            db: fx.db,
+            lifecycle: WorktreeLifecycle(
+                db: fx.db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+
+        let resp = try await close(router, fx.terminal.id)
+
+        #expect(resp.success, "the row itself must still close")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "an unverified pane must never be kill-windowed: \(recorder.snapshot())")
+    }
+
     /// A deliberate protective skip is recorded as a refusal naming the
     /// mismatch, not as a tmux error — the actuation log must be able to tell
     /// the guard doing its job from a kill-window that failed.
