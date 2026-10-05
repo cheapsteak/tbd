@@ -44,7 +44,11 @@ these steps in order.
   `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
   `scripts/swift-safe`, with the same shared module cache. A failed build
   stops here and the running installation, and the clone's own build
-  identity sidecar (below), are both untouched.
+  identity sidecar (below), are both untouched. The run's full compiler output
+  is kept in `~/tbd/updates/build.log`, overwritten by the next run; a failure
+  logs the first `error:` lines and that path. When `scripts/swift-safe` exits
+  75 the build never got the machine-wide build slot, so nothing was compiled,
+  and the log says so rather than calling it a failed build.
 - **Stamps the build identity**, once the build above actually succeeded.
   `TBDBuildIdentity.json` lands in the build directory recording the commit,
   the branch, the build time, the clone's path, and whether the tree was
