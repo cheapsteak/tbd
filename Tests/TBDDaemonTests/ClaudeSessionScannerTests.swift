@@ -399,6 +399,66 @@ struct ClaudeSessionScannerTests {
         ) == false)
     }
 
+    // MARK: - transcriptState: missing vs blank vs conversation
+
+    @Test("transcriptState: project dir resolved but no JSONL is missing, naming the file")
+    func stateMissingFile() throws {
+        let wt = "/Users/test/state-missing-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+
+        let state = ClaudeSessionScanner.transcriptState(
+            sessionID: "deadbeef", worktreePath: wt, projectsBase: layout.base)
+        #expect(state == .missing(
+            lookedFor: layout.dir.appendingPathComponent("deadbeef.jsonl").path))
+    }
+
+    @Test("transcriptState: unresolvable project dir is missing, naming the expected path")
+    func stateMissingProjectDir() throws {
+        let wt = "/Users/test/state-nodir-\(UUID().uuidString.prefix(8))"
+        let emptyBase = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: emptyBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyBase) }
+
+        let state = ClaudeSessionScanner.transcriptState(
+            sessionID: "nodir", worktreePath: wt,
+            transcriptFilePath: "/nonexistent/nodir.jsonl", projectsBase: emptyBase)
+        let encoded = wt.map { "/." .contains($0) ? "-" : String($0) }.joined()
+        #expect(state == .missing(lookedFor: emptyBase
+            .appendingPathComponent(encoded)
+            .appendingPathComponent("nodir.jsonl").path))
+    }
+
+    @Test("transcriptState: an empty or metadata-only JSONL is blank, not missing")
+    func stateBlank() throws {
+        let wt = "/Users/test/state-blank-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+
+        try Data().write(to: layout.dir.appendingPathComponent("empty.jsonl"))
+        #expect(ClaudeSessionScanner.transcriptState(
+            sessionID: "empty", worktreePath: wt, projectsBase: layout.base) == .blank)
+
+        try #"{"type":"permission-mode","sessionId":"meta","permissionMode":"auto"}"#
+            .data(using: .utf8)!.write(to: layout.dir.appendingPathComponent("meta.jsonl"))
+        #expect(ClaudeSessionScanner.transcriptState(
+            sessionID: "meta", worktreePath: wt, projectsBase: layout.base) == .blank)
+    }
+
+    @Test("transcriptState: a JSONL with a user turn has a conversation")
+    func stateHasConversation() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let sessionFile = tmpDir.appendingPathComponent("real.jsonl")
+        try #"{"type":"user","message":{"role":"user","content":"Hello"},"sessionId":"real"}"#
+            .data(using: .utf8)!.write(to: sessionFile)
+
+        #expect(ClaudeSessionScanner.transcriptState(
+            sessionID: "real", worktreePath: "/any/path",
+            transcriptFilePath: sessionFile.path) == .hasConversation)
+    }
+
     // MARK: - Cache TTL tests
 
     @Test("ClaudeProjectDirectory: positive entries are re-validated against filesystem")

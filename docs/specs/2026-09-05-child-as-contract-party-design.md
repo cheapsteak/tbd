@@ -135,8 +135,8 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   wrong row.
 - **`cursor: (row, column)`** – in viewport coordinates, so `lines[viewportStart
   + cursor.row]` is the cursor's line when that row survived trimming; plus
-  whether the cursor is visible. The login driver and the pending-input rail
-  both reason about where the cursor sits.
+  whether the cursor is visible. The pending-input rail reasons about where
+  the cursor sits.
 - **`size: (columns, rows)`** – the grid the lines were rendered from. A
   consumer that compares against the pty's own size can see a grid that
   disagrees with the child.
@@ -418,7 +418,7 @@ any child.
   it does not make them the right source for agent *state*. "Is the agent
   stuck" belongs on hook and transcript state, as the rule already says. The
   screen contract serves the readers that legitimately need a screen — the
-  login driver, the pending-input check, a person running
+  pending-input check, a person running
   `tbd terminal output` — and the input composer, which needs modes and
   nothing else.
 

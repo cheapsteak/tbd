@@ -505,6 +505,8 @@ import Testing
             "20260902140000_config_gc_retained_transcripts",
             "20260903193500_config_holder_row_reconcile",
             "20260904172536_config_update_mode",
+            "20260905080315_config_profile_balancing",
+            "20260905080317_model_profiles_pool_opt_out",
             "20260905120000_config_transcript_composer",
             "20260905213000_config_holder_hibernation",
             "20260905220000_terminal_holder_child_started_at",
@@ -512,6 +514,8 @@ import Testing
             "20260907215725_config_transcript_streaming",
             "20260907215726_config_model_proxy_port",
             "20260907215727_terminal_transcript_stream_path",
+            "20260924120000_config_remote_transcript_enabled",
+            "20261002143454_config_pr_poll_schedule",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

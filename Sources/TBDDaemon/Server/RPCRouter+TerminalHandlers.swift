@@ -348,7 +348,13 @@ extension RPCRouter {
                 if let overrideID = params.overrideProfileID {
                     resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
                 } else {
-                    resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                    // A resumed conversation belongs to the account holding its
+                    // transcript, which the history row does not record, so a
+                    // resume keeps the stable pre-balancing resolution.
+                    resolvedProfile = try await modelProfileResolver.resolve(
+                        repoID: worktree.repoID,
+                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
+                        worktreeID: params.worktreeID)
                 }
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
@@ -379,10 +385,6 @@ extension RPCRouter {
         }
 
         // A login session takes the decided transport like every other spawn.
-        // Its auto-`/login` pump is transport-agnostic: `armLoginSession`
-        // hands it a closure pair per transport — a captured tmux pane and
-        // `send-keys`, or the daemon's retained emulator and the holder's
-        // injection courier.
         let transport = decidedTransport
 
         // Build the spawn command via the pure helper.
@@ -550,7 +552,7 @@ extension RPCRouter {
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
-        let (terminal, currentServer) = try await actuating(actuationID) {
+        let terminal = try await actuating(actuationID) {
             try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: params.worktreeID,
                 allowedStatuses: [worktree.status]
@@ -575,16 +577,19 @@ extension RPCRouter {
                     transport: transport,
                     attachment: attachment,
                     modelProxySupervisor: modelProxySupervisor)
-                return (terminal, currentWorktree.tmuxServer)
+                return terminal
             }
         }
+        // The row is in, so its live count now carries a balanced pick's
+        // load; hand the reservation back so it stops counting too.
+        await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
         )))
 
         if isLoginSession, let profile = resolvedProfile {
-            await armLoginSession(terminal: terminal, server: currentServer, profile: profile)
+            await armLoginSession(profile: profile)
         }
 
         await finishActuation(actuationID, .dispatched)
@@ -619,32 +624,12 @@ extension RPCRouter {
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
     }
 
-    /// Post-spawn wiring for a profile login session:
-    /// 1. starts the verified auto-`/login` pump — poll the session's screen
-    ///    until Claude's TUI is interactive, type `/login` + Enter, then verify
-    ///    the login dialog actually appeared (retrying, capped) so a send that
-    ///    lands before the input loop is ready doesn't silently vanish;
-    /// 2. starts the login-identity watcher so the Settings badge flips to
-    ///    "Logged in as …" the moment the profile's isolated `.claude.json`
-    ///    gains an `oauthAccount`.
-    ///
-    /// Transport-agnostic: the pump is one loop and one classifier, and what
-    /// differs per transport is the pair of closures `loginPumpClosures(for:)`
-    /// builds for it.
-    private func armLoginSession(
-        terminal: Terminal,
-        server: String,
-        profile: ResolvedModelProfile
-    ) async {
-        let terminalID = terminal.id
-        let closures = loginPumpClosures(for: terminal, server: server)
-        await loginSessions.registerPendingAutoLogin(terminalID: terminalID)
-        await loginSessions.startAutoLoginPump(
-            terminalID: terminalID,
-            paneText: closures.paneText,
-            typeLogin: closures.typeLogin
-        )
-
+    /// Post-spawn wiring for a profile login session: starts the
+    /// login-identity watcher so the Settings badge flips to "Logged in as …"
+    /// the moment the profile's isolated `.claude.json` gains an
+    /// `oauthAccount`. Nothing is typed into the session — the person runs
+    /// `/login` from the footer hint Claude renders.
+    private func armLoginSession(profile: ResolvedModelProfile) async {
         let configDirManager = self.configDirManager
         let subscriptions = self.subscriptions
         let profileID = profile.profileID
@@ -655,137 +640,6 @@ extension RPCRouter {
             identity: { configDirManager.loginIdentity(forProfileID: profileID) },
             onLogin: { subscriptions.broadcast(delta: .modelProfilesChanged) }
         )
-    }
-
-    /// How the auto-`/login` pump reads and types for one login tab, chosen by
-    /// the transport its row records.
-    ///
-    /// A factory rather than two branches inside `armLoginSession` so a test
-    /// can take the pair and drive it: arming also starts the identity watcher
-    /// against a profile's config dir, which a test of the typing has no
-    /// business running.
-    ///
-    /// - **tmux** — a captured pane, which the daemon can always judge because
-    ///   the tmux server renders it for everybody, and `send-keys` twice: the
-    ///   text, then `Enter`.
-    /// - **holder** — the daemon's own retained emulator through the typed
-    ///   screen, judged only when it is live and fully observed
-    ///   (`LoginSessionCoordinator.paneReading(from:)`), and two courier writes
-    ///   for the same two acts, paced `PacedKeySender.interKeyPause` apart so
-    ///   the body and the submit reach the child as separate reads.
-    ///
-    /// `server` is the tmux server the spawn ran in, and is consulted on the
-    /// tmux arm alone — a holder row has no server behind it.
-    func loginPumpClosures(
-        for terminal: Terminal,
-        server: String
-    ) -> (
-        paneText: @Sendable () async -> LoginSessionCoordinator.PaneReading,
-        typeLogin: @Sendable () async -> Void
-    ) {
-        let terminalID = terminal.id
-        switch terminal.transport {
-        case .tmux:
-            let tmux = self.tmux
-            let paneID = terminal.tmuxPaneID
-            return (
-                paneText: {
-                    // A capture that failed is an empty pane, which classifies
-                    // as `notReady` — the same wait it has always taken.
-                    let captured = try? await tmux.capturePaneOutput(
-                        server: server, paneID: paneID)
-                    return .text(captured ?? "")
-                },
-                typeLogin: {
-                    do {
-                        try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
-                        try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
-                    } catch {
-                        logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
-                    }
-                }
-            )
-        case .holder:
-            return (
-                paneText: {
-                    let screen: TerminalScreen?
-                    do {
-                        screen = try await self.holderLoginScreen(terminalID: terminalID)
-                    } catch {
-                        // A refused projection is a producer bug rather than a
-                        // session state, so it is said out loud on every read
-                        // that hits it — the pump then waits, exactly as it
-                        // does for a screen it may not judge.
-                        logger.warning("auto-login: could not project terminal \(terminalID, privacy: .public)'s screen: \(error.localizedDescription, privacy: .public)")
-                        screen = nil
-                    }
-                    return LoginSessionCoordinator.paneReading(from: screen)
-                },
-                typeLogin: {
-                    guard let courier = self.holderInjectionCourier else {
-                        logger.warning("auto-login: terminal \(terminalID, privacy: .public) runs on the pty-holder transport and this daemon has no injection path; nothing was typed")
-                        return
-                    }
-                    // Enter comes through the named-key table, against whatever
-                    // modes the session's store reports, so the login tab
-                    // resolves a key the one way every other holder send does.
-                    // The reading is taken once, before anything is written:
-                    // a submit this daemon cannot spell types nothing at all
-                    // rather than leaving a `/login` sitting in the composer.
-                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
-                    guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
-                        logger.warning("auto-login: no holder byte mapping for Enter; nothing was typed into terminal \(terminalID, privacy: .public)")
-                        return
-                    }
-                    // Two writes with a pause between them, which is the shape
-                    // the tmux arm has — `send-keys -l` and then a separate
-                    // `Enter` command — and the shape this pump was proven
-                    // against live. Back-to-back raw writes coalesce into one
-                    // child `read()` on the daemon-write path, and the TUI's
-                    // paste heuristic can absorb the `\r` into the body it
-                    // arrives with. `PacedKeySender.interKeyPause` is the pause
-                    // every other holder key sequence already takes.
-                    let bodyLanded = await self.deliverLoginBytes(
-                        Data("/login".utf8), terminalID: terminalID, courier: courier)
-                    guard bodyLanded else { return }
-                    try? await self.clock.sleep(for: PacedKeySender.interKeyPause)
-                    _ = await self.deliverLoginBytes(
-                        enter, terminalID: terminalID, courier: courier)
-                }
-            )
-        }
-    }
-
-    /// One courier write for the login pump. `false` when nothing was written,
-    /// which stops the pair rather than submitting a `/login` that never landed.
-    private func deliverLoginBytes(
-        _ bytes: Data, terminalID: UUID, courier: HolderInjectionCourier
-    ) async -> Bool {
-        switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
-        case .viewerWrote, .daemonWrote:
-            return true
-        case .notDelivered(let reason):
-            logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(reason, privacy: .public)")
-            return false
-        }
-    }
-
-    /// The holder-backed login tab's screen, for the pump to read.
-    ///
-    /// The seam first so a test can pin all four of the pump's readings without
-    /// a real holder; otherwise the registry's own reader, which is retained
-    /// across an attach and so answers for an open session as well as a
-    /// detached one. `nil` from either means the same thing: nothing answered.
-    ///
-    /// The depth is `terminal.output`'s own default. The pump reads a tail of
-    /// the session rather than a pane, and the classifier's markers are what
-    /// Claude paints in the last handful of rows.
-    private func holderLoginScreen(terminalID: UUID) async throws -> TerminalScreen? {
-        if let holderScreenOracle {
-            return try await holderScreenOracle(terminalID)
-        }
-        guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
-        return try await reader.screen(maxLines: 50)
     }
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
@@ -1062,7 +916,6 @@ extension RPCRouter {
         }
         await pendingQuestions.clear(terminalID: params.terminalID)
         await broadcastPendingQuestions(terminalID: params.terminalID)
-        await loginSessions.cancelPendingAutoLogin(terminalID: params.terminalID)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.
@@ -1323,7 +1176,11 @@ extension RPCRouter {
             }
             var resolvedProfile: ResolvedModelProfile? = nil
             do {
-                resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so a
+                // revive keeps the stable pre-balancing resolution.
+                resolvedProfile = try await modelProfileResolver.resolve(
+                    repoID: worktree.repoID, balance: false)
             } catch {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
@@ -2156,8 +2013,10 @@ extension RPCRouter {
         /// Session has prior content — `claude --resume <id>` and recapture
         /// the forked session ID after a brief delay.
         case resume(sessionID: String)
-        /// Session JSONL is missing or has no conversation — start a new
-        /// session with the system prompt, no recapture needed.
+        /// Session JSONL has no conversation (or, for `.inPlace` only, is
+        /// missing — a `.fork` of a missing transcript is refused before a
+        /// plan is made) — start a new session with the system prompt, no
+        /// recapture needed.
         case fresh(sessionID: String)
     }
 
@@ -2264,6 +2123,50 @@ extension RPCRouter {
         return fm.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
+    /// The last look a fork takes before refusing a session as having no
+    /// transcript. Tries, in order: `resolveSwapSourceTranscript` against each
+    /// of `searchConfigDirs` (the row's `transcriptPath`, then the worktree's
+    /// slug dir under that config dir's `projects/`), then a shallow
+    /// by-session-ID scan of each config dir's `projects/` tree
+    /// (`TranscriptProjectDirSync.locateSessionTranscript`). The scan is what
+    /// the resume path's own sync falls back to; it lists directories
+    /// directly, so neither a moved worktree (the slug no longer matches) nor
+    /// a stale cached miss in `ClaudeProjectDirectory.resolve` can hide a
+    /// transcript from it. Runs detached: the scan is filesystem work an RPC
+    /// handler must not block its executor on.
+    static func locateForkSourceTranscript(
+        transcriptPath: String?,
+        sessionID: String,
+        worktreePath: String,
+        searchConfigDirs: [URL]
+    ) async -> URL? {
+        return await Task.detached {
+            // De-duplicate on the RESOLVED `projects/` root: a profile's
+            // `projects` slot is normally a symlink into the host store, so
+            // the source and ambient dirs often name one physical tree.
+            var seen = Set<String>()
+            let dirs = searchConfigDirs.filter {
+                seen.insert($0.appendingPathComponent("projects", isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL.path).inserted
+            }
+            for dir in dirs {
+                if let hit = resolveSwapSourceTranscript(
+                    transcriptPath: transcriptPath, sessionID: sessionID,
+                    worktreePath: worktreePath, sourceConfigDir: dir) {
+                    return hit
+                }
+            }
+            for dir in dirs {
+                if let hit = TranscriptProjectDirSync.locateSessionTranscript(
+                    sessionID: sessionID,
+                    projectsRoot: dir.appendingPathComponent("projects", isDirectory: true)) {
+                    return hit
+                }
+            }
+            return nil
+        }.value
+    }
+
     func handleTerminalSwapProfile(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2311,12 +2214,15 @@ extension RPCRouter {
         // loads the row's profile via loadByID and resolves that profile's config
         // dir, so a wake after this resumes under the new account automatically.
         if oldTerminal.isParked {
-            let blank = ClaudeSessionScanner.isSessionBlank(
+            // Parked rows are re-homed whatever the mode asks, and a re-home
+            // with no transcript simply wakes fresh later — so missing and
+            // blank are the same answer here.
+            let state = ClaudeSessionScanner.transcriptState(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 transcriptFilePath: oldTerminal.transcriptPath
             )
-            if !blank {
+            if state == .hasConversation {
                 let sourceConfigDir: URL
                 if let oldProfileID = oldTerminal.profileID {
                     sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
@@ -2408,12 +2314,69 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
-        let blank = ClaudeSessionScanner.isSessionBlank(
+        var transcriptState = ClaudeSessionScanner.transcriptState(
             sessionID: sessionID,
             worktreePath: worktree.path,
             transcriptFilePath: oldTerminal.transcriptPath
         )
-        let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+        // A fork is about to be refused on `missing`, so make sure the answer
+        // is not an artifact of where or how the scanner looked: the scan
+        // above searches only the host store's `projects/`, by the current
+        // worktree path's slug, through a resolver that caches misses for 30
+        // seconds. `locateForkSourceTranscript` also searches the SOURCE
+        // profile's config dir and falls back to a by-session-ID scan, which
+        // neither the slug nor the miss cache can defeat. If it finds the
+        // file, classify that file instead, and hand the same file to the
+        // transcript carry below so the resume sees what this check saw.
+        var forkSourceTranscript: URL?
+        if mode == .fork, case .missing = transcriptState {
+            forkSourceTranscript = await Self.locateForkSourceTranscript(
+                transcriptPath: oldTerminal.transcriptPath,
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                searchConfigDirs: [
+                    oldTerminal.profileID.map {
+                        configDirManager.configDirectory(forProfileID: $0)
+                    } ?? configDirManager.ambientConfigDirectory,
+                    configDirManager.ambientConfigDirectory,
+                ])
+            if let forkSourceTranscript {
+                transcriptState = ClaudeSessionScanner.transcriptState(
+                    sessionID: sessionID,
+                    worktreePath: worktree.path,
+                    transcriptFilePath: forkSourceTranscript.path)
+            }
+        }
+
+        // A fork of a session with NO transcript on disk is refused rather
+        // than planned fresh: a fresh spawn would open a blank tab that the
+        // user asked for as a fork of a conversation, and nothing about that
+        // tab says the conversation did not come with it. A BLANK transcript
+        // (file present, no turns yet) still forks fresh — there is genuinely
+        // nothing to carry. `.inPlace` is deliberately unchanged: it replaces
+        // the session on the row the user is already looking at, so a fresh
+        // start under the new account is the visible result either way.
+        if mode == .fork, case .missing(let lookedFor) = transcriptState {
+            let actuationID = try await beginActuation(
+                .terminalSwapProfile, actor: actor,
+                target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+                agent: TerminalKind.claude.rawValue,
+                profile: resolved?.profileID.uuidString)
+            // Name every place a user could expect the file: the scan's own
+            // path, the row's recorded path when it has one, and the fact
+            // that the source config dir was searched by session id too.
+            let recorded = oldTerminal.transcriptPath.flatMap { $0.isEmpty || $0 == lookedFor ? nil : $0 }
+            let message = "Fork refused: session \(sessionID) has no transcript to fork "
+                + "(looked for \(lookedFor)"
+                + (recorded.map { " and the recorded \($0)" } ?? "")
+                + ", and searched the source config dir's projects by session id)"
+            logger.warning("\(message, privacy: .public)")
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        }
+
+        let plan = Self.planTerminalSwap(
+            oldSessionID: sessionID, isBlank: transcriptState != .hasConversation)
 
         // The two facts the plan decides that are not the command itself. A
         // resume keeps the session id and wants the post-resume recapture; a
@@ -2474,7 +2437,7 @@ extension RPCRouter {
                 destConfigDir = configDirManager.ambientConfigDirectory
             }
 
-            if let sourceTranscript = Self.resolveSwapSourceTranscript(
+            if let sourceTranscript = forkSourceTranscript ?? Self.resolveSwapSourceTranscript(
                 transcriptPath: oldTerminal.transcriptPath,
                 sessionID: sessionID,
                 worktreePath: worktree.path,
@@ -2497,7 +2460,9 @@ extension RPCRouter {
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 projectsRoot: destProjectsRoot,
-                storedTranscriptPath: oldTerminal.transcriptPath
+                // A fork that had to search for its transcript syncs the file
+                // it classified, not whatever a fresh lookup would pick.
+                storedTranscriptPath: forkSourceTranscript?.path ?? oldTerminal.transcriptPath
             )
             resumeProjectsRoot = destProjectsRoot
         }
@@ -5443,6 +5408,9 @@ extension RPCRouter {
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        // Any hook event marks the worktree active for the PR schedule.
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
         // validate, so we fall back to the old behavior.
@@ -5615,6 +5583,8 @@ extension RPCRouter {
             return .ok()
         }
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         if let cwd = params.cwd, !cwd.isEmpty {
             guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
@@ -5823,6 +5793,10 @@ extension RPCRouter {
         // an agent hook, so it must not inflate the hook-event counter.
         if params.origin == nil {
             await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+            // The same rule for the PR schedule's activity: a user interrupt is
+            // not agent activity.
+            await activityLedger.recordHookEvent(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
 
         // Stop-hook transcript sync (Stop/StopFailure reach the daemon as

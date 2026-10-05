@@ -52,6 +52,38 @@ struct RateLimitDetectionTests {
         #expect(RateLimitDetection.detect(transcriptData: data, now: Self.now, timeZone: Self.utc) == nil)
     }
 
+    @Test func structuredStringResetsAtFallsBackToTextButPreservesLimitType() {
+        // A rejected record with resetsAt as a string instead of epoch: fall back
+        // to text parsing, but preserve the rateLimitType from structured.
+        let data = Self.transcript([Self.errorLine(
+            text: "You've hit your session limit · resets 3pm (UTC)",
+            rateLimitInfo: [
+                "status": "rejected",
+                "resetsAt": "2026-07-03T19:00:00Z",  // string, not number
+                "rateLimitType": "session"
+            ])])
+        let hit = RateLimitDetection.detect(transcriptData: data, now: Self.now, timeZone: Self.utc)
+        #expect(hit != nil)
+        #expect(hit?.limitType == "session")  // structured type preserved
+        if let hit {
+            #expect(hit.resetsAt > Self.now)
+            #expect(hit.rawMessage == "You've hit your session limit · resets 3pm (UTC)")
+        }
+    }
+
+    @Test func structuredRejectedWithNoUsableResetAndNoParseableTextDetectsNothing() {
+        // A rejected record with non-numeric resetsAt and transient text → nil.
+        // The structured limitType does not save a transient message.
+        let data = Self.transcript([Self.errorLine(
+            text: "API Error: Server is temporarily limiting requests (not your usage limit)",
+            rateLimitInfo: [
+                "status": "rejected",
+                "resetsAt": "invalid",  // not numeric
+                "rateLimitType": "session"
+            ])])
+        #expect(RateLimitDetection.detect(transcriptData: data, now: Self.now, timeZone: Self.utc) == nil)
+    }
+
     // MARK: - Hard-limit wordings (spec fixtures, delimiters · / - / .)
 
     @Test(arguments: [

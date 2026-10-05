@@ -96,6 +96,15 @@ struct RemoteFleetSnapshot {
         Set(providers.first { $0.config.name == provider }?.describe?.capabilities ?? [])
     }
 
+    /// The refusal text when `provider` has not declared `capability`, nil when
+    /// it has. Capability strings match exactly, so a provider still declaring
+    /// a bare pre-namespace spelling (`retain` for `transcript.retain`) is
+    /// refused rather than admitted.
+    func missingCapability(_ capability: String, provider: String) -> String? {
+        capabilities(of: provider).contains(capability)
+            ? nil : remoteMissingCapability(capability, provider: provider)
+    }
+
     func isKnown(provider: String) -> Bool {
         providers.contains { $0.config.name == provider }
     }
@@ -195,6 +204,12 @@ struct RemoteRetain: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    /// The capability refusal `retain` gives before calling anything, pure so
+    /// bare vs namespaced capabilities can be tested without a live daemon.
+    static func missingCapability(fleet: RemoteFleetSnapshot, provider: String) -> String? {
+        fleet.missingCapability(RemoteCapability.transcriptRetain, provider: provider)
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -203,8 +218,8 @@ struct RemoteRetain: AsyncParsableCommand {
             remoteNote("Error: could not resolve '\(session)' to a remote session")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: target.provider).contains("retain") else {
-            remoteNote(remoteMissingCapability("retain", provider: target.provider))
+        if let refusal = RemoteRetain.missingCapability(fleet: fleet, provider: target.provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let receipt = try client.call(
@@ -252,6 +267,12 @@ struct RemoteImport: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    /// The capability refusal `import` gives before calling anything, pure so
+    /// bare vs namespaced capabilities can be tested without a live daemon.
+    static func missingCapability(fleet: RemoteFleetSnapshot, provider: String) -> String? {
+        fleet.missingCapability(RemoteCapability.transcriptImport, provider: provider)
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -259,8 +280,8 @@ struct RemoteImport: AsyncParsableCommand {
             remoteNote("Error: no provider named '\(provider)' is registered")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: provider).contains("import") else {
-            remoteNote(remoteMissingCapability("import", provider: provider))
+        if let refusal = RemoteImport.missingCapability(fleet: fleet, provider: provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let jsonl = try readTranscriptOperand(path)
@@ -321,6 +342,12 @@ struct RemoteRecall: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Write the JSONL to this file instead of stdout")
     var output: String?
 
+    /// The capability refusal `recall` gives before calling anything, pure so
+    /// bare vs namespaced capabilities can be tested without a live daemon.
+    static func missingCapability(fleet: RemoteFleetSnapshot, provider: String) -> String? {
+        fleet.missingCapability(RemoteCapability.transcriptRecall, provider: provider)
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -328,8 +355,8 @@ struct RemoteRecall: AsyncParsableCommand {
             remoteNote("Error: no provider named '\(provider)' is registered")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: provider).contains("recall") else {
-            remoteNote(remoteMissingCapability("recall", provider: provider))
+        if let refusal = RemoteRecall.missingCapability(fleet: fleet, provider: provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let result = try client.call(
@@ -544,8 +571,8 @@ struct RemoteDelete: AsyncParsableCommand {
 
             With --retain the provider stores the transcript first and the key is \
             printed, so the conversation survives the session. Without it, \
-            nothing survives. --retain needs the provider to declare `retain` as \
-            well as `delete`.
+            nothing survives. --retain needs the provider to declare \
+            `transcript.retain` as well as `delete`.
 
             Refuses without --force when the session is running or reports \
             uncommitted work, naming which.
@@ -566,6 +593,23 @@ struct RemoteDelete: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    /// The capability refusal `delete` gives before calling anything: `delete`
+    /// itself is required unconditionally, and `--retain` needs
+    /// `transcript.retain` as well — the contract makes --retain valid only
+    /// where that capability is declared, so this is refused here rather than
+    /// sent and hoped for: a provider that ignored the flag would destroy a
+    /// session the caller believed was being preserved. Pure, so bare vs
+    /// namespaced capabilities can be tested without a live daemon. Mirrors
+    /// `RemoteDeletePrecondition.refusal`, which covers the session-state half
+    /// of the same command's policy.
+    static func refusal(fleet: RemoteFleetSnapshot, provider: String, retain: Bool) -> String? {
+        guard fleet.capabilities(of: provider).contains("delete") else {
+            return remoteMissingCapability("delete", provider: provider)
+        }
+        guard retain else { return nil }
+        return fleet.missingCapability(RemoteCapability.transcriptRetain, provider: provider)
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -575,17 +619,8 @@ struct RemoteDelete: AsyncParsableCommand {
             throw ExitCode.failure
         }
         let address = "\(target.provider)/\(target.sessionID)"
-        let capabilities = fleet.capabilities(of: target.provider)
-        guard capabilities.contains("delete") else {
-            remoteNote(remoteMissingCapability("delete", provider: target.provider))
-            throw ExitCode.failure
-        }
-        // The contract makes --retain valid only where `retain` is declared, so
-        // this is refused here rather than sent and hoped for: a provider that
-        // ignored the flag would destroy a session the caller believed was
-        // being preserved.
-        if retain, !capabilities.contains("retain") {
-            remoteNote(remoteMissingCapability("retain", provider: target.provider))
+        if let refusal = RemoteDelete.refusal(fleet: fleet, provider: target.provider, retain: retain) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let mirrored = fleet.sessions.first {
@@ -932,8 +967,8 @@ struct RemoteCreate: AsyncParsableCommand {
             behind; --force moves the conversation anyway.
 
             Seeding needs the provider to declare `seed`, and the two \
-            file-bearing sources need `import` as well. Both are refused here, \
-            by name, before anything is created.
+            file-bearing sources need `transcript.import` as well. Both are \
+            refused here, by name, before anything is created.
             """
     )
 
@@ -962,6 +997,28 @@ struct RemoteCreate: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    /// The capability refusal `create` gives before reading, importing or
+    /// creating anything. `seed` gates carrying any conversation in at all; the
+    /// two file-bearing sources — `--continue` and `--from-file`, which both
+    /// import JSONL — need `transcript.import` as well. Pure, so bare vs
+    /// namespaced capabilities can be tested without a live daemon.
+    ///
+    /// A `seed` a provider never declared is silently ignored by the contract's
+    /// own ignore-unknown-fields rule, which would leave the user with an empty
+    /// session they believed carried their conversation — hence the check here,
+    /// before anything is read, imported or created.
+    static func missingCapability(
+        fleet: RemoteFleetSnapshot, provider: String, hasSeedSource: Bool, needsImport: Bool
+    ) -> String? {
+        if hasSeedSource, !fleet.capabilities(of: provider).contains("seed") {
+            return remoteMissingCapability("seed", provider: provider)
+        }
+        if needsImport {
+            return fleet.missingCapability(RemoteCapability.transcriptImport, provider: provider)
+        }
+        return nil
+    }
+
     mutating func run() async throws {
         let sources = [continueTerminal, fromKey, fromFile].compactMap { $0 }
         guard sources.count <= 1 else {
@@ -977,17 +1034,11 @@ struct RemoteCreate: AsyncParsableCommand {
             remoteNote("Error: no provider named '\(provider)' is registered")
             throw ExitCode.failure
         }
-        let capabilities = fleet.capabilities(of: provider)
-        // Both capability checks happen before anything is read, imported or
-        // created. A `seed` a provider never declared is silently ignored by
-        // the contract's own ignore-unknown-fields rule, which would leave the
-        // user with an empty session they believed carried their conversation.
-        if !sources.isEmpty, !capabilities.contains("seed") {
-            remoteNote(remoteMissingCapability("seed", provider: provider))
-            throw ExitCode.failure
-        }
-        if continueTerminal != nil || fromFile != nil, !capabilities.contains("import") {
-            remoteNote(remoteMissingCapability("import", provider: provider))
+        if let refusal = RemoteCreate.missingCapability(
+            fleet: fleet, provider: provider,
+            hasSeedSource: !sources.isEmpty,
+            needsImport: continueTerminal != nil || fromFile != nil) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
 
@@ -1360,6 +1411,12 @@ struct RemoteTranscript: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Write the JSONL to this file instead of stdout")
     var output: String?
 
+    /// The capability refusal `transcript` gives before calling anything, pure
+    /// so bare vs namespaced capabilities can be tested without a live daemon.
+    static func missingCapability(fleet: RemoteFleetSnapshot, provider: String) -> String? {
+        fleet.missingCapability(RemoteCapability.transcriptRead, provider: provider)
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -1368,8 +1425,8 @@ struct RemoteTranscript: AsyncParsableCommand {
             remoteNote("Error: could not resolve '\(session)' to a remote session")
             throw ExitCode.failure
         }
-        guard fleet.capabilities(of: target.provider).contains("transcript") else {
-            remoteNote(remoteMissingCapability("transcript", provider: target.provider))
+        if let refusal = RemoteTranscript.missingCapability(fleet: fleet, provider: target.provider) {
+            remoteNote(refusal)
             throw ExitCode.failure
         }
         let result = try client.call(

@@ -48,7 +48,7 @@ public struct MergedTransitionDispatcher: Sendable {
 /// **every non-detached binding is terminal, at least one is merged, and at
 /// least one merged binding is the worktree's own work** —
 /// `PRBinding.allResolved(_:)` and
-/// `PRBinding.mergedBindingIsOwnWork(_:branchCandidates:provenancePRNumber:)`.
+/// `PRBinding.mergedBindingIsOwnWork(_:branchCandidates:provenancePRNumber:ownRepo:)`.
 /// A binding whose status has never been observed is not terminal, so an
 /// unpolled PR holds the gate shut.
 ///
@@ -149,12 +149,16 @@ public actor AllResolvedMergeTrigger {
     /// `branchCandidates` is the worktree's own branch list as the matcher
     /// derives it (`PRStatusManager.candidatesFor`) and `provenancePRNumber` its
     /// `Worktree.prNumber`; both are passed in rather than looked up here so the
-    /// rule stays a pure function of facts the poll already holds.
+    /// rule stays a pure function of facts the poll already holds. `ownRepo` is
+    /// the worktree's own repository, which a merged `.provider` binding must be
+    /// in to count as own work; nil holds the gate shut for those bindings only.
     public func evaluate(worktreeID: UUID, bindings: [PRBinding],
-                         branchCandidates: [String], provenancePRNumber: Int?) async {
+                         branchCandidates: [String], provenancePRNumber: Int?,
+                         ownRepo: (owner: String, name: String, host: String)?) async {
         let live = bindings.filter { !$0.detached }
         let ownWorkMerged = PRBinding.mergedBindingIsOwnWork(
-            live, branchCandidates: branchCandidates, provenancePRNumber: provenancePRNumber)
+            live, branchCandidates: branchCandidates, provenancePRNumber: provenancePRNumber,
+            ownRepo: ownRepo)
         guard PRBinding.allResolved(live), ownWorkMerged else {
             // Not resolved (any more), or nothing merged here is this worktree's
             // own: re-arm, so a later resolution is a fresh rising edge rather

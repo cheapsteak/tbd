@@ -94,6 +94,11 @@ public struct WorktreeLifecycle: Sendable {
     /// resolves for the gate above, at no extra subprocess cost. An actor
     /// reference for the same reason `conflictSweepCache` is one.
     public let branchTipTracker = BranchTipTracker()
+    /// Notices when a worktree's remote-tracking tip (`origin/<branch>`) moves,
+    /// from the same tips map, and makes its PR check due now. An actor
+    /// reference, so the copy `Daemon` wires and the copy the sweep runs on
+    /// share one watch.
+    public let remoteTipTracker = RemoteTipTracker()
     /// In-flight `preSession` runs, keyed by worktree ID. An actor reference,
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).

@@ -6,7 +6,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "composer")
 
 extension AppState {
 
-    /// This terminal's draft, created on first ask and kept for the app's
+    /// This target's draft, created on first ask and kept for the app's
     /// lifetime — or until `discardComposerDraft` forgets it.
     ///
     /// Kept in an `@ObservationIgnored` dictionary because the DICTIONARY is not
@@ -14,16 +14,26 @@ extension AppState {
     /// a view that holds one re-renders on its changes. Making the registry
     /// observable would republish every composer in the app whenever any of them
     /// gained a draft.
-    func composerDraft(for terminalID: UUID) -> ComposerDraft {
-        if let existing = composerDrafts[terminalID] { return existing }
+    func composerDraft(for key: ComposerKey) -> ComposerDraft {
+        if let existing = composerDrafts[key] { return existing }
         let draft = ComposerDraft()
-        composerDrafts[terminalID] = draft
+        composerDrafts[key] = draft
         return draft
     }
 
-    /// Forget a terminal's draft — on a successful send, and when its tab closes.
+    /// A local terminal's draft — `composerDraft(for: .terminal(id))`.
+    func composerDraft(for terminalID: UUID) -> ComposerDraft {
+        composerDraft(for: .terminal(terminalID))
+    }
+
+    /// Forget a target's draft — on a successful send, and when its tab closes.
+    func discardComposerDraft(for key: ComposerKey) {
+        composerDrafts[key] = nil
+    }
+
+    /// A local terminal's `discardComposerDraft(for: .terminal(id))`.
     func discardComposerDraft(for terminalID: UUID) {
-        composerDrafts[terminalID] = nil
+        discardComposerDraft(for: .terminal(terminalID))
     }
 
     /// Forget everything the composer keys on this terminal, because the
@@ -46,8 +56,8 @@ extension AppState {
     /// `releaseSessionStartWaiters`.
     func forgetComposerState(for terminalID: UUID) {
         discardComposerDraft(for: terminalID)
-        composerFocusTargets.removeValue(forKey: terminalID)
-        transcriptFocusTargets.removeValue(forKey: terminalID)
+        composerFocusTargets.removeValue(forKey: .terminal(terminalID))
+        transcriptFocusTargets.removeValue(forKey: .terminal(terminalID))
         lastStartedIncarnation.removeValue(forKey: terminalID)
         releaseSessionStartWaiters(terminalID: terminalID)
     }

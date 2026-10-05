@@ -20,9 +20,8 @@ public enum TerminalLabel {
     public static let codex = "Codex"
     /// Profile login-session terminal (Settings → "Open login session"):
     /// a Claude session pinned to an OAuth profile, spawned so the user can
-    /// run `/login` into the profile's isolated config dir. The daemon spawns
-    /// it with an auto-`/login` pump attached and the app dedupes "Open login
-    /// session" clicks against this label.
+    /// run `/login` into the profile's isolated config dir. The app dedupes
+    /// "Open login session" clicks against this label.
     public static let login = "login"
 
     /// Every identity above, as one set: the labels a caller may not claim.

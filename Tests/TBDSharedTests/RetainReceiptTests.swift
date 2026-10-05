@@ -2,8 +2,9 @@ import Testing
 import Foundation
 @testable import TBDShared
 
-/// The receipt shape `retain`, `import`, and `delete --retain` all share
-/// (`docs/remote-provider-contract.md` § `retain <id>` / `import`).
+/// The receipt shape `transcript retain`, `transcript import`, and `delete
+/// --retain` all share (`docs/remote-provider-contract.md` § `transcript retain
+/// <id>` / `transcript import`).
 ///
 /// Decoded through `JSONDecoder.forRemoteProvider`, which is the decoder the
 /// daemon actually hands provider stdout to — a bare `JSONDecoder()` would

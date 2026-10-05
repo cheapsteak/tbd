@@ -973,7 +973,7 @@ public struct GitManager: Sendable {
         case .timedOut:
             logger.warning("git subprocess timed out after \(resolvedTimeout, privacy: .public): \(commandDescription, privacy: .public)")
             throw GitTimeoutError(command: commandDescription, timeout: resolvedTimeout)
-        case let .completed(status, stdoutData, stderrData):
+        case let .completed(status, stdoutData, stderrData), let .signaled(status, stdoutData, stderrData):
             let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             if status != 0 {

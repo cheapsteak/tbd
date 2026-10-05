@@ -431,6 +431,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the remote-transcript gate — the default-off soak switch for
+    /// `remote.transcriptSync`, the remote transcript pane and (with the
+    /// composer gate) the remote composer. It takes effect on the daemon already
+    /// running: the sync handler reads the column per request.
+    func handleConfigSetRemoteTranscriptEnabled(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetRemoteTranscriptEnabledParams.self, from: paramsData)
+        try await db.config.setRemoteTranscriptEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the model-proxy gate — the default-off soak switch for routing a
     /// pty-holder session's Messages API traffic through the loopback proxy.
     /// This is how the soak is turned on: the flag is the feature's only opt-in,
@@ -544,6 +559,40 @@ extension RPCRouter {
         try await db.config.setUpdateMode(params.mode)
         if params.mode.runsChecks {
             await updateChecker?.start()
+        }
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    func handleConfigSetProfileBalancingEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetProfileBalancingEnabledParams.self, from: paramsData)
+        try await db.config.setProfileBalancingEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the schedule-based PR polling gate (default OFF, soaking) and
+    /// apply it at once: the daemon stops the running PR driver and starts the
+    /// other (`PRPollDriverSwitch`). The write happens inside the switch's
+    /// serialized section, so two concurrent calls cannot leave the column and
+    /// the running driver disagreeing. The switch is inert until the daemon
+    /// arms it at start-up, so in mock mode (and in a test's router) this only
+    /// writes the column. Design: docs/specs/2026-10-01-pr-polling-schedule-design.md.
+    func handleConfigSetPRPollScheduleEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetPRPollScheduleEnabledParams.self, from: paramsData)
+        let enabled = params.enabled
+        let config = db.config
+        try await prPollDriverSwitch.apply(PRPollDriver.kind(enabled: enabled)) {
+            try await config.setPRPollScheduleEnabled(enabled)
         }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)

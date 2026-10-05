@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -6,7 +5,7 @@ import Testing
 @testable import TBDShared
 
 /// Tier 2 — dry-run tmux, a real (temp-directory) actuation log, an in-memory
-/// database, and a `TestClock` for the key pacing.
+/// database, and an `EventDrivenTestClock` for the key pacing.
 ///
 /// `terminal.send` grew a payload vocabulary (`--text` or `--keys`), a dispatch
 /// envelope on every non-empty text payload, and an opt-in delivery
@@ -459,14 +458,20 @@ struct TerminalSendDispatchTests {
 
     // MARK: - Keys
 
+    /// The first pacing sleep is reached through the whole dispatch (an `async
+    /// let`, the router, the actuation row), so arming takes the saturated budget.
+    private static let keyPacingArming = TestDeadlines.saturatedPass
+
     @Test("--keys sends each named key in order, paced through the injected clock")
     func keysSentInOrderPaced() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let fixture = try await makeFixture(clock: clock)
 
         async let response = send(fixture, keys: "Escape C-c Enter")
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
+        try await clock.requireAdvanceWhenArmed(
+            by: PacedKeySender.interKeyPause, timeout: Self.keyPacingArming)
+        try await clock.requireAdvanceWhenArmed(
+            by: PacedKeySender.interKeyPause, timeout: Self.keyPacingArming)
         #expect(try await response.success)
 
         let sent = fixture.recorder.calls
@@ -480,11 +485,12 @@ struct TerminalSendDispatchTests {
 
     @Test("a keys row records the keys verbatim, with submit and verify absent")
     func keysRowShape() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let fixture = try await makeFixture(clock: clock)
 
         async let response = send(fixture, keys: "Escape Enter")
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
+        try await clock.requireAdvanceWhenArmed(
+            by: PacedKeySender.interKeyPause, timeout: Self.keyPacingArming)
         #expect(try await response.success)
 
         let request = try requestRow(at: fixture.logPath)
@@ -656,12 +662,13 @@ struct TerminalSendDispatchTests {
 
     @Test("a keys send arms no observation, flag on or off")
     func keysSendArmsNothing() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let fixture = try await makeFixture(clock: clock)
         try await fixture.router.db.config.setDeliveryVerification(enabled: true)
 
         async let response = send(fixture, keys: "Escape Enter")
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
+        try await clock.requireAdvanceWhenArmed(
+            by: PacedKeySender.interKeyPause, timeout: Self.keyPacingArming)
         #expect(try await response.success)
         #expect(fixture.verifier.armings.isEmpty)
     }

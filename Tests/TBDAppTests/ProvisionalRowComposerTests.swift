@@ -421,6 +421,13 @@ struct ProvisionalRowPublishTests {
 
     private static let t0 = Date(timeIntervalSince1970: 1_700_000_000)
 
+    /// On `EventDrivenTestClock`, whose `advance` does not yield: positive
+    /// checks poll, and "not fired yet" reads the clock's sleeper ledger, which
+    /// `advance` empties of due sleepers before it returns. The alarm arms in an
+    /// unstructured task and fires through the main actor, so waits take the
+    /// saturated budget.
+    private static let saturatedHop = TestDeadlines.saturatedPass
+
     @MainActor
     private static func makeState(streaming: Bool, suite: String) -> AppState {
         let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
@@ -483,7 +490,7 @@ struct ProvisionalRowPublishTests {
         let date = MovableDate(Self.t0)
         let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
 
         let published = await TableTranscriptPaneView.publish(
@@ -496,7 +503,8 @@ struct ProvisionalRowPublishTests {
         // 59 s of virtual time. The alarm is armed for 60, so nothing fires and
         // the row is still on screen.
         date.advance(by: 59)
-        await clock.advanceWhenSuspended(by: .seconds(59))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(59), timeout: Self.saturatedHop)
+        #expect(clock.sleeperCount == 1, "the alarm must not be due before its 60 s")
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
                 "the row must survive right up to the deadline")
 
@@ -504,10 +512,10 @@ struct ProvisionalRowPublishTests {
         // 60-second rule is what drops the row.
         date.advance(by: 2)
         await clock.advance(by: .seconds(2))
-        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        try #require(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
         #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
     }
 
@@ -526,7 +534,7 @@ struct ProvisionalRowPublishTests {
         let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
         try await Self.addPlainTranscript(to: source, sessionID: "s2")
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
 
         await TableTranscriptPaneView.publish(
@@ -537,10 +545,13 @@ struct ProvisionalRowPublishTests {
         // Half-way through A's window, B publishes. Same `publish`, same timer
         // instance, no provisional of its own.
         date.advance(by: 30)
-        await clock.advanceWhenSuspended(by: .seconds(30))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(30), timeout: Self.saturatedHop)
         await TableTranscriptPaneView.publish(
             sessionID: "s2", state: state, source: source,
             retireTimer: timer, now: { date.now })
+        // A disarm cancels A's sleep, and cancellation leaves the ledger
+        // synchronously — so this reads zero the moment B's publish disarms A.
+        #expect(clock.sleeperCount == 1, "A's alarm is still sleeping after B's publish")
 
         let bIDs = await Self.publishedIDs(state, session: "s2")
         #expect(bIDs.isEmpty == false, "B's publish really did run and write B's transcript")
@@ -556,16 +567,17 @@ struct ProvisionalRowPublishTests {
         // A's alarm still fires on A's original schedule, 60 s from when it was
         // armed: 29 s more is inside the window, 2 s past it is not.
         date.advance(by: 29)
-        await clock.advanceWhenSuspended(by: .seconds(29))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(29), timeout: Self.saturatedHop)
+        #expect(clock.sleeperCount == 1, "A's alarm must not be due at 59 s")
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
                 "still inside A's window")
 
         date.advance(by: 2)
         await clock.advance(by: .seconds(2))
-        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "A's row must retire on A's own deadline")
+        try #require(withdrawn == .satisfied, "A's row must retire on A's own deadline")
         #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
                 "and B's transcript is untouched by it")
     }
@@ -587,7 +599,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
 
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let date = MovableDate(Self.t0)
 
@@ -601,16 +613,17 @@ struct ProvisionalRowPublishTests {
         // Nine minutes of silence is not enough: a healthy turn streaming a
         // large tool-input block emits no text deltas for exactly this long.
         date.advance(by: 540)
-        await clock.advanceWhenSuspended(by: .seconds(540))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(540), timeout: Self.saturatedHop)
+        #expect(clock.sleeperCount == 1, "the silent-stream alarm must not be due at 540 s")
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
                 "the row must survive right up to the drain cap")
 
         date.advance(by: 61)
         await clock.advance(by: .seconds(61))
-        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        try #require(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
         #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
     }
 
@@ -631,7 +644,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
 
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let date = MovableDate(Self.t0)
 
@@ -642,7 +655,7 @@ struct ProvisionalRowPublishTests {
 
         // Nine minutes in, one more delta lands and the source re-reads it.
         date.advance(by: 540)
-        await clock.advanceWhenSuspended(by: .seconds(540))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(540), timeout: Self.saturatedHop)
         let more = try ModelProxyStreamLine
             .text(message: "msg_a", index: 0, text: "lo").encodedLine()
         let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
@@ -657,7 +670,11 @@ struct ProvisionalRowPublishTests {
         // Past the *original* deadline. The row is still there, because the
         // append moved it.
         date.advance(by: 61)
-        await clock.advanceWhenSuspended(by: .seconds(61))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(61), timeout: Self.saturatedHop)
+        // The original sleep was cancelled out of the ledger by the re-arm; had
+        // it been left in place it would have come due at 600 s and gone.
+        #expect(clock.sleeperCount == 1,
+                "the replacement alarm is still sleeping past the original deadline")
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
                 "the original window expired, but the line that arrived replaced it")
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a",
@@ -693,7 +710,7 @@ struct ProvisionalRowPublishTests {
         let source = TranscriptSource()
         #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let date = MovableDate(Self.t0)
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
 
@@ -729,12 +746,21 @@ struct ProvisionalRowPublishTests {
             retireTimer: timerB, now: { date.now })
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
 
+        // The poll loop's sleep and the re-armed alarm's are both in the ledger
+        // before teardown (the replaced alarm's sleep was cancelled out of it),
+        // so a late-arming sleeper cannot slip in behind the check below.
+        let armed = await pollUntilTrue(timeout: Self.saturatedHop) { clock.sleeperCount >= 2 }
+        try #require(armed == .satisfied, "the poll loop and the re-armed alarm must both arm")
+
         // A tears down: the hold goes, the alarm goes with it, and the source
         // forgets the session — the real teardown sequence, in its real order.
         await scheduler.deregister(sessionID: "s1", token: paneA)
         await scheduler.disarmProvisional(sessionID: "s1")
         #expect(await timerB.armedSessionCount == 0,
                 "the re-armed alarm was reachable from the departing pane's teardown")
+        // Cancellation leaves the ledger synchronously, so anything still
+        // sleeping here is an orphan the 1200 s advance below would fire.
+        #expect(clock.sleeperCount == 0, "teardown left no sleeper on the clock")
 
         // Past every deadline either arm could have set.
         await clock.advance(by: .seconds(1_200))
@@ -763,7 +789,7 @@ struct ProvisionalRowPublishTests {
         let streamingPath = try Self.streamFileWithOneTextLine()
         #expect(await source.refreshStream(sessionID: "s2", path: streamingPath, now: Self.t0))
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let date = MovableDate(Self.t0)
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
         let timer = Self.timerForMountingPane(scheduler)
@@ -771,12 +797,6 @@ struct ProvisionalRowPublishTests {
         await TableTranscriptPaneView.publish(
             sessionID: "s1", state: state, source: source,
             retireTimer: timer, now: { date.now })
-        // A's alarm is the only sleeper on this clock, so waiting for one
-        // proves *it* is armed before any virtual time moves. B's may register
-        // a moment later, which is why the advance that fires it is generous
-        // rather than exact; A's is not, because "A retires on its own minute"
-        // is the claim being made.
-        await clock.waitForSuspension()
         await TableTranscriptPaneView.publish(
             sessionID: "s2", state: state, source: source,
             retireTimer: timer, now: { date.now })
@@ -784,29 +804,36 @@ struct ProvisionalRowPublishTests {
         #expect(await Self.publishedIDs(state, session: "s2") == ["stream:msg_a"])
         #expect(await timer.armedSessionCount == 2, "one timer, two live alarms")
 
+        // Both sleeps registered at virtual zero before any time moves, so both
+        // deadlines below are exact. Every wait in this test is `#require`d: a
+        // miss ends it, so at most one 90 s guard elapses inside the 240 s limit.
+        let bothArmed = await pollUntilTrue(timeout: Self.saturatedHop) { clock.sleeperCount == 2 }
+        try #require(bothArmed == .satisfied, "both alarms must arm")
+
         // A's minute is up; B's ten are not.
         date.advance(by: 61)
         await clock.advance(by: .seconds(61))
-        let aWithdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        #expect(clock.sleeperCount == 1, "B's alarm must not be due at 61 s")
+        let aWithdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(aWithdrawn == .satisfied, "A retires on the unconfirmed rule")
+        try #require(aWithdrawn == .satisfied, "A retires on the unconfirmed rule")
         #expect(await Self.publishedIDs(state, session: "s2") == ["stream:msg_a"],
                 "and B's row is untouched by it")
         #expect(await timer.armedMessage(sessionID: "s2") == "msg_a",
                 "B's alarm is still pending on its own, longer window")
 
-        // And B's, on its own deadline rather than A's.
+        // And B's, on its own deadline rather than A's: 600 s from virtual zero.
         date.advance(by: 540)
-        await clock.advance(by: .seconds(700))
-        let bWithdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        await clock.advance(by: .seconds(540))
+        #expect(clock.sleeperCount == 0, "B's alarm comes due at 600 s")
+        let bWithdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state, session: "s2").isEmpty
         }
-        #expect(bWithdrawn == .satisfied, "B retires on the silent-stream rule")
-        let cleared = await pollUntilTrue(timeout: .seconds(10)) {
-            await timer.armedSessionCount == 0
-        }
-        #expect(cleared == .satisfied, "and neither alarm re-arms after firing")
+        try #require(bWithdrawn == .satisfied, "B retires on the silent-stream rule")
+        // A fire claims its alarm entry before it publishes, so a withdrawn row
+        // means the entry is already gone — no second poll is needed.
+        #expect(await timer.armedSessionCount == 0, "and neither alarm re-arms after firing")
     }
 
     /// A remount, which used to be the moment a second timer appeared. Now it
@@ -821,7 +848,7 @@ struct ProvisionalRowPublishTests {
         let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
         try await Self.addPlainTranscript(to: source, sessionID: "s2")
         let state = await Self.makeState(streaming: true, suite: suite)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
 
         // Mount one arms A's 60-second backstop.
@@ -833,7 +860,8 @@ struct ProvisionalRowPublishTests {
 
         // The remount, half-way through the window.
         date.advance(by: 30)
-        await clock.advanceWhenSuspended(by: .seconds(30))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(30), timeout: Self.saturatedHop)
+        #expect(clock.sleeperCount == 1, "A's backstop must not be due at 30 s")
         let remounted = Self.timerForMountingPane(scheduler)
         #expect(remounted === mounted, "a remount finds the timer, it does not build one")
         await TableTranscriptPaneView.publish(
@@ -854,14 +882,14 @@ struct ProvisionalRowPublishTests {
 
         date.advance(by: 31)
         await clock.advance(by: .seconds(31))
-        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+        let withdrawn = await pollUntilTrue(timeout: Self.saturatedHop) {
             await Self.publishedIDs(state).isEmpty
         }
-        #expect(withdrawn == .satisfied,
-                "the row retires on the deadline it was given before the remount")
+        try #require(withdrawn == .satisfied,
+                     "the row retires on the deadline it was given before the remount")
         #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
                 "and B's transcript is untouched")
-        let cleared = await pollUntilTrue(timeout: .seconds(10)) {
+        let cleared = await pollUntilTrue(timeout: Self.saturatedHop) {
             await remounted.armedSessionCount == 0
         }
         #expect(cleared == .satisfied, "and nothing re-arms after firing")

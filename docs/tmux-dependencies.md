@@ -130,16 +130,15 @@ tmux's environment plumbing.
 ### Typing into a session
 
 - **`send-keys -l`** (literal text) — `sendKeysCommand` (`:487-489`). Path:
-  **default**. Two callers: the rate-limit auto-continue rail
-  (`LimitResumeActuator.swift:424`) and the auto-`/login` pump
-  (`RPCRouter+TerminalHandlers.swift:535`).
+  **default**. One caller: the rate-limit auto-continue rail
+  (`LimitResumeActuator.swift:424`).
 - **`send-keys`** (key names) — `sendKeyCommand` (`:492-494`). Path: **default**.
   Callers: the auto-continue rail's Escape/Enter bracket
   (`LimitResumeActuator.swift:422, 426`), the graceful pane interrupt used before
   parking (`HibernationCoordinator.swift:1162-1166` and the twin at
   `RPCRouter+TerminalHandlers.swift:2103-2108`), the trailing Enter after a
   `terminal.send` paste (`:2392, 2405`) and after a verified re-delivery
-  (`:2554`), the login pump's Enter (`:536`), and the supervision desk's nudge
+  (`:2554`), and the supervision desk's nudge
   and wrap-up Enters (`DeskSessionManager.swift:565, 702`).
 - **`send-keys … Enter`** (command form) — `sendCommandArgs` (`:727-729`), one
   caller: typing `/exit` when parking a Claude session politely
@@ -165,19 +164,15 @@ Four capture shapes exist. Under the "No TUI screen-scraping" rule, only two of
 them classify what they read, and both are named exceptions.
 
 - **`capture-pane -p`** — `capturePaneCommand` (`:526-528`). Path: **default**.
-  Two callers, and they are on opposite sides of the rule. `handleTerminalOutput`
-  (`:1324-1344`) passes the text through verbatim as the result of the
-  `terminal.output` RPC, which is what `tbd terminal output` prints — sanctioned
-  pass-through. The auto-`/login` pump (`:531`) feeds it to
-  `LoginSessionCoordinator.classifyPane` (`:94`), which reads the rendered TUI to
-  decide when Claude is ready for `/login` — **sanctioned scraper #1**, exempted
-  in `.swiftlint.yml:327` because no machine interface exists before login.
+  One caller: `handleTerminalOutput` (`:1324-1344`) passes the text through
+  verbatim as the result of the `terminal.output` RPC, which is what
+  `tbd terminal output` prints — sanctioned pass-through.
 - **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:531-533`). Path:
   **default**. One caller: `performHibernate`
   (`HibernationCoordinator.swift:375`), which uses it twice over. The capture is
   stored as the parked pane's display snapshot (verbatim), *and* it is fed to
-  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #2**,
-  exempted at `.swiftlint.yml:329`, the rail that refuses to park a session with
+  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #1**,
+  exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
   unsent text in its composer. The `-e` is load-bearing: dimness is the only
   thing distinguishing a ghost suggestion from typed input.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
@@ -188,7 +183,7 @@ them classify what they read, and both are named exceptions.
   `terminal.delete` (`RPCRouter+TerminalHandlers.swift:735`).
 - **The supervision tick's own capture** — `NightwatchSkillContent.swift:954`
   runs `capture-pane -p -e` per fleet pane and regex-classifies the result.
-  **Sanctioned scraper #3**, exempted at `.swiftlint.yml:332` with an explicit
+  **Sanctioned scraper #2**, exempted at `.swiftlint.yml:337` with an explicit
   debt marker. Path: **default** (it shells out directly; control mode is
   irrelevant to it).
 
@@ -407,7 +402,7 @@ What is **exclusively** supervision's:
 - **The tick script's own `capture-pane -p -e`** (`NightwatchSkillContent.swift:954`)
   and the regex classifier it feeds. This is the only tmux invocation in the tree
   that exists solely to babysit the fleet, it is the only one that lives outside
-  every seam, and it is one of the three sanctioned screen-scrapers. It goes when
+  every seam, and it is one of the two sanctioned screen-scrapers. It goes when
   the tick script goes.
 - **The desk's unattended paste-plus-Enter rail** — the *shape*, not the
   primitives. `nudgeDeskSession` and `postShiftWrapUp` paste and then send Enter
@@ -518,7 +513,7 @@ usually told.
   to keep the pty alive between views.
 - **Every actuation into a session.** `send-keys` and `paste-buffer` are how the
   daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging,
-  the rate-limit auto-continue, the auto-`/login` pump, the polite `/exit` before
+  the rate-limit auto-continue, the polite `/exit` before
   parking, and every supervision nudge lose their transport. There is no second
   path.
 - **Bracketed-paste correctness.** tmux is the sole wrapping authority

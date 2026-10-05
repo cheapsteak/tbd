@@ -8,6 +8,12 @@ public struct ProviderResult: Sendable {
     public let exitCode: Int32
     public let stdout: Data
     public let stderr: String
+    /// The provider died of an uncaught signal rather than exiting, so it has
+    /// no exit status and `exitCode` holds the signal number, which is what it
+    /// held before this field existed. Every verb but one reads it as the
+    /// non-zero exit it looks like. `remote.sendMessage` reads it as an unknown
+    /// outcome: a provider killed mid-send may already have pressed Enter.
+    public var terminatedBySignal: Bool = false
 
     /// Classified from the exit code AND the error object's `code`, so a
     /// provider that names `auth_expired` while exiting 1 still lands in
@@ -77,11 +83,23 @@ public struct ProviderRunner: RemoteProviderInvoking {
         return env
     }
 
+    /// The name a log line or timeout message gives an invocation: the verb,
+    /// plus its subcommand for `transcript`, whose four subcommands are four
+    /// different operations (`RemoteVerb`). Operands never appear — a session
+    /// id, cursor or key is not part of what was run.
+    public static func verbName(_ verb: [String]) -> String {
+        guard let first = verb.first else { return "?" }
+        if first == "transcript", verb.count > 1 {
+            return "\(first) \(verb[1])"
+        }
+        return first
+    }
+
     public func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
                     timeout: TimeInterval, contractVersion: Int) async throws -> ProviderResult {
         let env = Self.invocationEnvironment(
             base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
-        let verbName = verb.first ?? "?"
+        let verbName = Self.verbName(verb)
 
         switch try await runBoundedProcess(
             executable: config.exec,
@@ -94,12 +112,27 @@ public struct ProviderRunner: RemoteProviderInvoking {
         case .timedOut:
             throw ProviderRunError.timeout(verb: verbName)
         case let .completed(status, stdoutData, stderrData):
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-            if !stderr.isEmpty {
-                remoteLogger.debug(
-                    "provider \(config.name, privacy: .public) \(verbName, privacy: .public) stderr: \(stderr, privacy: .public)")
-            }
-            return ProviderResult(exitCode: status, stdout: stdoutData, stderr: stderr)
+            return Self.result(
+                config: config, verbName: verbName, status: status,
+                stdout: stdoutData, stderr: stderrData, signaled: false)
+        case let .signaled(signal, stdoutData, stderrData):
+            remoteLogger.error(
+                "provider \(config.name, privacy: .public) \(verbName, privacy: .public) died of signal \(signal, privacy: .public)")
+            return Self.result(
+                config: config, verbName: verbName, status: signal,
+                stdout: stdoutData, stderr: stderrData, signaled: true)
         }
+    }
+
+    private static func result(
+        config: RemoteProviderConfig, verbName: String, status: Int32,
+        stdout: Data, stderr stderrData: Data, signaled: Bool
+    ) -> ProviderResult {
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        if !stderr.isEmpty {
+            remoteLogger.debug(
+                "provider \(config.name, privacy: .public) \(verbName, privacy: .public) stderr: \(stderr, privacy: .public)")
+        }
+        return ProviderResult(exitCode: status, stdout: stdout, stderr: stderr, terminatedBySignal: signaled)
     }
 }
