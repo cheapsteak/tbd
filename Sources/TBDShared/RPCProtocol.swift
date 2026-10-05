@@ -308,6 +308,20 @@ public enum RPCMethod {
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
+    /// The profile balancing gate (`profile_balancing_enabled`), the launch
+    /// policy's soak switch (design 2026-09-05 §6). Reading needs no method of
+    /// its own: `config.get` already carries the resolved value, as does
+    /// `daemon.capabilities`.
+    public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
+    /// The schedule-based PR polling gate (`pr_poll_schedule_enabled`). Takes
+    /// effect at once: the daemon stops the running PR driver and starts the
+    /// other. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
+    /// Per-profile opt-out from the balancing pool. Reading needs no method of
+    /// its own: the opt-out is already carried in `model.profiles` as
+    /// `ModelProfile.poolOptOut`.
+    public static let modelProfileSetPoolOptOut = "modelProfile.setPoolOptOut"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -319,20 +333,34 @@ public enum RPCMethod {
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
     /// The transcript exchange (`docs/remote-provider-contract.md` §
-    /// `retain <id>` / `import`, § `recall <key>`). All three are
+    /// `transcript retain <id>` / `transcript import`, § `transcript recall
+    /// <key>`). All three are
     /// non-destructive and gated by their capabilities alone — no feature flag
     /// stands in front of them.
     public static let remoteRetain = "remote.retain"
     public static let remoteImport = "remote.import"
     public static let remoteRecall = "remote.recall"
     /// The live transcript of a session the provider still has
-    /// (`docs/remote-provider-contract.md` § `transcript <id>`). A sibling of
-    /// the exchange verbs rather than one of them: `recall` reads an immutable
+    /// (`docs/remote-provider-contract.md` § `transcript read <id>`). A sibling
+    /// of the exchange verbs rather than one of them: `transcript recall` reads an immutable
     /// blob out of the provider's store by key, this reads a growing
     /// conversation out of a live session by id, and the contract keeps the two
-    /// capabilities separate so `transcript` never becomes ambiguous about
+    /// capabilities separate so `transcript.read` never becomes ambiguous about
     /// which of the two a provider implements.
     public static let remoteTranscript = "remote.transcript"
+    /// Brings a session's local transcript cache
+    /// (`~/tbd/remote-transcripts/<provider>/<sessionID>/`) up to date through
+    /// `transcript read --since`, and says where it is. The app tails the file;
+    /// the daemon runs no timers of its own for transcripts. Refused unless
+    /// `remote_transcript_enabled` is on and the provider declares
+    /// `transcript.read`. Design:
+    /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
+    public static let remoteTranscriptSync = "remote.transcriptSync"
+    /// Submits a message to a remote session through `send <id> --submit`, the
+    /// provider pasting it and pressing Enter. Distinct from `remote.send`,
+    /// which delivers raw keystrokes. Refused unless the provider declares
+    /// `send-submit`.
+    public static let remoteSendMessage = "remote.sendMessage"
     /// Lists the receipts TBD holds. Deliberately absent from
     /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
     /// `provider` field is an optional *filter* rather than an address, so
@@ -374,6 +402,7 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
+        remoteTranscriptSync, remoteSendMessage,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
@@ -392,6 +421,11 @@ public enum RPCMethod {
     /// feature's only opt-in. Reading needs no method of its own: `config.get`
     /// already carries the resolved value.
     public static let configSetTranscriptComposerEnabled = "config.setTranscriptComposerEnabled"
+    /// The remote-transcript gate (`remote_transcript_enabled`) — the soak
+    /// switch for `remote.transcriptSync`, the remote transcript pane and its
+    /// composer. Reading needs no method of its own: `config.get` carries the
+    /// resolved value and `daemon.capabilities` carries it to the app.
+    public static let configSetRemoteTranscriptEnabled = "config.setRemoteTranscriptEnabled"
     /// The model-proxy gate (`model_proxy_enabled`) — whether a new pty-holder
     /// session's Messages API traffic is routed through the loopback proxy.
     /// Reading needs no method of its own: `config.get` carries the resolved
@@ -878,6 +912,9 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// the provider's own `create_params` field names. Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalRemoteCreateDefaults: [String: String]
+    /// Whether profile balancing is enabled. Absent on older daemons (fall
+    /// through to the shipped default on the app side).
+    public let profileBalancingEnabled: Bool?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -890,7 +927,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
-        globalRemoteCreateDefaults: [String: String] = [:]
+        globalRemoteCreateDefaults: [String: String] = [:],
+        profileBalancingEnabled: Bool? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -904,6 +942,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.gcEnabled = gcEnabled
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
+        self.profileBalancingEnabled = profileBalancingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -938,6 +977,10 @@ public struct ModelProfileListResult: Codable, Sendable {
             [String: String].self,
             forKey: .globalRemoteCreateDefaults
         ) ?? [:]
+        // New fields for the profile balancing gates. Absent on older daemons —
+        // the app falls through to the shipped defaults on the Config side.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled)
     }
 }
 
@@ -1706,7 +1749,7 @@ public struct RemoteReconnectResult: Codable, Sendable {
 
 /// Params for `remote.retain` — ask a provider to put one of its own sessions'
 /// transcripts into its durable store (`docs/remote-provider-contract.md` §
-/// `retain <id>`). The result is a `RetainReceipt`.
+/// `transcript retain <id>`). The result is a `RetainReceipt`.
 public struct RemoteRetainParams: Codable, Sendable {
     public let provider: String
     public let sessionID: String
@@ -1717,8 +1760,8 @@ public struct RemoteRetainParams: Codable, Sendable {
 
 /// Params for `remote.import` — put a transcript from somewhere else, including
 /// this machine, into a provider's durable store with no session of the
-/// provider's involved (`docs/remote-provider-contract.md` § `import`). The
-/// result is a `RetainReceipt`.
+/// provider's involved (`docs/remote-provider-contract.md` § `transcript
+/// import`). The result is a `RetainReceipt`.
 ///
 /// `jsonl` is Claude Code transcript JSONL, which the contract's format-scope
 /// paragraph fixes for this verb. It rides as a `String` rather than `Data`
@@ -1734,7 +1777,7 @@ public struct RemoteImportParams: Codable, Sendable {
 }
 
 /// Params for `remote.recall` — read back a transcript the provider retained
-/// (`docs/remote-provider-contract.md` § `recall <key>`).
+/// (`docs/remote-provider-contract.md` § `transcript recall <key>`).
 ///
 /// `key` is opaque and provider-scoped, so the provider travels with it: the
 /// same string may mean different things to two providers, and a caller MUST
@@ -1783,7 +1826,7 @@ public struct RemoteRecallResult: Codable, Sendable {
 }
 
 /// Params for `remote.transcript` — the conversation of a session the provider
-/// still has (`docs/remote-provider-contract.md` § `transcript <id>`).
+/// still has (`docs/remote-provider-contract.md` § `transcript read <id>`).
 ///
 /// No cursor. The verb's `--since` exists so a *live* view can fetch a growing
 /// transcript incrementally, and this RPC serves a one-shot read of the whole
@@ -1805,13 +1848,85 @@ public struct RemoteTranscriptResult: Codable, Sendable {
     public init(jsonl: String) { self.jsonl = jsonl }
 }
 
+/// Params for `remote.transcriptSync` — bring one session's transcript cache
+/// up to date. The result is a `RemoteTranscriptSyncResult`.
+public struct RemoteTranscriptSyncParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcriptSync`.
+///
+/// - `path` — the cache's `transcript.jsonl`, which the app reads directly.
+/// - `generation` — incremented whenever the provider answered from the
+///   beginning (`reset`), so a reader holding records from an earlier
+///   generation discards them and rereads the file from the start.
+/// - `caughtUp` — false when the sync stopped at its page cap with the
+///   provider still reporting `more`; the next sync resumes from the stored
+///   cursor.
+public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
+    public let path: String
+    public let generation: Int
+    public let caughtUp: Bool
+    public init(path: String, generation: Int, caughtUp: Bool) {
+        self.path = path; self.generation = generation; self.caughtUp = caughtUp
+    }
+}
+
+/// Params for `remote.sendMessage` — submit `text` as one message through
+/// `send <id> --submit` (`docs/remote-provider-contract.md` § `--submit`).
+/// Embedded newlines belong to the message. The result is a
+/// `RemoteSendMessageResult`.
+public struct RemoteSendMessageParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let text: String
+    public init(provider: String, sessionID: String, text: String) {
+        self.provider = provider; self.sessionID = sessionID; self.text = text
+    }
+}
+
+/// How a `remote.sendMessage` call ended, when it did not end in "not sent".
+///
+/// A send has three outcomes, not two
+/// (`docs/specs/2026-09-25-remote-session-transcript-design.md`):
+/// - `sent` – the provider exited 0.
+/// - not sent – a non-zero exit with the provider's error object. That one is
+///   not a case here: it is an RPC error carrying the provider's message, like
+///   every other refused remote call.
+/// - `unknown` – the call ended without an exit status: the timeout fired or
+///   the provider process died, and the provider may already have pressed
+///   Enter. The daemon never retries, and a caller must not treat this as a
+///   failure it can safely resubmit.
+///
+/// Decoding is forward-compatible: a raw value this build does not know reads
+/// as `unknown`, the only reading that never invites a duplicate send.
+public enum RemoteSendOutcome: String, Codable, Sendable, Equatable {
+    case sent
+    case unknown
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = RemoteSendOutcome(rawValue: raw) ?? .unknown
+    }
+}
+
+/// Result of `remote.sendMessage`. See `RemoteSendOutcome`.
+public struct RemoteSendMessageResult: Codable, Sendable, Equatable {
+    public let outcome: RemoteSendOutcome
+    public init(outcome: RemoteSendOutcome) { self.outcome = outcome }
+}
+
 /// Params for `remote.delete` — destroy a provider-hosted session
 /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`). The result
 /// is a `RemoteDeleteResult`.
 ///
 /// `retain` maps to the verb's `--retain` flag, and is a request rather than a
 /// preference: the contract makes retention something a caller asks for
-/// explicitly, never something implied by the provider declaring `retain`. So
+/// explicitly, never something implied by the provider declaring `transcript.retain`. So
 /// an absent field decodes as `false` — a caller that said nothing did not ask
 /// for storage, and allocating it anyway would put a copy of a conversation on
 /// a remote store nobody asked to write to. The hand-written decoder exists for
@@ -1929,6 +2044,15 @@ public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
 /// column out of its NULL "never chose" state, so an operator who turns the
 /// feature off stays off when the shipped default graduates.
 public struct ConfigSetTranscriptComposerEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteTranscriptEnabled` — the remote-transcript gate
+/// (default OFF during soak). Writing either value is the explicit gesture that
+/// lifts the column out of its NULL "never chose" state, so an operator who
+/// turns the feature off stays off when the shipped default graduates.
+public struct ConfigSetRemoteTranscriptEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -2347,8 +2471,8 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let overrideProfileID: UUID?
     /// True for a profile *login session* (Settings → "Open login session"):
     /// requires `overrideProfileID`; the daemon labels the terminal
-    /// `TerminalLabel.login`, auto-types `/login` once Claude is up, and
-    /// watches the profile's config dir so the UI badge flips on completion.
+    /// `TerminalLabel.login` and watches the profile's config dir so the UI
+    /// badge flips on completion. The person types `/login` themselves.
     /// Optional so older clients/params decode unchanged (nil = false).
     public let loginSession: Bool?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
@@ -3485,6 +3609,35 @@ public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProfileBalancingEnabled` — the gate for profile
+/// balancing across multiple Claude accounts, the launch policy that spreads new
+/// sessions across the profiles with the most room (default OFF during soak).
+/// Design: `docs/specs/2026-09-05-account-load-balancing-design.md` §6.
+public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setPRPollScheduleEnabled` — the gate for schedule-based PR
+/// polling, which checks each pull request as often as its status needs within
+/// a GitHub API budget instead of every worktree on a fixed interval (default
+/// OFF during soak). Design: `docs/specs/2026-10-01-pr-polling-schedule-design.md`.
+public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
+/// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
+public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
+    public var id: UUID
+    public var optOut: Bool
+    public init(id: UUID, optOut: Bool) {
+        self.id = id
+        self.optOut = optOut
+    }
+}
+
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
 /// orphaned-process collector, which reclaims processes that outlived the
 /// worktree they were rooted in (default OFF during soak, on top of the GC
@@ -3843,6 +3996,32 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// streams nothing, and this field says so rather than making the app
     /// re-derive the pair.
     public var transcriptStreamingEnabled: Bool
+    /// Whether the remote transcript pane and its composer are enabled
+    /// (`remote_transcript_enabled`). Default OFF while it soaks. The app shows
+    /// the Transcript toggle on a remote session only with this on (and the
+    /// provider declaring `transcript.read`); the remote composer additionally
+    /// needs `transcriptComposerEnabled`. Resolved through
+    /// `Config.remoteTranscriptEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault
+    /// Whether the profile balancing gate is currently set (design 2026-09-05
+    /// §6). Default OFF while it soaks. Resolved through
+    /// `Config.profileBalancingEnabledDefault`, so an install that never touched
+    /// the toggle reports whatever the shipped default currently is.
+    ///
+    /// `var` rather than `let` for the same reason as `modelProxyEnabled`: this
+    /// type's memberwise initializer is at the type-checker's expression
+    /// budget, so callers construct with the older arguments and assign this
+    /// after.
+    public var profileBalancingEnabled: Bool
+    /// Whether schedule-based PR polling is on (`pr_poll_schedule_enabled`).
+    /// Default OFF while it soaks. Resolved through `Config.prPollScheduleDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3866,7 +4045,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 modelProxySupported: Bool = false,
                 modelProxyPort: Int? = nil,
                 modelProxyVersion: String? = nil,
-                transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault) {
+                transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3890,6 +4070,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.modelProxyPort = modelProxyPort
         self.modelProxyVersion = modelProxyVersion
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
+        self.profileBalancingEnabled = profileBalancingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3969,6 +4150,21 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
+        // New field for the remote-transcript gate. A daemon that does not send
+        // it has no `remote.transcriptSync` either, so fall through to the
+        // shipped default rather than showing a pane nothing can fill.
+        remoteTranscriptEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptEnabled)
+            ?? Config.remoteTranscriptEnabledDefault
+        // New field for the profile balancing gate. A daemon that does not send
+        // it knows nothing about the feature, so fall through to the shipped
+        // default rather than assuming it is off.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
+        // New field for the PR poll schedule gate. A daemon that does not send
+        // it has no schedule either, so fall through to the shipped default.
+        prPollScheduleEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
     }
 }
 

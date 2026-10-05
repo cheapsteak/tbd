@@ -24,7 +24,7 @@ import TBDShared
 /// - `stop` — nothing exposed terminates a running cloud session. That is
 ///   also why `contract_versions` is `[2]` alone: major 1 requires `stop`.
 /// - `log` — a cloud session has no terminal to scroll.
-/// - `transcript` — no supported interface reads a cloud session's
+/// - `transcript.read` — no supported interface reads a cloud session's
 ///   conversation.
 ///
 /// `land`, `archive` and `unarchive` are ALSO absent, but for a different

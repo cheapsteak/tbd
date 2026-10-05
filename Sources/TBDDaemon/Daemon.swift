@@ -831,10 +831,25 @@ public final class Daemon: Sendable {
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
+        let configDirManager = ClaudeProfileConfigDirManager()
+        let profilePoolCandidateSource = ProfilePoolCandidateSource(
+            profiles: database.modelProfiles,
+            snapshots: database.oauthUsageSnapshots,
+            terminals: database.terminals,
+            loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) }
+        )
+        // One reservation ledger for the whole daemon: the lifecycle and the
+        // router hold copies of this resolver, and a balanced pick is only
+        // atomic across spawns that share the same ledger. The stale-account
+        // latch is shared the same way, so it holds to once across spawns.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
-            config: database.config
+            config: database.config,
+            candidateSource: profilePoolCandidateSource,
+            reservations: ProfilePickReservations(),
+            staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
         let pendingQuestions = PendingQuestionStore()
 
@@ -1103,6 +1118,10 @@ public final class Daemon: Sendable {
             subscriptions: subs,
             prManager: prManager,
             modelProfileResolver: modelProfileResolver,
+            // The same candidate source the resolver balances on; the
+            // rate-limit handler reads it to suggest a profile with room.
+            // Without it the suggestion is silently unreachable.
+            profilePoolCandidateSource: profilePoolCandidateSource,
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,
@@ -1116,6 +1135,11 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // Provider-named PRs (`meta.prs`) bind through the router's
+        // coordinator, which exists only now. Installed before
+        // `remoteManager.start()`, so no snapshot is applied without it.
+        await remoteManager?.setProviderPRBinder(
+            ProviderPRBinder(db: database, coordinator: rpcRouter.prBindingCoordinator))
         // And the holder registry, for the same reason and on the same terms:
         // the park path reads a holder session's screen through the reader the
         // spawn path registered, so all three must hold ONE registry.
@@ -1159,7 +1183,7 @@ public final class Daemon: Sendable {
         // only thing that fires a merged transition is `PRStatusManager.fetchAll`
         // / `refresh`, and the three paths that reach them all start later: the
         // `pr.list` / `pr.refresh` RPC handlers wait on the socket server (step
-        // 9), and `PRPoller`'s loop is not started until step 12f.
+        // 9), and the periodic PR driver is not started until step 12f.
         //
         // ONE OWNER FOR THE EDGE. The merged transition is edge-triggered on a
         // cache change, so whichever path updates the cache consumes it, and a
@@ -1167,8 +1191,11 @@ public final class Daemon: Sendable {
         // consumers are waiting for. The edge's owner is
         // `PRStatusManager.apply` — the single funnel every cache write goes
         // through, which fires this callback exactly once per non-merged →
-        // merged move. `PRPoller` is the only thing that calls into that funnel
-        // on a timer; `pr.list` serves the snapshot and never fetches.
+        // merged move. The periodic driver is the only thing that calls into
+        // that funnel on a timer, and it is whichever ONE of the two runs:
+        // `PRPoller`, or `PRPollScheduler` when `pr_poll_schedule_enabled` is
+        // set (`PRPollDriver`, step 12f). `pr.list` serves the snapshot and
+        // never fetches.
         let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
             db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog,
             remoteManager: remoteManager)
@@ -1192,6 +1219,31 @@ public final class Daemon: Sendable {
             let bindings = (try? await database.prBindings.list(worktreeID: worktreeID)) ?? []
             await allResolvedTrigger.observedMerge(
                 worktreeID: worktreeID, prNumber: prNumber, bindings: bindings)
+        }
+        // Every GitHub GraphQL answer's `rateLimit` reading (and any rate-limit
+        // error) feeds the PR schedule's budget. Wired here rather than with
+        // the persistence callbacks above because the scheduler lives on the
+        // router, which exists only now. Harmless when the legacy poller runs:
+        // the scheduler then only records readings nothing decides on.
+        await prManager.setOnRateLimitSignal { [weak rpcRouter] signal in
+            await rpcRouter?.prPollScheduler.recordRateLimitSignal(signal)
+        }
+        // A push seen by the git status sweep (`origin/<branch>` moved) makes
+        // that worktree's PR due now. Harmless when the legacy poller runs:
+        // the scheduler was never started, so a trigger only moves a due time
+        // in an idle in-memory schedule. The sweep below runs on a copy of
+        // `lifecycle`, which shares this tracker (an actor reference).
+        await lifecycle.remoteTipTracker.setOnMoved { [weak rpcRouter] id in
+            await rpcRouter?.prPollScheduler.trigger(worktreeID: id)
+        }
+        // A worktree that may have gone from idle to active (a hook event or a
+        // selection after a quiet 30 minutes) wakes the schedule; reconcile's
+        // idle-to-active rule decides whether anything becomes due. The ledger
+        // signals at most once per worktree per window, so hook traffic cannot
+        // storm the loop. With the legacy poller the ledger stays disabled,
+        // so it records nothing and never signals.
+        await rpcRouter.activityLedger.setOnPossibleActivation { [weak rpcRouter] _ in
+            await rpcRouter?.prPollScheduler.kick()
         }
 
         self.router = rpcRouter
@@ -1965,13 +2017,26 @@ public final class Daemon: Sendable {
                 }
             }
 
-            // 12f. Pull-request poll on the daemon's own clock (30s foreground,
-            // 5min background — GitPollCadence.prInterval). This is the only
-            // periodic driver of the PR fetch, so PR facts keep arriving with
-            // no app running — and so exactly one path consumes the merged-PR
-            // transition edge (see the dispatcher wiring above).
+            // 12f. Pull-request poll on the daemon's own clock. Exactly one
+            // periodic driver of the PR fetch runs, so PR facts keep arriving
+            // with no app running — and so exactly one path consumes the
+            // merged-PR transition edge (see the dispatcher wiring above).
+            // Flag off: today's fixed-interval `PRPoller` (30s foreground,
+            // 5min background — GitPollCadence.prInterval). Flag on
+            // (`pr_poll_schedule_enabled`): the budgeted `PRPollScheduler`.
+            // `PRPollDriverSwitch` starts the one the flag names and arms live
+            // switching, so `config.setPRPollScheduleEnabled` swaps drivers
+            // without a restart through the same steps. The flag is read
+            // inside the switch's serialized section: the socket is already
+            // serving, and a toggle landing between a read here and the arm
+            // would leave the driver disagreeing with the column. The poller's
+            // foreground gate is installed whichever driver starts, so a later
+            // live switch to the poller finds it paced by a real answer.
             await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
-            await rpcRouter.prPoller.start()
+            let pollConfigStore = database.config
+            await rpcRouter.prPollDriverSwitch.start(readKind: {
+                PRPollDriver.kind(for: (try? await pollConfigStore.get()) ?? Config())
+            })
 
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
@@ -2122,9 +2187,12 @@ public final class Daemon: Sendable {
             await runner.apply(mode: .off)
         }
 
-        // Stop the daemon-clock PR poll (no-op when it was never started).
+        // Stop the daemon-clock PR poll — whichever driver runs — through the
+        // switch, which waits for a pass in flight and disarms, so a toggle
+        // landing while the socket is still up cannot restart a loop that
+        // would outlive shutdown. Stopping a never-started driver is a no-op.
         if let router = self.router {
-            await router.prPoller.stop()
+            await router.prPollDriverSwitch.stopAll()
         }
 
         // Stop the supervision heartbeat. `status.json` is left exactly as the

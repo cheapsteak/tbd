@@ -1144,6 +1144,25 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6).
+    func setProfileBalancing(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetProfileBalancingEnabled,
+            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the schedule-based PR polling gate (default OFF, soaking). The
+    /// daemon applies it at once, swapping its PR driver without a restart.
+    func setPRPollSchedule(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPRPollScheduleEnabled,
+            params: ConfigSetPRPollScheduleEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
@@ -1193,6 +1212,16 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetTranscriptComposerEnabled,
             params: ConfigSetTranscriptComposerEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the remote-transcript gate (default OFF). Read per request by
+    /// the daemon, so no restart is needed; re-read capabilities after writing
+    /// so a toggle reflects the daemon's persisted state.
+    func setRemoteTranscriptEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteTranscriptEnabled,
+            params: ConfigSetRemoteTranscriptEnabledParams(enabled: enabled)
         )
     }
 
@@ -1325,6 +1354,39 @@ actor DaemonClient {
         )
     }
 
+    /// Bring a remote session's local transcript cache up to date and say
+    /// where it is (`remote.transcriptSync`). The app reads `result.path`
+    /// directly; a changed `generation` means discard and reread from the
+    /// start. Refused by the daemon unless `remote_transcript_enabled` is on
+    /// and the provider declares `transcript.read`.
+    func remoteTranscriptSync(
+        provider: String, sessionID: String
+    ) async throws -> RemoteTranscriptSyncResult {
+        try await callAsync(
+            method: RPCMethod.remoteTranscriptSync,
+            params: RemoteTranscriptSyncParams(provider: provider, sessionID: sessionID),
+            resultType: RemoteTranscriptSyncResult.self
+        )
+    }
+
+    /// Submit `text` as one message to a remote session
+    /// (`remote.sendMessage` → `send <id> --submit`). Unlike `remoteSend`, the
+    /// text is a message, not keystrokes: the provider pastes it and presses
+    /// Enter. Refused by the daemon unless the provider declares `send-submit`.
+    ///
+    /// Returns `.sent` or `.unknown`; "not sent" (the provider exited non-zero)
+    /// throws with the provider's message. `.unknown` means the message may
+    /// have been delivered — never resubmit it automatically.
+    func remoteSendMessage(
+        provider: String, sessionID: String, text: String
+    ) async throws -> RemoteSendOutcome {
+        try await callAsync(
+            method: RPCMethod.remoteSendMessage,
+            params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text),
+            resultType: RemoteSendMessageResult.self
+        ).outcome
+    }
+
     /// Fetch recent log lines for a remote session. `lines` nil == provider default.
     func remoteLog(provider: String, sessionID: String, lines: Int? = nil) async throws -> RemoteLogResult {
         try await callAsync(
@@ -1347,7 +1409,7 @@ actor DaemonClient {
     }
 
     /// Ask a provider to retain one of its own sessions' transcripts
-    /// (`docs/remote-provider-contract.md` § `retain <id>`), and record the
+    /// (`docs/remote-provider-contract.md` § `transcript retain <id>`), and record the
     /// receipt daemon-side. Unlike `remoteRename`, the capability check is the
     /// DAEMON's here — the handler refuses before invoking anything — so a
     /// caller need not pre-check, and gets a refusal naming the capability
@@ -1362,7 +1424,7 @@ actor DaemonClient {
 
     /// Put a transcript from anywhere — including this machine — into a
     /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `import`). `jsonl` is Claude Code transcript JSONL.
+    /// `transcript import`). `jsonl` is Claude Code transcript JSONL.
     func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
         try await callAsync(
             method: RPCMethod.remoteImport,
@@ -1372,7 +1434,7 @@ actor DaemonClient {
     }
 
     /// Read a retained transcript back (`docs/remote-provider-contract.md` §
-    /// `recall <key>`). With `saveLocally`, the daemon also writes it under
+    /// `transcript recall <key>`). With `saveLocally`, the daemon also writes it under
     /// `~/tbd/transcripts/` and returns that path; the records come back in
     /// `jsonl` either way.
     func remoteRecall(
@@ -1410,7 +1472,7 @@ actor DaemonClient {
     /// than a destroyed session.
     ///
     /// `retain` asks the provider to keep the transcript first, and needs the
-    /// `retain` capability as well. The returned `RemoteDeleteResult` carries a
+    /// `transcript.retain` capability as well. The returned `RemoteDeleteResult` carries a
     /// receipt exactly when it was asked for, and `deleted: false` — nothing
     /// was there to destroy — is a success, not an error.
     func remoteDelete(
@@ -2280,5 +2342,14 @@ actor DaemonClient {
         }
         defer { measured.finish() }
         return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
+    }
+
+    /// Set whether a profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4).
+    func setProfilePoolOptOut(id: UUID, optOut: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetPoolOptOut,
+            params: ModelProfileSetPoolOptOutParams(id: id, optOut: optOut)
+        )
     }
 }

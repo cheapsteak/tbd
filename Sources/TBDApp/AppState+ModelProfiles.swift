@@ -778,9 +778,9 @@ extension AppState {
 
     /// Open (or focus) a Claude *login session* pinned to `profileID` so the
     /// user can complete `/login` there — the daemon labels the terminal as a
-    /// login session, auto-types `/login` once Claude is up, and pushes a
-    /// `modelProfilesChanged` delta when the profile's isolated config dir
-    /// gains an account, flipping the Settings badge live.
+    /// login session and pushes a `modelProfilesChanged` delta when the
+    /// profile's isolated config dir gains an account, flipping the Settings
+    /// badge live.
     ///
     /// Duplicate-safe: if a live login session for this profile already
     /// exists, it is focused instead of spawning another; while a spawn RPC
@@ -982,6 +982,65 @@ extension AppState {
         } catch {
             logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
             showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Account Load Balancing
+
+    /// Persist the profile-balancing soak flag and refresh daemon capabilities.
+    /// Applies to the next spawn-time resolution.
+    func setProfileBalancingEnabled(_ enabled: Bool) async {
+        do {
+            try await profileBalancingFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set profile balancing: \(error, privacy: .public)")
+            showAlert("Failed to set profile balancing: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - PR polling schedule
+
+    /// Persist the schedule-based PR polling gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// swaps its PR driver at once; no restart.
+    func setPRPollScheduleEnabled(_ enabled: Bool) async {
+        do {
+            try await prPollScheduleFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set PR poll schedule: \(error, privacy: .public)")
+            showAlert("Failed to set PR polling: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a profile's pool opt-out, then reload profiles.
+    func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
+        do {
+            try await profilePoolOptOutSetter(id, optOut)
+            await loadModelProfiles()
+        } catch {
+            logger.error("Failed to set profile pool opt-out: \(error, privacy: .public)")
+            showAlert("Failed to set profile pool opt-out: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Count live Claude sessions running under a given profile.
+    /// Prefers the daemon's `entry.liveSessions` when non-nil, else computes from
+    /// `appState.terminals` (Claude kind, unparked, matching profileID).
+    func liveSessionCount(forProfile profileID: UUID) -> Int {
+        // If any profile has a daemon-supplied count, use it (prefer the daemon)
+        if let entry = modelProfiles.first(where: { $0.profile.id == profileID }),
+           let liveCount = entry.liveSessions {
+            return liveCount
+        }
+        // Otherwise count from local terminal state
+        return terminals.values.reduce(0) { acc, terminalList in
+            acc + terminalList.filter { terminal in
+                terminal.profileID == profileID
+                    && !terminal.isParked
+                    && terminal.kind == .claude
+            }.count
         }
     }
 }

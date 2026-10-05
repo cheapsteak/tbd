@@ -809,6 +809,108 @@ public struct RetainReceipt: Codable, Sendable, Equatable {
     }
 }
 
+/// The branch-name rule from `docs/remote-provider-contract.md` § `land <id>`:
+/// the pattern a provider can predict acceptance from, stricter than
+/// `git check-ref-format --branch`. Used wherever TBD reads a branch name a
+/// provider supplied — the live `meta.branch` included — so a value that would
+/// be refused at landing is never matched against a forge either.
+public enum RemoteBranchName {
+    private static let allowed = Set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")
+
+    public static func isAcceptable(_ name: String) -> Bool {
+        guard !name.isEmpty, name != "@" else { return false }
+        guard name.allSatisfy({ allowed.contains($0) }) else { return false }
+        guard let first = name.first, first != "-", first != ".", first != "/" else { return false }
+        guard !name.hasSuffix("/"), !name.hasSuffix("."), !name.hasSuffix(".lock") else { return false }
+        // `@{` and control characters are already outside `allowed`; kept
+        // explicit so each contract bullet has a line that states it.
+        guard !name.contains(".."), !name.contains("//"), !name.contains("@{") else { return false }
+        return true
+    }
+}
+
+/// A session's `meta.location` (`docs/remote-provider-contract.md`, "Location
+/// and PR keys"): `host:/abs/path`, scp-style. Parsed only to validate it —
+/// `value` is what TBD shows and copies, verbatim, and TBD never connects to it.
+public struct RemoteSessionLocation: Equatable, Sendable {
+    public let value: String
+    public let host: String
+    public let path: String
+
+    public init(value: String, host: String, path: String) {
+        self.value = value
+        self.host = host
+        self.path = path
+    }
+
+    private static let hostnameCharacters = Set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
+    private static let ipv6Characters = Set("0123456789abcdefABCDEF:.%")
+
+    public static func parse(_ raw: String) -> RemoteSessionLocation? {
+        guard !raw.isEmpty else { return nil }
+        // No whitespace, no ASCII control characters, no scheme.
+        guard !raw.unicodeScalars.contains(where: {
+            $0.properties.isWhitespace || $0.value < 0x20 || $0.value == 0x7F
+        }) else { return nil }
+        guard !raw.contains("://") else { return nil }
+
+        let host: Substring
+        let rest: Substring
+        if raw.hasPrefix("[") {
+            // A bracketed host ends at `]`, which must be followed by `:`.
+            guard let close = raw.firstIndex(of: "]") else { return nil }
+            let inner = raw[raw.index(after: raw.startIndex)..<close]
+            guard !inner.isEmpty, inner.contains(":"),
+                  inner.allSatisfy({ ipv6Characters.contains($0) }) else { return nil }
+            let colon = raw.index(after: close)
+            guard colon < raw.endIndex, raw[colon] == ":" else { return nil }
+            host = raw[raw.startIndex...close]
+            rest = raw[raw.index(after: colon)...]
+        } else {
+            // Any other host ends at the first `:`.
+            guard let colon = raw.firstIndex(of: ":") else { return nil }
+            host = raw[..<colon]
+            rest = raw[raw.index(after: colon)...]
+            guard isPlainHost(host) else { return nil }
+        }
+        // Absolute path; a port (`host:22:/p`) fails here because `22:/p` is not.
+        guard rest.hasPrefix("/") else { return nil }
+        return RemoteSessionLocation(value: raw, host: String(host), path: String(rest))
+    }
+
+    /// `hostname` or `user@hostname`, both parts non-empty.
+    private static func isPlainHost(_ host: Substring) -> Bool {
+        let parts = host.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let hostname = parts.last, !hostname.isEmpty,
+              hostname.allSatisfy({ hostnameCharacters.contains($0) }) else { return false }
+        if parts.count == 2 {
+            let user = parts[0]
+            guard !user.isEmpty, !user.contains(where: { "/[]:".contains($0) }) else { return false }
+        }
+        return true
+    }
+}
+
+/// A session's `meta.prs`, parsed. A pointer list, never a status.
+public struct RemoteSessionPRList: Equatable, Sendable {
+    /// Parsed, deduplicated on (host, owner, repo, number) case-insensitively,
+    /// first-seen order, at most the cap. A GitHub URL may be on any host; a
+    /// caller that can only query github.com checks `host` itself.
+    public let accepted: [ParsedPRURL]
+    /// Entries that did not parse, verbatim, for the caller's log line.
+    public let rejected: [String]
+    /// Parsed entries past the cap, for the caller's log line.
+    public let overflow: [ParsedPRURL]
+
+    public init(accepted: [ParsedPRURL], rejected: [String], overflow: [ParsedPRURL]) {
+        self.accepted = accepted
+        self.rejected = rejected
+        self.overflow = overflow
+    }
+}
+
 /// The response `delete` returns (`docs/remote-provider-contract.md` §
 /// `delete <id> [--retain]`).
 ///
@@ -849,6 +951,60 @@ public extension RemoteSessionPayload {
     /// This session's own dirty-checkout claim.
     var reportsDirtyWorkspace: Bool {
         Self.metaReportsDirtyWorkspace(meta)
+    }
+
+    /// Well-known `meta` key naming the session's branch. Read on the LATEST
+    /// sighting as the session's current branch (the contract's `meta`
+    /// paragraph); the branch recorded at adoption stays the row's identity.
+    static let branchMetaKey = "branch"
+
+    /// The session's live branch, or nil when absent, blank, or not a name the
+    /// contract's branch rule accepts. Never trimmed and never defaulted: a
+    /// caller with no live branch matches nothing by branch rather than falling
+    /// back to the stored one.
+    static func metaLiveBranch(_ meta: [String: String]?) -> String? {
+        guard let raw = meta?[branchMetaKey], RemoteBranchName.isAcceptable(raw) else { return nil }
+        return raw
+    }
+
+    /// Well-known `meta` key naming where the session's checkout lives.
+    static let locationMetaKey = "location"
+
+    /// The session's validated location, or nil when absent or unparseable. A
+    /// caller that cannot parse the value treats the key as absent.
+    static func metaLocation(_ meta: [String: String]?) -> RemoteSessionLocation? {
+        meta?[locationMetaKey].flatMap { RemoteSessionLocation.parse($0) }
+    }
+
+    /// Well-known `meta` key listing the pull and merge requests a provider
+    /// names for the session, whitespace-separated.
+    static let prsMetaKey = "prs"
+
+    /// Bounds the forge fan-out one snapshot can cause (spec: at most 20).
+    static let maxProviderPRs = 20
+
+    /// The session's named PRs, or nil when the key is absent — "no claim" —
+    /// so a caller can tell it from an explicit empty list. Each
+    /// whitespace-separated entry stands alone: one that is not exactly a PR
+    /// or MR URL is reported in `rejected` without affecting the others. A
+    /// GitHub URL is accepted on any host (`PRBindingExtractor.parsePRURL(exactly:)`).
+    static func metaPRs(_ meta: [String: String]?, cap: Int = maxProviderPRs) -> RemoteSessionPRList? {
+        guard let raw = meta?[prsMetaKey] else { return nil }
+        var seen = Set<String>()
+        var accepted: [ParsedPRURL] = []
+        var rejected: [String] = []
+        var overflow: [ParsedPRURL] = []
+        for entry in raw.split(whereSeparator: { $0.isWhitespace }).map(String.init) {
+            guard let parsed = PRBindingExtractor.parsePRURL(exactly: entry) else {
+                rejected.append(entry)
+                continue
+            }
+            let key = [parsed.host.lowercased(), parsed.owner.lowercased(),
+                       parsed.repo.lowercased(), String(parsed.number)].joined(separator: "\u{1}")
+            guard seen.insert(key).inserted else { continue }
+            if accepted.count < cap { accepted.append(parsed) } else { overflow.append(parsed) }
+        }
+        return RemoteSessionPRList(accepted: accepted, rejected: rejected, overflow: overflow)
     }
 }
 

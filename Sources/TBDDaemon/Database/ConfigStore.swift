@@ -148,6 +148,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// callers act on is `Config.transcriptStreamingEffective`, the conjunction
     /// with `modelProxyEnabled`.
     var transcript_streaming_enabled: Bool?
+    /// Gate for the remote session transcript — `remote.transcriptSync`, the
+    /// remote pane and its composer. **Genuinely tri-state**, same shape as
+    /// `transcript_composer_enabled`: the
+    /// `20260924120000_config_remote_transcript_enabled` migration carries no
+    /// SQL default, so `nil` here means "never chose" rather than "off".
+    /// Resolve it through `Config.remoteTranscriptEnabledDefault`, never
+    /// through `?? false`.
+    var remote_transcript_enabled: Bool?
     /// The loopback port this TBD home's model proxy binds, or nil if none has
     /// been minted. **Not a flag**, exactly like `holder_owner_token`: NULL
     /// means "not yet minted", and the mint is the conditional UPDATE in
@@ -155,6 +163,20 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// the first port, and there is no literal the shipped code could fall back
     /// to that would not collide with whatever already holds it.
     var model_proxy_port: Int?
+    /// Gate for profile balancing across multiple Claude accounts. When enabled,
+    /// new sessions land on the eligible profile with the most room, adjusted for
+    /// live session count (design 2026-09-05 §6). **Genuinely tri-state**, same
+    /// shape as `gc_retained_transcripts_enabled`: the
+    /// `20260905080315_config_profile_balancing` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.profileBalancingEnabledDefault`, never through
+    /// `?? false`.
+    var profile_balancing_enabled: Bool?
+    /// Schedule-based PR polling gate. **Genuinely tri-state**: the
+    /// `20261002143454_config_pr_poll_schedule` migration carries no SQL default, so
+    /// `nil` means "never chose". Resolve it through
+    /// `Config.prPollScheduleDefault`, never through `?? false`.
+    var pr_poll_schedule_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -224,11 +246,15 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   provisional assistant row. Resolved here on its own; what callers act
     ///   on is `Config.transcriptStreamingEffective`, its conjunction with the
     ///   proxy flag.
+    /// - Parameter remoteTranscriptDefault: same shape once more, for
+    ///   `remote_transcript_enabled` — the remote session transcript's gate.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
     ///   shipped default, and a string this build does not recognise resolves
     ///   the same way rather than to a hardcoded `.off`.
+    /// - Parameter profileBalancingDefault: same shape again, for
+    ///   `profile_balancing_enabled` — the launch policy's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -244,7 +270,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
-        updateModeDefault: UpdateMode = Config.updateModeDefault
+        remoteTranscriptDefault: Bool = Config.remoteTranscriptEnabledDefault,
+        updateModeDefault: UpdateMode = Config.updateModeDefault,
+        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
+        prPollScheduleDefault: Bool = Config.prPollScheduleDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -329,6 +358,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // resolves to the shipped default rather than silently arming a
             // mode this build cannot run.
             updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
+            // Profile balancing gate — NOT `?? false`.
+            profileBalancingEnabled: profile_balancing_enabled ?? profileBalancingDefault,
+            // PR poll schedule gate — NOT `?? false`.
+            prPollScheduleEnabled: pr_poll_schedule_enabled ?? prPollScheduleDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -343,6 +376,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // readable as the two separate choices it records.
         config.transcriptStreamingEnabled =
             transcript_streaming_enabled ?? transcriptStreamingDefault
+        // And once more, for the remote transcript's gate — NOT `?? false`.
+        config.remoteTranscriptEnabled =
+            remote_transcript_enabled ?? remoteTranscriptDefault
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
@@ -834,6 +870,45 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_composer_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote-transcript gate (default OFF, soaking). It gates
+    /// `remote.transcriptSync`, the remote transcript pane and — with
+    /// `transcript_composer_enabled` — the remote composer. The column is
+    /// written on every call, because writing either value is the explicit
+    /// gesture that lifts it out of NULL forever after.
+    public func setRemoteTranscriptEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_transcript_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setProfileBalancingEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the schedule-based PR polling gate. Written on every call, so
+    /// either value is the explicit gesture that lifts the column out of NULL.
+    public func setPRPollScheduleEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

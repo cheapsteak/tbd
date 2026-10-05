@@ -46,6 +46,20 @@ struct PRBindingPresentationTests {
                     .contains("all 1 pull request ("))
     }
 
+    @Test("with the done chip showing, the overflow wording says the list is open PRs")
+    func overflowWordingOpenOnly() {
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 4, overflow: 2, openOnly: true)
+                    == "Show all 4 open pull requests (2 not shown here)")
+        #expect(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: 4, overflow: 2, openOnly: true)
+                    == "Show all 4 open pull requests, 2 not shown here")
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 1, overflow: 1, openOnly: true)
+                    == "Show all 1 open pull request (1 not shown here)")
+        // Ungrouped, the wording is unchanged.
+        #expect(PRBindingPresentation.overflowChipTooltip(total: 4, overflow: 2, openOnly: false)
+                    == "Show all 4 pull requests (2 not shown here)")
+    }
+
     // MARK: - The toolbar's primary-action branch
 
     /// A lone binding with an unparseable URL used to fall into the several-PR
@@ -202,6 +216,181 @@ struct PRBindingPresentationTests {
             [binding(1, .mergeable), binding(2, .draft)], limit: 4)
         #expect(result.chips.count == 2)
         #expect(result.overflow == 0)
+    }
+
+    // MARK: - The done chip split
+
+    private func unobserved(_ n: Int) -> PRBinding {
+        let url = "https://github.com/acme/acme-prod/pull/\(n)"
+        return PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                         number: n, url: url, status: nil, source: .hook)
+    }
+
+    @Test("with no finished PRs the split is exactly today's chip selection")
+    func doneSplitNoFinished() {
+        let bindings = (1...9).map { binding($0, .mergeable) }
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 4)
+        let today = PRBindingPresentation.statusBarChips(bindings, limit: 4)
+        #expect(groups.chips == today.chips)
+        #expect(groups.overflow == today.overflow)
+        #expect(groups.overflowMenu == bindings)
+        #expect(groups.done.isEmpty)
+    }
+
+    @Test("a single finished PR stays a normal chip")
+    func doneSplitOneFinished() {
+        let bindings = [binding(1, .mergeable), binding(2, .merged),
+                        binding(3, .draft), binding(4, .checksFailed),
+                        binding(5, .mergeable)]
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 4)
+        let today = PRBindingPresentation.statusBarChips(bindings, limit: 4)
+        #expect(groups.chips == today.chips)
+        #expect(groups.chips.map(\.number) == [1, 2, 3, 4])
+        #expect(groups.overflow == today.overflow)
+        #expect(groups.overflow == 1)
+        #expect(groups.overflowMenu == bindings)
+        #expect(groups.done.isEmpty)
+    }
+
+    @Test("two or more finished PRs fold into the done group, both groups in bind order")
+    func doneSplitGroups() {
+        let bindings = [binding(10, .merged), binding(20, .mergeable),
+                        binding(30, .closed), binding(40, .draft),
+                        binding(50, .merged), binding(60, .checksFailed)]
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 7)
+        #expect(groups.chips.map(\.number) == [20, 40, 60])
+        #expect(groups.overflow == 0)
+        #expect(groups.overflowMenu.map(\.number) == [20, 40, 60])
+        // `.closed` folds alongside `.merged`.
+        #expect(groups.done.map(\.number) == [10, 30, 50])
+    }
+
+    @Test("a binding with no observed status counts as open")
+    func doneSplitUnobservedIsOpen() {
+        let bindings = [unobserved(1), binding(2, .merged), binding(3, .closed)]
+        #expect(!PRBindingPresentation.isFinished(bindings[0]))
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 7)
+        #expect(groups.chips.map(\.number) == [1])
+        #expect(groups.done.map(\.number) == [2, 3])
+    }
+
+    @Test("when grouping, the cap and the overflow count cover open PRs only")
+    func doneSplitLimitCountsOpenOnly() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable),
+                        binding(3, .merged), binding(4, .mergeable),
+                        binding(5, .mergeable), binding(6, .closed),
+                        binding(7, .mergeable)]
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 2)
+        #expect(groups.chips.map(\.number) == [2, 4])
+        #expect(groups.overflow == 2)
+        // The `+N` menu lists the open PRs, not the finished ones.
+        #expect(groups.overflowMenu.map(\.number) == [2, 4, 5, 7])
+        #expect(groups.done.map(\.number) == [1, 3, 6])
+    }
+
+    @Test("when every PR is finished, the cluster is the done group alone")
+    func doneSplitAllFinished() {
+        let bindings = [binding(1, .merged), binding(2, .closed), binding(3, .merged)]
+        let groups = PRBindingPresentation.statusBarGroups(bindings, limit: 7)
+        #expect(groups.chips.isEmpty)
+        #expect(groups.overflow == 0)
+        #expect(groups.overflowMenu.isEmpty)
+        #expect(groups.done == bindings)
+    }
+
+    @Test("the done chip names its count, singular and plural")
+    func doneChipWording() {
+        #expect(PRBindingPresentation.doneChipLabel(count: 5) == "\u{2713} 5 done")
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 5)
+                    == "5 merged or closed pull requests")
+        #expect(PRBindingPresentation.doneChipCardTitle(count: 1)
+                    == "1 merged or closed pull request")
+        #expect(PRBindingPresentation.doneChipAccessibilityLabel(count: 5)
+                    == "Show 5 merged or closed pull requests")
+        #expect(PRBindingPresentation.doneChipAccessibilityLabel(count: 1)
+                    == "Show 1 merged or closed pull request")
+    }
+
+    // MARK: - The done chip's menu rows
+
+    private func finished(_ n: Int, _ state: PRMergeableState = .merged,
+                          title: String? = nil, headBranch: String? = nil,
+                          url: String? = nil) -> PRBinding {
+        let url = url ?? "https://github.com/acme/acme-prod/pull/\(n)"
+        return PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                         number: n, url: url, headBranch: headBranch, title: title,
+                         status: PRStatus(number: n, url: url, state: state),
+                         source: .hook)
+    }
+
+    @Test("done menu rows lead with the title, then the reference and state, in bind order")
+    func doneMenuRowsLeadWithTitle() {
+        let bindings = [
+            finished(930, title: "Fix the login timeout", headBranch: "fix-login"),
+            finished(912, .closed, title: " Trim the relay "),
+        ]
+        let rows = PRBindingPresentation.doneMenuRows(bindings)
+        #expect(rows.map(\.number) == [930, 912])
+        #expect(rows.map(\.title) == [
+            "Fix the login timeout  PR #930 · Merged",
+            "Trim the relay  PR #912 · Closed",
+        ])
+        #expect(rows.map(\.id) == bindings.map(\.id))
+        #expect(rows[0].url == URL(string: bindings[0].url))
+        #expect(rows[0].state == .merged)
+    }
+
+    @Test("an untitled done menu row falls back to the branch, then to the reference alone")
+    func doneMenuRowsFallBack() {
+        let gitlab = "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/7"
+        let rows = PRBindingPresentation.doneMenuRows([
+            finished(5, title: "  ", headBranch: "fix-login"),
+            finished(6),
+            finished(7, url: gitlab),
+        ])
+        #expect(rows.map(\.title) == [
+            "fix-login  PR #5 · Merged",
+            "PR #6 · Merged",
+            "MR !7 · Merged",
+        ])
+    }
+
+    @Test("a blank status reason leaves no dangling separator on a done row")
+    func doneMenuRowsBlankReason() {
+        let url = "https://github.com/acme/acme-prod/pull/8"
+        let b = PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                          number: 8, url: url, title: "Fix it",
+                          status: PRStatus(number: 8, url: url, state: .merged, reason: "  "),
+                          source: .hook)
+        #expect(PRBindingPresentation.doneReference(b) == "PR #8")
+        #expect(PRBindingPresentation.doneMenuRows([b])[0].title == "Fix it  PR #8")
+    }
+
+    @Test("a long title is cut short in the done menu, never the reference")
+    func doneMenuRowsTruncateLongTitles() {
+        let limit = PRBindingPresentation.doneMenuLeadLimit
+        let exact = String(repeating: "a", count: limit)
+        let long = String(repeating: "b", count: limit + 40)
+        let rows = PRBindingPresentation.doneMenuRows([
+            finished(1, title: exact),
+            finished(2, title: long),
+        ])
+        #expect(rows[0].title == "\(exact)  PR #1 · Merged")
+        #expect(rows[1].title
+                == "\(String(repeating: "b", count: limit - 1))\u{2026}  PR #2 · Merged")
+    }
+
+    @Test("the done menu's rows do not change the shared +N / toolbar rows")
+    func doneMenuRowsLeaveMenuRowsAlone() {
+        let b = finished(930, title: "Fix the login timeout", headBranch: "fix-login")
+        #expect(PRBindingPresentation.menuRows([b])[0].title == "PR #930  Merged  fix-login")
+        // A title change re-materializes the done menu.
+        let retitled = PRBinding(id: b.id, worktreeID: b.worktreeID, owner: b.owner,
+                                 repo: b.repo, number: b.number, url: b.url,
+                                 headBranch: b.headBranch, title: "Fix the login timeouts",
+                                 status: b.status, source: b.source, boundAt: b.boundAt)
+        #expect(PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([b]))
+                != PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([retitled])))
     }
 
     @Test("menu rows keep bind order, not severity order")

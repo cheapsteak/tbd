@@ -87,6 +87,9 @@ Top level of `tbd profile list --json`:
   will be spawned under; it does not tell you what any *existing* session is
   running on, and it is never a substitute for a missing `profileID` (see
   "The terminal join").
+- **`balancing`** – object with one boolean field, `enabled`: whether new
+  sessions spread across the available pool (design 2026-09-05 §6). Defaults
+  to `false`.
 
 The envelope also carries app-oriented configuration mirrors —
 `primaryAgentPreference`, `globalEnvOverrides`, merge-automation defaults, and
@@ -118,6 +121,9 @@ Each element of `profiles`:
   directory. Absent for Bedrock profiles.
 - **`usageSnapshot`** – the capacity facts, or **absent**. Its absence is
   meaningful; see next.
+- **`liveSessions`** – integer count of active sessions currently running under
+  this profile. Used by the load-balancing policy to spread new sessions
+  across accounts (design 2026-09-05 §5). Zero when none are active.
 
 ### Absence is not failure
 

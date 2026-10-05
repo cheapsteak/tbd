@@ -249,7 +249,7 @@ struct ClaudeCloudInvokerTests {
         // Each absence is a fact about the surface, not an unimplemented verb.
         #expect(!describe.capabilities.contains("stop"))
         #expect(!describe.capabilities.contains("log"))
-        #expect(!describe.capabilities.contains("transcript"))
+        #expect(!describe.capabilities.contains(RemoteCapability.transcriptRead))
         #expect(!describe.capabilities.contains("events"))
         // `land`/`archive`/`unarchive` are a DIFFERENT kind of absence than
         // the four above: `run` does implement a case for each (see

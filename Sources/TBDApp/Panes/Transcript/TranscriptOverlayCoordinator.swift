@@ -3,17 +3,25 @@ import Combine
 import Foundation
 
 /// Identifies a transcript item the overlay should render. `terminalID` is
-/// nil when opened from the History pane; in that case `historySessionID`
-/// carries the session whose transcript is being viewed.
+/// nil when opened from the History pane or a remote session's transcript
+/// pane; in that case `historySessionID` carries the `sessionTranscripts` key
+/// whose items are being viewed.
+///
+/// `detailPath` is the transcript file a card reads un-truncated bodies from
+/// when there is no terminal to ask the daemon through — set by the remote
+/// transcript pane to its cache file. Nil everywhere else, which leaves those
+/// cards exactly as they were.
 struct ItemFrame: Equatable {
     let terminalID: UUID?
     let itemID: String
     let historySessionID: String?
+    let detailPath: String?
 
-    init(terminalID: UUID?, itemID: String, historySessionID: String? = nil) {
+    init(terminalID: UUID?, itemID: String, historySessionID: String? = nil, detailPath: String? = nil) {
         self.terminalID = terminalID
         self.itemID = itemID
         self.historySessionID = historySessionID
+        self.detailPath = detailPath
     }
 }
 
@@ -44,11 +52,14 @@ final class TranscriptOverlayCoordinator: ObservableObject {
 
     /// Top-level open. Clears any prior stack. If the same item is already
     /// at the top of the stack, toggles closed.
-    func open(terminalID: UUID?, itemID: String, historySessionID: String? = nil) {
+    func open(
+        terminalID: UUID?, itemID: String, historySessionID: String? = nil, detailPath: String? = nil
+    ) {
         let frame = ItemFrame(
             terminalID: terminalID,
             itemID: itemID,
-            historySessionID: historySessionID
+            historySessionID: historySessionID,
+            detailPath: detailPath
         )
         if case .item(let top)? = current, top == frame {
             stack.removeAll()
@@ -65,7 +76,8 @@ final class TranscriptOverlayCoordinator: ObservableObject {
         stack.append(.item(ItemFrame(
             terminalID: frame.terminalID,
             itemID: itemID,
-            historySessionID: frame.historySessionID
+            historySessionID: frame.historySessionID,
+            detailPath: frame.detailPath
         )))
     }
 

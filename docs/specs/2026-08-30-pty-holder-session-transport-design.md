@@ -598,7 +598,7 @@ Everything TBD does through tmux today, and its replacement:
 - **Input injection** (`tbd terminal send`, queued prompts) — the daemon is the
   sole injector, writing through the session's holder whether or not a viewer is
   attached.
-- **Machine reads** (`tbd terminal read`, the interactive-login driver, the
+- **Machine reads** (`tbd terminal read`, the
   hibernation pending-input rail, the embedded supervision babysitter) — the
   daemon renders its own emulator when it is the reader and pulls a snapshot
   from the app when a viewer is attached. Every such read answers with a
@@ -606,7 +606,7 @@ Everything TBD does through tmux today, and its replacement:
   consumer can hold a policy rather than a hope
   ([`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)).
   This replaces `capture-pane` with a first-party interface, which the
-  no-TUI-scraping rule already pushes toward; the three sanctioned scrapers
+  no-TUI-scraping rule already pushes toward; the two sanctioned scrapers
   migrate onto it as part of this work.
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
@@ -932,29 +932,10 @@ flag with a soak and a stated graduation plan.
   respawns onto the transport its row recorded. Every spawn kind takes the
   decided transport; none is pinned.
 
-  The login tab is the one whose *servicing* differs, because it carries the
-  auto-`/login` pump. On a holder the pump reads the daemon's retained
-  emulator through the typed screen and types through the injection courier,
-  where on tmux it captures a pane and sends keys. It treats only a live,
-  fully observed screen as evidence — the same two facts the hibernation
-  pending-input rail refuses on — rather than typing at a grid that can show a
-  caret the session does not have. The loop, the classifier and the send cap
-  are one implementation either transport feeds.
-
-  On the holder that makes waiting the ordinary outcome rather than the
-  exception. The daemon may judge the screen only while it is the session's
-  reader, and the app navigates to a login tab as soon as `terminal.create`
-  returns — which attaches a viewer and suspends that reader, before the
-  pump's initial settle has elapsed. So the usual login tab is attached by the
-  time the pump takes its first reading: it polls out its timeout without
-  typing, and the person runs `/login` themselves from the footer hint the
-  pane already shows, exactly as they would if the pump had never been armed.
-  Auto-typing becomes effective on this transport once the pump can read a
-  screen the viewer itself answers — the pull
-  [`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)
-  carries as an open item — and until then the holder arm's value is
-  that a login tab opens on the same transport as everything else, with the
-  typing ready for the read that makes it usable.
+  The login tab is serviced the same way on both transports: the daemon
+  types nothing into it. Claude renders its own "Not logged in · Run /login"
+  footer hint, the person runs `/login` from there, and the daemon only
+  watches the profile's config dir for the credential that login writes.
 
   The flag therefore gates **spawning, not servicing**: the flag is consulted
   only when a session is created, and both transports' machinery (attach

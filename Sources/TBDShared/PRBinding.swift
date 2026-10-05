@@ -6,6 +6,7 @@ public enum PRBindingSource: String, Codable, Sendable, CaseIterable {
     case hook       // scraped from a `gh pr create` tool result
     case branch     // matched by head branch against the repo's PRs, whoever opened them
     case manual     // `tbd pr attach`, or seeded from Worktree.prNumber
+    case provider   // named by a remote provider in a session's `meta.prs`
 }
 
 /// A durable statement that a pull request belongs to a worktree.
@@ -171,7 +172,7 @@ public extension PRBinding {
     /// status is not terminal, so an unpolled PR holds the gate shut.
     ///
     /// Not sufficient on its own — the merged PR must also be the worktree's own
-    /// work. See `mergedBindingIsOwnWork(_:branchCandidates:provenancePRNumber:)`.
+    /// work. See `mergedBindingIsOwnWork(_:branchCandidates:provenancePRNumber:ownRepo:)`.
     static func allResolved(_ bindings: [PRBinding]) -> Bool {
         let live = bindings.filter { !$0.detached }
         guard !live.isEmpty else { return false }
@@ -208,15 +209,39 @@ public extension PRBinding {
     /// A merged binding whose `headBranch` was never observed satisfies neither
     /// arm on its own: unknown holds the gate SHUT, the same way a nil status
     /// already blocks `allResolved`.
+    ///
+    /// **A `.provider` binding must also be in the worktree's own repository**
+    /// (`ownRepo`: host, owner and name, compared case-insensitively) before
+    /// either arm is consulted. It is the one source bound without the
+    /// coordinator's own-repo check — a provider may name a companion
+    /// repository's PR — and both arms are repo-blind: a branch name or a PR
+    /// number means the same thing only within one repository, so `acme/web`'s
+    /// PR whose head happens to share the lane's branch name, or whose number
+    /// happens to equal the lane's `prNumber`, is not the lane's work. Nil
+    /// `ownRepo` (unresolved) holds the gate shut for provider bindings. Every
+    /// other source was validated against the worktree's repo when it bound,
+    /// so it is judged exactly as before and `ownRepo` is not consulted.
     static func mergedBindingIsOwnWork(_ bindings: [PRBinding],
                                        branchCandidates: [String],
-                                       provenancePRNumber: Int?) -> Bool {
+                                       provenancePRNumber: Int?,
+                                       ownRepo: (owner: String, name: String, host: String)?) -> Bool {
         let candidates = Set(branchCandidates)
         return bindings.contains { binding in
             guard !binding.detached, binding.status?.state == .merged else { return false }
+            if binding.source == .provider {
+                guard let ownRepo, binding.isInRepository(ownRepo) else { return false }
+            }
             if let provenancePRNumber, binding.number == provenancePRNumber { return true }
             guard let head = binding.headBranch else { return false }
             return candidates.contains(head)
         }
+    }
+
+    /// Whether this binding's PR lives in the named repository. Host, owner
+    /// and name compare case-insensitively, as the forges treat them.
+    func isInRepository(_ repository: (owner: String, name: String, host: String)) -> Bool {
+        host.lowercased() == repository.host.lowercased()
+            && owner.lowercased() == repository.owner.lowercased()
+            && repo.lowercased() == repository.name.lowercased()
     }
 }

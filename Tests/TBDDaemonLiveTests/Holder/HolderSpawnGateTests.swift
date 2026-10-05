@@ -605,6 +605,21 @@ struct HolderSpawnGateTests {
 
     // MARK: - Profile login tab
 
+    /// Every write a recording injection courier was asked to make, frame or
+    /// direct, in order.
+    private final class CourierWriteLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _writes: [Data] = []
+        var writes: [Data] {
+            lock.lock(); defer { lock.unlock() }
+            return _writes
+        }
+        func record(_ bytes: Data) {
+            lock.lock(); defer { lock.unlock() }
+            _writes.append(bytes)
+        }
+    }
+
     /// The profile login tab with the flag on: born onto a real holder like
     /// every other spawn, with no tmux server behind it.
     ///
@@ -616,6 +631,13 @@ struct HolderSpawnGateTests {
         let fixture = try await GateFixture.make(flagEnabled: true)
         defer { fixture.tearDown() }
         let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
+        // The daemon's only path for typing into a holder session. A login tab
+        // is left to the person, so nothing may come through it.
+        let courierWrites = CourierWriteLog()
+        fixture.router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: { courierWrites.record($0) },
+            viewerAttachment: { _ in nil },
+            writeDirectly: { _, bytes in courierWrites.record(bytes) })
 
         let terminal = try await fixture.terminalCreate(
             TerminalCreateParams(
@@ -647,14 +669,17 @@ struct HolderSpawnGateTests {
             !issued.contains(where: { $0.contains("new-session") }),
             "the login tab started a tmux server: \(issued)")
 
-        // The pump polls the holder and the identity watcher reads the profile
-        // dir; teardown kills the holder and deletes the home, so stop the pump
-        // before either becomes a read against something that is gone.
-        await fixture.router.loginSessions.cancelPendingAutoLogin(terminalID: row.id)
+        // Three seconds covers the settle-then-poll shape an auto-typing pump
+        // would take (a 2 s settle, then a 1 s cadence) before its first write.
+        let wrote = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
+            !courierWrites.writes.isEmpty
+        }
+        #expect(wrote != .satisfied, "the daemon typed into a login tab: \(courierWrites.writes)")
+        #expect(courierWrites.writes.isEmpty)
     }
 
     /// The other arm, unchanged: with the flag off a login tab is a tmux
-    /// window in a tmux server, and the pump reads and types through its pane.
+    /// window in a tmux server.
     @Test func loginTabFlagOffStaysOnTmux() async throws {
         let fixture = try await GateFixture.make(flagEnabled: false)
         defer { fixture.tearDown() }
@@ -676,11 +701,6 @@ struct HolderSpawnGateTests {
         #expect(
             !FileManager.default.fileExists(atPath: socketPath),
             "a holder rendezvous was created for a tmux-transport login tab")
-
-        // The pump polls the pane and the identity watcher reads the profile
-        // dir; teardown kills the session and deletes the home, so stop the
-        // pump before either becomes a read against something that is gone.
-        await fixture.router.loginSessions.cancelPendingAutoLogin(terminalID: row.id)
     }
 
     // MARK: - Fork-session swap
@@ -1258,17 +1278,10 @@ private final class GateFixture {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
-            // The login-tab tests arm the auto-`/login` pump against a real
-            // holder whose job is the pinned gate shell — it never paints a
-            // Claude TUI, so the pump polls until it gives up. On the router's
-            // shipped delays that is 45 seconds of polling and half an hour of
-            // identity watching outliving the test; these bound both to the
-            // test's own lifetime.
+            // The login-tab tests arm the identity watcher. On the router's
+            // shipped delays that is half an hour of polling outliving the
+            // test; these bound it to the test's own lifetime.
             loginSessions: LoginSessionCoordinator(delays: .init(
-                pumpInitialDelay: .zero,
-                pumpPollInterval: .milliseconds(50),
-                pumpPostSendDelay: .milliseconds(50),
-                pumpTimeout: .seconds(1),
                 identityPollInterval: .milliseconds(25),
                 identityPollTimeout: .milliseconds(50))),
             actuationLog: makeTestActuationLog())

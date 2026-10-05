@@ -35,52 +35,76 @@ enum ComposerWakeReply: Equatable, Sendable {
 }
 
 extension AppState {
+    func registerComposerView(_ view: NSView, for key: ComposerKey) {
+        composerFocusTargets[key] = ComposerFocusTarget(view)
+    }
+
     func registerComposerView(_ view: NSView, for terminalID: UUID) {
-        composerFocusTargets[terminalID] = ComposerFocusTarget(view)
+        registerComposerView(view, for: .terminal(terminalID))
     }
 
     /// Only the CURRENT view may unregister. A pane rebuilt while the old view is
     /// still deallocating would otherwise evict its own replacement.
-    func unregisterComposerView(_ view: NSView, for terminalID: UUID) {
-        guard composerFocusTargets[terminalID]?.view === view else { return }
-        composerFocusTargets.removeValue(forKey: terminalID)
+    func unregisterComposerView(_ view: NSView, for key: ComposerKey) {
+        guard composerFocusTargets[key]?.view === view else { return }
+        composerFocusTargets.removeValue(forKey: key)
     }
 
-    /// Cmd+/ — put the caret in this terminal's composer. A no-op when no
+    func unregisterComposerView(_ view: NSView, for terminalID: UUID) {
+        unregisterComposerView(view, for: .terminal(terminalID))
+    }
+
+    /// Cmd+/ — put the caret in this target's composer. A no-op when no
     /// composer is mounted, which is the honest answer for a pane that is closed.
-    func focusComposer(terminalID: UUID) {
-        guard let view = composerFocusTargets[terminalID]?.view else { return }
+    func focusComposer(_ key: ComposerKey) {
+        guard let view = composerFocusTargets[key]?.view else { return }
         view.window?.makeFirstResponder(view)
     }
 
-    /// The transcript table this terminal is reading, so Escape in the composer
+    func focusComposer(terminalID: UUID) {
+        focusComposer(.terminal(terminalID))
+    }
+
+    /// The transcript table this target is reading, so Escape in the composer
     /// has somewhere to send focus back to.
     ///
     /// Written from `TableTranscriptView.makeNSView` rather than from a deferred
     /// task: both registries are `@ObservationIgnored`, so the write publishes
     /// nothing and cannot re-enter the view update that is making the view.
+    func registerTranscriptView(_ view: NSView, for key: ComposerKey) {
+        transcriptFocusTargets[key] = ComposerFocusTarget(view)
+    }
+
     func registerTranscriptView(_ view: NSView, for terminalID: UUID) {
-        transcriptFocusTargets[terminalID] = ComposerFocusTarget(view)
+        registerTranscriptView(view, for: .terminal(terminalID))
     }
 
     /// Newer-wins, exactly as `unregisterComposerView` is: a session rollover
     /// rebuilds the table under its `.id`, and the outgoing view must not evict
     /// the replacement that has already registered.
+    func unregisterTranscriptView(_ view: NSView, for key: ComposerKey) {
+        guard transcriptFocusTargets[key]?.view === view else { return }
+        transcriptFocusTargets.removeValue(forKey: key)
+    }
+
     func unregisterTranscriptView(_ view: NSView, for terminalID: UUID) {
-        guard transcriptFocusTargets[terminalID]?.view === view else { return }
-        transcriptFocusTargets.removeValue(forKey: terminalID)
+        unregisterTranscriptView(view, for: .terminal(terminalID))
     }
 
     /// Escape from the composer — hand focus back to the transcript, which is
     /// where the person was reading.
-    func focusTranscript(terminalID: UUID) {
-        guard let view = transcriptFocusTargets[terminalID]?.view else {
+    func focusTranscript(_ key: ComposerKey) {
+        guard let view = transcriptFocusTargets[key]?.view else {
             // No transcript table registered: give up first responder rather
             // than holding it, so the pane's own key handling resumes.
-            composerFocusTargets[terminalID]?.view?.window?.makeFirstResponder(nil)
+            composerFocusTargets[key]?.view?.window?.makeFirstResponder(nil)
             return
         }
         view.window?.makeFirstResponder(view)
+    }
+
+    func focusTranscript(terminalID: UUID) {
+        focusTranscript(.terminal(terminalID))
     }
 
     /// The Reveal Terminal action on the blocked banner. Answering a dialog in
@@ -174,7 +198,7 @@ extension AppState {
         let activeTab = selectedWorktreeIDs.first.flatMap { resolvedActiveTab(worktreeID: $0) }
         for tab in [focusedTab, activeTab].compactMap({ $0 }) {
             if let id = terminalIDs(in: tab).first(
-                where: { composerFocusTargets[$0]?.view != nil }) {
+                where: { composerFocusTargets[.terminal($0)]?.view != nil }) {
                 return id
             }
         }

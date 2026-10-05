@@ -250,6 +250,18 @@ extension AppState {
         remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
     }
 
+    // MARK: - Transcript
+
+    /// Whether the daemon reports the remote transcript as enabled
+    /// (`remote_transcript_enabled`). Read from the capability payload, so it
+    /// is the shipped default (off) until capabilities have been fetched: a
+    /// Transcript toggle that flashed in and then disappeared would be worse
+    /// than one that appeared a moment late. The remote composer additionally
+    /// needs `transcriptComposerEnabled`.
+    var remoteTranscriptEnabled: Bool {
+        daemonCapabilities?.remoteTranscriptEnabled ?? Config.remoteTranscriptEnabledDefault
+    }
+
     // MARK: - Destroying a session
 
     /// Whether the daemon currently permits `remote.delete`
@@ -267,7 +279,7 @@ extension AppState {
     /// requesting it, and the request is what this whole design is for:
     /// destroying a session should not destroy the conversation. The receipt is
     /// also what a later Revive-as-reseed reads. When the provider does not
-    /// declare `retain` no receipt is possible, and the confirmation says so in
+    /// declare `transcript.retain` no receipt is possible, and the confirmation says so in
     /// as many words — that is the branch a user most needs to see.
     ///
     /// The confirmation itself is `RemoteDeleteConfirmation.decide`, which is
@@ -280,7 +292,7 @@ extension AppState {
         }
         let capabilities = remoteProviders.first { $0.config.name == provider }?
             .describe?.capabilities ?? []
-        let willRetain = capabilities.contains("retain")
+        let willRetain = capabilities.contains(RemoteCapability.transcriptRetain)
         let decision = RemoteDeleteConfirmation.decide(
             state: session?.payload.state ?? .unknown,
             workspaceDirty: session?.payload.reportsDirtyWorkspace ?? false,

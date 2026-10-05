@@ -76,9 +76,10 @@ struct GeneralSettingsTab: View {
                 Toggle("Enable macOS notifications", isOn: $enableNotifications)
                     .help("Show system notifications when background tasks complete")
                 Toggle("Enable notification sounds", isOn: $enableSounds)
-                    .help("Play a sound when background tasks complete")
+                    .disabled(!enableNotifications)
+                    .help("Play a sound with each macOS notification. The sound follows Focus and Do Not Disturb, like the notification itself.")
 
-                if enableSounds {
+                if enableNotifications && enableSounds {
                     HStack {
                         Picker("Sound", selection: Binding(
                             get: { customPath.isEmpty ? soundName : "__custom__" },
@@ -163,6 +164,8 @@ struct GeneralSettingsTab: View {
                 ))
                 .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree. Each worktree can override this from its PR toolbar menu.")
 
+                prPollScheduleToggle
+
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
 
@@ -204,6 +207,7 @@ struct GeneralSettingsTab: View {
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
                 transcriptComposerToggle
+                remoteTranscriptToggle
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
                 Picker("Usage reset times", selection: $usageResetTimeStyle) {
@@ -384,6 +388,23 @@ struct GeneralSettingsTab: View {
         .help(AppState.transcriptComposerHelp)
     }
 
+    /// Remote-session transcript opt-in (`remote_transcript_enabled`), beside
+    /// the composer toggle because together they decide whether a remote
+    /// session gets a transcript pane and a composer in it. Reads the
+    /// persisted flag from `daemon.capabilities` and writes via
+    /// `config.setRemoteTranscriptEnabled`. Off by default (soaking).
+    @ViewBuilder
+    private var remoteTranscriptToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Transcript pane for remote sessions", isOn: Binding(
+            get: { capabilities?.remoteTranscriptEnabled ?? Config.remoteTranscriptEnabledDefault },
+            set: { newValue in
+                Task { await appState.setRemoteTranscriptEnabled(newValue) }
+            }
+        ))
+        .help(AppState.remoteTranscriptHelp)
+    }
+
     /// Ask for a first message when creating a worktree. Reads the persisted
     /// flag from `daemon.capabilities` and writes via `config.setQueuedPrompt`.
     /// Off by default (soaking).
@@ -443,6 +464,23 @@ struct GeneralSettingsTab: View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    /// Schedule-based PR polling. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
+    /// which the daemon applies at once. Off by default (soaking).
+    @ViewBuilder
+    private var prPollScheduleToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Poll PRs on a schedule", isOn: Binding(
+            get: { capabilities?.prPollScheduleEnabled ?? Config.prPollScheduleDefault },
+            set: { newValue in Task { await appState.setPRPollScheduleEnabled(newValue) } }
+        ))
+        .help(Self.prPollScheduleHelp)
+    }
+
+    static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
+        + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
+        + "while TBD is in front, and every 5 minutes otherwise."
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.
@@ -754,7 +792,7 @@ struct GeneralSettingsTab: View {
 
     private func pickCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -767,7 +805,7 @@ struct GeneralSettingsTab: View {
 
     private func pickErrorCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false

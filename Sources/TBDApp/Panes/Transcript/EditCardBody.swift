@@ -10,6 +10,9 @@ struct EditCardBody: View {
     let inputTruncatedTo: Int?
     let result: ToolResult?
     let terminalID: UUID?
+    /// The transcript file to read a full body from when there is no
+    /// terminal — see `TranscriptFullBodySource`.
+    let detailPath: String?
 
     @State private var fullInputJSON: String? = nil
     @Environment(AppState.self) var appState
@@ -41,6 +44,10 @@ struct EditCardBody: View {
         return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
     }
 
+    var fullBodySource: TranscriptFullBodySource? {
+        TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
+    }
+
     var body: some View {
         let parsedInput = decodeInput()
         let language: String? = {
@@ -69,7 +76,7 @@ struct EditCardBody: View {
                     if idx < hunks.count - 1 { Divider() }
                 }
             }
-            let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
+            let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && fullBodySource != nil
             let previewPath = resolvedFilePath
             let showPreview = previewPath != nil && openFilePreview != nil
             if showPreview || showTruncation {
@@ -88,10 +95,8 @@ struct EditCardBody: View {
     }
 
     private func fetchFullInput() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input", path: path) {
-            await MainActor.run { fullInputJSON = r.text }
+        if let r = await fullBodySource?.fetch(itemID: "\(id)#input", appState: appState) {
+            fullInputJSON = r.text
         }
     }
 

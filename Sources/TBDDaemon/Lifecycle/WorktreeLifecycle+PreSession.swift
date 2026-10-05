@@ -235,7 +235,13 @@ extension WorktreeLifecycle {
                 transport: transport,
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
-            if let initialWindowID {
+            // Kill the untracked initial window that new-session created, but skip
+            // if a restarted tmux server reused the window ID for the replacement
+            // we just created (ABA scenario: the fresh window and the old ID are
+            // textually identical, so killing it would destroy the session we just
+            // spawned). Within one live tmux incarnation, window IDs are unique, so
+            // this is defense in depth.
+            if let initialWindowID, initialWindowID != terminal.tmuxWindowID {
                 try? await tmux.killWindow(
                     server: currentWorktree.tmuxServer,
                     windowID: initialWindowID)
@@ -541,8 +547,8 @@ extension WorktreeLifecycle {
     /// delete the terminal + tab rows, broadcast `.terminalRemoved`.
     ///
     /// Deliberately NOT reusing `RPCRouter.handleTerminalDelete`: that handler
-    /// also cancels scheduled resumes, clears pending questions, cancels
-    /// auto-login, and reclaims a per-session `ClaudeHookOverlay` — all Claude
+    /// also cancels scheduled resumes, clears pending questions, and reclaims
+    /// a per-session `ClaudeHookOverlay` — all Claude
     /// concerns, all no-ops for this `.shell` tab, and several reach for
     /// `RPCRouter` state the lifecycle doesn't hold.
     ///

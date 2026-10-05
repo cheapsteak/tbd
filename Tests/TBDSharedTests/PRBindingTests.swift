@@ -6,7 +6,8 @@ import Testing
 struct PRBindingTests {
 
     private func binding(_ number: Int, _ state: PRMergeableState,
-                         detached: Bool = false) -> PRBinding {
+                         detached: Bool = false,
+                         source: PRBindingSource = .hook) -> PRBinding {
         PRBinding(
             id: UUID(), worktreeID: UUID(), host: "github.com",
             owner: "acme", repo: "acme-prod", number: number,
@@ -15,7 +16,7 @@ struct PRBindingTests {
             status: PRStatus(number: number,
                              url: "https://github.com/acme/acme-prod/pull/\(number)",
                              state: state),
-            source: .hook, detached: detached, boundAt: Date()
+            source: source, detached: detached, boundAt: Date()
         )
     }
 
@@ -155,29 +156,29 @@ struct PRBindingTests {
     func ownWorkByBranch() {
         #expect(PRBinding.mergedBindingIsOwnWork([binding(1, .merged)],
                                                  branchCandidates: ["feature-1"],
-                                                 provenancePRNumber: nil))
+                                                 provenancePRNumber: nil, ownRepo: nil))
         // The H1 scenario in miniature: the only merged PR is a subagent's, on a
         // branch this worktree never checked out.
         #expect(!PRBinding.mergedBindingIsOwnWork([binding(1, .merged)],
                                                   branchCandidates: ["work-2"],
-                                                  provenancePRNumber: nil))
+                                                  provenancePRNumber: nil, ownRepo: nil))
         // A candidate that is not the local branch — a tracked or push branch —
         // counts just the same; the caller passes the matcher's whole list.
         #expect(PRBinding.mergedBindingIsOwnWork([binding(1, .merged)],
                                                  branchCandidates: ["work-2", "feature-1"],
-                                                 provenancePRNumber: nil))
+                                                 provenancePRNumber: nil, ownRepo: nil))
         // Only a MERGED binding can establish ownership.
         #expect(!PRBinding.mergedBindingIsOwnWork([binding(1, .mergeable)],
                                                   branchCandidates: ["feature-1"],
-                                                  provenancePRNumber: nil))
+                                                  provenancePRNumber: nil, ownRepo: nil))
         // Own branch merged among several: the subagent's PRs do not obscure it.
         #expect(PRBinding.mergedBindingIsOwnWork(
             [binding(1, .merged), binding(2, .merged)],
-            branchCandidates: ["feature-2"], provenancePRNumber: nil))
+            branchCandidates: ["feature-2"], provenancePRNumber: nil, ownRepo: nil))
         // Branch names compare case-sensitively, as git refs do.
         #expect(!PRBinding.mergedBindingIsOwnWork([binding(1, .merged)],
                                                   branchCandidates: ["Feature-1"],
-                                                  provenancePRNumber: nil))
+                                                  provenancePRNumber: nil, ownRepo: nil))
     }
 
     /// A fork PR's head branch belongs to the fork and matches nothing local, so
@@ -186,14 +187,14 @@ struct PRBindingTests {
     func ownWorkByProvenanceNumber() {
         #expect(PRBinding.mergedBindingIsOwnWork([binding(412, .merged)],
                                                  branchCandidates: ["work-2"],
-                                                 provenancePRNumber: 412))
+                                                 provenancePRNumber: 412, ownRepo: nil))
         #expect(!PRBinding.mergedBindingIsOwnWork([binding(412, .merged)],
                                                   branchCandidates: ["work-2"],
-                                                  provenancePRNumber: 413))
+                                                  provenancePRNumber: 413, ownRepo: nil))
         // The provenance PR is only own work when it actually merged.
         #expect(!PRBinding.mergedBindingIsOwnWork([binding(412, .closed)],
                                                   branchCandidates: ["work-2"],
-                                                  provenancePRNumber: 412))
+                                                  provenancePRNumber: 412, ownRepo: nil))
     }
 
     @Test("a merged binding with no observed head branch is not own work")
@@ -207,18 +208,83 @@ struct PRBindingTests {
             boundAt: merged.boundAt)
         #expect(!PRBinding.mergedBindingIsOwnWork([unobserved],
                                                   branchCandidates: ["feature-1", "work-2"],
-                                                  provenancePRNumber: nil))
+                                                  provenancePRNumber: nil, ownRepo: nil))
         // …but its number can still say it is ours.
         #expect(PRBinding.mergedBindingIsOwnWork([unobserved],
                                                  branchCandidates: [],
-                                                 provenancePRNumber: 1))
+                                                 provenancePRNumber: 1, ownRepo: nil))
+    }
+
+    /// A provider naming a PR in `meta.prs` is not by itself a claim the rail
+    /// accepts: an already-merged earlier PR, or a companion repo's PR, must not
+    /// retire the lane on first sighting. A merged `.provider` binding counts
+    /// only on the rail's existing evidence.
+    @Test("a merged provider-named binding needs a matching head or number to be own work")
+    func providerSourceAloneIsNotOwnWork() {
+        let own = (owner: "acme", name: "acme-prod", host: "github.com")
+        // Head does not match the live branch, number is not the lane's PR.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: ["work-2"], provenancePRNumber: 8, ownRepo: own))
+        // A lane with no valid live branch has no candidates and no number.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: [], provenancePRNumber: nil, ownRepo: own))
+        // Its head matching the lane's live branch makes it own work…
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: ["feature-7"], provenancePRNumber: nil, ownRepo: own))
+        // …as does its number being the lane's PR.
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [binding(7, .merged, source: .provider)],
+            branchCandidates: [], provenancePRNumber: 7, ownRepo: own))
+    }
+
+    /// Branch names and PR numbers mean the same thing only within one
+    /// repository. A provider-named PR in a companion repo whose head shares the
+    /// lane's branch name (or whose number equals the lane's PR) is not own work.
+    @Test("a merged provider-named binding in another repository is never own work")
+    func providerBindingInOtherRepoIsNotOwnWork() {
+        let own = (owner: "acme", name: "acme-prod", host: "github.com")
+        let foreign = PRBinding(
+            worktreeID: UUID(), host: "github.com", owner: "acme", repo: "acme-web",
+            number: 12, url: "https://github.com/acme/acme-web/pull/12",
+            headBranch: "claude/fix-x",
+            status: PRStatus(number: 12, url: "https://github.com/acme/acme-web/pull/12",
+                             state: .merged),
+            source: .provider)
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [foreign], branchCandidates: ["claude/fix-x"], provenancePRNumber: nil, ownRepo: own))
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [foreign], branchCandidates: [], provenancePRNumber: 12, ownRepo: own))
+        // Same owner and name on another host is another repository too.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [foreign], branchCandidates: ["claude/fix-x"], provenancePRNumber: nil,
+            ownRepo: (owner: "acme", name: "acme-web", host: "ghe.acme.example")))
+        // The same PR judged against its own repo (case-insensitively) is own work.
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [foreign], branchCandidates: ["claude/fix-x"], provenancePRNumber: nil,
+            ownRepo: (owner: "Acme", name: "Acme-Web", host: "GitHub.com")))
+        // An unresolved own repo cannot vouch for a provider binding.
+        #expect(!PRBinding.mergedBindingIsOwnWork(
+            [foreign], branchCandidates: ["claude/fix-x"], provenancePRNumber: 12, ownRepo: nil))
+    }
+
+    /// Every other source was validated against the worktree's repo when it
+    /// bound, so the repository is not re-checked and an unresolved one does
+    /// not hold the gate shut for it.
+    @Test("a non-provider binding is judged without the own repository")
+    func nonProviderBindingIgnoresOwnRepo() {
+        #expect(PRBinding.mergedBindingIsOwnWork(
+            [binding(1, .merged, source: .branch)],
+            branchCandidates: ["feature-1"], provenancePRNumber: nil, ownRepo: nil))
     }
 
     @Test("own work ignores detached bindings")
     func ownWorkIgnoresDetached() {
         #expect(!PRBinding.mergedBindingIsOwnWork(
             [binding(1, .merged, detached: true)],
-            branchCandidates: ["feature-1"], provenancePRNumber: 1))
+            branchCandidates: ["feature-1"], provenancePRNumber: 1, ownRepo: nil))
     }
 
     /// The shared-model half of the migration rule: a row or payload written
