@@ -240,6 +240,7 @@ jobs:
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/sweep-branch-dbs.test.sh
           bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/restart-guard-lib.test.sh
