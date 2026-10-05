@@ -71,7 +71,7 @@ enum ComposerTokens {
     /// An argument prompt cannot carry image attachments at all, so this is what
     /// a woken session receives. The sentence reads the same, and Claude reads
     /// the files with its Read tool — whose image reads are capped near 500 KB,
-    /// which is why the composer says so on the send button.
+    /// which is why the composer says so in the send button's tooltip.
     static func flattened(text: String, paths: [Int: String]) -> String {
         let ns = text as NSString
         var result = ""

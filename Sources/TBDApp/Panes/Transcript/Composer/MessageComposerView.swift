@@ -5,8 +5,9 @@ import TBDShared
 /// The composer: a text field pinned below the transcript, inside the session
 /// workbench beside the index rail.
 ///
-/// A send button that **names the target terminal**, so the injection is never
-/// anonymous.
+/// A send button that is a return icon in the field's corner. The message goes
+/// to the terminal the transcript belongs to; the terminal's name appears only
+/// in the button's tooltip and accessibility label.
 ///
 /// Text sitting unsent in the terminal's own input box is invisible here, and a
 /// message sent from the composer appends to it. No signal exists for that
@@ -592,14 +593,14 @@ struct MessageComposerView: View {
         .help(
             Self.sendButtonLabel(state: state, terminalLabel: targetLabel) + " — "
                 + Self.sendButtonHelp(state: state))
-        // The glyph names nobody, so the label carries the target. It is the
-        // terminal's name and changes with it; the identifier does not, which
-        // is the whole point of having both.
+        // The glyph names nobody, so the accessibility label carries the target.
+        // It is the terminal's name and changes with it; the identifier does not,
+        // which is the whole point of having both.
         .accessibilityLabel(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
         .accessibilityIdentifier(ComposerAccessibility.send)
     }
 
-    /// What the send button calls the target: a terminal's label, or a
+    /// What the send button's tooltip and accessibility label call the target: a terminal's label, or a
     /// remote session's display name.
     private var targetLabel: String? {
         switch target {
@@ -608,7 +609,7 @@ struct MessageComposerView: View {
         }
     }
 
-    /// The button names the target, so an injection is never anonymous.
+    /// The tooltip and accessibility label name the target; the glyph itself does not.
     static func sendButtonLabel(state: ComposerState, terminalLabel: String?) -> String {
         let name = terminalLabel ?? "Claude"
         switch state {

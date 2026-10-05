@@ -22,7 +22,7 @@ enum ComposerState: Equatable {
     /// mid-turn queues inside Claude Code, as it does when typed.
     case running
     /// The process is gone. Enabled, with a note that sending will resume the
-    /// session and a send button that says so. `exited` distinguishes only the
+    /// session and a send button whose tooltip says so. `exited` distinguishes only the
     /// wording — a session that left on its own from one TBD parked.
     case notRunning(exited: Bool)
     /// A dialog is on screen, or an awaiting-input reason this build does not
