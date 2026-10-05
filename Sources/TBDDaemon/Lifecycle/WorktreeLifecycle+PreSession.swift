@@ -429,9 +429,25 @@ extension WorktreeLifecycle {
             logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
             switch preSession.transport {
             case .tmux:
-                try? await tmux.killWindow(
-                    server: preSession.tmuxServer, windowID: preSession.windowID
-                )
+                // Refuse to kill a window whose pane belongs to a DIFFERENT
+                // terminal — see `TmuxManager.paneOwnership`. The wait
+                // this follows can run arbitrarily long, so the tmux server
+                // can be recreated (window/pane numbering reset) before this
+                // cleanup ever runs — the same hazard class as PR #902.
+                let ownership = await tmux.paneOwnership(
+                    terminalID: preSession.terminalID, server: preSession.tmuxServer,
+                    paneID: preSession.paneID)
+                if ownership.permitsTeardown {
+                    try? await tmux.killWindow(
+                        server: preSession.tmuxServer, windowID: preSession.windowID
+                    )
+                } else {
+                    logger.warning("""
+                        phase-3: leaving window \(preSession.windowID, privacy: .public) \
+                        untouched for terminal \(preSession.terminalID, privacy: .public) — \
+                        \(ownership.refusalDetail ?? "", privacy: .public)
+                        """)
+                }
             case .holder:
                 // The terminal row went with the worktree, so nothing can read
                 // the pids back any more — this is the last moment either can
@@ -586,6 +602,7 @@ extension WorktreeLifecycle {
             tmuxServer: preSession.tmuxServer,
             terminalID: preSession.terminalID,
             windowID: preSession.windowID,
+            paneID: preSession.paneID,
             unreadableRowTransport: preSession.transport,
             holderPID: preSession.holderPID,
             childPID: preSession.childPID,
@@ -598,18 +615,20 @@ extension WorktreeLifecycle {
     /// coordinates describe.
     ///
     /// No production caller: every hook tab is torn down from the descriptor
-    /// its spawn returned. It is kept because the tmux-coordinate tests
-    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`,
-    /// `HookTabTransportGateTests`) address the teardown the way a caller
-    /// without a descriptor would, and that is a shape worth keeping reachable.
+    /// its spawn returned. It is kept because the tmux-coordinate test
+    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`)
+    /// addresses the teardown the way a caller without a descriptor would,
+    /// and that is a shape worth keeping reachable.
     func closeHookTerminal(
-        worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
+        worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String,
+        paneID: String
     ) async {
         await closeHookTerminal(
             worktree: worktree,
             tmuxServer: tmuxServer,
             terminalID: terminalID,
             windowID: windowID,
+            paneID: paneID,
             unreadableRowTransport: .tmux,
             holderPID: nil,
             childPID: nil,
@@ -628,6 +647,7 @@ extension WorktreeLifecycle {
         tmuxServer: String,
         terminalID: UUID,
         windowID: String,
+        paneID: String,
         unreadableRowTransport: TerminalTransport,
         holderPID: Int32?,
         childPID: Int32?,
@@ -672,6 +692,22 @@ extension WorktreeLifecycle {
                     childStartedAt: childStartedAt)
             }
         case .tmux:
+            // Refuse to capture or kill a pane that belongs to a DIFFERENT
+            // terminal — see `TmuxManager.paneOwnership`. A hook tab's
+            // wait for its setup script can run arbitrarily long, so the
+            // tmux server can be recreated (and its window/pane numbering
+            // reset) in the gap between spawning this hook tab and tearing
+            // it down here — the same hazard class as PR #902.
+            let ownership = await tmux.paneOwnership(
+                terminalID: terminalID, server: tmuxServer, paneID: paneID)
+            guard ownership.permitsTeardown else {
+                logger.warning("""
+                    closeHookTerminal: leaving window \(windowID, privacy: .public) untouched \
+                    for terminal \(terminalID, privacy: .public) — \
+                    \(ownership.refusalDetail ?? "", privacy: .public)
+                    """)
+                break
+            }
             // Preserve the hook tab's output before the window dies so a user
             // can read an auto-closed setup/pre-session run later (Session
             // History → Closed Terminals). Best-effort: captureOnClose logs
