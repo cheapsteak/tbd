@@ -149,6 +149,12 @@ public final class RPCRouter: Sendable {
     /// Native Claude-to-Codex import seams. Production uses the installed
     /// Codex app-server; tests replace these before invoking the handler.
     nonisolated(unsafe) var codexExecutableResolver: @Sendable () throws -> String
+    /// Whether a recorded holder pid still names a running `TBDHolder` —
+    /// consulted only when a holder attach finds no reader, to tell an ended
+    /// session from one that is merely unattachable. Tests replace it.
+    nonisolated(unsafe) var holderProcessIsLive: @Sendable (Int32) -> Bool = { pid in
+        ProcessLiveness.isLiveNamedProcess(pid: pid, name: "TBDHolder")
+    }
     nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
     nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
         CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in

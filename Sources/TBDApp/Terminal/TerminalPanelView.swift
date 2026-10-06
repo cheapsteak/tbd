@@ -45,6 +45,25 @@ enum TerminalPreparationPresentation {
     /// attach leaves the daemon's reader on the pty and the session running.
     static let holderAttachFailedMessage =
         "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Close and reopen the tab to try again."
+    /// Shown when the daemon reports the holder session ended: no reader, and
+    /// the holder process the row records is no longer running.
+    ///
+    /// Distinct from `holderAttachFailedMessage` because both of that copy's
+    /// claims are false here — the session is not running, and reopening the
+    /// tab attaches to nothing. The remedy it names is real: closing the tab
+    /// records it under Closed Terminals, and reviving a Claude entry there
+    /// resumes its conversation.
+    static let holderSessionEndedMessage =
+        "This session's terminal process has ended, so there is nothing to attach to. Close the tab, then reopen it from History → Closed Terminals to resume."
+
+    /// The placard for a holder attach that failed with `error`.
+    static func holderAttachFailureMessage(for error: any Error) -> String {
+        if case DaemonClientError.attachUnavailable(let status) = error,
+           status == AttachRequestResult.holderSessionEndedStatus {
+            return holderSessionEndedMessage
+        }
+        return holderAttachFailedMessage
+    }
 }
 
 enum TerminalRecoveryPresentation {
@@ -1049,13 +1068,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// every failure in `startHolderClient` tells the same, truthful
         /// story: the session is fine, this panel is not on it.
         @MainActor
-        private func feedHolderAttachFailure(reason: String, into terminalView: TerminalView) {
+        private func feedHolderAttachFailure(
+            reason: String, into terminalView: TerminalView,
+            message: String = TerminalPreparationPresentation.holderAttachFailedMessage
+        ) {
             let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
             logger.error(
                 "holder attach failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderAttachFailed reason=\(reason, privacy: .public)"
             )
-            feedPreparationMessage(
-                TerminalPreparationPresentation.holderAttachFailedMessage, into: terminalView)
+            feedPreparationMessage(message, into: terminalView)
         }
 
         /// The ledger this panel registers its handback with and waits on.
@@ -1154,7 +1175,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
             } catch {
                 feedHolderAttachFailure(
-                    reason: "attach refused: \(error.localizedDescription)", into: terminalView)
+                    reason: "attach refused: \(error.localizedDescription)", into: terminalView,
+                    message: TerminalPreparationPresentation.holderAttachFailureMessage(for: error))
                 return
             }
             // **Close-on-exec, before anything else touches it.** A descriptor

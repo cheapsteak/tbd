@@ -442,6 +442,49 @@ struct TerminalHolderTransportGateTests {
                 "a refused holder attach must not fall back into tmux, ran \(recorded)")
     }
 
+    /// The attach-failed copy says the session keeps running and that
+    /// reopening the tab retries. When the daemon reports the holder gone,
+    /// both claims are false, so the ended copy must replace it.
+    @MainActor
+    @Test("a holder attach the daemon reports as ended shows the session-ended placard")
+    func startTmuxClientShowsEndedPlacardWhenTheHolderIsGone() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let panel = try makePanel(transport: .holder, fixture: fixture)
+        defer { tearDown(panel) }
+        let stub = StubHolderAttach(attach: {
+            throw DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
+        })
+        panel.coordinator.holderAttachClient = stub
+
+        await panel.coordinator.startTmuxClient(
+            terminalView: panel.view,
+            bridge: panel.bridge,
+            server: Self.server,
+            windowID: "",
+            panelID: panel.terminalID
+        )
+
+        #expect(stub.attaches == 1)
+        #expect(didFeed(TerminalPreparationPresentation.holderSessionEndedMessage, panel),
+                "an ended session must say it has ended")
+        #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
+                "an ended session must not claim it keeps running")
+    }
+
+    @Test("only the ended status maps to the session-ended copy")
+    func holderAttachFailureMessageMapping() {
+        typealias Copy = TerminalPreparationPresentation
+        #expect(Copy.holderAttachFailureMessage(
+            for: DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus))
+            == Copy.holderSessionEndedMessage)
+        #expect(Copy.holderAttachFailureMessage(
+            for: DaemonClientError.attachUnavailable("unavailable")) == Copy.holderAttachFailedMessage)
+        #expect(Copy.holderAttachFailureMessage(
+            for: DaemonClientError.rpcError("attach failed: no live holder reader", code: nil))
+            == Copy.holderAttachFailedMessage)
+    }
+
     @MainActor
     @Test("a holder attach whose ready is refused stops reading and shows the attach-failed placard")
     func holderAttachWithRefusedReadyShowsPlacard() async throws {

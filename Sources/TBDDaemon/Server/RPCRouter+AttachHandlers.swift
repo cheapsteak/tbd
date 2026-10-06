@@ -199,6 +199,18 @@ extension RPCRouter {
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
             vend = try await registry.beginAttach(terminalID: terminal.id)
+        } catch HolderRegistry.Error.noLiveReader(_) where holderSessionHasEnded(terminal) {
+            // No reader, and the holder the row records is not running: the
+            // session is over, not merely unattachable. Answered as a status
+            // rather than an error so the app does not tell the user the
+            // session "keeps running" and to reopen the tab to retry.
+            logger.warning("""
+                holder attach.request for terminal \(terminal.id.uuidString, privacy: .public): \
+                its holder (pid \(terminal.holderPID ?? 0, privacy: .public)) is no longer \
+                running; reporting the session as ended
+                """)
+            return try RPCResponse(
+                result: AttachRequestResult(status: AttachRequestResult.holderSessionEndedStatus))
         } catch {
             logger.error("""
                 holder attach.request failed for terminal \
@@ -244,6 +256,14 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// True only on positive evidence that the row's holder is gone: a holder
+    /// pid was recorded and no `TBDHolder` runs under it. A row that recorded
+    /// none — a session still being established — is not judged ended.
+    func holderSessionHasEnded(_ terminal: Terminal) -> Bool {
+        guard let holderPID = terminal.holderPID, holderPID > 1 else { return false }
+        return !holderProcessIsLive(holderPID)
     }
 
     /// Handle `attach.ready`: the app's reader is draining the vended fd —

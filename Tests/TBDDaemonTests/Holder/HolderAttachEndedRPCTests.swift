@@ -1,0 +1,96 @@
+import Foundation
+import TestSupport
+import Testing
+@testable import TBDDaemonLib
+@testable import TBDShared
+
+/// Tier 1: `attach.request` for a holder row the registry holds no reader for.
+/// No holder is spawned — the registry simply never adopted the session, which
+/// is exactly the state a killed holder leaves behind — and holder liveness is
+/// the router's injected `holderProcessIsLive`.
+///
+/// The app shows "the session keeps running, reopen the tab" for an attach
+/// error, and "this session has ended" for the ended status, so the status may
+/// be answered only when the row's holder is positively gone.
+@Suite("A holder attach with no reader reports an ended session only when its holder is gone")
+struct HolderAttachEndedRPCTests {
+
+    private func makeRouter(holderPID: Int32?) async throws -> (RPCRouter, UUID, UUID) {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        let repo = try await db.repos.create(
+            path: "/tmp/holder-ended", displayName: "holder-ended", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "holder-ended", branch: "main",
+            path: "/tmp/holder-ended", tmuxServer: "tbd-holder-ended")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder, holderPID: holderPID, childPID: holderPID.map { $0 + 1 })
+        router.controlMode = TmuxControlModeBridge(
+            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
+        router.holderRegistry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: [:],
+            listTerminals: { [] })
+        return (router, worktree.id, terminal.id)
+    }
+
+    private func attach(
+        _ router: RPCRouter, worktreeID: UUID, terminalID: UUID
+    ) async throws -> RPCResponse {
+        await router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: worktreeID, paneID: "", windowID: "", attachID: UUID(),
+                    terminalID: terminalID)))
+    }
+
+    @Test("a dead recorded holder answers the ended status")
+    func deadHolderIsEnded() async throws {
+        let (router, worktreeID, terminalID) = try await makeRouter(holderPID: 4242)
+        let probed = LockedPIDs()
+        router.holderProcessIsLive = { pid in probed.append(pid); return false }
+
+        let response = try await attach(router, worktreeID: worktreeID, terminalID: terminalID)
+
+        #expect(response.success)
+        #expect(try response.decodeResult(AttachRequestResult.self).status
+            == AttachRequestResult.holderSessionEndedStatus)
+        #expect(probed.values == [4242])
+    }
+
+    @Test("a live recorded holder keeps the attach error")
+    func liveHolderIsAnError() async throws {
+        let (router, worktreeID, terminalID) = try await makeRouter(holderPID: 4242)
+        router.holderProcessIsLive = { _ in true }
+
+        let response = try await attach(router, worktreeID: worktreeID, terminalID: terminalID)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("no live holder reader") == true)
+    }
+
+    @Test("a row with no recorded holder is never judged ended")
+    func unrecordedHolderIsAnError() async throws {
+        let (router, worktreeID, terminalID) = try await makeRouter(holderPID: nil)
+        router.holderProcessIsLive = { _ in false }
+
+        let response = try await attach(router, worktreeID: worktreeID, terminalID: terminalID)
+
+        #expect(!response.success)
+    }
+
+    private final class LockedPIDs: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [Int32] = []
+        func append(_ pid: Int32) { lock.withLock { stored.append(pid) } }
+        var values: [Int32] { lock.withLock { stored } }
+    }
+}
