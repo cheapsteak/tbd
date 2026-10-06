@@ -13,7 +13,7 @@ private let remoteAttachLogger = Logger(subsystem: "com.tbd.app", category: "rem
 /// they mutate (Swift's `private` access control is file-scoped, not
 /// type-scoped) — this file only computes read-only inputs/outputs.
 extension AppState {
-    /// Sessions eligible for auto-attach right now: present in the daemon's
+    /// Sessions eligible for a requested attachment: present in the daemon's
     /// mirror, not `gone`, not exited, not `dismissed`, whose provider
     /// declares the `attach` capability, and whose provider is not
     /// `.needsAuth`. A session that exits while attached leaves this set, so
@@ -64,12 +64,16 @@ extension AppState {
     }
 
     /// Whether selecting `selection` would show a live attached terminal in
-    /// its pane: the same predicate `RemoteAttachLifecycle` applies to the
-    /// selected session (eligible, not explicitly detached, not blocked on
-    /// reconnect backoff). The sidebar context menu uses it to offer Send
-    /// Text… exactly where the pane will carry a send footer.
+    /// its pane: the same predicate `attachedRemoteSelections` applies to the
+    /// selected session (attachment already requested, eligible, not
+    /// explicitly detached, not blocked on reconnect backoff). A plain
+    /// selection only browses, so a session with no attachment request
+    /// never attaches merely by being selected. The sidebar context menu
+    /// uses it to offer Send Text… exactly where the pane will carry a send
+    /// footer.
     func remoteSessionAttachesWhenSelected(_ selection: RemoteSessionSelection, now: Date = Date()) -> Bool {
-        RemoteAttachLifecycle.attachedSelections(
+        guard recentlyAttachedRemoteSessions.contains(selection) else { return false }
+        return RemoteAttachLifecycle.attachedSelections(
             selected: selection,
             recentlyViewed: [],
             eligible: attachEligibleRemoteSelections,
@@ -150,11 +154,16 @@ extension AppState {
 
     /// The remote-session selections that should have a live attach
     /// terminal at `now` — the testable core of `attachedRemoteSelections`.
-    /// Reflects the current selection, mirror, detach-flag, and
-    /// reconnect-backoff state for the given instant.
+    /// Protects the current selection only if the user already requested an
+    /// attachment. Browsing a new session must not add it to the mount set.
+    /// Existing connection intent retains eligibility, detach and reconnect
+    /// handling, including automatic recovery after a transport failure.
     func attachedRemoteSelections(now: Date) -> [RemoteSessionSelection] {
-        RemoteAttachLifecycle.attachedSelections(
-            selected: selectedRemoteSession,
+        let requestedSelection = selectedRemoteSession.flatMap { selection in
+            recentlyAttachedRemoteSessions.contains(selection) ? selection : nil
+        }
+        return RemoteAttachLifecycle.attachedSelections(
+            selected: requestedSelection,
             recentlyViewed: recentlyAttachedRemoteSessions,
             eligible: attachEligibleRemoteSelections,
             explicitlyDetached: Set(explicitlyDetachedRemoteSessions.keys),
@@ -186,13 +195,13 @@ extension AppState {
     /// Which selection the persistently-mounted remote-session detail host
     /// (`DetailSectionHostPager`'s `.remote` tab, via `RemoteSessionHostSlot`)
     /// should currently render its chrome for: the active selection when
-    /// one exists, otherwise the most-recently-viewed remote session — so
+    /// one exists, otherwise the most-recent attachment request — so
     /// the host still has SOME concrete session to describe while the user
     /// is elsewhere (`RemoteSessionDetailView.selection` is non-optional,
     /// and the host stays mounted, just hidden, across that excursion
     /// specifically so `RemoteAttachPager`'s live connections survive it).
-    /// `nil` only when no remote session has ever been selected this app
-    /// session. Which stale session an invisible host's chrome technically
+    /// `nil` when no remote session is selected and none has requested an
+    /// attachment. Which stale session an invisible host's chrome technically
     /// describes never matters for correctness — visibility is separately
     /// gated on `selectedRemoteSession` itself, not this value.
     var remoteSessionHostSelection: RemoteSessionSelection? {
