@@ -20,6 +20,13 @@ The design uses three groups:
 These are presentation choices. Moving a row between groups does not archive,
 dismiss, stop, wake, reparent, delete, or create a session.
 
+Grouping is opt-in. A Settings toggle, "Group hibernated, remote and exited
+worktrees", turns it on and ships off; with it off the sidebar renders every
+row inline in its usual place with no group headers. The flag's semantics and
+graduation plan are in
+[`2026-10-06-sidebar-groups-toggle-design.md`](2026-10-06-sidebar-groups-toggle-design.md).
+Everything below describes the sidebar with the toggle on.
+
 ## What the sidebar represents
 
 A remote session can have an adopted `Worktree` row or only a
@@ -134,10 +141,13 @@ design adds no freshness model.
 
 ## Disclosure, navigation, and attachment
 
-Remote, Exited, and Hibernated groups begin collapsed. Store expansion in
-app-owned transient state keyed by repository, owning parent, group kind,
-and provider where needed. Recomputing a view or polling does not reset it.
-An application restart may return groups to their collapsed defaults.
+Remote, Exited, and Hibernated groups begin collapsed. Expansion is app-owned
+state keyed by the group's owner – a repository, a provider, or Scratch – and
+its kind. Recomputing a view or polling does not reset it, and it persists
+across application restarts: the expanded set is written to `UserDefaults`
+on every change and restored at launch, and entries whose repository or
+provider is no longer reported are pruned
+(see [`2026-10-06-sidebar-groups-toggle-design.md`](2026-10-06-sidebar-groups-toggle-design.md)).
 
 An explicit navigation to a row reveals its repository and every containing
 group before the existing scroll request runs. Apply this to keyboard
@@ -181,9 +191,10 @@ remote detail views.
 ## Ordering and implementation boundary
 
 Project existing state through small pure helpers in the app. Keep daemon
-models, provider contracts, and lifecycle operations unchanged. This is an
-additive sidebar presentation change, with no new timer, background action,
-durable external resource, or feature flag.
+models, provider contracts, and lifecycle operations unchanged. This is a
+sidebar presentation change with no new timer, background action, or durable
+external resource. Because it moves rows users already rely on, it ships
+behind an app-only, default-off Settings toggle rather than a daemon flag.
 
 Reuse the existing row views, tags, context menus, and pinned dock. Resolve
 group membership from stable identities, not names or captured terminal text.
