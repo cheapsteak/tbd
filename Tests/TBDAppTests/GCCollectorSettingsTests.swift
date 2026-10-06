@@ -18,17 +18,23 @@ struct GCCollectorSettingsTests {
         let name = "tbd-gc-collector-settings-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         let state = AppState(userDefaults: defaults)
-        // The hang-stack setter re-derives the write-time cap from the
-        // daemon's config; keep that read off any real daemon.
+        // Keep any config read off a real daemon.
         state.configFetcher = { @MainActor in Config() }
         await body(state)
         defaults.removePersistentDomain(forName: name)
     }
 
-    @Test func everyCollectorDefaultsOff() async {
+    @Test func everyCollectorStartsAtItsShippedDefault() async {
+        let shipped: [GCCollector: Bool] = [
+            .orphanProcesses: Config.gcOrphanProcessesEnabledDefault,
+            .profileDirs: Config.gcProfileDirsEnabledDefault,
+            .retainedTranscripts: Config.gcRetainedTranscriptsEnabledDefault,
+            .hangStacks: Config.gcHangStacksEnabledDefault,
+        ]
         await withAppState { state in
             for collector in GCCollector.allCases {
-                #expect(!state.gcCollectorEnabled(collector), "\(collector) must ship off")
+                #expect(collector.mapping.shippedDefault == shipped[collector])
+                #expect(state.gcCollectorEnabled(collector) == shipped[collector])
             }
         }
     }
@@ -44,9 +50,10 @@ struct GCCollectorSettingsTests {
             #expect(written.count == 1)
             #expect(written.first?.0 == collector)
             #expect(written.first?.1 == true)
-            for other in GCCollector.allCases {
-                #expect(state.gcCollectorEnabled(other) == (other == collector))
+            for other in GCCollector.allCases where other != collector {
+                #expect(state.gcCollectorEnabled(other) == other.mapping.shippedDefault)
             }
+            #expect(state.gcCollectorEnabled(collector))
             #expect(state.alertMessage == nil)
         }
     }
@@ -74,9 +81,11 @@ struct GCCollectorSettingsTests {
         await withAppState { state in
             state.gcCollectorSetter = { @MainActor _, _ in throw Rejected() }
 
-            await state.setGCCollectorEnabled(collector, true)
+            let before = state.gcCollectorEnabled(collector)
 
-            #expect(!state.gcCollectorEnabled(collector))
+            await state.setGCCollectorEnabled(collector, !before)
+
+            #expect(state.gcCollectorEnabled(collector) == before)
             #expect(state.alertIsError)
             #expect(state.alertMessage != nil)
         }
@@ -91,7 +100,7 @@ struct GCCollectorSettingsTests {
             config.gcHangStacksEnabled = false
             state.configFetcher = { @MainActor in config }
 
-            await state.loadGCCollectorConfig()
+            await state.loadGCConfig()
 
             #expect(state.gcOrphanProcessesEnabled)
             #expect(!state.gcProfileDirsEnabled)
@@ -104,7 +113,7 @@ struct GCCollectorSettingsTests {
             config.gcHangStacksEnabled = true
             state.configFetcher = { @MainActor in config }
 
-            await state.loadGCCollectorConfig()
+            await state.loadGCConfig()
 
             #expect(!state.gcOrphanProcessesEnabled)
             #expect(state.gcProfileDirsEnabled)
@@ -119,7 +128,7 @@ struct GCCollectorSettingsTests {
             state.gcOrphanProcessesEnabled = true
             state.configFetcher = { @MainActor in throw Down() }
 
-            await state.loadGCCollectorConfig()
+            await state.loadGCConfig()
 
             #expect(state.gcOrphanProcessesEnabled)
         }
@@ -130,8 +139,17 @@ struct GCCollectorSettingsTests {
             let on = GeneralSettingsTab.gcCollectorCaption(collector, cleanupEnabled: true)
             let off = GeneralSettingsTab.gcCollectorCaption(collector, cleanupEnabled: false)
             #expect(on == collector.caption)
-            #expect(on.hasSuffix("Off by default."))
             #expect(off == "\(collector.caption) Requires automatic cleanup to be on.")
+        }
+    }
+
+    @Test func captionAndHelpFollowTheShippedDefaultConstant() {
+        for collector in GCCollector.allCases {
+            let shipped = collector.mapping.shippedDefault
+            #expect(collector.caption.hasSuffix(shipped ? "On by default." : "Off by default."))
+            #expect(collector.help.contains(shipped ? "(default on)" : "(default off)"))
+            #expect(collector.help.hasSuffix("Same switch as \(collector.mapping.cliCommand)."))
+            #expect(!collector.help.contains("`"))
         }
     }
 }

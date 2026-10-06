@@ -481,7 +481,7 @@ struct GeneralSettingsTab: View {
                 get: { appState.gcCollectorEnabled(collector) },
                 set: { newValue in Task { await appState.setGCCollectorEnabled(collector, newValue) } }
             ))
-            .help("\(collector.help). Same switch as `\(collector.cliCommand)`.")
+            .help(collector.help)
             Text(Self.gcCollectorCaption(collector, cleanupEnabled: appState.gcEnabled))
                 .font(.caption)
                 .foregroundStyle(.secondary)

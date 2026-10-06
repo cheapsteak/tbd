@@ -44,11 +44,15 @@ struct GCProfileDirs: AsyncParsableCommand {
         commandName: "profile-dirs",
         abstract: "Show, enable, or disable reclaiming orphaned model-profile config dirs (default off)")
     @Argument(help: "on | off (omit to print the current value)") var state: String?
+    /// The no-argument read-back line, over the daemon's resolved `Config`.
+    static func statusLine(_ config: Config) -> String {
+        gcToggleStatusLine(label: "Profile-dir GC", enabled: config.gcProfileDirsEnabled,
+                           shippedDefault: Config.gcProfileDirsEnabledDefault)
+    }
     mutating func run() async throws {
         guard let state else {
             let config = try fetchGCConfig()
-            print(gcToggleStatusLine(label: "Profile-dir GC", enabled: config.gcProfileDirsEnabled,
-                                     shippedDefault: Config.gcProfileDirsEnabledDefault))
+            print(Self.statusLine(config))
             return
         }
         let enabled = try parseGCToggleState(state)
@@ -67,11 +71,15 @@ struct GCOrphanProcesses: AsyncParsableCommand {
         commandName: "orphan-processes",
         abstract: "Show, enable, or disable reclaiming processes that outlived their worktree (default off)")
     @Argument(help: "on | off (omit to print the current value)") var state: String?
+    /// The no-argument read-back line, over the daemon's resolved `Config`.
+    static func statusLine(_ config: Config) -> String {
+        gcToggleStatusLine(label: "Orphan-process GC", enabled: config.gcOrphanProcessesEnabled,
+                           shippedDefault: Config.gcOrphanProcessesEnabledDefault)
+    }
     mutating func run() async throws {
         guard let state else {
             let config = try fetchGCConfig()
-            print(gcToggleStatusLine(label: "Orphan-process GC", enabled: config.gcOrphanProcessesEnabled,
-                                     shippedDefault: Config.gcOrphanProcessesEnabledDefault))
+            print(Self.statusLine(config))
             return
         }
         let enabled = try parseGCToggleState(state)
@@ -92,11 +100,15 @@ struct GCHangStacks: AsyncParsableCommand {
         commandName: "hang-stacks",
         abstract: "Show, enable, or disable reclaiming old hang-stack diagnostics (default off)")
     @Argument(help: "on | off (omit to print the current value)") var state: String?
+    /// The no-argument read-back line, over the daemon's resolved `Config`.
+    static func statusLine(_ config: Config) -> String {
+        gcToggleStatusLine(label: "Hang-stack GC", enabled: config.gcHangStacksEnabled,
+                           shippedDefault: Config.gcHangStacksEnabledDefault)
+    }
     mutating func run() async throws {
         guard let state else {
             let config = try fetchGCConfig()
-            print(gcToggleStatusLine(label: "Hang-stack GC", enabled: config.gcHangStacksEnabled,
-                                     shippedDefault: Config.gcHangStacksEnabledDefault))
+            print(Self.statusLine(config))
             return
         }
         let enabled = try parseGCToggleState(state)
@@ -137,12 +149,15 @@ struct GCRetainedTranscripts: AsyncParsableCommand {
             """
     )
     @Argument(help: "on | off (omit to print the current value)") var state: String?
+    /// The no-argument read-back line, over the daemon's resolved `Config`.
+    static func statusLine(_ config: Config) -> String {
+        gcToggleStatusLine(label: "Retained-transcript GC", enabled: config.gcRetainedTranscriptsEnabled,
+                           shippedDefault: Config.gcRetainedTranscriptsEnabledDefault)
+    }
     mutating func run() async throws {
         guard let state else {
             let config = try fetchGCConfig()
-            print(gcToggleStatusLine(
-                label: "Retained-transcript GC", enabled: config.gcRetainedTranscriptsEnabled,
-                shippedDefault: Config.gcRetainedTranscriptsEnabledDefault))
+            print(Self.statusLine(config))
             return
         }
         let enabled = try parseGCToggleState(state)

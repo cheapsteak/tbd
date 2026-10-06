@@ -1015,7 +1015,7 @@ final class AppState {
     /// from the daemon alongside the other config-backed worktree defaults.
     var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
-    /// `gcEnabled` by the daemon). Loaded via `loadGCCollectorConfig()`.
+    /// `gcEnabled` by the daemon). Loaded via `loadGCConfig()`.
     var gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault
     var gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault
     var gcRetainedTranscriptsEnabled: Bool = Config.gcRetainedTranscriptsEnabledDefault
@@ -1801,12 +1801,8 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
         { [daemonClient] collector, enabled in
-            switch collector {
-            case .orphanProcesses: try await daemonClient.setGCOrphanProcessesEnabled(enabled)
-            case .profileDirs: try await daemonClient.setGCProfileDirsEnabled(enabled)
-            case .retainedTranscripts: try await daemonClient.setGCRetainedTranscriptsEnabled(enabled)
-            case .hangStacks: try await daemonClient.setGCHangStacksEnabled(enabled)
-            }
+            let mapping = collector.mapping
+            try await daemonClient.setGCCollectorEnabled(method: mapping.rpcMethod, params: mapping.params(enabled))
         }
     /// How `fetchConfig` reads the daemon's resolved `Config` — injectable so
     /// the config loaders are testable without a real daemon.
@@ -2750,8 +2746,7 @@ final class AppState {
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
                 await self?.loadSupervisionConfig()
-                await self?.loadHangStackRetentionConfig()
-                await self?.loadGCCollectorConfig()
+                await self?.loadGCConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
                 // refresh capabilities too — a toggle from ANOTHER client
@@ -3440,8 +3435,7 @@ final class AppState {
             await loadModelProfiles()
             await loadHibernationConfig()
             await loadSupervisionConfig()
-            await loadHangStackRetentionConfig()
-            await loadGCCollectorConfig()
+            await loadGCConfig()
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()

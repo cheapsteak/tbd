@@ -33,4 +33,43 @@ struct GCToggleCommandTests {
         #expect(gcToggleStatusLine(label: "Hang-stack GC", enabled: false, shippedDefault: false)
             == "Hang-stack GC: off (default off)")
     }
+
+    /// Each read path reads its own `Config` field: flip one field at a time
+    /// and only that command's line changes.
+    @Test func eachReadPathReadsItsOwnConfigField() {
+        func onOff(_ value: Bool) -> String { value ? "on" : "off" }
+        var base = Config()
+        base.gcOrphanProcessesEnabled = false
+        base.gcProfileDirsEnabled = false
+        base.gcRetainedTranscriptsEnabled = false
+        base.gcHangStacksEnabled = false
+        #expect(GCOrphanProcesses.statusLine(base)
+            == "Orphan-process GC: off (default \(onOff(Config.gcOrphanProcessesEnabledDefault)))")
+        #expect(GCProfileDirs.statusLine(base)
+            == "Profile-dir GC: off (default \(onOff(Config.gcProfileDirsEnabledDefault)))")
+        #expect(GCRetainedTranscripts.statusLine(base)
+            == "Retained-transcript GC: off (default \(onOff(Config.gcRetainedTranscriptsEnabledDefault)))")
+        #expect(GCHangStacks.statusLine(base)
+            == "Hang-stack GC: off (default \(onOff(Config.gcHangStacksEnabledDefault)))")
+
+        var config = base
+        config.gcOrphanProcessesEnabled = true
+        #expect(GCOrphanProcesses.statusLine(config).hasPrefix("Orphan-process GC: on"))
+        #expect(GCProfileDirs.statusLine(config).hasPrefix("Profile-dir GC: off"))
+
+        config = base
+        config.gcProfileDirsEnabled = true
+        #expect(GCProfileDirs.statusLine(config).hasPrefix("Profile-dir GC: on"))
+        #expect(GCOrphanProcesses.statusLine(config).hasPrefix("Orphan-process GC: off"))
+
+        config = base
+        config.gcRetainedTranscriptsEnabled = true
+        #expect(GCRetainedTranscripts.statusLine(config).hasPrefix("Retained-transcript GC: on"))
+        #expect(GCHangStacks.statusLine(config).hasPrefix("Hang-stack GC: off"))
+
+        config = base
+        config.gcHangStacksEnabled = true
+        #expect(GCHangStacks.statusLine(config).hasPrefix("Hang-stack GC: on"))
+        #expect(GCRetainedTranscripts.statusLine(config).hasPrefix("Retained-transcript GC: off"))
+    }
 }

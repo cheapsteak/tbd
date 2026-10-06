@@ -272,10 +272,10 @@ extension RPCRouter {
     /// bounding `~/Library/Logs/TBD/hang-stacks/` by age and by count, read on
     /// top of the GC master switch.
     ///
-    /// The broadcast is load-bearing beyond refreshing a Settings toggle (there
-    /// is none for this flag): the app mirrors the resolved value into
-    /// `HangStackWriter`'s write-time cap, so this delta is how the write side
-    /// of the policy learns it was turned on without waiting for a relaunch.
+    /// The broadcast is load-bearing beyond refreshing the Settings → Cleanup
+    /// toggle: the app mirrors the resolved value into `HangStackWriter`'s
+    /// write-time cap, so this delta is how the write side of the policy
+    /// learns it was turned on without waiting for a relaunch.
     ///
     /// Like the master switch, flipping it off does not cancel an in-progress
     /// sweep: `OrphanGC.sweep` re-reads the flag on its next pass.

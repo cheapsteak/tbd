@@ -1094,37 +1094,11 @@ actor DaemonClient {
         )
     }
 
-    /// Set the orphaned-process collector's soak switch (`tbd gc orphan-processes`).
-    func setGCOrphanProcessesEnabled(_ enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetGCOrphanProcessesEnabled,
-            params: ConfigSetGCOrphanProcessesEnabledParams(enabled: enabled)
-        )
-    }
-
-    /// Set the profile-dir collector's soak switch (`tbd gc profile-dirs`).
-    func setGCProfileDirsEnabled(_ enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetGCProfileDirsEnabled,
-            params: ConfigSetGCProfileDirsEnabledParams(enabled: enabled)
-        )
-    }
-
-    /// Set the retained-transcript collector's soak switch
-    /// (`tbd gc retained-transcripts`).
-    func setGCRetainedTranscriptsEnabled(_ enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
-            params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled)
-        )
-    }
-
-    /// Set the hang-stack reclaimer's soak switch (`tbd gc hang-stacks`).
-    func setGCHangStacksEnabled(_ enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetGCHangStacksEnabled,
-            params: ConfigSetGCHangStacksEnabledParams(enabled: enabled)
-        )
+    /// Set one opt-in orphan-GC collector's switch, through the same RPC its
+    /// `tbd gc <collector>` subcommand calls. The method and params come from
+    /// `GCCollector.mapping`.
+    func setGCCollectorEnabled(method: String, params: any Encodable & Sendable) async throws {
+        try await callVoidAsync(method: method, params: params)
     }
 
     /// Set whether ordinary new worktrees start with an empty Notes tab.
