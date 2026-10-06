@@ -261,9 +261,7 @@ enum PRBindingPresentation {
     /// `doneMenuLeadLimit` is cut short with an ellipsis.
     ///
     /// A done-chip builder of its own rather than `menuRows`, so the `+N` menu
-    /// and the toolbar dropdown keep sharing one row shape. Rows render through
-    /// `menuRowsID` exactly as `menuRows`' do — the key reads only `id`,
-    /// `title` and `url`.
+    /// and the toolbar dropdown keep sharing one row shape.
     static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
             let reference = doneReference(binding)
@@ -278,34 +276,6 @@ enum PRBindingPresentation {
                 state: binding.status?.state
             )
         }
-    }
-
-    /// The `.id` key for a `Menu` rendering `menuRows`, keyed on what those
-    /// rows actually draw. AppKit materializes an `NSMenu` ONCE and later
-    /// SwiftUI state changes do not reach it, so without a key that moves when
-    /// the rows do, a row reads stale for as long as the menu lives — the
-    /// constraint `PRButtonLabel.prSplitButtonID` exists for, in the smaller
-    /// shape a plain menu needs.
-    ///
-    /// Keyed on the composed `title` rather than on any one field, because the
-    /// title is the whole of what a row renders and it folds in every input
-    /// that can move underneath it: the queue position (3 → 2 → 1 on every
-    /// merge ahead of the PR, and the reason a stale row could contradict the
-    /// chip two pixels away), the status `reason`, and the head branch. `url`
-    /// joins it because the row's action captures it and `disabled` reads it, so
-    /// a re-pointed PR must rebuild the item even with identical text. `id`
-    /// pins which binding each row IS, so a reorder or a swap that happens to
-    /// preserve the titles still counts as a change.
-    ///
-    /// Fields go through `PRButtonLabel.escapedIDField` for the same reason
-    /// they do there: a title is free text that can contain the key's own
-    /// separators, and an unescaped collision does not merely look wrong — it
-    /// freezes the menu on the previous set.
-    static func menuRowsID(_ rows: [MenuRow]) -> String {
-        rows.map { row in
-            "\(row.id)-\(PRButtonLabel.escapedIDField(row.title))"
-                + "-\(PRButtonLabel.escapedIDField(row.url?.absoluteString))"
-        }.joined(separator: "|")
     }
 
     /// Tooltip for the status bar's `+N` overflow chip.
@@ -345,9 +315,18 @@ enum PRBindingPresentation {
         "\(total) \(openOnly ? "open " : "")pull request\(total == 1 ? "" : "s")"
     }
 
-    /// The status bar's done chip label, e.g. `"✓ 5 done"`.
-    static func doneChipLabel(count: Int) -> String {
-        "\u{2713} \(count) done"
+    /// The status bar's done chip label, e.g. `"✓ 5 PRs done"`.
+    ///
+    /// The noun is what makes a bare count readable as pull requests at all,
+    /// so the chip names one even though it summarises a set. It says `MRs`
+    /// when every finished binding is a GitLab merge request — each binding's
+    /// own URL decides, see `Forge.forURL` — and `PRs` otherwise, including a
+    /// set that spans both forges, where the more common word stands in for
+    /// both. The full, forge-neutral wording lives in `doneChipCardTitle`.
+    static func doneChipLabel(_ done: [PRBinding]) -> String {
+        let allGitLab = !done.isEmpty && done.allSatisfy { Forge.forURL($0.url) == .gitlab }
+        let noun = (allGitLab ? Forge.gitlab : Forge.github).refNoun
+        return "\u{2713} \(done.count) \(noun)\(done.count == 1 ? "" : "s") done"
     }
 
     /// The done chip's hover-card title. Counts a set that can span both
