@@ -199,6 +199,19 @@ extension RPCRouter {
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
             vend = try await registry.beginAttach(terminalID: terminal.id)
+        } catch let error as HolderRegistry.Error
+            where attachRefusalMeansSessionEnded(error, terminal: terminal) {
+            // Refused, and the holder the row records is not running: the
+            // session is over, not merely unattachable. Answered as a status
+            // rather than an error so the app does not tell the user the
+            // session "keeps running" and to reopen the tab to retry.
+            logger.warning("""
+                holder attach.request for terminal \(terminal.id.uuidString, privacy: .public): \
+                its holder (pid \(terminal.holderPID ?? 0, privacy: .public)) is no longer \
+                running; reporting the session as ended
+                """)
+            return try RPCResponse(
+                result: AttachRequestResult(status: AttachRequestResult.holderSessionEndedStatus))
         } catch {
             logger.error("""
                 holder attach.request failed for terminal \
@@ -244,6 +257,29 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// Whether `beginAttach` refusing with `error` means the session has
+    /// ended rather than that this attach cannot happen right now. "Ended" is
+    /// `HolderChildDisposition.sessionHasEnded` — the park's own answer — so a
+    /// tab whose job still runs is never told its session is over.
+    ///
+    /// Three refusals can stand in front of a dead holder, because the registry
+    /// checks its own bookkeeping before it ever reaches the pty: no reader at
+    /// all, a viewer claim, and an attach still pending. Each of them is the
+    /// ended answer when the holder is gone — a claim or a pending attach on a
+    /// session nothing serves any more is bookkeeping, not a session. Every
+    /// other refusal is about the request, not the session, and stays an error.
+    func attachRefusalMeansSessionEnded(
+        _ error: HolderRegistry.Error, terminal: Terminal
+    ) -> Bool {
+        switch error {
+        case .noLiveReader, .attachedToViewer, .attachAlreadyPending:
+            return HolderChildDisposition.sessionHasEnded(
+                terminal, holderIsLive: holderProcessIsLive, signaller: holderChildSignaller)
+        default:
+            return false
+        }
     }
 
     /// Handle `attach.ready`: the app's reader is draining the vended fd —

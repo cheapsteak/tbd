@@ -3739,9 +3739,16 @@ public struct AttachRequestParams: Codable, Sendable {
 
 /// Result of `attach.request`.
 public struct AttachRequestResult: Codable, Sendable {
-    /// One of "pending" (fd vended; waiting for attach.ready) or
-    /// "unavailable" (control mode off / not configured).
+    /// One of "pending" (fd vended; waiting for attach.ready),
+    /// "unavailable" (control mode off / not configured), or
+    /// `holderSessionEndedStatus` (a holder attach whose session's holder
+    /// process is gone, so there is nothing left to attach to).
     public let status: String
+    /// The status a holder attach answers when the session has no reader and
+    /// its recorded holder process is no longer running. Distinct from an
+    /// error because the app tells the user something different: not "try
+    /// again", but "this session has ended".
+    public static let holderSessionEndedStatus = "ended"
     /// Daemon-side fanout generation of the vended attach ("pending" only).
     /// The app echoes it back in `pane.detach` so a stale detach — a closing
     /// view racing a fresh attach for the same pane — cannot kill the newer
