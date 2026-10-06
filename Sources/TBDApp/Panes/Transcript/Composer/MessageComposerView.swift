@@ -5,8 +5,9 @@ import TBDShared
 /// The composer: a text field pinned below the transcript, inside the session
 /// workbench beside the index rail.
 ///
-/// A send button that **names the target terminal**, so the injection is never
-/// anonymous.
+/// A send button that is a return icon in the field's corner. The message goes
+/// to the terminal the transcript belongs to; the terminal's name appears only
+/// in the button's tooltip and accessibility label.
 ///
 /// Text sitting unsent in the terminal's own input box is invisible here, and a
 /// message sent from the composer appends to it. No signal exists for that
@@ -91,30 +92,32 @@ struct MessageComposerView: View {
                 onRemove: { removeAttachment($0) },
                 hoveredNumber: hoveredAttachment,
                 onHover: { hoveredAttachment = $0 })
-            HStack(alignment: .bottom, spacing: 8) {
-                MessageComposerTextView(
-                    command: command,
-                    isEnabled: state.isEnabled && !isSending,
-                    onTextChange: { text, caret, hasMarkedText in
-                        draft.text = text
-                        controller?.update(
+            MessageComposerTextView(
+                command: command,
+                isEnabled: state.isEnabled && !isSending,
+                onTextChange: { text, caret, hasMarkedText in
+                    draft.text = text
+                    controller?.update(
+                        text: text, selectionLocation: caret,
+                        hasMarkedText: hasMarkedText)
+                    (handle.view as? ComposerTextView)?.argumentHint =
+                        ComposerArgumentHint.hint(
                             text: text, selectionLocation: caret,
-                            hasMarkedText: hasMarkedText)
-                        (handle.view as? ComposerTextView)?.argumentHint =
-                            ComposerArgumentHint.hint(
-                                text: text, selectionLocation: caret,
-                                commands: controller?.inventoryCommands ?? [])
-                    },
-                    onSubmit: { text in submit(text) },
-                    onEscape: { appState.focusTranscript(key) },
-                    onImageData: { stage($0) },
-                    menuIsOpen: { controller?.isOpen ?? false },
-                    onMenuAction: { handleMenu($0) },
-                    onViewReady: { view in adopt(view) })
+                            commands: controller?.inventoryCommands ?? [])
+                },
+                onSubmit: { text in submit(text) },
+                onEscape: { appState.focusTranscript(key) },
+                onImageData: { stage($0) },
+                menuIsOpen: { controller?.isOpen ?? false },
+                onMenuAction: { handleMenu($0) },
+                onViewReady: { view in adopt(view) })
                 .frame(minHeight: 32, maxHeight: 132)
-                sendButton
-            }
-            .padding(8)
+                // Room for the send glyph, so typed text never runs under it.
+                .padding(.trailing, 22)
+                .overlay(alignment: .bottomTrailing) {
+                    sendButton.padding(.bottom, 8)
+                }
+                .padding(8)
         }
         .background(.background.secondary)
         .overlay(alignment: .topLeading) {
@@ -574,9 +577,12 @@ struct MessageComposerView: View {
             if isSending {
                 ProgressView().controlSize(.small)
             } else {
-                Text(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
+                Image(systemName: "return")
             }
         }
+        // A hint glyph in the field's corner, not a column beside it.
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
         // **No key equivalent.** `ComposerKeyRouter` already maps Cmd+Return to
         // `.submit`, and a SwiftUI key equivalent is live for the whole WINDOW
         // while the composer is mounted — so a button shortcut here would fire
@@ -584,13 +590,17 @@ struct MessageComposerView: View {
         // pressing Cmd+Return means the terminal they are typing into. The
         // router owns the key; the button stays clickable.
         .disabled(!state.isEnabled || isSending || !Self.maySubmit(text: draft.text, draft: draft))
-        .help(Self.sendButtonHelp(state: state))
-        // The label is the terminal's name and changes with it; the identifier
-        // does not, which is the whole point of having both.
+        .help(
+            Self.sendButtonLabel(state: state, terminalLabel: targetLabel) + " — "
+                + Self.sendButtonHelp(state: state))
+        // The glyph names nobody, so the accessibility label carries the target.
+        // It is the terminal's name and changes with it; the identifier does not,
+        // which is the whole point of having both.
+        .accessibilityLabel(Self.sendButtonLabel(state: state, terminalLabel: targetLabel))
         .accessibilityIdentifier(ComposerAccessibility.send)
     }
 
-    /// What the send button calls the target: a terminal's label, or a
+    /// What the send button's tooltip and accessibility label call the target: a terminal's label, or a
     /// remote session's display name.
     private var targetLabel: String? {
         switch target {
@@ -599,7 +609,7 @@ struct MessageComposerView: View {
         }
     }
 
-    /// The button names the target, so an injection is never anonymous.
+    /// The tooltip and accessibility label name the target; the glyph itself does not.
     static func sendButtonLabel(state: ComposerState, terminalLabel: String?) -> String {
         let name = terminalLabel ?? "Claude"
         switch state {
@@ -613,7 +623,7 @@ struct MessageComposerView: View {
         case .notRunning:
             return "Claude is not running here. Sending resumes the session with this "
                 + "message as its first prompt. Images are sent as file paths for Claude to "
-                + "read, not as attachments."
+                + "read, not as attachments. Claude can read images up to about 500 KB."
         case .running, .blocked, .hidden, .unavailable:
             return "Return sends, Shift+Return breaks the line."
         }

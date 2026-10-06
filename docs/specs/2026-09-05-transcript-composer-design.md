@@ -25,15 +25,15 @@ sessions are out of scope. The archived transcript view never gets a composer.
 
 The composer is a text field pinned below the transcript table, inside the
 session workbench beside the index rail, wherever a live Claude Code transcript
-renders. A send button names the target terminal so the injection is never
-anonymous.
+renders. The send button is a return icon in the field's bottom-right corner;
+the message goes to the terminal the transcript belongs to.
 
 - **Running.** Enabled while Claude is working, idle, or in an informational
   state. A message sent mid-turn queues inside Claude Code, as it does when
   typed.
 - **Not running.** Enabled, with a note that Claude is not running and that
-  sending will resume it, and the send button labeled accordingly. This covers
-  a hibernated session and a session whose Claude process exited. Sending wakes
+  sending will resume it, and the send button's tooltip and accessibility label
+  reading "Resume" rather than "Send to". This covers a hibernated session and a session whose Claude process exited. Sending wakes
   the session with the message as its first prompt. While the wake is in
   flight the text stays in the field, shown as sending, until the session that
   wake started reports in. On a timeout the text is restored editable with the
@@ -179,8 +179,8 @@ an exit as hibernation means one state, one wake path, and one UI.
 An argument prompt cannot carry image attachments, so for a not-running target
 each image token is replaced inline with the quoted path as plain text. The
 sentence reads the same, and Claude reads the files with its Read tool, whose
-image reads are capped near 500 KB. The composer says so on the send button,
-because the transcript then shows a tool read after the message rather than an
+image reads are capped near 500 KB. The composer says so in the send button's
+tooltip, because the transcript then shows a tool read after the message rather than an
 image inside it. TBD spawns sessions with permissions skipped, so a read outside
 the worktree raises no prompt.
 
