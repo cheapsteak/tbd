@@ -316,7 +316,7 @@ struct StatusBarView: View {
     /// ten long titles cannot grow the card past the window it explains.
     nonisolated static let doneCardLeadLimit = 120
 
-    /// What the `✓ N done` chip's hover overlay says: the count as its title
+    /// What the `✓ N PRs done` chip's hover overlay says: the count as its title
     /// (`5 merged or closed pull requests`), then one row per finished PR in
     /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
     /// the title, else the head branch) and beneath it the PR's
@@ -751,7 +751,7 @@ private struct StatusBarHoverAffordance: ViewModifier {
 
 /// The status bar's PR cluster: one chip per bound PR up to
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
-/// more merged or closed PRs, those fold into a leading `✓ N done` chip and
+/// more merged or closed PRs, those fold into a leading `✓ N PRs done` chip and
 /// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
@@ -771,7 +771,7 @@ private struct PRChipCluster: View {
                 // tooltip would say, and both would stack over the chip.
                 PRChipMenu(
                     rows: PRBindingPresentation.doneMenuRows(model.done),
-                    label: PRBindingPresentation.doneChipLabel(count: count),
+                    label: PRBindingPresentation.doneChipLabel(model.done),
                     tooltip: nil,
                     spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
                     hoverCard: StatusBarView.doneChipHoverCard(model.done))
@@ -1009,7 +1009,7 @@ private struct PRChipView: View {
     }
 }
 
-/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N done`
+/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N PRs done`
 /// chip. Clicking it drops down the rows its caller built, in bind order. The
 /// `+N` chip's rows come from the toolbar's multi-PR dropdown's own builder —
 /// `PRBindingPresentation.menuRows` — so the two surfaces cannot describe the

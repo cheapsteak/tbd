@@ -315,9 +315,18 @@ enum PRBindingPresentation {
         "\(total) \(openOnly ? "open " : "")pull request\(total == 1 ? "" : "s")"
     }
 
-    /// The status bar's done chip label, e.g. `"✓ 5 done"`.
-    static func doneChipLabel(count: Int) -> String {
-        "\u{2713} \(count) done"
+    /// The status bar's done chip label, e.g. `"✓ 5 PRs done"`.
+    ///
+    /// The noun is what makes a bare count readable as pull requests at all,
+    /// so the chip names one even though it summarises a set. It says `MRs`
+    /// when every finished binding is a GitLab merge request — each binding's
+    /// own URL decides, see `Forge.forURL` — and `PRs` otherwise, including a
+    /// set that spans both forges, where the more common word stands in for
+    /// both. The full, forge-neutral wording lives in `doneChipCardTitle`.
+    static func doneChipLabel(_ done: [PRBinding]) -> String {
+        let allGitLab = !done.isEmpty && done.allSatisfy { Forge.forURL($0.url) == .gitlab }
+        let noun = (allGitLab ? Forge.gitlab : Forge.github).refNoun
+        return "\u{2713} \(done.count) \(noun)\(done.count == 1 ? "" : "s") done"
     }
 
     /// The done chip's hover-card title. Counts a set that can span both

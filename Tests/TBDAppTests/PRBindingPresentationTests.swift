@@ -298,9 +298,19 @@ struct PRBindingPresentationTests {
         #expect(groups.done == bindings)
     }
 
+    @Test("the done chip label names the request noun of the forges it holds")
+    func doneChipLabelNoun() {
+        let mr = { (n: Int) in self.finished(n, url: "https://gitlab.acme.dev/acme/acme-prod/-/merge_requests/\(n)") }
+        #expect(PRBindingPresentation.doneChipLabel([finished(1), finished(2)]) == "\u{2713} 2 PRs done")
+        #expect(PRBindingPresentation.doneChipLabel([mr(1), mr(2)]) == "\u{2713} 2 MRs done")
+        // A set spanning both forges takes the more common word.
+        #expect(PRBindingPresentation.doneChipLabel([finished(1), mr(2)]) == "\u{2713} 2 PRs done")
+        #expect(PRBindingPresentation.doneChipLabel([mr(1)]) == "\u{2713} 1 MR done")
+        #expect(PRBindingPresentation.doneChipLabel([finished(1)]) == "\u{2713} 1 PR done")
+    }
+
     @Test("the done chip names its count, singular and plural")
     func doneChipWording() {
-        #expect(PRBindingPresentation.doneChipLabel(count: 5) == "\u{2713} 5 done")
         #expect(PRBindingPresentation.doneChipCardTitle(count: 5)
                     == "5 merged or closed pull requests")
         #expect(PRBindingPresentation.doneChipCardTitle(count: 1)
