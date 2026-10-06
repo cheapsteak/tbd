@@ -132,6 +132,30 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
     }
 }
 
+/// One holder-transport session row whose worktree is not archived, reduced to
+/// what `OrphanProcessCollector.liveHolderSessionPIDs` needs to spare it.
+public struct LiveHolderSession: Sendable, Equatable {
+    public var terminalID: UUID
+    public var holderPID: Int32?
+    public var childPID: Int32?
+    /// The job's identity anchor, spelled as every reader spells it:
+    /// `holderChildStartedAt ?? createdAt` (see `HolderChildRecord.createdAt`).
+    public var childStartedAt: Date
+
+    public init(terminalID: UUID, holderPID: Int32?, childPID: Int32?, childStartedAt: Date) {
+        self.terminalID = terminalID
+        self.holderPID = holderPID
+        self.childPID = childPID
+        self.childStartedAt = childStartedAt
+    }
+
+    public init(_ terminal: Terminal) {
+        self.init(
+            terminalID: terminal.id, holderPID: terminal.holderPID, childPID: terminal.childPID,
+            childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+    }
+}
+
 /// Reclaims processes that outlived the worktree they were rooted in — the
 /// named reconciler for that resource class
 /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
@@ -226,9 +250,11 @@ public struct OrphanProcessCollector: Sendable {
         roots: TBDProcessRoots,
         ourUID: uid_t,
         ourPID: Int32,
-        graceSeconds: Int
+        graceSeconds: Int,
+        exempt: Set<Int32> = []
     ) -> [OrphanProcessCandidate] {
-        let protected = protectedPIDs(processes: processes, ourPID: ourPID, ourUID: ourUID)
+        let protected = protectedPIDs(
+            processes: processes, ourPID: ourPID, ourUID: ourUID, exempt: exempt)
         // How stale the cwd map is by the time this snapshot was read. Never
         // negative, so a clock that went backwards cannot weaken the gate.
         let cwdAge = max(0, now().timeIntervalSince(cwdsCapturedAt))
@@ -351,13 +377,18 @@ public struct OrphanProcessCollector: Sendable {
     /// instead. The grandchild is not lost to the reconciler either: when its
     /// foreign parent exits, it reparents to launchd and the next sweep sees it
     /// as an orphan root of its own.
+    ///
+    /// `exempt` is protected the same way — the caller's list of processes it
+    /// can attest belong to something live, today `liveHolderSessionPIDs`.
     func protectedPIDs(
-        processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t
+        processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t,
+        exempt: Set<Int32> = []
     ) -> Set<Int32> {
         var byPID: [Int32: ProcessSnapshotEntry] = [:]
         for entry in processes { byPID[entry.pid] = entry }
 
         var protected: Set<Int32> = [0, 1, ourPID]
+        protected.formUnion(exempt)
         // Walk our own ancestry. Bounded by `protected` growing on every step,
         // so a cyclic (corrupt) snapshot terminates instead of hanging a sweep.
         var cursor = ourPID
@@ -399,6 +430,96 @@ public struct OrphanProcessCollector: Sendable {
             if basename == "TBDDaemon" || basename == "TBDApp" { return true }
         }
         return false
+    }
+
+    // MARK: - Live holder sessions
+
+    /// The pids of every `TBDHolder`, and every job one forked, that belongs to
+    /// a holder-transport session whose worktree is not archived. The caller
+    /// passes the result as `exempt`, so none of them is ever signalled or
+    /// descended into.
+    ///
+    /// **Why cwd is not enough here.** A holder outlives the daemon at
+    /// `ppid == 1`, which is exactly the shape this sweep hunts, and a holder
+    /// spawned before `HolderSpawner` pinned its cwd to `/` carries the cwd of
+    /// whichever worktree launched the daemon. Archive that worktree and every
+    /// such holder — serving sessions in other, live worktrees — reads as an
+    /// escaped job of a dead one. Measured: one sweep killed six holders and
+    /// their jobs this way, and their terminal rows went on naming holders that
+    /// no longer existed.
+    ///
+    /// Identity runs through `ProcessIdentityCheck`, the check
+    /// `AgentReaper.decideHolderChild` uses, with the **opposite** policy:
+    /// that leg decides whether to signal, so only `.same` kills; this one
+    /// decides whether to *spare*, so only an answer that positively says the
+    /// pid now names somebody else — gone, started at another time, or running
+    /// another executable — withholds the exemption. An unreadable start time
+    /// or command line protects.
+    ///
+    /// - A **holder** is identified by its command line naming the session
+    ///   (`--session <terminal id>`), which is unique by construction — the
+    ///   creation lock admits one holder per session — and does not depend on
+    ///   a start time no row records. The same test is applied to every holder
+    ///   in the snapshot, so a holder is spared even when its row's
+    ///   `holderPID` is stale or not yet written.
+    /// - A **job** is identified as `AgentReaper` identifies it: started within
+    ///   `AgentReaper.defaultHolderIdentityWindow` of the row's anchor, and
+    ///   presenting an executable a holder's job could have.
+    public func liveHolderSessionPIDs(
+        _ sessions: [LiveHolderSession], processes: [ProcessSnapshotEntry]
+    ) -> Set<Int32> {
+        guard !sessions.isEmpty else { return [] }
+        let sessionIDs = Set(sessions.map(\.terminalID))
+        var exempt: Set<Int32> = []
+        for entry in processes {
+            if let id = Self.holderSessionID(entry.command), sessionIDs.contains(id) {
+                exempt.insert(entry.pid)
+            }
+        }
+        for session in sessions {
+            if let holderPID = session.holderPID, holderPID > 1,
+               !Self.refutesIdentity(ProcessIdentityCheck.verify(
+                   pid: holderPID,
+                   startedWithin: .infinity,
+                   of: session.childStartedAt,
+                   executableIsAcceptable: { Self.holderSessionID($0) == session.terminalID },
+                   signaller: signaller)) {
+                exempt.insert(holderPID)
+            }
+            if let childPID = session.childPID, childPID > 1,
+               !Self.refutesIdentity(ProcessIdentityCheck.verify(
+                   pid: childPID,
+                   startedWithin: AgentReaper.defaultHolderIdentityWindow,
+                   of: session.childStartedAt,
+                   executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+                   signaller: signaller)) {
+                exempt.insert(childPID)
+            }
+        }
+        return exempt
+    }
+
+    /// True only for the answers that say the pid names a different process —
+    /// or none. Everything uncertain is not a refutation.
+    static func refutesIdentity(_ verdict: ProcessIdentityVerdict) -> Bool {
+        switch verdict {
+        case .notRunning, .startTimeMismatch, .foreignExecutable: return true
+        case .same, .startTimeUnreadable, .commandUnreadable: return false
+        }
+    }
+
+    /// The session a `TBDHolder` command line serves, or nil when the command
+    /// is not a holder's. Matched on any token's basename, for the reason
+    /// `isTBDBinary` gives: `ps` prints argv unquoted, so a path with a space
+    /// in it splits.
+    static func holderSessionID(_ command: String) -> UUID? {
+        let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        let isHolder = tokens.contains { token in
+            (token.split(separator: "/").last.map(String.init) ?? String(token)) == "TBDHolder"
+        }
+        guard isHolder, let flag = tokens.firstIndex(of: "--session"),
+              tokens.index(after: flag) < tokens.endIndex else { return nil }
+        return UUID(uuidString: String(tokens[tokens.index(after: flag)]))
     }
 
     // MARK: - Identity across time

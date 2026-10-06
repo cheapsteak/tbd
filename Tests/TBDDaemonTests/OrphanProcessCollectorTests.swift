@@ -368,6 +368,114 @@ struct OrphanProcessCollectorTests {
             "the foreign-uid child and the grandchild below it are both left alone")
     }
 
+    // MARK: - Live holder sessions
+
+    private let session = UUID(uuidString: "0B7A0000-0000-4000-8000-000000000001")!
+    private let anchor = Date(timeIntervalSince1970: 900_000)
+
+    private func holderCommand(_ id: UUID) -> String {
+        "/acme/.build/release/TBDHolder --session \(id.uuidString) --socket /h/x.sock --lock-fd 9"
+    }
+
+    /// A holder spawned from the worktree that launched the daemon keeps that
+    /// cwd and sits at `ppid == 1`; archive that worktree and, without the
+    /// exemption, the holder and its job are an "orphan" tree.
+    private func holderTable() -> [ProcessSnapshotEntry] {
+        [
+            entry(pid: 800, command: holderCommand(session)),
+            entry(pid: 801, ppid: 800, command: "/bin/zsh -l"),
+            entry(pid: 900, command: "/usr/bin/node server.js"),
+        ]
+    }
+
+    private func holderSignaller(childStartedAt: Date?) -> FakeProcessSignaller {
+        let signaller = FakeProcessSignaller()
+        signaller.cmdlines[800] = holderCommand(session)
+        signaller.cmdlines[801] = "/bin/zsh -l"
+        if let childStartedAt { signaller.startTimes[801] = childStartedAt }
+        signaller.startTimes[800] = anchor
+        return signaller
+    }
+
+    private func liveSession(holderPID: Int32? = 800, childPID: Int32? = 801) -> LiveHolderSession {
+        LiveHolderSession(
+            terminalID: session, holderPID: holderPID, childPID: childPID, childStartedAt: anchor)
+    }
+
+    private func sweep(
+        _ subject: OrphanProcessCollector, processes: [ProcessSnapshotEntry], exempt: Set<Int32>
+    ) -> [Int32] {
+        subject.candidates(
+            processes: processes,
+            cwdByPID: [800: dead, 801: dead, 900: dead],
+            cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
+            roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600,
+            exempt: exempt
+        ).map(\.pid)
+    }
+
+    @Test("a live session's holder under a dead worktree's cwd is kept; a real orphan there is not")
+    func liveHolderIsExemptWhileARealOrphanIsReaped() {
+        let subject = collector(signaller: holderSignaller(childStartedAt: anchor))
+        let processes = holderTable()
+        // Discriminates: without the exemption the holder is a candidate.
+        #expect(sweep(subject, processes: processes, exempt: []) == [800, 900])
+
+        let exempt = subject.liveHolderSessionPIDs([liveSession()], processes: processes)
+        #expect(exempt == [800, 801])
+        #expect(sweep(subject, processes: processes, exempt: exempt) == [900])
+
+        let protected = subject.protectedPIDs(
+            processes: processes, ourPID: 12_345, ourUID: getuid(), exempt: exempt)
+        #expect(protected.isSuperset(of: [800, 801]))
+        #expect(!protected.contains(900))
+    }
+
+    @Test("a holder whose session row is absent (archived worktree) is not exempt")
+    func holderOfAnUnlistedSessionIsNotExempt() {
+        let subject = collector(signaller: holderSignaller(childStartedAt: anchor))
+        let exempt = subject.liveHolderSessionPIDs([], processes: holderTable())
+        #expect(exempt.isEmpty)
+        #expect(sweep(subject, processes: holderTable(), exempt: exempt) == [800, 900])
+    }
+
+    @Test("a holder naming a live session is exempt even when the row has no holder pid")
+    func holderIsRecognizedByItsCommandLine() {
+        let subject = collector(signaller: holderSignaller(childStartedAt: anchor))
+        let exempt = subject.liveHolderSessionPIDs(
+            [liveSession(holderPID: nil, childPID: nil)], processes: holderTable())
+        #expect(exempt == [800])
+    }
+
+    @Test("a recorded pid now naming a different process is not exempt")
+    func reusedPIDsAreNotExempt() {
+        let signaller = holderSignaller(childStartedAt: anchor.addingTimeInterval(86_400))
+        signaller.cmdlines[800] = holderCommand(UUID())
+        let subject = collector(signaller: signaller)
+        let processes = [
+            entry(pid: 800, command: holderCommand(UUID())),
+            entry(pid: 801, ppid: 800, command: "/bin/zsh -l"),
+        ]
+        #expect(subject.liveHolderSessionPIDs([liveSession()], processes: processes).isEmpty)
+    }
+
+    @Test("a recorded job whose start time cannot be read stays exempt")
+    func uncertainIdentityStaysExempt() {
+        let subject = collector(signaller: holderSignaller(childStartedAt: nil))
+        let exempt = subject.liveHolderSessionPIDs([liveSession()], processes: holderTable())
+        #expect(exempt.contains(801))
+    }
+
+    @Test("a holder's session is read from any token, and only from a TBDHolder command")
+    func holderSessionIDParsing() {
+        #expect(OrphanProcessCollector.holderSessionID(holderCommand(session)) == session)
+        #expect(OrphanProcessCollector.holderSessionID(
+            "/opt/Jane Roe/.build/TBDHolder --session \(session.uuidString)") == session)
+        #expect(OrphanProcessCollector.holderSessionID(
+            "/usr/bin/node --session \(session.uuidString)") == nil)
+        #expect(OrphanProcessCollector.holderSessionID("/x/TBDHolder --session") == nil)
+    }
+
     // MARK: - Reclamation
 
     @Test("reap SIGTERMs leaf-first and SIGKILLs only what survives the grace window")

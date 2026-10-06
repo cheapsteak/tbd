@@ -1578,11 +1578,24 @@ public actor OrphanGC {
             return
         }
         guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true),
-              let archived = try? await db.worktrees.list(status: .archived) else {
+              let archived = try? await db.worktrees.list(status: .archived),
+              let terminals = try? await db.terminals.list() else {
             logger.warning("gc: orphan-process phase skipped — DB read failed")
             planned.append("KEEP db-unavailable orphan-processes")
             return
         }
+
+        // Holders and their jobs serving any session whose worktree is not
+        // positively archived are never this phase's to signal, whatever their
+        // cwd says — see `liveHolderSessionPIDs`. Keyed on "not archived"
+        // rather than "in the live list", so a row this phase cannot place
+        // (a remote or not-yet-listed worktree) is spared, not exposed.
+        let archivedIDs = Set(archived.map(\.id))
+        let holderSessions = terminals
+            .filter { $0.transport == .holder && !archivedIDs.contains($0.worktreeID) }
+            .map(LiveHolderSession.init)
+        let exempt = orphanProcessCollector.liveHolderSessionPIDs(
+            holderSessions, processes: processes)
 
         let (roots, repoPathByPool) = orphanProcessRoots(
             repos: repos, archived: archived, liveRows: liveRows)
@@ -1593,12 +1606,13 @@ public actor OrphanGC {
             roots: roots,
             ourUID: getuid(),
             ourPID: getpid(),
-            graceSeconds: config.gcGraceSeconds
+            graceSeconds: config.gcGraceSeconds,
+            exempt: exempt
         )
         guard !candidates.isEmpty else { return }
 
         let protected = orphanProcessCollector.protectedPIDs(
-            processes: processes, ourPID: getpid(), ourUID: getuid())
+            processes: processes, ourPID: getpid(), ourUID: getuid(), exempt: exempt)
         // Every tree is planned from the ONE snapshot before anything is
         // signalled, so the plan is a single consistent reading of the process
         // graph rather than one that interleaves with its own destruction.
