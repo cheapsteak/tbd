@@ -315,6 +315,23 @@ The description is sanitized exactly like every other body: HTML comments stripp
 whole (so a quoted state marker cannot masquerade as the pipeline's own), then
 angle brackets escaped.
 
+### The conventions lens checks product fit
+
+TBD is used across unrelated organizations, so the conventions specialist asks of
+every new script, doc, default, or feature whether a user with a different stack
+would find it useful and correct as written. Work that only holds when a project
+follows one particular naming, layout, toolchain, service, or database convention
+is a Medium finding unless TBD itself defines that convention or makes it fully
+configurable. User-land placement, a required parameter, and a "per-project"
+framing do not count as generality — a parameter that only selects within one
+project's scheme is still that scheme — and an Assumptions bullet about how some
+project names or runs things is read as evidence of the problem, not a mitigation.
+The finding points such work at the project's own repo, wired to TBD through an
+existing hook such as the per-repo `archive` hook. The specialist reads new scripts
+and docs in full rather than grepping them: a script whose correctness rested on
+one project's database naming rule passed a review that searched the diff for
+identifiers instead of reading it.
+
 ### What a trusted author's branch can execute
 
 The opt-in is only defensible because of the push-access gate above, so it is worth
