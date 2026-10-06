@@ -30,11 +30,59 @@ struct HolderLockTests {
         }
     }
 
-    @Test func lockIsReacquirableAfterRelease() throws {
+    /// Takes the lock at `path`, retrying only while it reads `.alreadyHeld`.
+    ///
+    /// The retry exists for somebody else's child, not for ours. Every test
+    /// target links into one process and Swift Testing runs suites in
+    /// parallel; SwiftTerm's `startProcess` in the app suites is a `forkpty`,
+    /// and a fork copies every open descriptor — O_CLOEXEC only drops it at
+    /// the child's `exec`. `flock` lives on the open file description, so a
+    /// sibling that forks between our `acquire` and our `release` holds this
+    /// lock until its child execs, and an immediate `LOCK_NB` re-take reads
+    /// `.alreadyHeld` against a claim nobody in this test made.
+    ///
+    /// Any other error fails at once, and the verdict after the budget comes
+    /// from a fresh attempt. The budget is generous because a forked child
+    /// waiting to `exec` on a starved runner can be descheduled for seconds;
+    /// success costs one attempt, so the size only matters when the lock
+    /// genuinely never comes back.
+    private func reacquire(path: String) async throws -> HolderLock {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while true {
+            do {
+                return try HolderLock.acquire(path: path)
+            } catch HolderLock.Error.alreadyHeld where ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
+    /// Whether `fd` is still a descriptor on the lock file at `path`.
+    ///
+    /// Not `fcntl(fd, F_GETFD) == -1` alone: once the number is free, a
+    /// parallel suite can open something else onto it, so a reused number is
+    /// not evidence that `release()` kept the lock file open. Comparing the
+    /// file identity is.
+    private func descriptorStillOpensLockFile(_ fd: Int32, path: String) -> Bool {
+        var onDescriptor = stat()
+        guard fstat(fd, &onDescriptor) == 0 else { return false }
+        var onPath = stat()
+        guard stat(path, &onPath) == 0 else { return false }
+        return onDescriptor.st_dev == onPath.st_dev && onDescriptor.st_ino == onPath.st_ino
+    }
+
+    @Test func lockIsReacquirableAfterRelease() async throws {
         let path = scratchPath()
         let first = try HolderLock.acquire(path: path)
+        let releasedDescriptor = first.fileDescriptor
         first.release()
-        let second = try HolderLock.acquire(path: path)
+        // Deterministic half: our own copy is gone. A `release()` that stopped
+        // closing the descriptor fails here, before the tolerant re-take below
+        // could mistake it for a sibling's fork.
+        #expect(
+            !descriptorStillOpensLockFile(releasedDescriptor, path: path),
+            "release() left the lock file open on its descriptor")
+        let second = try await reacquire(path: path)
         defer { second.release() }
         #expect(second.fileDescriptor >= 0)
     }
@@ -77,7 +125,7 @@ struct HolderLockTests {
     /// `secondAcquisitionFailsWhileFirstIsHeld`, and a `LOCK_NB` regression
     /// should redden that test rather than park this one in a blocking `flock`
     /// forever.
-    @Test func lockIsReacquirableAfterTheHoldingProcessExits() throws {
+    @Test func lockIsReacquirableAfterTheHoldingProcessExits() async throws {
         let path = scratchPath()
         let lock = try HolderLock.acquire(path: path)
         var parentStillHoldsLock = true
@@ -215,8 +263,11 @@ struct HolderLockTests {
         // Nothing in userspace released that lock. If the kernel did not drop
         // it when the process died, this throws `.alreadyHeld` against a pid
         // that no longer exists — a session UUID unreclaimable for the life of
-        // the machine.
-        let reacquired = try HolderLock.acquire(path: path)
+        // the machine. Tolerant of `.alreadyHeld` for the reason on
+        // `reacquire(path:)`: a sibling that forked while this process still
+        // held the lock keeps it until its own child execs. A kernel that
+        // never drops the lock still fails, once the budget is spent.
+        let reacquired = try await reacquire(path: path)
         reacquired.release()
         #expect(reacquired.fileDescriptor >= 0)
     }
