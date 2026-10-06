@@ -76,7 +76,13 @@ struct HolderClientTests {
                 "the test process must not already sit at /, or this proves nothing")
         #expect(processCWD(fixture.handle.holderPID) == HolderSpawner.holderWorkingDirectory)
         // Polled because the job `chdir`s after `fork`, on its own schedule.
-        let requested = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath().path
+        // `realpath(3)`, because the kernel reports the resolved path
+        // (`/private/tmp`) and Foundation's `resolvingSymlinksInPath` strips the
+        // `/private` prefix back off.
+        let requested = try #require(realpath("/tmp", nil).map { resolved in
+            defer { free(resolved) }
+            return String(cString: resolved)
+        })
         let jobStarted = waitUntilTrue("the job's cwd to be the requested directory") {
             processCWD(fixture.handle.childPID) == requested
         }
