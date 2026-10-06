@@ -52,6 +52,32 @@ extension AppState {
             unread: unreadByRemoteSession)
     }
 
+    /// A cached presentation partition; tracked inputs are read even on a hit
+    /// so wake/park and tree changes remain observable to the mounted sidebar.
+    func sidebarHibernation(repoID: UUID) -> SidebarHibernationPartition {
+        _ = worktrees
+        _ = terminals
+        let owner = SidebarGroupID.Owner.repository(repoID)
+        if let cached = sidebarHibernationCache[owner] { return cached }
+        let roots = (worktrees[repoID] ?? []).filter {
+            ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil && $0.location.isLocal
+        }.sorted { $0.sortOrder < $1.sortOrder }
+        let partition = SidebarHibernation.partition(roots: roots, terminals: terminals, children: children(of:))
+        sidebarHibernationCache[owner] = partition
+        return partition
+    }
+
+    var sidebarScratchHibernation: SidebarHibernationPartition {
+        _ = scratchWorktrees
+        _ = worktrees
+        _ = terminals
+        if let cached = sidebarHibernationCache[.scratch] { return cached }
+        let partition = SidebarHibernation.partition(
+            roots: scratchWorktrees, terminals: terminals, allowsDescendants: false, children: children(of:))
+        sidebarHibernationCache[.scratch] = partition
+        return partition
+    }
+
     var sidebarSelectionReveal: SidebarGroupReveal {
         sidebarGroupReveal(worktreeIDs: selectedWorktreeIDs, selection: selectedRemoteSession)
     }
@@ -62,10 +88,16 @@ extension AppState {
         for repo in repos where repoFilter == nil || repoFilter == repo.id {
             groups.formUnion(sidebarRemoteGroups(repoID: repo.id).revealGroups(
                 owner: .repository(repo.id), worktreeIDs: worktreeIDs, remoteID: remoteID))
+            if !sidebarHibernation(repoID: repo.id).hibernatedWorktreeIDs.isDisjoint(with: worktreeIDs) {
+                groups.insert(.init(owner: .repository(repo.id), kind: .hibernated))
+            }
         }
         for provider in remoteProviders {
             groups.formUnion(sidebarRemoteGroups(provider: provider.config.name).revealGroups(
                 owner: .provider(provider.config.name), worktreeIDs: worktreeIDs, remoteID: remoteID))
+        }
+        if !sidebarScratchHibernation.hibernatedWorktreeIDs.isDisjoint(with: worktreeIDs) {
+            groups.insert(.init(owner: .scratch, kind: .hibernated))
         }
         return SidebarGroupReveal(generation: sidebarSelectionGeneration,
                                   worktreeIDs: worktreeIDs, remoteID: remoteID, groups: groups)
@@ -81,6 +113,9 @@ extension AppState {
            previous.worktreeIDs == reveal.worktreeIDs,
            previous.remoteID == reveal.remoteID { return }
         for group in reveal.groups {
+            if group.owner == .scratch {
+                userDefaults.set(true, forKey: Self.scratchSectionExpandedKey)
+            }
             guard case .repository(let id) = group.owner,
                   let index = repos.firstIndex(where: { $0.id == id }), !repos[index].expanded else { continue }
             repos[index].expanded = true

@@ -114,6 +114,11 @@ with an awake, remote, creating, or unknown descendant stays in the working
 list with its children. Cross-repository children retain the existing owner's
 section and repository suffix.
 
+Scratch keeps its existing flat row renderer. Its Hibernated shelf accepts
+only parked roots with no visible descendants, and counts only those root
+rows. A Scratch root with children stays in place; this design does not add
+Scratch subtree rendering or advertise hidden children in its shelf count.
+
 `Hibernated (N)` counts the parked worktree rows represented by the shelf,
 including descendants, not terminals. Pinning does not change membership:
 the existing dock keeps its shortcut even when the row is shelved. Selecting
