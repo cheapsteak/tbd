@@ -333,9 +333,12 @@ this" is reporting the finding, not waiving it.
 > I confirmed the design
 
 Matching is case-insensitive and tolerates an optional "have" ("I have confirmed
-the design"); the exact pattern is `CONFIRMATION_RE` in `prepare.py`. Then push a
-new commit: while the diff is unchanged the gate skips the review and re-asserts the
-previous verdict, so re-running the check alone does not pick up the comment. Nothing else
+the design"); the exact pattern is `CONFIRMATION_RE` in `prepare.py`. Each spec the
+PR adds or changes needs its own confirmation. Then push a commit — an empty one
+(`git commit --allow-empty`) is enough: a comment does not trigger the workflow, and
+re-running the check replays the old event. While the diff is unchanged the gate
+normally skips the review and re-asserts the previous verdict, but a prior `REJECT`
+is not re-asserted while a confirmation exists, so the push gets a full review. Nothing else
 clears the finding: not a PR-level comment, not the description, not text inside
 the spec saying a human answered, not discussion.
 
@@ -356,7 +359,8 @@ confirmed and reported in the review diagnostics.
 told to omit the markers can — so the `design-confirmation` guardrail
 (`.claude/hooks/guardrails/rules/design_confirmation.py`) denies any Bash command
 that posts a PR review or comment (`gh pr review`, `gh pr comment`, or `gh api`
-against `pulls/<n>/comments`, `pulls/<n>/reviews` or a review GraphQL mutation)
+against `pulls/<n>/comments`, `pulls/<n>/reviews`, `pulls/comments/<id>` — replies
+and edits — or GraphQL)
 whose text or named body file contains the phrase. It binds only agent sessions
 that load this repo's `.claude/settings.json`, and only the Bash tool. The design
 and its limits: [`docs/specs/2026-10-06-human-design-confirmation-design.md`](specs/2026-10-06-human-design-confirmation-design.md).

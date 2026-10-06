@@ -53,6 +53,28 @@ class DesignConfirmationDenyTests(unittest.TestCase):
             '{body: "I confirmed the design"}) { thread { id } } }\''
         )
 
+    def test_denies_reply_and_edit_of_an_existing_review_comment(self):
+        # A thread reply is itself a spec-path review comment, and an edit can
+        # turn an existing comment into the phrase; the gate counts both.
+        self._assert_denied(
+            "gh api repos/acme/acme-app/pulls/comments/5/replies "
+            "-f body='I confirmed the design'"
+        )
+        self._assert_denied(
+            "gh api -X PATCH repos/acme/acme-app/pulls/comments/9 "
+            "-f body='I confirmed the design'"
+        )
+
+    def test_denies_graphql_query_read_from_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "q.graphql")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    'mutation { addPullRequestReviewThreadReply(input: '
+                    '{body: "I confirmed the design"}) { comment { id } } }'
+                )
+            self._assert_denied(f"gh api graphql -F query=@{path}")
+
     def test_denies_phrase_in_a_heredoc_body(self):
         self._assert_denied(
             "gh pr review 12 --comment --body \"$(cat <<'EOF'\n"

@@ -13,8 +13,8 @@ loads this repo's guardrails cannot post the phrase at all.
 It DENIES a Bash call when both hold:
 
 - the command posts to a PR's review surface — `gh pr review`, `gh pr comment`,
-  or a `gh api` call that targets `pulls/<n>/comments` or `pulls/<n>/reviews`
-  (REST) or a review-creating GraphQL mutation;
+  or a `gh api` call that targets `pulls/<n>/comments`, `pulls/<n>/reviews` or
+  `pulls/comments/<id>` (REST: replies and edits included) or GraphQL;
 - the confirmation phrase appears in the command text (inline flags and heredoc
   bodies alike) or in a body file the command names (`--body-file`, `-F`,
   `--input`, or a `field=@path` value).
@@ -55,11 +55,15 @@ _GH_PR_POST = re.compile(
     r"(?:^|[\s;&|(`/])gh(?:\s+(?:-R|--repo|--hostname)\s+\S+)*\s+pr\s+(?:review|comment)\b"
 )
 _GH_API = re.compile(r"(?:^|[\s;&|(`/])gh\s+api\b")
-# REST review surfaces, and the GraphQL mutations that create review comments.
+# REST review surfaces — a PR's comments and reviews, and an existing review
+# comment by id (`pulls/comments/<id>`, whose `/replies` posts a thread reply
+# and whose PATCH edits a body into the phrase) — and any GraphQL call. GraphQL
+# is matched whole rather than by mutation name because the query can sit in a
+# file (`-F query=@q.graphql`) where only the phrase check reads it.
 _REVIEW_ENDPOINT = re.compile(
     r"pulls/[^/\s'\"]+/(?:comments|reviews)\b"
-    r"|\baddPullRequestReview(?:Comment|Thread)?\b"
-    r"|\bsubmitPullRequestReview\b"
+    r"|pulls/comments/"
+    r"|\bgraphql\b"
 )
 
 # Flags whose value names a file holding the body, plus gh api's `field=@path`.
@@ -119,7 +123,7 @@ class DesignConfirmationRule(Rule):
     description = "Block agents from posting the human 'I confirmed the design' review comment."
     tools = {"Bash"}
 
-    def check(self, tool_input: dict, ctx: dict) -> "Decision | None":
+    def check(self, tool_input: dict, _ctx: dict) -> "Decision | None":
         command = tool_input.get("command", "") or ""
         command_lines, _ = _split_heredoc_bodies(command)
         if not _posts_review_surface(command_lines):

@@ -3,13 +3,14 @@
 ## Summary
 
 The repo's rule is that a human answers the brainstorming questions behind a
-spec, and that work which revises the system's theory ships with a spec. The PR
-review gate checked only that a spec was referenced. It did not check who chose
-the design, so a spec whose questions an agent answered for itself passed, even
-when the PR disclosed that "a human needs to confirm" it. The gate also let
-through a script framed around one project's database naming rule, because the
-conventions specialist accepted user-land placement and a required `--prefix`
-argument as evidence of generality, and grepped the diff instead of reading it.
+spec, and that work which revises the system's theory ships with a spec. A gate
+that checks only that a spec is referenced cannot tell who chose the design: a
+spec whose questions an agent answered for itself passes, even when the PR
+discloses that "a human needs to confirm" it. Field evidence showed a second
+gap in the same lens: a script framed around one project's database naming rule
+passed because the conventions specialist accepted user-land placement and a
+required `--prefix` argument as evidence of generality, and grepped the diff
+instead of reading it.
 
 This design makes three changes:
 
@@ -32,7 +33,9 @@ The repo owner made each of these decisions; this spec transcribes them.
 
 A human clears the finding by leaving an **inline review comment on the spec
 file** (a file under `docs/specs/` that the PR changes) whose body says they
-confirmed the design. The phrase is matched by
+confirmed the design. Each spec the PR adds or modifies needs its own
+confirmation; the computed fact names every confirmed spec path, and the
+conventions specialist clears only those. The phrase is matched by
 `\bI\s+(?:have\s+)?confirmed\s+the\s+design\b`, case-insensitively: "I
 confirmed the design" or "I have confirmed the design". A negation ("I have not
 confirmed the design") does not match.
@@ -47,9 +50,15 @@ Nothing else clears it:
 - **Discussion** – the merge step may weigh discussion against other findings,
   but never against this one.
 
-Because the gate skips re-review while the diff is unchanged and re-asserts the
-previous verdict, a confirmation left after a rejection takes effect on the next
-pushed commit, not on a re-run of the check.
+A comment does not trigger the review workflow, and re-running the check
+replays the old event, so a confirmation takes effect on the next pushed commit;
+an empty commit is enough. The gate normally skips re-review while the diff is
+unchanged and re-asserts the previous verdict, but `prepare.py` computes the
+confirmation before that decision and does not re-assert a prior `REJECT` while
+a confirmation exists. The prior verdict's marker does not record which
+confirmations that review saw, so every push of an unchanged, rejected diff with
+a confirmation present gets a full review — spending a review, the cheap
+direction to fail.
 
 ## Computing the fact
 
@@ -83,8 +92,9 @@ commits is deleted before anything runs, so a PR cannot forge the result.
 Marker detection is heuristic, so the agent side has its own control. The
 `design-confirmation` rule in `.claude/hooks/guardrails/` denies a Bash command
 that posts to a PR's review surface (`gh pr review`, `gh pr comment`, or
-`gh api` against `pulls/<n>/comments`, `pulls/<n>/reviews`, or a review-creating
-GraphQL mutation) when the phrase appears in the command text or in a body file
+`gh api` against `pulls/<n>/comments`, `pulls/<n>/reviews`,
+`pulls/comments/<id>` for replies and edits, or GraphQL, matched whole because
+the query can sit in a file) when the phrase appears in the command text or in a body file
 the command names. Its deny message tells the agent that a human must leave the
 comment. The rule shares the gate's phrase regex, and a test pins the two
 together.

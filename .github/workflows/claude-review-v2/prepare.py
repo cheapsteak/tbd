@@ -83,6 +83,7 @@ def decide_skip(
     prior_patch_id: str | None,
     head_patch_id: str | None,
     prior_verdict: str | None,
+    design_confirmed: bool = False,
 ) -> dict:
     """Decide whether to skip the review and re-assert the recorded verdict.
 
@@ -91,6 +92,14 @@ def decide_skip(
     REJECT. Every other state falls through to a full review with a distinct
     reason — the cheap direction to fail is toward spending a review, never
     toward re-asserting a verdict we can't read (spec §3.5).
+
+    One exception to an equal patch-id: a prior REJECT is not re-asserted while
+    a human design confirmation exists, because a confirmation left after the
+    rejection changes the verdict without changing the diff
+    (docs/specs/2026-10-06-human-design-confirmation-design.md). The marker
+    does not record which confirmations the prior review saw, so this re-reviews
+    on every push of an unchanged diff whose prior verdict is REJECT — spending
+    a review, the cheap direction.
 
     Returns {"skip": bool, "verdict": str|None, "reason": str}.
     """
@@ -128,6 +137,13 @@ def decide_skip(
             "verdict": None,
             "reason": "diff content changed since the last review "
             "(patch-id mismatch) — running a full review",
+        }
+    if prior_verdict == "REJECT" and design_confirmed:
+        return {
+            "skip": False,
+            "verdict": None,
+            "reason": "diff unchanged but the prior verdict is REJECT and a "
+            "human design confirmation is present — running a full review",
         }
     return {
         "skip": True,
@@ -639,6 +655,13 @@ def main() -> int:
         prior_body = ""
         prior_fetch_ok = False
 
+    # Fetched before the skip decision: a confirmation left after a rejection
+    # must be able to defeat the skip (see decide_skip).
+    review_comments, review_comments_ok = fetch_review_comments(args.pr, args.repo)
+    confirmations = find_design_confirmations(review_comments)
+    with open("design-confirmation.txt", "w", encoding="utf-8") as handle:
+        handle.write(render_design_confirmation(confirmations, review_comments_ok))
+
     markers = parse_markers(prior_body)
     head_patch_id = _compute_head_patch_id(merge_base)
     decision = decide_skip(
@@ -646,6 +669,7 @@ def main() -> int:
         prior_patch_id=markers["patch_id"],
         head_patch_id=head_patch_id,
         prior_verdict=markers["verdict"],
+        design_confirmed=bool(confirmations),
     )
     decision["head_patch_id"] = head_patch_id
     decision["merge_base"] = merge_base
@@ -658,11 +682,6 @@ def main() -> int:
     discussion = render_discussion(items, fence_token, description)
     with open("discussion-context.txt", "w", encoding="utf-8") as handle:
         handle.write(discussion)
-
-    review_comments, review_comments_ok = fetch_review_comments(args.pr, args.repo)
-    confirmations = find_design_confirmations(review_comments)
-    with open("design-confirmation.txt", "w", encoding="utf-8") as handle:
-        handle.write(render_design_confirmation(confirmations, review_comments_ok))
 
     print(f"merge base with origin/{args.base_ref}: {merge_base}")
     print(f"skip: {decision['skip']} — {decision['reason']}")

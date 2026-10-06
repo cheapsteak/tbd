@@ -107,6 +107,27 @@ def test_decide_skip_all_good_reject() -> None:
     assert result["verdict"] == "REJECT"
 
 
+def test_decide_skip_reject_with_design_confirmation_reruns() -> None:
+    # A confirmation left after a rejection must not be hidden behind the
+    # re-asserted REJECT of an unchanged diff.
+    result = decide_skip(True, GOOD_PATCH, GOOD_PATCH, "REJECT", design_confirmed=True)
+    assert result["skip"] is False
+    assert result["verdict"] is None
+    assert "design confirmation" in result["reason"]
+
+
+def test_decide_skip_approve_with_design_confirmation_still_skips() -> None:
+    result = decide_skip(True, GOOD_PATCH, GOOD_PATCH, "APPROVE", design_confirmed=True)
+    assert result["skip"] is True
+    assert result["verdict"] == "APPROVE"
+
+
+def test_decide_skip_reject_without_design_confirmation_still_skips() -> None:
+    result = decide_skip(True, GOOD_PATCH, GOOD_PATCH, "REJECT", design_confirmed=False)
+    assert result["skip"] is True
+    assert result["verdict"] == "REJECT"
+
+
 def test_decide_skip_fetch_failed() -> None:
     # Even with everything else lining up, a failed fetch means full review.
     result = decide_skip(False, GOOD_PATCH, GOOD_PATCH, "APPROVE")
