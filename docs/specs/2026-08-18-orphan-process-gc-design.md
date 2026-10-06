@@ -382,8 +382,10 @@ The flag gates the collector **on top of** `gcEnabled`, the same way
 Migration, GRDB record and Codable model land in one commit, with the model
 field optional so existing rows and JSON still decode.
 
-**Enabling it for a soak:** call the `config.setGCOrphanProcessesEnabled` RPC,
-which writes `gc_orphan_processes_enabled` on the singleton `config` row. It has
+**Enabling it for a soak:** `tbd gc orphan-processes on` (no argument prints
+the current value) or the Settings → Cleanup toggle "Reclaim orphaned
+processes". Both call the `config.setGCOrphanProcessesEnabled` RPC, which
+writes `gc_orphan_processes_enabled` on the singleton `config` row. It has
 an RPC for the same reason its sibling gates do — the one phase whose mistakes
 cannot be undone should not also be the one whose only switch is behind a
 hand-edit of `state.db`. **Graduation:** once reap records across a soak show it

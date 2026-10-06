@@ -1014,6 +1014,15 @@ final class AppState {
     /// Whether ordinary new worktrees start with an empty Notes tab. Loaded
     /// from the daemon alongside the other config-backed worktree defaults.
     var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
+    /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
+    /// `gcEnabled` by the daemon). Loaded via `loadGCConfig()`.
+    var gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault
+    var gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault
+    var gcRetainedTranscriptsEnabled: Bool = Config.gcRetainedTranscriptsEnabledDefault
+    var gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault
+    /// Bumped by each `loadGCConfig()` before it fetches, so a load whose
+    /// fetch returns after a newer one started applies nothing.
+    @ObservationIgnored var gcConfigLoadGeneration: UInt64 = 0
     var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
@@ -1791,6 +1800,17 @@ final class AppState {
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
+    /// How `setGCCollectorEnabled` persists one opt-in GC collector's switch —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
+        { [daemonClient] collector, enabled in
+            let mapping = collector.mapping
+            try await daemonClient.setGCCollectorEnabled(method: mapping.rpcMethod, params: mapping.params(enabled))
+        }
+    /// How `fetchConfig` reads the daemon's resolved `Config` — injectable so
+    /// the config loaders are testable without a real daemon.
+    @ObservationIgnored lazy var configFetcher: @MainActor () async throws -> Config =
+        { [daemonClient] in try await daemonClient.getConfig() }
     /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
@@ -2729,7 +2749,7 @@ final class AppState {
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
                 await self?.loadSupervisionConfig()
-                await self?.loadHangStackRetentionConfig()
+                await self?.loadGCConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
                 // refresh capabilities too — a toggle from ANOTHER client
@@ -3418,7 +3438,7 @@ final class AppState {
             await loadModelProfiles()
             await loadHibernationConfig()
             await loadSupervisionConfig()
-            await loadHangStackRetentionConfig()
+            await loadGCConfig()
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()

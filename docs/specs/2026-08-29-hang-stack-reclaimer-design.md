@@ -197,9 +197,11 @@ master switch has to master both halves of one policy: mirroring the per-phase
 flag alone would mean turning GC off in Settings stops the sweep while the app
 keeps deleting.
 
-Enablement for the soak is `tbd gc hang-stacks on`, mirroring
-`tbd gc profile-dirs` and `tbd gc orphan-processes`. No app UI toggle before
-graduation.
+The switch is exposed twice over one RPC, `config.setGCHangStacksEnabled`:
+as `tbd gc hang-stacks on|off` (no argument prints the current value),
+mirroring `tbd gc profile-dirs` and `tbd gc orphan-processes`, and as the
+Settings → Cleanup toggle "Reclaim old hang-stack diagnostics". The default
+stays off; graduation flips `Config.gcHangStacksEnabledDefault`.
 
 ## Mechanics
 

@@ -1094,6 +1094,13 @@ actor DaemonClient {
         )
     }
 
+    /// Set one opt-in orphan-GC collector's switch, through the same RPC its
+    /// `tbd gc <collector>` subcommand calls. The method and params come from
+    /// `GCCollector.mapping`.
+    func setGCCollectorEnabled(method: String, params: any Encodable & Sendable) async throws {
+        try await callVoidAsync(method: method, params: params)
+    }
+
     /// Set whether ordinary new worktrees start with an empty Notes tab.
     func setAutoCreateNotes(enabled: Bool) async throws {
         try await callVoidAsync(
