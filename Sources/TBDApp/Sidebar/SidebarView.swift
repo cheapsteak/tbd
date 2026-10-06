@@ -18,6 +18,18 @@ struct SidebarView: View {
     @State private var sidebarHeight: CGFloat = 0
     @State private var hasRevealedInitialSelection = false
 
+    /// The `previous` handed to `revealSidebarGroups` for a selection-reveal
+    /// change. Nil — reveal as navigation, expanding a collapsed owning
+    /// section — only on the initial mount. Turning the toggle on mid-session
+    /// moves the observed value from nil to a reveal; that compares the
+    /// reveal against itself, so it opens the selection's groups but never
+    /// overrides a section the user collapsed.
+    static func revealBaseline(
+        previous: SidebarGroupReveal?, reveal: SidebarGroupReveal, hasRevealed: Bool
+    ) -> SidebarGroupReveal? {
+        hasRevealed ? (previous ?? reveal) : nil
+    }
+
     var filteredRepos: [Repo] {
         let base: [Repo]
         if let filterID = appState.repoFilter {
@@ -49,7 +61,8 @@ struct SidebarView: View {
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }
                 if workflowGroups {
-                    appState.revealSidebarGroups(appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil))
+                    appState.revealSidebarGroups(
+                        appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil), grouped: true)
                 }
                 // Defer to the next runloop tick so a freshly-expanded repo's
                 // rows are mounted in the List before we ask to scroll to them.
@@ -59,10 +72,13 @@ struct SidebarView: View {
                 }
             }
             .onChange(of: workflowGroups ? appState.sidebarSelectionReveal : nil, initial: true) { previous, reveal in
+                defer { hasRevealedInitialSelection = true }
                 guard let reveal else { return }
                 appState.revealSidebarGroups(
-                    reveal, previous: hasRevealedInitialSelection ? previous : nil)
-                hasRevealedInitialSelection = true
+                    reveal,
+                    previous: Self.revealBaseline(previous: previous, reveal: reveal,
+                                                  hasRevealed: hasRevealedInitialSelection),
+                    grouped: true)
             }
             .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
                 GeometryReader { geo in

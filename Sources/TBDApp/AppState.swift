@@ -2081,6 +2081,11 @@ final class AppState {
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
     /// redundant RPC fan-out as `loadTabStates` runs per worktree.
     @ObservationIgnored private var hasAttemptedPanelImport = false
+    /// How `refreshRepos()` fetches the repo list — injectable for the same
+    /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
+    /// prunes no remembered sidebar group.
+    @ObservationIgnored lazy var reposFetcher: @MainActor () async throws -> [Repo] =
+        { [daemonClient] in try await daemonClient.listRepos() }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -3614,7 +3619,7 @@ final class AppState {
     /// Refresh the repo list. Only updates if data changed.
     func refreshRepos() async {
         do {
-            let fetchedRepos = try await daemonClient.listRepos()
+            let fetchedRepos = try await reposFetcher()
             if fetchedRepos != repos {
                 repos = fetchedRepos
             }

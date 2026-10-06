@@ -28,18 +28,6 @@ struct SidebarSectionLayout {
         remoteGroups == nil && hibernation == nil ? nil : inlineRoots.map(\.id)
     }
 
-    /// Group headers this layout renders, in render order. A collapsed Remote
-    /// header still counts its Exited child, which mounts once it expands.
-    var groupKinds: [SidebarGroupID.Kind] {
-        var kinds: [SidebarGroupID.Kind] = []
-        if let remoteGroups {
-            kinds.append(.remote)
-            if remoteGroups.hasExited { kinds.append(.exited) }
-        }
-        if hibernation != nil { kinds.append(.hibernated) }
-        return kinds
-    }
-
     /// A repository section. Inputs are autoclosures so each mode computes
     /// only what it renders; the ungrouped default never partitions.
     static func repository(

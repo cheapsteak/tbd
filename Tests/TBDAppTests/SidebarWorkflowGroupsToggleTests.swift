@@ -3,6 +3,21 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
+extension SidebarSectionLayout {
+    /// Group headers the section views mount for this layout, in render
+    /// order, derived from the same fields they branch on. A collapsed Remote
+    /// header still counts its Exited child, which mounts once it expands.
+    var groupKinds: [SidebarGroupID.Kind] {
+        var kinds: [SidebarGroupID.Kind] = []
+        if let remoteGroups {
+            kinds.append(.remote)
+            if remoteGroups.hasExited { kinds.append(.exited) }
+        }
+        if hibernation != nil { kinds.append(.hibernated) }
+        return kinds
+    }
+}
+
 /// The Settings toggle that files remote, exited and hibernated rows under
 /// sidebar groups (`AppState.sidebarWorkflowGroupsKey`), and the persisted
 /// expansion state those groups keep across launches.
@@ -80,7 +95,6 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(AppState.sidebarWorkflowGroupsEnabled(defaults: defaults) == false)
             defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
             #expect(AppState.sidebarWorkflowGroupsEnabled(defaults: defaults) == true)
-            #expect(AppState(userDefaults: defaults).sidebarWorkflowGroupsEnabled)
         }
     }
 
@@ -128,9 +142,33 @@ struct SidebarWorkflowGroupsToggleTests {
             state.repos[0].expanded = false
             let reveal = state.sidebarGroupReveal(worktreeIDs: [fleet.ended.id, fleet.parked.id], selection: nil)
             #expect(!reveal.groups.isEmpty, "The reveal must name groups, or this test is vacuous")
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: false)
             #expect(state.expandedSidebarGroups.isEmpty)
             #expect(state.repos[0].expanded == false)
+            state.revealSidebarGroups(reveal, grouped: true)
+            #expect(!state.expandedSidebarGroups.isEmpty, "The same reveal must act when grouped")
+        }
+    }
+
+    /// Turning the toggle on mid-session opens the selection's groups but
+    /// leaves a collapsed repository collapsed; only the initial mount
+    /// reveals as navigation.
+    @Test func turningGroupsOnNeverExpandsACollapsedRepository() {
+        withDefaults { defaults, _ in
+            let state = AppState(userDefaults: defaults)
+            let fleet = makeFleet(in: state)
+            state.repos[0].expanded = false
+            let reveal = state.sidebarGroupReveal(worktreeIDs: [fleet.parked.id], selection: nil)
+
+            #expect(SidebarView.revealBaseline(previous: nil, reveal: reveal, hasRevealed: false) == nil)
+            let baseline = SidebarView.revealBaseline(previous: nil, reveal: reveal, hasRevealed: true)
+            #expect(baseline == reveal)
+            state.revealSidebarGroups(reveal, previous: baseline, grouped: true)
+            #expect(state.expandedSidebarGroups.contains(.init(owner: .repository(fleet.repoID), kind: .hibernated)))
+            #expect(state.repos[0].expanded == false)
+
+            state.revealSidebarGroups(reveal, previous: nil, grouped: true)
+            #expect(state.repos[0].expanded, "The initial-mount path must expand it, or this test is vacuous")
         }
     }
 
@@ -138,7 +176,6 @@ struct SidebarWorkflowGroupsToggleTests {
 
     @Test func onFilesRemoteExitedAndHibernatedRowsUnderHeaders() {
         withDefaults { defaults, _ in
-            defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
             let state = AppState(userDefaults: defaults)
             let fleet = makeFleet(in: state)
             let layout = state.sidebarRepositoryLayout(
@@ -158,7 +195,7 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(provider.inlineSessions.isEmpty)
 
             let reveal = state.sidebarGroupReveal(worktreeIDs: [fleet.parked.id], selection: nil)
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: true)
             #expect(state.expandedSidebarGroups.contains(.init(owner: .repository(fleet.repoID), kind: .hibernated)))
         }
     }
@@ -167,7 +204,6 @@ struct SidebarWorkflowGroupsToggleTests {
 
     @Test func expandedGroupsSurviveAFreshAppState() {
         withDefaults { defaults, _ in
-            defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
             let repoID = UUID()
             let groups: Set<SidebarGroupID> = [
                 .init(owner: .repository(repoID), kind: .remote),
@@ -214,5 +250,53 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(state.expandedSidebarGroups == expected)
             #expect(AppState(userDefaults: defaults).expandedSidebarGroups == expected)
         }
+    }
+
+    /// `refreshRepos` prunes repository groups only on a successful fetch.
+    @Test func refreshReposPrunesOnlyOnASuccessfulFetch() async {
+        let suite = "SidebarWorkflowGroupsToggleTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = AppState(userDefaults: defaults)
+        let kept = Repo(path: "/tmp/acme", displayName: "acme")
+        let goneID = UUID()
+        let gone = SidebarGroupID(owner: .repository(goneID), kind: .remote)
+        state.expandedSidebarGroups = [.init(owner: .repository(kept.id), kind: .hibernated), gone]
+
+        state.reposFetcher = { throw DaemonClientError.connectionFailed("boom") }
+        await state.refreshRepos()
+        #expect(state.expandedSidebarGroups.contains(gone))
+
+        state.reposFetcher = { [kept] }
+        await state.refreshRepos()
+        #expect(state.expandedSidebarGroups == [.init(owner: .repository(kept.id), kind: .hibernated)])
+    }
+
+    /// `refreshRemote` prunes provider groups only on a successful roster:
+    /// a disabled-backend refusal and a genuine RPC failure both keep them.
+    @Test func refreshRemotePrunesOnlyOnASuccessfulRoster() async {
+        let suite = "SidebarWorkflowGroupsToggleTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = AppState(userDefaults: defaults)
+        let retired = SidebarGroupID(owner: .provider("retired"), kind: .remote)
+        state.expandedSidebarGroups = [retired]
+        state.retainedTranscriptsFetcher = { [] }
+        state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }
+
+        state.remoteProvidersFetcher = {
+            throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
+        }
+        await state.refreshRemote()
+        #expect(state.expandedSidebarGroups == [retired])
+
+        state.remoteProvidersFetcher = { throw DaemonClientError.connectionFailed("boom") }
+        await state.refreshRemote()
+        #expect(state.expandedSidebarGroups == [retired])
+
+        state.remoteProvidersFetcher = { RemoteProvidersResult(providers: [SidebarGroupFixtures.provider()]) }
+        await state.refreshRemote()
+        #expect(state.expandedSidebarGroups.isEmpty)
+        #expect(AppState(userDefaults: defaults).expandedSidebarGroups.isEmpty)
     }
 }

@@ -77,10 +77,6 @@ struct RepoSectionView: View {
             .first { $0.status == .main }
     }
 
-    var topLevelWorktrees: [Worktree] {
-        appState.sidebarTopLevelWorktrees(repoID: repo.id)
-    }
-
     /// Remote sessions resolved to this repo (`RemoteSessionInfo.resolvedRepoID
     /// == repo.id`) that do NOT already own a worktree row in this section,
     /// rendered after every local worktree. See

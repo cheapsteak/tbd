@@ -70,6 +70,11 @@ extension AppState {
     /// `sidebarWorkflowGroupsEnabled(defaults:)` or an `@AppStorage` whose
     /// default is that constant — never `bool(forKey:)`, which collapses
     /// "unset" into `false`.
+    ///
+    /// The toggle binds `@AppStorage`, which targets `UserDefaults.standard`,
+    /// so the views are the readers: they pass the value into AppState as
+    /// `grouped:` rather than AppState re-reading `userDefaults`, which is a
+    /// separate suite under `TBD_MOCK` and would disagree with them.
     static let sidebarWorkflowGroupsKey = "sidebarWorkflowGroupsEnabled"
 
     /// The one shipped default for `sidebarWorkflowGroupsKey`, for the reason
@@ -95,11 +100,6 @@ extension AppState {
         shippedDefault: Bool = sidebarWorkflowGroupsDefault
     ) -> Bool {
         stored ?? shippedDefault
-    }
-
-    /// This instance's read of the toggle, on the store it was built with.
-    var sidebarWorkflowGroupsEnabled: Bool {
-        Self.sidebarWorkflowGroupsEnabled(defaults: userDefaults)
     }
 
     static func restoredSidebarGroups(defaults: UserDefaults) -> Set<SidebarGroupID> {
@@ -135,8 +135,15 @@ extension AppState {
     /// A repository's active and creating top-level rows, local and remote
     /// alike, in their stored order: the ungrouped section's inline rows.
     func sidebarTopLevelWorktrees(repoID: UUID) -> [Worktree] {
-        (worktrees[repoID] ?? [])
-            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+        Self.topLevelWorktrees(worktrees[repoID] ?? [])
+    }
+
+    /// Active and creating parentless rows sorted by `sortOrder`: the one
+    /// definition of a section's top level, shared by the row list, the
+    /// grouped partition and drag reorder's index snapshot, so a plain index
+    /// move always lands on the rows the user sees.
+    nonisolated static func topLevelWorktrees(_ rows: [Worktree]) -> [Worktree] {
+        rows.filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
             .sorted { $0.sortOrder < $1.sortOrder }
     }
 
@@ -191,11 +198,8 @@ extension AppState {
     func sidebarRemoteGroups(repoID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let rows = worktrees[repoID] ?? []
-        let roots = rows.filter {
-            ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil
-        }.sorted { $0.sortOrder < $1.sortOrder }
         return SidebarRemoteGroups(
-            roots: roots,
+            roots: Self.topLevelWorktrees(rows),
             remainder: RepoSectionView.matchedRemoteSessions(
                 snapshot.sessionsByRepo[repoID] ?? [], repoID: repoID, worktrees: rows),
             snapshot: snapshot, unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
@@ -266,10 +270,13 @@ extension AppState {
     /// Membership changes reveal transient groups without overriding a collapsed
     /// repository. Navigation may expand the owning section; a missing previous
     /// value explicitly requests that behavior for initial mounting and scrolls.
-    /// A no-op while workflow groups are off: there is no group to open, and
-    /// the ungrouped sidebar never expanded a section on selection.
-    func revealSidebarGroups(_ reveal: SidebarGroupReveal, previous: SidebarGroupReveal? = nil) {
-        guard sidebarWorkflowGroupsEnabled else { return }
+    /// A no-op when `grouped` is false (workflow groups off): there is no
+    /// group to open, and the ungrouped sidebar never expanded a section on
+    /// selection. `grouped` is the caller's `@AppStorage` read of
+    /// `sidebarWorkflowGroupsKey`, so the gate and the rendered sidebar
+    /// always agree.
+    func revealSidebarGroups(_ reveal: SidebarGroupReveal, previous: SidebarGroupReveal? = nil, grouped: Bool) {
+        guard grouped else { return }
         expandedSidebarGroups.formUnion(reveal.groups)
         if let previous,
            previous.generation == reveal.generation,

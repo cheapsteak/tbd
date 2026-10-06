@@ -10,9 +10,6 @@ struct SidebarHibernationAppStateTests {
         let suite = "SidebarHibernationAppStateTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        // Reveal acts only with workflow groups on; the off branch is
-        // covered by SidebarWorkflowGroupsToggleTests.
-        defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]
@@ -49,7 +46,7 @@ struct SidebarHibernationAppStateTests {
             state.selectedWorktreeIDs = [row.id]
             let reveal = state.sidebarSelectionReveal
             let group = SidebarGroupID(owner: .repository(repoID), kind: .hibernated)
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: true)
             #expect(state.expandedSidebarGroups == [group])
             state.toggleSidebarGroup(group)
             let same = state.terminals
@@ -58,7 +55,7 @@ struct SidebarHibernationAppStateTests {
             #expect(state.expandedSidebarGroups.isEmpty)
             state.selectedWorktreeIDs = [row.id]
             #expect(state.sidebarSelectionReveal != reveal)
-            state.revealSidebarGroups(state.sidebarSelectionReveal)
+            state.revealSidebarGroups(state.sidebarSelectionReveal, grouped: true)
             #expect(state.expandedSidebarGroups == [group])
             #expect(state.terminals[row.id]?.first?.isParked == true)
         }
@@ -74,7 +71,7 @@ struct SidebarHibernationAppStateTests {
             park(row, in: state)
             let parked = state.sidebarSelectionReveal
             #expect(parked != initial)
-            state.revealSidebarGroups(parked)
+            state.revealSidebarGroups(parked, grouped: true)
             #expect(state.expandedSidebarGroups.contains(.init(owner: .repository(repoID), kind: .hibernated)))
             state.terminals[row.id]?[0].hibernatedAt = nil
             #expect(state.sidebarSelectionReveal.groups.isEmpty)
@@ -93,7 +90,7 @@ struct SidebarHibernationAppStateTests {
             state.userDefaults.set(false, forKey: AppState.scratchSectionExpandedKey)
             let reveal = state.sidebarGroupReveal(worktreeIDs: [scratch.id], selection: nil)
             #expect(reveal.groups == [.init(owner: .scratch, kind: .hibernated)])
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: true)
             #expect(state.userDefaults.bool(forKey: AppState.scratchSectionExpandedKey))
             #expect(state.expandedSidebarGroups == [.init(owner: .scratch, kind: .hibernated)])
             #expect(state.selectedWorktreeIDs.isEmpty)
