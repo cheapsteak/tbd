@@ -26,7 +26,10 @@ from prepare import (
     WHOLE_BLOCK_CAP,
     decide_skip,
     fetch_discussion,
+    fetch_review_comments,
+    find_design_confirmations,
     parse_markers,
+    render_design_confirmation,
     render_discussion,
 )
 
@@ -561,6 +564,148 @@ def test_fetch_discussion_null_author_is_not_a_crash(
     assert any(item["author"] == "" for item in items)
 
 
+# --- design confirmation (docs/specs/2026-10-06-human-design-confirmation-design.md)
+
+_SPEC = "docs/specs/2026-01-01-acme-design.md"
+
+
+def _review_comment(
+    body: str = "I confirmed the design",
+    path: str = _SPEC,
+    login: str = "acme-owner",
+    user_type: str = "User",
+) -> dict:
+    return {"path": path, "body": body, "user": {"login": login, "type": user_type}}
+
+
+def test_confirmation_counts_a_human_inline_comment_on_a_spec() -> None:
+    assert find_design_confirmations([_review_comment()]) == [
+        {"login": "acme-owner", "path": _SPEC}
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "i CONFIRMED the   design",
+        "Read it end to end. I have confirmed the design.",
+        "LGTM\nI confirmed the design\nthanks",
+    ],
+)
+def test_confirmation_phrase_is_case_and_whitespace_tolerant(body: str) -> None:
+    assert len(find_design_confirmations([_review_comment(body=body)])) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "I have not confirmed the design",
+        "looks fine",
+        "please confirm the design",
+        "Can a human say they confirmed the design?",
+    ],
+)
+def test_confirmation_requires_the_phrase(body: str) -> None:
+    assert find_design_confirmations([_review_comment(body=body)]) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["Sources/Example.swift", "docs/pr-review-gate.md", "specs/docs/specs/x.md", ""],
+)
+def test_confirmation_must_sit_on_a_spec_file(path: str) -> None:
+    assert find_design_confirmations([_review_comment(path=path)]) == []
+
+
+def test_confirmation_ignores_bots_by_type_and_login_suffix() -> None:
+    comments = [
+        _review_comment(user_type="Bot", login="acme-ci"),
+        _review_comment(login="acme-reviewer[bot]"),
+    ]
+    assert find_design_confirmations(comments) == []
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "https://claude.ai/code/session_0123abcd",
+        "Claude-Session: https://example.invalid/x",
+        "\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)",
+        "Co-Authored-By: Claude <noreply@anthropic.com>",
+        "\U0001F916",
+    ],
+)
+def test_confirmation_ignores_bodies_with_an_agent_marker(marker: str) -> None:
+    body = f"I confirmed the design\n\n{marker}"
+    assert find_design_confirmations([_review_comment(body=body)]) == []
+
+
+def test_confirmation_tolerates_null_fields() -> None:
+    comments = [{"path": None, "body": None, "user": None}, {}]
+    assert find_design_confirmations(comments) == []
+
+
+def test_render_confirmation_three_states_are_distinct() -> None:
+    confirmed = render_design_confirmation(
+        [{"login": "acme-owner", "path": _SPEC}], fetch_ok=True
+    )
+    none = render_design_confirmation([], fetch_ok=True)
+    unavailable = render_design_confirmation([], fetch_ok=False)
+    assert "CONFIRMED" in confirmed
+    assert f"confirmed by acme-owner on {_SPEC}" in confirmed
+    assert "NONE" in none and "CONFIRMED" not in none
+    assert "UNAVAILABLE" in unavailable and "CONFIRMED" not in unavailable
+    # A failed fetch never renders as confirmed, even with stale input.
+    stale = render_design_confirmation(
+        [{"login": "acme-owner", "path": _SPEC}], fetch_ok=False
+    )
+    assert "CONFIRMED" not in stale
+
+
+def test_render_confirmation_sanitizes_login_and_path() -> None:
+    rendered = render_design_confirmation(
+        [{"login": "acme<x>", "path": "docs/specs/<!-- m -->a.md"}], fetch_ok=True
+    )
+    assert "<" not in rendered and "&lt;x&gt;" in rendered
+
+
+def test_fetch_review_comments_reads_paginated_json_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake(args: list[str]) -> str:
+        seen.append(args)
+        return "\n".join(
+            json.dumps(c) for c in (_review_comment(), _review_comment(path="a.swift"))
+        ) + "\n"
+
+    monkeypatch.setattr(_gh, "run_gh", fake)
+    comments, ok = fetch_review_comments(7, "acme/acme-app")
+    assert ok is True
+    assert len(comments) == 2
+    assert "--paginate" in seen[0]
+    assert "repos/acme/acme-app/pulls/7/comments" in seen[0]
+
+
+def test_fetch_review_comments_failure_is_not_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(args: list[str]) -> str:
+        raise RuntimeError("gh exploded")
+
+    monkeypatch.setattr(_gh, "run_gh", boom)
+    assert fetch_review_comments(7, "acme/acme-app") == ([], False)
+    assert "UNAVAILABLE" in capsys.readouterr().err
+
+
+def test_fetch_review_comments_rejects_non_object_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_gh, "run_gh", lambda args: "[1, 2]\n")
+    assert fetch_review_comments(7, "acme/acme-app") == ([], False)
+
+
 # --- main(): the merge base is resolved here, or the run aborts -------------
 #
 # These build a REAL git repo. The property is a property of git: prepare.py
@@ -630,12 +775,22 @@ def _sever_origin_from_history(repo: Path) -> None:
     _git(repo, "update-ref", "refs/remotes/origin/main", orphan)
 
 
+def _fake_gh(args: list[str]) -> str:
+    """Route by endpoint: GraphQL gets the discussion, REST gets one
+    qualifying inline confirmation on a spec."""
+    if args[:2] == ["api", "graphql"]:
+        return _graphql_payload()
+    return json.dumps(
+        _review_comment(body="I confirmed the design.", login="acme-owner")
+    ) + "\n"
+
+
 def _run_prepare(
     monkeypatch: pytest.MonkeyPatch, repo: Path, prior_body: str = ""
 ) -> int:
     body_file = repo.parent / "prior-review-body.txt"
     body_file.write_text(prior_body, encoding="utf-8")
-    monkeypatch.setattr(_gh, "run_gh", lambda args: _graphql_payload())
+    monkeypatch.setattr(_gh, "run_gh", _fake_gh)
     # prepare.py's own git subprocesses must see the same scrubbed config as
     # the fixture's (_GIT_ENV), or a developer's global diff.* settings change
     # the diff text on one side of the patch-id comparison only.
@@ -690,6 +845,11 @@ def test_main_records_the_merge_base_and_a_patch_id_over_it(
     context = (repo / "discussion-context.txt").read_text(encoding="utf-8")
     assert "[pr-description]" in context
 
+    # And the design-confirmation fact reached its own file.
+    fact = (repo / "design-confirmation.txt").read_text(encoding="utf-8")
+    assert "CONFIRMED" in fact
+    assert "confirmed by acme-owner on docs/specs/2026-01-01-acme-design.md" in fact
+
 
 def test_main_aborts_when_there_is_no_merge_base(
     tmp_path: Path,
@@ -719,6 +879,7 @@ def test_main_aborts_when_there_is_no_merge_base(
 
     assert not (repo / "skip-decision.json").exists()
     assert not (repo / "discussion-context.txt").exists()
+    assert not (repo / "design-confirmation.txt").exists()
 
 
 def test_main_annotates_a_failed_discussion_fetch(
@@ -758,3 +919,6 @@ def test_main_annotates_a_failed_discussion_fetch(
     assert "premise audit" in out
     # The context file exists and is empty — the "fetch failed" signal.
     assert (repo / "discussion-context.txt").read_text(encoding="utf-8") == ""
+    # A failed comment fetch is UNAVAILABLE, never NONE and never CONFIRMED.
+    fact = (repo / "design-confirmation.txt").read_text(encoding="utf-8")
+    assert "UNAVAILABLE" in fact

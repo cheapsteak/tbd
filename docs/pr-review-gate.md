@@ -52,7 +52,9 @@ why, and for what reviving it actually takes.
    merge base that cannot be resolved fails the job outright — see
    [below](#the-merge-base-goes-missing-two-ways-and-only-one-is-repairable-in-the-workflow).
    The same script fetches the PR's description and discussion and writes them to
-   `discussion-context.txt` for the session to read.
+   `discussion-context.txt` for the session to read, and computes whether a human
+   has confirmed a spec's design, writing that fact to `design-confirmation.txt`
+   (see [below](#human-design-confirmation)).
 4. **Review.** One model session orchestrates two specialist subagents
    (`correctness`, `conventions`). Each specialist writes a schema-validated
    `findings-<name>.json`; the orchestrator merges them into `review-result.json`
@@ -71,7 +73,8 @@ why, and for what reviving it actually takes.
    merge, and anything else (missing / malformed / killed session) fails closed.
 
 Every file the pipeline reads back out of the workspace — `review-result.json`,
-`verdict.txt`, `skip-decision.json`, `discussion-context.txt`, `findings-*.json` —
+`verdict.txt`, `skip-decision.json`, `discussion-context.txt`,
+`design-confirmation.txt`, `findings-*.json` —
 is deleted after checkout, before anything runs, so a PR cannot pre-commit a forged
 `verdict.txt=APPROVE` or a skip decision and approve itself.
 
@@ -314,6 +317,49 @@ Four properties follow from that role:
 The description is sanitized exactly like every other body: HTML comments stripped
 whole (so a quoted state marker cannot masquerade as the pipeline's own), then
 angle brackets escaped.
+
+### Human design confirmation
+
+A PR that revises the system's theory needs a committed spec, and the spec counts
+only once a human has confirmed its design: the brainstorming questions must have
+been answered by a person, not by the agent that wrote the code. The conventions
+specialist flags as Medium a spec the PR adds or changes that an agent answered or
+that no human has confirmed. A PR that discloses "a human still needs to confirm
+this" is reporting the finding, not waiving it.
+
+**How a human clears it.** Open the PR's *Files changed* view, find the spec under
+`docs/specs/`, and leave an inline review comment on any line of it that says:
+
+> I confirmed the design
+
+Matching is case-insensitive and tolerates an optional "have" ("I have confirmed
+the design"); the exact pattern is `CONFIRMATION_RE` in `prepare.py`. Then push a
+new commit: while the diff is unchanged the gate skips the review and re-asserts the
+previous verdict, so re-running the check alone does not pick up the comment. Nothing else
+clears the finding: not a PR-level comment, not the description, not text inside
+the spec saying a human answered, not discussion.
+
+**Why it is computed rather than judged.** Agents post through their human's own
+GitHub account, so neither the model nor any login check can tell them apart from
+the human. `prepare.py` therefore decides the fact deterministically: it fetches
+the PR's inline review comments (`GET /repos/{owner}/{repo}/pulls/{n}/comments`,
+paginated) and keeps one only when it sits on a `docs/specs/` path, its author is
+not a bot (`user.type` is not `Bot` and the login does not end in `[bot]`), its body
+matches the phrase, and its body carries no agent marker — `claude.ai/code/session_`,
+`Claude-Session:`, `Generated with [Claude Code]`, `Co-Authored-By: Claude`, or the
+robot emoji. The result lands in `design-confirmation.txt` in one of three states:
+`CONFIRMED` with the login and spec path, `NONE`, or `UNAVAILABLE` when the fetch
+failed. Only `CONFIRMED` clears the finding; `UNAVAILABLE` is treated as not
+confirmed and reported in the review diagnostics.
+
+**The other half lives on the agent side.** Marker detection is heuristic — an agent
+told to omit the markers can — so the `design-confirmation` guardrail
+(`.claude/hooks/guardrails/rules/design_confirmation.py`) denies any Bash command
+that posts a PR review or comment (`gh pr review`, `gh pr comment`, or `gh api`
+against `pulls/<n>/comments`, `pulls/<n>/reviews` or a review GraphQL mutation)
+whose text or named body file contains the phrase. It binds only agent sessions
+that load this repo's `.claude/settings.json`, and only the Bash tool. The design
+and its limits: [`docs/specs/2026-10-06-human-design-confirmation-design.md`](specs/2026-10-06-human-design-confirmation-design.md).
 
 ### What a trusted author's branch can execute
 

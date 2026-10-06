@@ -108,7 +108,7 @@ Decisions must be examinable — changes to our theory of the system or the prod
 
 **Prior design does not exempt.** Thinking done in prototypes, a report, another repo, or an earlier session makes the spec a cheap transcription — not an unnecessary one. Reviewers here cannot read that material, so those decisions are the ones that most need writing down.
 
-**A human answers the brainstorming questions.** An agent may not answer its own. If none is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+**A human answers the brainstorming questions.** An agent may not answer its own. If none is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead. The PR review gate holds a spec the PR adds or changes as unconfirmed (Medium) until a human leaves an inline review comment on the spec file saying "I confirmed the design" — agents may not leave that comment, even through the human's account, and a guardrail blocks them from posting it ([spec](docs/specs/2026-10-06-human-design-confirmation-design.md)).
 
 Bug fixes and minor UI changes need no spec — a bug fix restores the system to its existing theory, while the work that needs a spec is the work that revises it. If a larger change genuinely needs none, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. In Claude Code use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one. Codex has no slash command for it — read `.claude/skills/tbd-brainstorming/SKILL.md` and follow it directly.
 
