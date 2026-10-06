@@ -84,19 +84,32 @@ With grouping on, the groups a user expands stay expanded across restarts.
   so the set stays proportional to the repositories and providers the user
   has.
 
-With grouping off nothing expands, so the stored set is left untouched, and
-turning grouping back on restores it as the user left it.
+With grouping off nothing expands, and pruning still runs, so turning
+grouping back on restores the set as the user left it, less the groups of any
+repository or provider that has since gone.
 
-## Rule change in CLAUDE.md
+The flag is read by the views, through `@AppStorage` on the same store the
+toggle writes, and handed to `AppState` as an explicit `grouped` argument
+rather than re-read there. `AppState` holds its own `UserDefaults`, a separate
+suite under `TBD_MOCK`, so a second read could disagree with what the sidebar
+renders.
 
-The flag rule in `CLAUDE.md` listed three kinds of change that must ship
-default-off: autonomous behavior, destructive behavior, and wholesale
-replacement of a load-bearing path. Workflow groups met none of them and
-still disrupted daily use, because moving rows people already rely on is its
-own kind of risk. The rule gains a fourth case – changing where existing
-items appear by default, by moving, hiding, regrouping, or collapsing UI that
-users already rely on – and its "small additive UI" exemption now states that
-rearranging existing items is not additive.
+Selection reveal keeps the grouped sidebar's distinction between navigation
+and membership change. The first reveal after the sidebar mounts is
+navigation and may expand the owning project section; turning the toggle on
+mid-session is not navigation, so it opens the selection's groups without
+expanding a section the user collapsed.
+
+## Why a flag
+
+`CLAUDE.md`'s default-off flag rule covers four kinds of change: autonomous
+behavior, destructive behavior, wholesale replacement of a load-bearing path,
+and changing where existing items appear by default – moving, hiding,
+regrouping, or collapsing UI that users already rely on. Workflow groups are
+the fourth kind. They act on no session and destroy nothing, yet they move
+rows people navigate by every day, which is its own kind of risk. For the same
+reason the rule's "small additive UI" exemption does not apply: additive means
+new UI beside what is there, and rearranging existing items is not additive.
 
 ## Graduation
 
@@ -115,8 +128,11 @@ layouts have users who chose them.
   selection reveal is a no-op.
 - The on branch files remote, exited, and hibernated rows under their headers
   as before, and the existing reveal and shelf suites run with it on.
+- Turning the toggle on opens the selection's groups and leaves a collapsed
+  project section collapsed, while the initial-mount reveal still expands it.
 - The three states resolve as specified, including an explicit `false`
   against a shipped default of `true`.
 - An expanded set survives constructing a fresh `AppState` over the same
   `UserDefaults` suite, unparsable entries are dropped, and pruning removes
-  only groups whose owner vanished.
+  only groups whose owner vanished – and only on a successful fetch, never on
+  a refused or failed one.
