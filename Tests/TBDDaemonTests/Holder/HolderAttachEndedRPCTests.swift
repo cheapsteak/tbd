@@ -87,6 +87,46 @@ struct HolderAttachEndedRPCTests {
         #expect(!response.success)
     }
 
+    /// The registry checks a viewer claim and a pending attach before it looks
+    /// for a reader, so a dead holder can be refused with either of those
+    /// first. All three mean ended when the holder is gone, and none of them
+    /// does while it lives or when no holder pid was recorded; every other
+    /// refusal is about the request, never the session.
+    @Test("every refusal that can front a dead holder reads as ended, and only then")
+    func refusalsThatCanFrontADeadHolder() async throws {
+        let (router, _, _) = try await makeRouter(holderPID: 4242)
+        let id = UUID()
+        let recorded = TBDShared.Terminal(
+            id: id, worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 4242, childPID: 4243)
+        var unrecorded = recorded
+        unrecorded.holderPID = nil
+        let endable: [HolderRegistry.Error] = [
+            .noLiveReader(terminalID: id),
+            .attachedToViewer(terminalID: id),
+            .attachAlreadyPending(terminalID: id, generation: 7),
+        ]
+        let others: [HolderRegistry.Error] = [
+            .notAHolderSession(terminalID: id),
+            .attachSuperseded(terminalID: id, generation: 7),
+            .sessionAlreadyRegistered(terminalID: id),
+        ]
+
+        router.holderProcessIsLive = { _ in false }
+        for error in endable {
+            #expect(router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
+            #expect(!router.attachRefusalMeansSessionEnded(error, terminal: unrecorded), "\(error)")
+        }
+        for error in others {
+            #expect(!router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
+        }
+
+        router.holderProcessIsLive = { _ in true }
+        for error in endable {
+            #expect(!router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
+        }
+    }
+
     private final class LockedPIDs: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [Int32] = []

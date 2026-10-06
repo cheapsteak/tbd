@@ -1585,30 +1585,35 @@ public actor OrphanGC {
             return
         }
 
-        // Holders and their jobs serving any session whose worktree is not
-        // positively archived are never this phase's to signal, whatever their
-        // cwd says — see `liveHolderSessionPIDs`. Keyed on "not archived"
-        // rather than "in the live list", so a row this phase cannot place
-        // (a remote or not-yet-listed worktree) is spared, not exposed.
-        let archivedIDs = Set(archived.map(\.id))
-        let holderSessions = terminals
-            .filter { $0.transport == .holder && !archivedIDs.contains($0.worktreeID) }
-            .map(LiveHolderSession.init)
-        let exempt = orphanProcessCollector.liveHolderSessionPIDs(
-            holderSessions, processes: processes)
-
         let (roots, repoPathByPool) = orphanProcessRoots(
             repos: repos, archived: archived, liveRows: liveRows)
-        let candidates = orphanProcessCollector.candidates(
+        let unexempted = orphanProcessCollector.candidates(
             processes: processes,
             cwdByPID: live.cwdByPID,
             cwdsCapturedAt: live.capturedAt,
             roots: roots,
             ourUID: getuid(),
             ourPID: getpid(),
-            graceSeconds: config.gcGraceSeconds,
-            exempt: exempt
+            graceSeconds: config.gcGraceSeconds
         )
+        guard !unexempted.isEmpty else { return }
+
+        // Holders and their jobs serving any session whose worktree is not
+        // positively archived are never this phase's to signal, whatever their
+        // cwd says — see `liveHolderSessionPIDs`. Built only once there is a
+        // candidate to spare, because the job identity check costs a `ps` per
+        // session. Keyed on "not archived" rather than "in the live list", so a
+        // row this phase cannot place (a remote or not-yet-listed worktree) is
+        // spared, not exposed.
+        let archivedIDs = Set(archived.map(\.id))
+        let holderSessions = terminals
+            .filter { $0.transport == .holder && !archivedIDs.contains($0.worktreeID) }
+            .map(LiveHolderSession.init)
+        let exempt = orphanProcessCollector.liveHolderSessionPIDs(
+            holderSessions, processes: processes)
+        // Equivalent to passing `exempt` to `candidates`, whose only use of the
+        // protected set on a candidate root is membership.
+        let candidates = unexempted.filter { !exempt.contains($0.pid) }
         guard !candidates.isEmpty else { return }
 
         let protected = orphanProcessCollector.protectedPIDs(

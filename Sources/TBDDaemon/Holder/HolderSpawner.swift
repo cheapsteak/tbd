@@ -803,7 +803,15 @@ struct HolderSpawner {
         // escaped job of a dead worktree and killed it with its session's
         // job. The job's own cwd is unaffected: the holder `chdir`s its child
         // to `launch.workingDirectory` between fork and exec.
-        posix_spawn_file_actions_addchdir_np(&actions, Self.holderWorkingDirectory)
+        // Checked, unlike the dup2s above: a chdir action that was not recorded
+        // would spawn the holder in the daemon's cwd — exactly the hazard this
+        // exists to remove — so failing the spawn is the honest outcome. It
+        // returns the error number rather than setting `errno`.
+        let chdirStatus = posix_spawn_file_actions_addchdir_np(
+            &actions, Self.holderWorkingDirectory)
+        guard chdirStatus == 0 else {
+            throw Error.spawnFailed(executable: executableURL.path, errno: chdirStatus)
+        }
 
         // Everything the daemon happens to have open without FD_CLOEXEC would
         // otherwise arrive in a process that outlives it. The five descriptors

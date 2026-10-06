@@ -199,8 +199,9 @@ extension RPCRouter {
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
             vend = try await registry.beginAttach(terminalID: terminal.id)
-        } catch HolderRegistry.Error.noLiveReader(_) where holderSessionHasEnded(terminal) {
-            // No reader, and the holder the row records is not running: the
+        } catch let error as HolderRegistry.Error
+            where attachRefusalMeansSessionEnded(error, terminal: terminal) {
+            // Refused, and the holder the row records is not running: the
             // session is over, not merely unattachable. Answered as a status
             // rather than an error so the app does not tell the user the
             // session "keeps running" and to reopen the tab to retry.
@@ -256,6 +257,26 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// Whether `beginAttach` refusing with `error` means the session has
+    /// ended rather than that this attach cannot happen right now.
+    ///
+    /// Three refusals can stand in front of a dead holder, because the registry
+    /// checks its own bookkeeping before it ever reaches the pty: no reader at
+    /// all, a viewer claim, and an attach still pending. Each of them is the
+    /// ended answer when the holder is gone — a claim or a pending attach on a
+    /// session nothing serves any more is bookkeeping, not a session. Every
+    /// other refusal is about the request, not the session, and stays an error.
+    func attachRefusalMeansSessionEnded(
+        _ error: HolderRegistry.Error, terminal: Terminal
+    ) -> Bool {
+        switch error {
+        case .noLiveReader, .attachedToViewer, .attachAlreadyPending:
+            return holderSessionHasEnded(terminal)
+        default:
+            return false
+        }
     }
 
     /// True only on positive evidence that the row's holder is gone: a holder
