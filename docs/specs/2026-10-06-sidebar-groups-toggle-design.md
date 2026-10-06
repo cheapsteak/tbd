@@ -6,14 +6,14 @@ The workflow groups in
 [`2026-09-16-workflow-sidebar-groups-design.md`](2026-09-16-workflow-sidebar-groups-design.md)
 file remote and exited work under a collapsible Remote group and wholly
 parked local work under a Hibernated group, each starting collapsed. For a
-user who did not ask for that, rows they navigate by every day disappear
-from the place they have always been, behind a header they have to find and
-open. Nothing let them put the sidebar back, and a restart collapsed every
-group they had opened.
+user who did not ask for that, rows they navigate by every day leave the
+place they have always been and sit behind a header they have to find and
+open, and a group that forgot its expansion on every restart would make them
+do it again each launch.
 
 The grouping is a reasonable choice for a large fleet, not a correction every
-user wants. So it becomes an opt-in setting that ships off, and the groups a
-user does open stay open.
+user wants. So it is an opt-in setting that ships off, and the groups a user
+does open stay open.
 
 ## The setting
 
