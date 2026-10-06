@@ -93,8 +93,9 @@ New features that act autonomously or can destroy state land gated behind a flag
 - acts without a user gesture — background sweeps, timers, anything "auto-"
 - kills processes, deletes or mutates persisted state, or sends input to sessions
 - wholesale-replaces a load-bearing path (rendering, input routing, persistence)
+- changes where existing items appear by default — moving, hiding, regrouping, or collapsing UI that users already rely on
 
-Not required for bug fixes, small additive UI, or refactors — don't sprawl flags.
+Not required for bug fixes, small additive UI, or refactors — don't sprawl flags. Additive means new UI beside what is there; rearranging existing items is not additive.
 
 Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `enableTranscript`, default-off). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
 

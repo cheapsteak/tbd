@@ -1299,9 +1299,7 @@ extension AppState {
         let previous = worktrees[repoID]
         var rows = (worktrees[repoID] ?? [])
         // Snapshot the top-level order BEFORE the move (matches the ForEach).
-        var topLevel = rows
-            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
-            .sorted { $0.sortOrder < $1.sortOrder }
+        var topLevel = Self.topLevelWorktrees(rows)
         logger.debug("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
         // guard: source/destination can outlive the snapshot they were captured against
         if topLevel.isEmpty || source.contains(where: { $0 >= topLevel.count }) || destination > topLevel.count {

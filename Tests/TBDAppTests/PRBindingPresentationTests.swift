@@ -298,9 +298,19 @@ struct PRBindingPresentationTests {
         #expect(groups.done == bindings)
     }
 
+    @Test("the done chip label names the request noun of the forges it holds")
+    func doneChipLabelNoun() {
+        let mr = { (n: Int) in self.finished(n, url: "https://gitlab.acme.dev/acme/acme-prod/-/merge_requests/\(n)") }
+        #expect(PRBindingPresentation.doneChipLabel([finished(1), finished(2)]) == "\u{2713} 2 PRs done")
+        #expect(PRBindingPresentation.doneChipLabel([mr(1), mr(2)]) == "\u{2713} 2 MRs done")
+        // A set spanning both forges takes the more common word.
+        #expect(PRBindingPresentation.doneChipLabel([finished(1), mr(2)]) == "\u{2713} 2 PRs done")
+        #expect(PRBindingPresentation.doneChipLabel([mr(1)]) == "\u{2713} 1 MR done")
+        #expect(PRBindingPresentation.doneChipLabel([finished(1)]) == "\u{2713} 1 PR done")
+    }
+
     @Test("the done chip names its count, singular and plural")
     func doneChipWording() {
-        #expect(PRBindingPresentation.doneChipLabel(count: 5) == "\u{2713} 5 done")
         #expect(PRBindingPresentation.doneChipCardTitle(count: 5)
                     == "5 merged or closed pull requests")
         #expect(PRBindingPresentation.doneChipCardTitle(count: 1)
@@ -384,13 +394,6 @@ struct PRBindingPresentationTests {
     func doneMenuRowsLeaveMenuRowsAlone() {
         let b = finished(930, title: "Fix the login timeout", headBranch: "fix-login")
         #expect(PRBindingPresentation.menuRows([b])[0].title == "PR #930  Merged  fix-login")
-        // A title change re-materializes the done menu.
-        let retitled = PRBinding(id: b.id, worktreeID: b.worktreeID, owner: b.owner,
-                                 repo: b.repo, number: b.number, url: b.url,
-                                 headBranch: b.headBranch, title: "Fix the login timeouts",
-                                 status: b.status, source: b.source, boundAt: b.boundAt)
-        #expect(PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([b]))
-                != PRBindingPresentation.menuRowsID(PRBindingPresentation.doneMenuRows([retitled])))
     }
 
     @Test("menu rows keep bind order, not severity order")
@@ -443,58 +446,5 @@ struct PRBindingPresentationTests {
             == "PR #412  Checks failing")
         #expect(PRBindingPresentation.menuRows([queued(.pending, position: nil)])[0].title
             == "PR #412  Checks pending")
-    }
-
-    // MARK: - The overflow menu's refresh key
-
-    /// AppKit materializes an `NSMenu` ONCE, so the `+N` menu carries an `.id`
-    /// keyed on its rendered rows. This is the tripwire on that key, and it has
-    /// to fail on the field that moves fastest: a queue position counting down
-    /// 3 → 2 → 1 under an unchanged `state` would otherwise leave the menu row
-    /// contradicting the bus badge on the chip two pixels away.
-    @Test("the overflow menu's id moves when anything its rows render moves")
-    func menuRowsIDTracksTheRenderedRows() {
-        let bindingID = UUID()
-        let defaultURL = "https://github.com/acme/acme-prod/pull/412"
-        func bound(state: PRMergeableState = .checksFailed,
-                   reason: String? = "Checks failing",
-                   position: Int? = nil,
-                   branch: String? = "fix-login-timeout",
-                   prURL: String? = nil) -> [MenuRow] {
-            let url = prURL ?? defaultURL
-            return PRBindingPresentation.menuRows([
-                PRBinding(id: bindingID, worktreeID: UUID(), owner: "acme", repo: "acme-prod",
-                          number: 412, url: url, headBranch: branch,
-                          status: PRStatus(number: 412, url: url, state: state,
-                                           reason: reason, mergeQueuePosition: position),
-                          source: .hook)
-            ])
-        }
-        let base = PRBindingPresentation.menuRowsID(bound())
-        #expect(PRBindingPresentation.menuRowsID(bound()) == base)
-        // The fast-moving field: same state, same reason, one place nearer the
-        // front of the queue.
-        #expect(PRBindingPresentation.menuRowsID(bound(position: 3))
-            != PRBindingPresentation.menuRowsID(bound(position: 2)))
-        // Everything else a row renders. The state reaches the title only
-        // through the words it falls back to, so it moves the key exactly when
-        // the status brought none of its own.
-        #expect(PRBindingPresentation.menuRowsID(bound(reason: "1 check failing")) != base)
-        #expect(PRBindingPresentation.menuRowsID(bound(state: .blocked, reason: nil))
-            != PRBindingPresentation.menuRowsID(bound(state: .checksFailed, reason: nil)))
-        #expect(PRBindingPresentation.menuRowsID(bound(branch: "fix-login-timeout-2")) != base)
-        // Identical text, re-pointed target — the row title carries the number
-        // and the branch, not the url. The row's action captures that url and
-        // `disabled` reads it, so the item still has to be rebuilt.
-        let repointed = bound(prURL: "https://github.com/acme/acme-prod/pull/999")
-        #expect(repointed[0].title == bound()[0].title)
-        #expect(PRBindingPresentation.menuRowsID(repointed) != base)
-        // A reason is whatever the forge wrote, and both of the key's own
-        // separators are legal in it. They go through
-        // `PRButtonLabel.escapedIDField`, so a value carrying either keys
-        // distinctly rather than reading as a field boundary.
-        #expect(PRBindingPresentation.menuRowsID(bound(reason: "a|b-c")) != base)
-        #expect(PRBindingPresentation.menuRowsID(bound(reason: "a|b-c"))
-            != PRBindingPresentation.menuRowsID(bound(reason: "abc")))
     }
 }

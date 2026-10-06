@@ -21,7 +21,8 @@ worktree's work shipped.
 
 **Layout** – when grouping applies, the PR cluster renders, left to right:
 
-- one done chip, `✓ N done`
+- one done chip, `✓ N PRs done` (`✓ N MRs done` when every finished request is
+  a GitLab merge request)
 - the open PRs as chips, in bind order, up to `prChipLimit`
 - the existing `+N` menu for open PRs past the limit
 

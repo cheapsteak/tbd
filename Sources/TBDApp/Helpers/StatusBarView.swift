@@ -316,7 +316,7 @@ struct StatusBarView: View {
     /// ten long titles cannot grow the card past the window it explains.
     nonisolated static let doneCardLeadLimit = 120
 
-    /// What the `✓ N done` chip's hover overlay says: the count as its title
+    /// What the `✓ N PRs done` chip's hover overlay says: the count as its title
     /// (`5 merged or closed pull requests`), then one row per finished PR in
     /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
     /// the title, else the head branch) and beneath it the PR's
@@ -751,7 +751,7 @@ private struct StatusBarHoverAffordance: ViewModifier {
 
 /// The status bar's PR cluster: one chip per bound PR up to
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
-/// more merged or closed PRs, those fold into a leading `✓ N done` chip and
+/// more merged or closed PRs, those fold into a leading `✓ N PRs done` chip and
 /// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
@@ -771,7 +771,7 @@ private struct PRChipCluster: View {
                 // tooltip would say, and both would stack over the chip.
                 PRChipMenu(
                     rows: PRBindingPresentation.doneMenuRows(model.done),
-                    label: PRBindingPresentation.doneChipLabel(count: count),
+                    label: PRBindingPresentation.doneChipLabel(model.done),
                     tooltip: nil,
                     spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
                     hoverCard: StatusBarView.doneChipHoverCard(model.done))
@@ -1009,7 +1009,7 @@ private struct PRChipView: View {
     }
 }
 
-/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N done`
+/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N PRs done`
 /// chip. Clicking it drops down the rows its caller built, in bind order. The
 /// `+N` chip's rows come from the toolbar's multi-PR dropdown's own builder —
 /// `PRBindingPresentation.menuRows` — so the two surfaces cannot describe the
@@ -1019,15 +1019,24 @@ private struct PRChipView: View {
 /// PR's title. Neither chip offers an untrack action; that lives on the
 /// individual chips.
 ///
-/// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
-/// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`
-/// exists for and `PRSplitButtonIDTests` tripwires. These rows carry two fields
-/// that move on their own: the queue position, which counts down on every merge
-/// ahead of the PR, and the status `reason`. A menu built at position 3 and left
-/// open would sit two pixels from a chip whose baked bus badge already read 1 —
-/// exactly the disagreement the shared sentence exists to remove. So the `Menu`
-/// takes an `.id` keyed on the rendered rows (`PRBindingPresentation.menuRowsID`)
-/// and is recreated whenever their text or targets change.
+/// The label is a plain-styled SwiftUI `Button` around a `Text`, and the menu
+/// is an `NSMenu` popped up on click, rather than a SwiftUI `Menu`. A `Menu`
+/// with `.menuStyle(.borderlessButton)` is backed on macOS by an AppKit pop-up
+/// button that draws its label in the system control font and ignores the
+/// environment font, so its label would draw a size larger than the `.caption`
+/// text around it. A `Text` inherits the bar's font like every other entry.
+///
+/// Building the `NSMenu` at click time from the current `rows` also keeps the
+/// rows current. These rows carry two fields that move on their own — the
+/// queue position, which counts down on every merge ahead of the PR, and the
+/// status `reason` — and a menu materialized once and reused would let a row
+/// contradict the chip two pixels away. A menu built fresh on every click
+/// cannot go stale, so no `.id` re-materialization key is needed.
+///
+/// The menu hangs just under the chip (`PRChipMenuAnchor`), the way a pull-down
+/// hangs off its button. Popping it up posts `NSMenu.didBeginTracking`, which
+/// `HoverCardController` observes to cancel a dwelling card and hide a shown
+/// one, so the hover card cannot open over the menu.
 ///
 /// The `+N` menu renders **no PR title**, and that is a decision rather than
 /// an omission: the PRs it lists are open, their titles reach the chips through
@@ -1045,36 +1054,83 @@ private struct PRChipMenu: View {
     var hoverCard: HoverCardModel?
 
     @State private var isHovering = false
+    @State private var anchor = PRChipMenuAnchor.Box()
 
     var body: some View {
-        Menu {
-            ForEach(rows) { row in
-                // The default browser, matching the chips beside it — see
-                // `PRChipView`'s tap handler for why the status bar differs
-                // from the toolbar here.
-                Button(row.title) {
-                    guard let url = row.url else { return }
-                    NSWorkspace.shared.open(url)
-                }
-                .disabled(row.url == nil)
-            }
-        } label: {
+        Button(action: showMenu) {
             Text(label)
                 .lineLimit(1)
                 .underline(isHovering)
                 .foregroundStyle(.secondary)
         }
-        // Forces AppKit to re-materialize the NSMenu when the rows' text or
-        // targets move — see this view's doc comment for why a queued PR makes
-        // that mandatory rather than tidy.
-        .id(PRBindingPresentation.menuRowsID(rows))
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
+        .background(PRChipMenuAnchor(box: anchor))
         .help(tooltip ?? "")
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
         .hoverCard(hoverCard)
         .accessibilityLabel(spokenLabel)
+    }
+
+    private func showMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let target = PRChipMenuTarget()
+        for row in rows {
+            // The default browser, matching the chips beside it — see
+            // `PRChipView`'s tap handler for why the status bar differs from
+            // the toolbar here.
+            let item = NSMenuItem(title: row.title,
+                                  action: #selector(PRChipMenuTarget.openRow(_:)),
+                                  keyEquivalent: "")
+            item.target = target
+            item.representedObject = row.url
+            item.isEnabled = row.url != nil
+            menu.addItem(item)
+        }
+        // `NSMenuItem.target` is weak: the menu owns the target for its lifetime.
+        objc_setAssociatedObject(menu, "prChipMenuTarget", target, .OBJC_ASSOCIATION_RETAIN)
+
+        if let view = anchor.view, view.window != nil {
+            // Top-left of the menu at the chip's bottom-left corner.
+            let underChip = NSPoint(x: view.bounds.minX,
+                                    y: view.isFlipped ? view.bounds.maxY : view.bounds.minY)
+            menu.popUp(positioning: nil, at: underChip, in: view)
+        } else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }
+    }
+}
+
+/// Routes a `PRChipMenu` item's click from AppKit's target/action world to the
+/// default browser. Each item carries its PR's url in `representedObject`.
+@MainActor
+private final class PRChipMenuTarget: NSObject {
+    @objc func openRow(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+/// A zero-content `NSView` laid behind a `PRChipMenu`'s label, sized to it, so
+/// the chip's menu can be popped up in the chip's own coordinate space. The
+/// view is handed out through a reference `Box` held in the chip's `@State`,
+/// which a click reads without causing a SwiftUI update.
+private struct PRChipMenuAnchor: NSViewRepresentable {
+    final class Box {
+        weak var view: NSView?
+    }
+
+    let box: Box
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        box.view = nsView
     }
 }
 

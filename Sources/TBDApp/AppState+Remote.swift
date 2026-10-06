@@ -45,6 +45,7 @@ extension AppState {
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
             remoteSessions = sessions.sessions
+            pruneExpandedSidebarGroups(providerNames: Set(providers.providers.map(\.config.name)))
             if let selectedRemoteProvider,
                !providers.providers.contains(where: { $0.config.name == selectedRemoteProvider }) {
                 self.selectedRemoteProvider = nil

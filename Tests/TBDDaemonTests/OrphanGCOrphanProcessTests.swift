@@ -526,6 +526,77 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(!result.planned.contains { $0.contains("pid=111") || $0.contains("pid=112") })
     }
 
+    /// The field incident: the daemon was launched from a worktree, so every
+    /// holder it spawned inherited that worktree's cwd and sat at `ppid == 1`.
+    /// The worktree was deleted and the sweep killed holders serving sessions
+    /// in OTHER, live worktrees — and their jobs with them. A real orphan under
+    /// the same dead path must still be reclaimed, and a holder whose session
+    /// row belongs to an archived worktree gets no exemption.
+    @Test("a live session's holder and job are spared under a dead cwd; real orphans there are not")
+    func liveHolderSessionsAreExempt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let queued = try makeQueuedEntry()
+        let deadCWD = canon(URL(fileURLWithPath: queued, isDirectory: true))
+
+        let liveDir = pool.appendingPathComponent("working", isDirectory: true)
+        try fm.createDirectory(at: liveDir, withIntermediateDirectories: true)
+        let liveRow = try await db.worktrees.create(
+            repoID: repo.id, name: "working", branch: "working",
+            path: liveDir.path, tmuxServer: "tbd-test")
+        let goneDir = pool.appendingPathComponent("gone", isDirectory: true)
+        try fm.createDirectory(at: goneDir, withIntermediateDirectories: true)
+        let goneRow = try await db.worktrees.create(
+            repoID: repo.id, name: "gone", branch: "gone",
+            path: goneDir.path, tmuxServer: "tbd-test")
+
+        let childStartedAt = Date().addingTimeInterval(-86_400)
+        let liveSession = try await db.terminals.create(
+            worktreeID: liveRow.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder, holderPID: 800, childPID: 801,
+            holderChildStartedAt: childStartedAt)
+        let archivedSession = try await db.terminals.create(
+            worktreeID: goneRow.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder, holderPID: 810, childPID: 811,
+            holderChildStartedAt: childStartedAt)
+        try await db.worktrees.archive(id: goneRow.id)
+
+        func holder(_ id: UUID) -> String {
+            "/acme/.build/release/TBDHolder --session \(id.uuidString) --socket /h/x.sock"
+        }
+        let signaller = FakeProcessSignaller()
+        for (pid, command) in [
+            (Int32(800), holder(liveSession.id)), (801, "/bin/zsh -l"),
+            (810, holder(archivedSession.id)), (811, "/bin/zsh -l"),
+        ] {
+            signaller.cmdlines[pid] = command
+            signaller.startTimes[pid] = childStartedAt
+        }
+        for pid: Int32 in [810, 811, 900] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        _ = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 800, command: holder(liveSession.id)),
+                entry(pid: 801, ppid: 800, command: "/bin/zsh -l"),
+                entry(pid: 810, command: holder(archivedSession.id)),
+                entry(pid: 811, ppid: 810, command: "/bin/zsh -l"),
+                entry(pid: 900),
+            ],
+            cwdByPID: [800: deadCWD, 801: canon(liveDir), 810: deadCWD, 811: deadCWD,
+                       900: deadCWD],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(800), "the live session's holder")
+        #expect(!signaller.terminated.contains(801), "the live session's job")
+        #expect(Set(signaller.terminated) == [810, 811, 900])
+    }
+
     @Test("a candidate whose cwd could not be read is skipped, never reclaimed")
     func unreadableCWDIsASkip() async throws {
         let db = try TBDDatabase(inMemory: true)

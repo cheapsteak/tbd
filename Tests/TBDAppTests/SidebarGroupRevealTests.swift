@@ -40,7 +40,7 @@ struct SidebarGroupRevealTests {
             state.selectRemoteSession(provider: "acme", sessionID: "worker")
             let first = state.sidebarSelectionReveal
             let generation = state.sidebarSelectionGeneration
-            state.revealSidebarGroups(first)
+            state.revealSidebarGroups(first, grouped: true)
             let group = SidebarGroupID(owner: .repository(repo), kind: .remote)
             state.toggleSidebarGroup(group)
             let sameInventory = state.remoteSessions
@@ -50,7 +50,7 @@ struct SidebarGroupRevealTests {
             state.selectRemoteSession(provider: "acme", sessionID: "worker")
             #expect(state.sidebarSelectionGeneration == generation + 1)
             #expect(state.sidebarSelectionReveal != first)
-            state.revealSidebarGroups(state.sidebarSelectionReveal)
+            state.revealSidebarGroups(state.sidebarSelectionReveal, grouped: true)
             #expect(state.expandedSidebarGroups.contains(group))
         }
     }
@@ -67,14 +67,14 @@ struct SidebarGroupRevealTests {
             state.selectedWorktreeIDs = [child.id]
             let first = state.sidebarSelectionReveal
             let generation = state.sidebarSelectionGeneration
-            state.revealSidebarGroups(first)
+            state.revealSidebarGroups(first, grouped: true)
             let group = SidebarGroupID(owner: .repository(repo), kind: .remote)
             #expect(state.expandedSidebarGroups.contains(group))
             state.toggleSidebarGroup(group)
             state.selectedWorktreeIDs = [child.id]
             #expect(state.sidebarSelectionGeneration == generation + 1)
             #expect(state.sidebarSelectionReveal != first)
-            state.revealSidebarGroups(state.sidebarSelectionReveal)
+            state.revealSidebarGroups(state.sidebarSelectionReveal, grouped: true)
             #expect(state.expandedSidebarGroups.contains(group))
         }
     }
@@ -115,7 +115,7 @@ struct SidebarGroupRevealTests {
             let remote = SidebarGroupID(owner: .repository(repo), kind: .remote)
             let exited = SidebarGroupID(owner: .repository(repo), kind: .exited)
             #expect(initial.groups == [remote])
-            state.revealSidebarGroups(initial)
+            state.revealSidebarGroups(initial, grouped: true)
             state.repos[0].expanded = false
 
             // An unrelated state update leaves membership and the observer's
@@ -130,13 +130,13 @@ struct SidebarGroupRevealTests {
             let moved = state.sidebarSelectionReveal
             #expect(moved.generation == initial.generation)
             #expect(moved.groups == [remote, exited])
-            state.revealSidebarGroups(moved, previous: initial)
+            state.revealSidebarGroups(moved, previous: initial, grouped: true)
             #expect(state.expandedSidebarGroups.contains(exited))
             #expect(!state.repos[0].expanded)
 
             // Explicitly re-selecting that same row still reveals its owner.
             state.selectedWorktreeIDs = [selected.id]
-            state.revealSidebarGroups(state.sidebarSelectionReveal, previous: moved)
+            state.revealSidebarGroups(state.sidebarSelectionReveal, previous: moved, grouped: true)
             #expect(state.repos[0].expanded)
         }
     }
@@ -147,12 +147,12 @@ struct SidebarGroupRevealTests {
             let reveal = state.sidebarGroupReveal(
                 worktreeIDs: [], selection: .init(provider: "acme", sessionID: "worker"))
             state.repos[0].expanded = false
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: true)
             #expect(state.repos[0].expanded)
             state.repos[0].expanded = false
-            state.revealSidebarGroups(reveal, previous: reveal)
+            state.revealSidebarGroups(reveal, previous: reveal, grouped: true)
             #expect(!state.repos[0].expanded)
-            state.revealSidebarGroups(reveal)
+            state.revealSidebarGroups(reveal, grouped: true)
             #expect(state.repos[0].expanded)
         }
     }
@@ -165,7 +165,7 @@ struct SidebarGroupRevealTests {
                 worktreeIDs: [], selection: .init(provider: "acme", sessionID: "worker"))
             #expect(initial.generation == target.generation)
             state.repos[0].expanded = false
-            state.revealSidebarGroups(target, previous: initial)
+            state.revealSidebarGroups(target, previous: initial, grouped: true)
             #expect(state.repos[0].expanded)
         }
     }
@@ -178,7 +178,7 @@ struct SidebarGroupRevealTests {
             state.remoteSessions = [SidebarGroupFixtures.session("worker", state: .exited, repoID: repo)]
             let updated = state.sidebarSelectionReveal
             #expect(updated != initial)
-            state.revealSidebarGroups(updated)
+            state.revealSidebarGroups(updated, grouped: true)
             #expect(state.expandedSidebarGroups.contains(.init(owner: .repository(repo), kind: .exited)))
             #expect(state.recentlyAttachedRemoteSessions.isEmpty)
         }
