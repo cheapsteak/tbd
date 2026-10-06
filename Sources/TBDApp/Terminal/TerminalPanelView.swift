@@ -50,21 +50,25 @@ enum TerminalPreparationPresentation {
     ///
     /// Distinct from `holderAttachFailedMessage` because both of that copy's
     /// claims are false here — the session is not running, and reopening the
-    /// tab attaches to nothing. Only a Claude tab is promised a way back:
-    /// closing the tab records it under Closed Terminals in Session History,
-    /// and reviving a Claude entry there resumes its conversation. Any other
-    /// kind is told only what is true of every tab.
+    /// tab attaches to nothing. Only a Claude tab with a recorded session id
+    /// is promised a way back: closing the tab records it under Closed
+    /// Terminals in Session History, and reviving it there resumes that
+    /// session — the revive resumes only when the entry carries one. Every
+    /// other tab is told only what is true of all of them.
     static let holderSessionEndedMessage =
         "This session's terminal process has ended, so there is nothing to attach to. Close the tab to clear it."
     static let holderClaudeSessionEndedMessage =
         "This session's terminal process has ended, so there is nothing to attach to. Close the tab, then reopen it from Session History → Closed Terminals to resume the conversation."
 
-    /// The placard for a holder attach that failed with `error`, in a tab of
-    /// `kind`.
-    static func holderAttachFailureMessage(for error: any Error, kind: TerminalKind?) -> String {
+    /// The placard for a holder attach that failed with `error`, in a tab
+    /// showing `terminal` (nil when it is not loaded).
+    static func holderAttachFailureMessage(
+        for error: any Error, terminal: TBDShared.Terminal?
+    ) -> String {
         if case DaemonClientError.attachUnavailable(let status) = error,
            status == AttachRequestResult.holderSessionEndedStatus {
-            return kind == .claude ? holderClaudeSessionEndedMessage : holderSessionEndedMessage
+            let resumable = terminal?.kind == .claude && terminal?.claudeSessionID != nil
+            return resumable ? holderClaudeSessionEndedMessage : holderSessionEndedMessage
         }
         return holderAttachFailedMessage
     }
@@ -931,6 +935,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 .transport ?? .tmux
         }
 
+        /// The terminal this panel shows, or nil when AppState has not loaded
+        /// it.
+        @MainActor
+        func panelTerminal() -> TBDShared.Terminal? {
+            appState?.terminals.values
+                .lazy
+                .flatMap { $0 }
+                .first(where: { $0.id == panelID })
+        }
+
         @MainActor
         func transportPreparationNoticeForPanel() -> String? {
             Self.transportPreparationNotice(for: panelTransport())
@@ -1183,7 +1197,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 feedHolderAttachFailure(
                     reason: "attach refused: \(error.localizedDescription)", into: terminalView,
                     message: TerminalPreparationPresentation.holderAttachFailureMessage(
-                        for: error, kind: panelKind()))
+                        for: error, terminal: panelTerminal()))
                 return
             }
             // **Close-on-exec, before anything else touches it.** A descriptor

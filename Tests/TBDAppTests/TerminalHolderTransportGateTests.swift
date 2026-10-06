@@ -473,24 +473,32 @@ struct TerminalHolderTransportGateTests {
                 "an ended session must not claim it keeps running")
     }
 
-    @Test("only the ended status maps to the session-ended copy, and only Claude is promised a resume")
+    @Test("only the ended status maps to the session-ended copy, and only a resumable Claude tab is promised a resume")
     func holderAttachFailureMessageMapping() {
         typealias Copy = TerminalPreparationPresentation
+        func tab(_ kind: TerminalKind?, session: String?) -> TBDShared.Terminal {
+            TBDShared.Terminal(
+                id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+                claudeSessionID: session, kind: kind, transport: .holder)
+        }
         let ended = DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
-        #expect(Copy.holderAttachFailureMessage(for: ended, kind: .claude)
+        #expect(Copy.holderAttachFailureMessage(for: ended, terminal: tab(.claude, session: "s-1"))
             == Copy.holderClaudeSessionEndedMessage)
-        for kind: TerminalKind? in [.shell, .codex, nil] {
-            #expect(Copy.holderAttachFailureMessage(for: ended, kind: kind)
+        let neutral: [TBDShared.Terminal?] = [
+            tab(.claude, session: nil), tab(.shell, session: nil), tab(.codex, session: "s-1"), nil,
+        ]
+        for terminal in neutral {
+            #expect(Copy.holderAttachFailureMessage(for: ended, terminal: terminal)
                 == Copy.holderSessionEndedMessage)
         }
         #expect(!Copy.holderSessionEndedMessage.contains("resume"),
                 "a tab that cannot resume must not be promised one")
         #expect(Copy.holderAttachFailureMessage(
-            for: DaemonClientError.attachUnavailable("unavailable"), kind: .claude)
-            == Copy.holderAttachFailedMessage)
+            for: DaemonClientError.attachUnavailable("unavailable"),
+            terminal: tab(.claude, session: "s-1")) == Copy.holderAttachFailedMessage)
         #expect(Copy.holderAttachFailureMessage(
             for: DaemonClientError.rpcError("attach failed: no live holder reader", code: nil),
-            kind: .claude) == Copy.holderAttachFailedMessage)
+            terminal: tab(.claude, session: "s-1")) == Copy.holderAttachFailedMessage)
     }
 
     @MainActor
