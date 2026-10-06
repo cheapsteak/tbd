@@ -313,7 +313,7 @@ public actor HibernationCoordinator {
     var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
 
     /// Whether a recorded holder pid is still a live `TBDHolder` — the
-    /// holder half of `holderSessionHasEnded`. Production uses the shared
+    /// holder half of `HolderChildDisposition.sessionHasEnded`. Production uses the shared
     /// `HolderSpawner.isLiveHolder`; tests replace it through
     /// `setHolderProcessIsLive`, because a fixture's holder pid is a number
     /// the real kernel answers for.

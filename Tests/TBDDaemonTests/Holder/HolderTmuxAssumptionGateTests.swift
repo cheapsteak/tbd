@@ -456,16 +456,32 @@ struct HolderTmuxAssumptionGateTests {
                 "the park left pids naming processes that no longer exist")
     }
 
-    /// A recorded child pid now running something else is the same fact once
-    /// the holder is gone: the job left that number long ago.
-    @Test("a dead holder whose child pid names a stranger is parked")
-    func deadHolderAndReusedChildPIDParks() async throws {
-        let (result, _, after) = try await parkWithDeadHolder { signaller, anchor in
+    /// A holder's death does not imply its job's: a viewer holding a dup of
+    /// the pty master keeps the job from ever seeing a hangup. So a recorded
+    /// child pid that is alive under another executable or another start time
+    /// is a process this daemon cannot identify, and the park refuses rather
+    /// than finalizing over it — a wake would otherwise start a second agent
+    /// on the same session.
+    @Test("a dead holder whose child pid runs a foreign executable is still refused")
+    func deadHolderWithAForeignChildStillRefuses() async throws {
+        let (result, before, after) = try await parkWithDeadHolder { signaller, anchor in
+            signaller.startTimes[9102] = anchor
+            signaller.cmdlines[9102] = "/opt/homebrew/bin/node /acme/cli.js"
+        }
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
+    }
+
+    @Test("a dead holder whose child pid started at another time is still refused")
+    func deadHolderWithAStartTimeMismatchStillRefuses() async throws {
+        let (result, before, after) = try await parkWithDeadHolder { signaller, anchor in
             signaller.startTimes[9102] = anchor.addingTimeInterval(86_400)
             signaller.cmdlines[9102] = "/bin/zsh -i -l -c claude"
         }
-        #expect(result == .ok, "\(result)")
-        #expect(after.isParked)
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
     }
 
     @Test("a live holder with no reader is still refused")

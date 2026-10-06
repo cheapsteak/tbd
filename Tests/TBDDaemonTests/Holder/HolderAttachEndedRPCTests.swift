@@ -52,11 +52,28 @@ struct HolderAttachEndedRPCTests {
                     terminalID: terminalID)))
     }
 
-    @Test("a dead recorded holder answers the ended status")
+    /// A process table in which the recorded child (4243) names nothing.
+    private func deadChild() -> FakeProcessSignaller {
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4243] = .init(aliveInitially: false)
+        return signaller
+    }
+
+    /// A process table in which the recorded child is alive and verifiably
+    /// this session's job: started at the row's anchor, running a shell.
+    private func liveChild(startedAt anchor: Date) -> FakeProcessSignaller {
+        let signaller = FakeProcessSignaller()
+        signaller.startTimes[4243] = anchor
+        signaller.cmdlines[4243] = "/bin/zsh -i -l -c claude"
+        return signaller
+    }
+
+    @Test("a dead recorded holder whose job is gone answers the ended status")
     func deadHolderIsEnded() async throws {
         let (router, worktreeID, terminalID) = try await makeRouter(holderPID: 4242)
         let probed = LockedPIDs()
         router.holderProcessIsLive = { pid in probed.append(pid); return false }
+        router.holderChildSignaller = deadChild()
 
         let response = try await attach(router, worktreeID: worktreeID, terminalID: terminalID)
 
@@ -64,6 +81,23 @@ struct HolderAttachEndedRPCTests {
         #expect(try response.decodeResult(AttachRequestResult.self).status
             == AttachRequestResult.holderSessionEndedStatus)
         #expect(probed.values == [4242])
+    }
+
+    /// The holder died but its job did not — a viewer holding a dup of the pty
+    /// master keeps the job from seeing a hangup. Telling that tab its session
+    /// ended would be the same lie in the other direction.
+    @Test("a dead holder whose job still runs keeps the attach error")
+    func deadHolderWithALiveJobIsAnError() async throws {
+        let (router, worktreeID, terminalID) = try await makeRouter(holderPID: 4242)
+        router.holderProcessIsLive = { _ in false }
+        let row = try #require(try await router.db.terminals.get(id: terminalID))
+        router.holderChildSignaller = liveChild(
+            startedAt: row.holderChildStartedAt ?? row.createdAt)
+
+        let response = try await attach(router, worktreeID: worktreeID, terminalID: terminalID)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("no live holder reader") == true)
     }
 
     @Test("a live recorded holder keeps the attach error")
@@ -113,6 +147,7 @@ struct HolderAttachEndedRPCTests {
         ]
 
         router.holderProcessIsLive = { _ in false }
+        router.holderChildSignaller = deadChild()
         for error in endable {
             #expect(router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
             #expect(!router.attachRefusalMeansSessionEnded(error, terminal: unrecorded), "\(error)")
@@ -122,6 +157,12 @@ struct HolderAttachEndedRPCTests {
         }
 
         router.holderProcessIsLive = { _ in true }
+        for error in endable {
+            #expect(!router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
+        }
+
+        router.holderProcessIsLive = { _ in false }
+        router.holderChildSignaller = liveChild(startedAt: recorded.createdAt)
         for error in endable {
             #expect(!router.attachRefusalMeansSessionEnded(error, terminal: recorded), "\(error)")
         }

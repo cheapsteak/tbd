@@ -260,7 +260,9 @@ extension RPCRouter {
     }
 
     /// Whether `beginAttach` refusing with `error` means the session has
-    /// ended rather than that this attach cannot happen right now.
+    /// ended rather than that this attach cannot happen right now. "Ended" is
+    /// `HolderChildDisposition.sessionHasEnded` — the park's own answer — so a
+    /// tab whose job still runs is never told its session is over.
     ///
     /// Three refusals can stand in front of a dead holder, because the registry
     /// checks its own bookkeeping before it ever reaches the pty: no reader at
@@ -273,18 +275,11 @@ extension RPCRouter {
     ) -> Bool {
         switch error {
         case .noLiveReader, .attachedToViewer, .attachAlreadyPending:
-            return holderSessionHasEnded(terminal)
+            return HolderChildDisposition.sessionHasEnded(
+                terminal, holderIsLive: holderProcessIsLive, signaller: holderChildSignaller)
         default:
             return false
         }
-    }
-
-    /// True only on positive evidence that the row's holder is gone: a holder
-    /// pid was recorded and no `TBDHolder` runs under it. A row that recorded
-    /// none — a session still being established — is not judged ended.
-    func holderSessionHasEnded(_ terminal: Terminal) -> Bool {
-        guard let holderPID = terminal.holderPID, holderPID > 1 else { return false }
-        return !holderProcessIsLive(holderPID)
     }
 
     /// Handle `attach.ready`: the app's reader is draining the vended fd —

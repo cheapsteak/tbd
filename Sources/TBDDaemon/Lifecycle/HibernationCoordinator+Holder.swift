@@ -57,6 +57,76 @@ enum HolderChildDisposition: Sendable, Equatable {
     case unverifiable(ProcessIdentityVerdict)
 }
 
+extension HolderChildDisposition {
+    /// The disposition of a recorded child pid, per the table on the type.
+    ///
+    /// A corpse is gone, and it is asked about FIRST so this agrees with
+    /// `childIsGone`, which reads the same fact. It also has to come first to
+    /// be right: `ps` prints a zombie's command in parentheses, which the
+    /// executable check below would read as a stranger's — so a child that
+    /// exited a moment after the poll gave up would be refused as a foreign
+    /// process rather than recognized as the exit it is. A zombie is past its
+    /// last instruction and its number cannot be reissued while the entry
+    /// stands, so this is a positive answer either way.
+    ///
+    /// The anchor is the row's own `holderChildStartedAt`, falling back to
+    /// `createdAt` for a row written before that column existed — the same
+    /// pair the reaper's holder leg and the wake's adopt guard measure
+    /// against, so a pid that passes here passes there.
+    static func of(
+        childPID: Int32, terminal: Terminal, signaller: any ProcessSignaller
+    ) -> HolderChildDisposition {
+        guard childPID > 1 else { return .unrecorded }
+        if signaller.stat(childPID)?.hasPrefix("Z") == true { return .gone }
+        let verdict = ProcessIdentityCheck.verify(
+            pid: childPID,
+            startedWithin: AgentReaper.defaultHolderIdentityWindow,
+            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+            signaller: signaller)
+        switch verdict {
+        case .same: return .ours
+        case .notRunning: return .gone
+        case .startTimeUnreadable, .startTimeMismatch, .commandUnreadable, .foreignExecutable:
+            return .unverifiable(verdict)
+        }
+    }
+
+    /// Whether a holder session has ended: its holder AND its job are both
+    /// verifiably gone. **The one answer to that question**, asked by the
+    /// attach path before it tells the app "ended" and by the park before it
+    /// finalizes without its live rails, so a tab is never told its session
+    /// ended while a park would still refuse it, or the reverse.
+    ///
+    /// Fail-closed on every half, because a wrong "ended" either tells somebody
+    /// a running job is gone or finalizes a park over it — and a wake then
+    /// starts a second agent on the same session:
+    ///
+    /// - **The holder** must have a recorded pid that is not a live
+    ///   `TBDHolder` (`holderIsLive`, which is `HolderSpawner.isLiveHolder` in
+    ///   production). No recorded pid is not evidence of anything, and a live
+    ///   holder that has merely lost its reader is a session the daemon has
+    ///   lost track of, not one that ended.
+    /// - **The job** must have a recorded pid whose disposition is `.gone`:
+    ///   nothing runs at that number, or a corpse holds it. A holder's death
+    ///   does not imply its job's — a viewer holding a dup of the pty master
+    ///   keeps the job from ever seeing a hangup — so a pid that is alive
+    ///   under another start time or another executable is NOT taken as
+    ///   gone. That is a process this daemon cannot identify, which is the
+    ///   case `HolderChildDisposition` refuses for every other rung too.
+    ///   Unreadable answers refuse for the same reason.
+    static func sessionHasEnded(
+        _ terminal: Terminal,
+        holderIsLive: (Int32) -> Bool,
+        signaller: any ProcessSignaller
+    ) -> Bool {
+        guard let holderPID = terminal.holderPID, holderPID > 1,
+              !holderIsLive(holderPID) else { return false }
+        guard let childPID = terminal.childPID, childPID > 1 else { return false }
+        return of(childPID: childPID, terminal: terminal, signaller: signaller) == .gone
+    }
+}
+
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -380,9 +450,12 @@ extension HibernationCoordinator {
         // over nothing, with every wake, hibernate and profile swap refused for
         // a reader that can never come back. Parking it is the truthful record,
         // and the invariant this feature is judged on holds trivially: the
-        // child is not running. `holderSessionHasEnded` is fail-closed — an
-        // unrecorded pid or an uncertain identity is not "gone".
-        let sessionEnded = holderSessionHasEnded(currentTerminal)
+        // child is not running. `HolderChildDisposition.sessionHasEnded` is
+        // fail-closed — an unrecorded pid, a pid that is alive under an
+        // identity this daemon cannot confirm, or an unreadable one is not
+        // "gone" — and it is the same answer the attach path gives the app.
+        let sessionEnded = HolderChildDisposition.sessionHasEnded(
+            currentTerminal, holderIsLive: holderProcessIsLive, signaller: signaller)
         if sessionEnded {
             logger.info("hibernate: \(terminal.id, privacy: .public)'s holder and job are both gone — parking it without the live rails")
         }
@@ -507,7 +580,7 @@ extension HibernationCoordinator {
         // a short count, it belongs in this same log line.
         //
         // An ended session skips the whole ladder: there is nothing to tell to
-        // exit and nothing to signal, and `holderSessionHasEnded` has already
+        // exit and nothing to signal, and `sessionHasEnded` has already
         // established that the child is gone.
         var gone = sessionEnded
         if let reader {
@@ -585,7 +658,13 @@ extension HibernationCoordinator {
             // The job ended without the forced rung, so the holder was never
             // told to let go — and a holder whose child has exited winds itself
             // down, which is a race this call does not need to win.
-            await letHolderGoWithoutKilling(currentTerminal, registry: registry)
+            //
+            // An ended session's holder is already dead, so its recorded pid
+            // may since have been reissued — possibly to one of this daemon's
+            // own children, which the holder reap's `waitpid` would collect.
+            // It is told to let go with no holder pid at all.
+            await letHolderGoWithoutKilling(
+                currentTerminal, registry: registry, reapHolder: !sessionEnded)
         }
 
         guard gone else {
@@ -778,61 +857,7 @@ extension HibernationCoordinator {
     func holderChildDisposition(
         childPID: Int32, terminal: Terminal
     ) -> HolderChildDisposition {
-        guard childPID > 1 else { return .unrecorded }
-        // A corpse is gone, and it is asked about FIRST so this agrees with
-        // `childIsGone`, which reads the same fact. It also has to come first
-        // to be right: `ps` prints a zombie's command in parentheses, which the
-        // executable check below would read as a stranger's — so a child that
-        // exited a moment after the poll gave up would be refused as a foreign
-        // process rather than recognized as the exit it is. A zombie is past
-        // its last instruction and its number cannot be reissued while the
-        // entry stands, so this is a positive answer either way: if some
-        // stranger's corpse holds the number, our child left it long ago.
-        if signaller.stat(childPID)?.hasPrefix("Z") == true { return .gone }
-        let verdict = ProcessIdentityCheck.verify(
-            pid: childPID,
-            startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
-            executableIsAcceptable: AgentReaper.isHolderChildExecutable,
-            signaller: signaller)
-        switch verdict {
-        case .same: return .ours
-        case .notRunning: return .gone
-        case .startTimeUnreadable, .startTimeMismatch, .commandUnreadable, .foreignExecutable:
-            return .unverifiable(verdict)
-        }
-    }
-
-    /// Whether a holder session's holder AND job are both verifiably gone, so
-    /// there is nothing live left for a park's rails to protect.
-    ///
-    /// Fail-closed on every half, because a wrong "gone" finalizes a park over
-    /// a running process — the one outcome this feature may never produce:
-    ///
-    /// - **The holder** must have a recorded pid that is not a live
-    ///   `TBDHolder` — the same check the attach path uses to answer "ended"
-    ///   (`HolderSpawner.isLiveHolder`). No recorded pid is not evidence of
-    ///   anything, and a live holder that has merely lost its reader is a
-    ///   session the daemon has lost track of, not one that ended.
-    /// - **The job** must have a recorded pid whose `ProcessIdentityCheck`
-    ///   positively says it is not this session's child: nothing runs at that
-    ///   number, or what runs there started at another time or runs another
-    ///   executable. With the holder already gone those are the same fact — the
-    ///   holder exits when its child does, and a pid reissued since names a
-    ///   stranger. An unreadable start time or command line is uncertainty, and
-    ///   uncertainty keeps refusing.
-    func holderSessionHasEnded(_ terminal: Terminal) -> Bool {
-        guard let holderPID = terminal.holderPID, holderPID > 1,
-              !holderProcessIsLive(holderPID) else { return false }
-        guard let childPID = terminal.childPID, childPID > 1 else { return false }
-        switch holderChildDisposition(childPID: childPID, terminal: terminal) {
-        case .gone:
-            return true
-        case .unverifiable(.startTimeMismatch), .unverifiable(.foreignExecutable):
-            return true
-        case .ours, .unrecorded, .unverifiable:
-            return false
-        }
+        HolderChildDisposition.of(childPID: childPID, terminal: terminal, signaller: signaller)
     }
 
     /// Abandon a park whose child pid this daemon cannot prove is its own.
@@ -879,8 +904,12 @@ extension HibernationCoordinator {
     /// recorded pid is free and the next process to take that number is
     /// somebody else's, and after an unverifiable identity the number was never
     /// ours to signal in the first place.
+    ///
+    /// `reapHolder: false` hands `abandon` no holder pid, so its reap step
+    /// (`waitpid` on that pid) is skipped — for a holder already known dead,
+    /// whose recorded number the kernel is free to have reissued.
     private func letHolderGoWithoutKilling(
-        _ terminal: Terminal, registry: HolderRegistry
+        _ terminal: Terminal, registry: HolderRegistry, reapHolder: Bool = true
     ) async {
         do {
             let socketPath = try HolderRendezvous.socketPath(
@@ -888,7 +917,7 @@ extension HibernationCoordinator {
             await registry.abandon(
                 terminalID: terminal.id,
                 handle: HolderHandle(
-                    holderPID: terminal.holderPID ?? 0,
+                    holderPID: reapHolder ? (terminal.holderPID ?? 0) : 0,
                     childPID: 0,
                     socketPath: socketPath))
         } catch {
