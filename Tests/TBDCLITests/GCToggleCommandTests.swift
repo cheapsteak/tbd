@@ -9,16 +9,13 @@ import TBDShared
 /// reads the current value back.
 @Suite("GC collector switch commands")
 struct GCToggleCommandTests {
-    @Test func noArgumentParsesAsTheReadForm() throws {
-        #expect(try GCOrphanProcesses.parse([]).state == nil)
+    /// Orphan-processes and hang-stacks are pinned in `GCCommandsTests`;
+    /// these are the two siblings it does not parse.
+    @Test func profileDirAndTranscriptSwitchesTakeAnOptionalStateWord() throws {
         #expect(try GCProfileDirs.parse([]).state == nil)
+        #expect(try GCProfileDirs.parse(["on"]).state == "on")
         #expect(try GCRetainedTranscripts.parse([]).state == nil)
-        #expect(try GCHangStacks.parse([]).state == nil)
-    }
-
-    @Test func anArgumentParsesAsTheSetForm() throws {
-        #expect(try GCOrphanProcesses.parse(["on"]).state == "on")
-        #expect(try GCHangStacks.parse(["off"]).state == "off")
+        #expect(try GCRetainedTranscripts.parse(["off"]).state == "off")
     }
 
     @Test func stateParsingAcceptsOnAndOffSpellings() throws {

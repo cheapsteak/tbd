@@ -156,6 +156,10 @@ final class AppStateEmissionTracker {
         _ = state.autoArchiveOnMergeDefault
         _ = state.autoHibernateOnMergeDefault
         _ = state.gcEnabled
+        _ = state.gcOrphanProcessesEnabled
+        _ = state.gcProfileDirsEnabled
+        _ = state.gcRetainedTranscriptsEnabled
+        _ = state.gcHangStacksEnabled
         _ = state.autoCreateNotesEnabled
         _ = state.nightwatchMode
         _ = state.autoHibernateEnabled
@@ -275,6 +279,10 @@ final class AppStateEmissionTracker {
         "autoArchiveOnMergeDefault",
         "autoHibernateOnMergeDefault",
         "gcEnabled",
+        "gcOrphanProcessesEnabled",
+        "gcProfileDirsEnabled",
+        "gcRetainedTranscriptsEnabled",
+        "gcHangStacksEnabled",
         "autoCreateNotesEnabled",
         "nightwatchMode",
         "autoHibernateEnabled",

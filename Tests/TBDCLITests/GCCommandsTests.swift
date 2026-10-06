@@ -7,7 +7,8 @@ import Testing
 /// The soak switches under `tbd gc` are the only hand-reachable way to turn a
 /// process-killing reclaimer on, so what these assert is that the switch is
 /// *reachable* — registered on the group under the name a soak participant is
-/// told to type, taking the same `on | off` positional as its siblings. The
+/// told to type, taking the same optional `on | off` positional as its
+/// siblings (omitted, it prints the current value). The
 /// state word's mapping to a Bool happens inside `run()`, behind a socket call
 /// to a live daemon, and is not exercised here.
 @Suite("tbd gc soak-switch registration and parsing")
@@ -42,13 +43,12 @@ struct GCCommandsTests {
         #expect(GCOrphanProcesses.configuration.commandName == "orphan-processes")
     }
 
-    @Test func orphanProcessSwitchTakesTheStateWordAsARequiredPositional() throws {
+    @Test func orphanProcessSwitchTakesTheStateWordAsAnOptionalPositional() throws {
         #expect(try GCOrphanProcesses.parse(["on"]).state == "on")
         #expect(try GCOrphanProcesses.parse(["off"]).state == "off")
-        // No argument is not "leave it as it is" — it is a usage error, so a
-        // bare `tbd gc orphan-processes` cannot read as a query that silently
-        // changed nothing.
-        #expect(throws: (any Error).self) { try GCOrphanProcesses.parse([]) }
+        // No argument is the read form: a bare `tbd gc orphan-processes`
+        // prints the current value and changes nothing.
+        #expect(try GCOrphanProcesses.parse([]).state == nil)
     }
 
     /// The hang-stack reclaimer deletes files rather than killing anything, so
@@ -66,9 +66,9 @@ struct GCCommandsTests {
         #expect(GCHangStacks.configuration.commandName == "hang-stacks")
     }
 
-    @Test func hangStackSwitchTakesTheStateWordAsARequiredPositional() throws {
+    @Test func hangStackSwitchTakesTheStateWordAsAnOptionalPositional() throws {
         #expect(try GCHangStacks.parse(["on"]).state == "on")
         #expect(try GCHangStacks.parse(["off"]).state == "off")
-        #expect(throws: (any Error).self) { try GCHangStacks.parse([]) }
+        #expect(try GCHangStacks.parse([]).state == nil)
     }
 }
