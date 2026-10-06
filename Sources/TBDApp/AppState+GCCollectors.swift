@@ -115,8 +115,14 @@ extension AppState {
     /// both. Silent on failure: the toggles keep their last value, and the cap
     /// stays at whatever it was, which on launch is OFF — the keep-biased
     /// direction, and the same answer the unset column gives.
+    ///
+    /// Overlapping loads (two deltas in quick succession) can finish out of
+    /// order; only the most recently started load applies its snapshot, so an
+    /// older `config.get` can never overwrite a newer one.
     func loadGCConfig() async {
-        guard let config = await fetchConfig() else { return }
+        gcConfigLoadGeneration &+= 1
+        let generation = gcConfigLoadGeneration
+        guard let config = await fetchConfig(), generation == gcConfigLoadGeneration else { return }
         applyGCCollectorConfig(config)
         // Mirror the hang-stack reclaimer gate into `HangStackWriter`'s
         // write-time cap (docs/specs/2026-08-29-hang-stack-reclaimer-design.md).

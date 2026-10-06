@@ -122,6 +122,55 @@ struct GCCollectorSettingsTests {
         }
     }
 
+    /// Two config-change deltas can start overlapping loads. The first
+    /// load's fetch is held until the second load has finished; when it then
+    /// returns its older snapshot it must apply nothing. Without the load
+    /// generation the first load would apply last and leave the mirrors at
+    /// the older snapshot, failing every expectation below.
+    @Test func aStaleLoadThatFinishesLastIsIgnored() async {
+        await withAppState { state in
+            // Hang-stack stays off in both so the shared writer's cap is
+            // never armed by this test.
+            var older = Config()
+            older.gcOrphanProcessesEnabled = true
+            older.gcProfileDirsEnabled = false
+            older.gcRetainedTranscriptsEnabled = true
+            older.gcHangStacksEnabled = false
+            var newer = Config()
+            newer.gcOrphanProcessesEnabled = false
+            newer.gcProfileDirsEnabled = true
+            newer.gcRetainedTranscriptsEnabled = false
+            newer.gcHangStacksEnabled = false
+
+            let (firstFetchStarted, signalFirstFetchStarted) = AsyncStream<Void>.makeStream()
+            let (releaseFirstFetch, openReleaseFirstFetch) = AsyncStream<Void>.makeStream()
+            var calls = 0
+            state.configFetcher = { @MainActor in
+                calls += 1
+                guard calls == 1 else { return newer }
+                signalFirstFetchStarted.yield()
+                for await _ in releaseFirstFetch { break }
+                return older
+            }
+
+            let first = Task { await state.loadGCConfig() }
+            for await _ in firstFetchStarted { break }
+
+            await state.loadGCConfig()
+            #expect(!state.gcOrphanProcessesEnabled)
+            #expect(state.gcProfileDirsEnabled)
+
+            openReleaseFirstFetch.yield()
+            openReleaseFirstFetch.finish()
+            await first.value
+
+            #expect(calls == 2)
+            #expect(!state.gcOrphanProcessesEnabled)
+            #expect(state.gcProfileDirsEnabled)
+            #expect(!state.gcRetainedTranscriptsEnabled)
+        }
+    }
+
     @Test func failedLoadKeepsTheLastValue() async {
         struct Down: Error {}
         await withAppState { state in

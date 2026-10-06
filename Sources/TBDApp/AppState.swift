@@ -1020,6 +1020,9 @@ final class AppState {
     var gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault
     var gcRetainedTranscriptsEnabled: Bool = Config.gcRetainedTranscriptsEnabledDefault
     var gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault
+    /// Bumped by each `loadGCConfig()` before it fetches, so a load whose
+    /// fetch returns after a newer one started applies nothing.
+    @ObservationIgnored var gcConfigLoadGeneration: UInt64 = 0
     var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
