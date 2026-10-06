@@ -164,8 +164,6 @@ After the spec review loop passes, ask the user to review the written spec befor
 
 Wait for the user's response. If they request changes, make them and re-run the spec review loop. Only proceed once the user approves.
 
-Tell the user that the PR review gate also needs their confirmation on the PR itself: once the PR is open, they leave an inline review comment on the spec file saying "I confirmed the design". You must never post that comment, even through their account — a guardrail blocks it ([spec](../../../docs/specs/2026-10-06-human-design-confirmation-design.md)).
-
 **Implementation:**
 
 - If `superpowers:writing-plans` is available, invoke it to create the implementation plan.

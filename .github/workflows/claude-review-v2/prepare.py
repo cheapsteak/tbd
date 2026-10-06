@@ -29,9 +29,6 @@ Outputs (written to the CWD):
                         "head_patch_id": str, "merge_base": str}
 - discussion-context.txt  the fenced description + discussion block ("" only
   when the GraphQL fetch failed)
-- design-confirmation.txt  the pipeline-computed fact of whether a human left
-  an inline "I confirmed the design" review comment on a spec file in the PR
-  (docs/specs/2026-10-06-human-design-confirmation-design.md)
 """
 
 from __future__ import annotations
@@ -83,7 +80,6 @@ def decide_skip(
     prior_patch_id: str | None,
     head_patch_id: str | None,
     prior_verdict: str | None,
-    design_confirmed: bool = False,
 ) -> dict:
     """Decide whether to skip the review and re-assert the recorded verdict.
 
@@ -92,14 +88,6 @@ def decide_skip(
     REJECT. Every other state falls through to a full review with a distinct
     reason — the cheap direction to fail is toward spending a review, never
     toward re-asserting a verdict we can't read (spec §3.5).
-
-    One exception to an equal patch-id: a prior REJECT is not re-asserted while
-    a human design confirmation exists, because a confirmation left after the
-    rejection changes the verdict without changing the diff
-    (docs/specs/2026-10-06-human-design-confirmation-design.md). The marker
-    does not record which confirmations the prior review saw, so this re-reviews
-    on every push of an unchanged diff whose prior verdict is REJECT — spending
-    a review, the cheap direction.
 
     Returns {"skip": bool, "verdict": str|None, "reason": str}.
     """
@@ -137,13 +125,6 @@ def decide_skip(
             "verdict": None,
             "reason": "diff content changed since the last review "
             "(patch-id mismatch) — running a full review",
-        }
-    if prior_verdict == "REJECT" and design_confirmed:
-        return {
-            "skip": False,
-            "verdict": None,
-            "reason": "diff unchanged but the prior verdict is REJECT and a "
-            "human design confirmation is present — running a full review",
         }
     return {
         "skip": True,
@@ -409,132 +390,6 @@ def fetch_discussion(
         return [], None, False
 
 
-# --- human design confirmation ----------------------------------------------
-#
-# docs/specs/2026-10-06-human-design-confirmation-design.md. A spec whose
-# brainstorming questions an agent answered does not satisfy the spec
-# requirement until a HUMAN confirms the design, and the one gesture that
-# counts is an inline review comment on the spec file itself. The conventions
-# specialist is handed the answer as a computed fact rather than left to judge
-# comment authorship: agents post through the human's own GitHub account, so a
-# model reading the thread has nothing better to go on than this filter does,
-# and a filter applies the same rule on every run.
-
-SPEC_PATH_PREFIX = "docs/specs/"
-
-# The confirmation phrase. Case-insensitive, whitespace-tolerant, an optional
-# "have", and nothing else: a fixed phrase keeps the gesture deliberate, and a
-# negation ("I have not confirmed the design") does not match.
-CONFIRMATION_RE = re.compile(r"\bI\s+(?:have\s+)?confirmed\s+the\s+design\b", re.IGNORECASE)
-
-# Substrings agent tooling leaves in what it posts. Heuristic by nature — an
-# agent told to omit them can — which is why the repo's guardrail
-# (.claude/hooks/guardrails/rules/design_confirmation.py) also refuses to let an
-# agent session post the phrase at all. Matched case-insensitively.
-AGENT_MARKERS = (
-    "claude.ai/code/session_",
-    "claude-session:",
-    "generated with [claude code]",
-    "co-authored-by: claude",
-    "\U0001F916",  # robot face
-)
-
-
-def _is_bot_user(user: dict) -> bool:
-    login = str(user.get("login") or "")
-    return user.get("type") == "Bot" or login.endswith("[bot]")
-
-
-def _has_agent_marker(body: str) -> bool:
-    lowered = body.lower()
-    return any(marker in lowered for marker in AGENT_MARKERS)
-
-
-def find_design_confirmations(comments: list[dict]) -> list[dict]:
-    """The inline review comments that confirm a spec's design.
-
-    `comments` is the REST shape of GET /repos/{o}/{r}/pulls/{n}/comments
-    (`path`, `body`, `user: {login, type}`). A comment counts only when ALL hold:
-    it sits on a file under docs/specs/ (inline comments can only anchor to
-    files in the PR's diff, so this means a spec the PR changes), its author is
-    not a bot, its body carries the confirmation phrase, and its body carries no
-    agent marker. Returns [{"login", "path"}] in input order.
-    """
-    found: list[dict] = []
-    for comment in comments:
-        path = str(comment.get("path") or "")
-        body = str(comment.get("body") or "")
-        user = comment.get("user")
-        if not isinstance(user, dict):
-            continue  # no author object: cannot rule out a bot, so it never counts
-        if not path.startswith(SPEC_PATH_PREFIX):
-            continue
-        if _is_bot_user(user):
-            continue
-        if not CONFIRMATION_RE.search(body):
-            continue
-        if _has_agent_marker(body):
-            continue
-        found.append({"login": str(user.get("login") or ""), "path": path})
-    return found
-
-
-def render_design_confirmation(
-    confirmations: list[dict], fetch_ok: bool
-) -> str:
-    """The one-paragraph fact handed to the conventions specialist.
-
-    Three distinguishable states: confirmed (who, on which spec), none, and
-    unavailable. Unavailable is a fetch FAILURE and is never read as confirmed —
-    the prompt treats it like "none" and asks for it to be reported.
-    """
-    if not fetch_ok:
-        return (
-            "HUMAN DESIGN CONFIRMATION: UNAVAILABLE — the inline review comment "
-            "fetch failed, so no confirmation could be verified. Treat as not "
-            "confirmed and note the fetch failure in the review diagnostics.\n"
-        )
-    if not confirmations:
-        return (
-            "HUMAN DESIGN CONFIRMATION: NONE — no qualifying inline review "
-            "comment on a docs/specs/ file in this PR.\n"
-        )
-    lines = ["HUMAN DESIGN CONFIRMATION: CONFIRMED"]
-    for item in confirmations:
-        login = _sanitize(item.get("login", ""))
-        path = _sanitize(item.get("path", ""))
-        lines.append(f"- confirmed by {login} on {path}")
-    return "\n".join(lines) + "\n"
-
-
-def fetch_review_comments(pr_number: int, repo: str) -> tuple[list[dict], bool]:
-    """Fetch every inline review comment on the PR via _gh.run_gh.
-
-    `--paginate` with `--jq '.[]'` prints one JSON object per line across all
-    pages. Returns (comments, fetch_ok); on ANY error ([], False) — a failed
-    fetch must never read as "no comments" in the rendered fact.
-    """
-    try:
-        raw = _gh.run_gh(
-            [
-                "api", "--paginate",
-                f"repos/{repo}/pulls/{pr_number}/comments",
-                "--jq", ".[]",
-            ]
-        )
-        comments = [json.loads(line) for line in raw.splitlines() if line.strip()]
-        if not all(isinstance(c, dict) for c in comments):
-            raise ValueError("unexpected review-comment shape")
-        return comments, True
-    except Exception as exc:  # noqa: BLE001 — any failure means "fetch failed", never "none"
-        print(
-            f"warning: inline review comment fetch failed ({exc}); design "
-            "confirmation is UNAVAILABLE, not absent.",
-            file=sys.stderr,
-        )
-        return [], False
-
-
 # --- main (the only I/O shell) ----------------------------------------------
 
 
@@ -657,13 +512,6 @@ def main() -> int:
         prior_body = ""
         prior_fetch_ok = False
 
-    # Fetched before the skip decision: a confirmation left after a rejection
-    # must be able to defeat the skip (see decide_skip).
-    review_comments, review_comments_ok = fetch_review_comments(args.pr, args.repo)
-    confirmations = find_design_confirmations(review_comments)
-    with open("design-confirmation.txt", "w", encoding="utf-8") as handle:
-        handle.write(render_design_confirmation(confirmations, review_comments_ok))
-
     markers = parse_markers(prior_body)
     head_patch_id = _compute_head_patch_id(merge_base)
     decision = decide_skip(
@@ -671,7 +519,6 @@ def main() -> int:
         prior_patch_id=markers["patch_id"],
         head_patch_id=head_patch_id,
         prior_verdict=markers["verdict"],
-        design_confirmed=bool(confirmations),
     )
     decision["head_patch_id"] = head_patch_id
     decision["merge_base"] = merge_base
@@ -688,13 +535,6 @@ def main() -> int:
     print(f"merge base with origin/{args.base_ref}: {merge_base}")
     print(f"skip: {decision['skip']} — {decision['reason']}")
     print(f"head patch-id: {head_patch_id or '(unavailable)'}")
-    if review_comments_ok:
-        print(f"design confirmation: {len(confirmations)} qualifying comment(s)")
-    else:
-        print(
-            "::warning::Inline review comment fetch FAILED — human design "
-            "confirmation is reported as UNAVAILABLE (treated as not confirmed)."
-        )
     if discussion_ok:
         print(
             f"discussion: PR description + {len(items)} raw item(s) fetched, "

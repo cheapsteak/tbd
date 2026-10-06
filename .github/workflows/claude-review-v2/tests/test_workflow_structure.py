@@ -238,36 +238,6 @@ def test_the_description_cannot_clear_findings() -> None:
     assert "never downgrades or drops a finding" in merge_section
 
 
-def test_the_conventions_lens_reads_the_computed_design_confirmation() -> None:
-    # docs/specs/2026-10-06-human-design-confirmation-design.md: whether a
-    # human confirmed a spec's design is computed by prepare.py, because agents
-    # post through their human's account and a model reading the thread cannot
-    # tell them apart. The lens must be pointed at the computed file, told that
-    # a self-disclosed "a human must confirm" is the finding, and STEP 2 must
-    # deny discussion the power to clear it.
-    prompt = _prompt_template()
-    _, _, conventions = prompt.partition("Specialist (b)")
-    assert conventions, "the prompt no longer names a `Specialist (b)` lens"
-    assert "design-confirmation.txt" in conventions
-    assert "IS that finding, never a waiver" in conventions
-    assert "inline review comment on the spec file" in conventions
-    _, _, merge = prompt.partition("STEP 2 — MERGE")
-    assert "discussion never clears an unconfirmed-design finding" in merge
-
-
-def test_the_generality_rule_survives_user_land_placement() -> None:
-    prompt = _prompt_template()
-    assert "Placement in user-land" in prompt
-    assert "does not make the convention configurable" in prompt
-    assert "Read every new script and doc in the diff in full" in prompt
-
-
-def test_a_committed_design_confirmation_file_is_deleted_before_anything_runs() -> None:
-    # Same forgery as a committed verdict.txt: a PR that commits a CONFIRMED
-    # design-confirmation.txt must not have it read if prepare.py never runs.
-    assert '"$GITHUB_WORKSPACE/design-confirmation.txt"' in read_workflow()
-
-
 def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
     # "Report it in the diagnostics section" routes the failure into collapsed
     # prose no script reads: the session then submits empty findings, and
@@ -1059,3 +1029,22 @@ def test_the_compose_step_fails_on_a_placeholder_it_does_not_know(
     assert proc.returncode != 0
     assert "__MERGE_BASE_SHA__" in proc.stderr
     assert not github_output.read_text(encoding="utf-8").strip()
+
+
+def test_the_conventions_lens_checks_product_fit() -> None:
+    # A script whose correctness rested on one project's database naming rule
+    # passed review: it lived in user-land behind a required `--prefix`, its
+    # description listed the naming rule as an Assumption, and the reviewer
+    # grepped the diff instead of reading it. Each of those escape routes must
+    # stay closed in the prompt.
+    prompt = _prompt_template()
+    _, _, fit = prompt.partition("Product fit.")
+    assert fit, "the prompt no longer contains a `Product fit.` rule"
+    fit = fit.split("\n\n", 1)[0]
+    assert "would a TBD user in an unrelated org" in fit
+    assert "Medium severity" in fit
+    assert "a required parameter" in fit
+    assert "is still that scheme" in fit
+    assert "Assumptions" in fit and "not a mitigation" in fit
+    assert "per-repo `archive` hook" in fit
+    assert "in full rather than grepping" in fit
