@@ -50,17 +50,21 @@ enum TerminalPreparationPresentation {
     ///
     /// Distinct from `holderAttachFailedMessage` because both of that copy's
     /// claims are false here — the session is not running, and reopening the
-    /// tab attaches to nothing. The remedy it names is real: closing the tab
-    /// records it under Closed Terminals, and reviving a Claude entry there
-    /// resumes its conversation.
+    /// tab attaches to nothing. Only a Claude tab is promised a way back:
+    /// closing the tab records it under Closed Terminals in Session History,
+    /// and reviving a Claude entry there resumes its conversation. Any other
+    /// kind is told only what is true of every tab.
     static let holderSessionEndedMessage =
-        "This session's terminal process has ended, so there is nothing to attach to. Close the tab, then reopen it from History → Closed Terminals to resume."
+        "This session's terminal process has ended, so there is nothing to attach to. Close the tab to clear it."
+    static let holderClaudeSessionEndedMessage =
+        "This session's terminal process has ended, so there is nothing to attach to. Close the tab, then reopen it from Session History → Closed Terminals to resume the conversation."
 
-    /// The placard for a holder attach that failed with `error`.
-    static func holderAttachFailureMessage(for error: any Error) -> String {
+    /// The placard for a holder attach that failed with `error`, in a tab of
+    /// `kind`.
+    static func holderAttachFailureMessage(for error: any Error, kind: TerminalKind?) -> String {
         if case DaemonClientError.attachUnavailable(let status) = error,
            status == AttachRequestResult.holderSessionEndedStatus {
-            return holderSessionEndedMessage
+            return kind == .claude ? holderClaudeSessionEndedMessage : holderSessionEndedMessage
         }
         return holderAttachFailedMessage
     }
@@ -1063,10 +1067,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             diagnostic?.unregister(registration)
         }
 
-        /// Renders the attach-failed placard for a holder attach that did not
-        /// complete, and logs why. One place for the copy and the log line so
-        /// every failure in `startHolderClient` tells the same, truthful
-        /// story: the session is fine, this panel is not on it.
+        /// Renders the placard for a holder attach that did not complete, and
+        /// logs why. One place for the log line, so every failure in
+        /// `startHolderClient` is diagnosable the same way. The copy defaults
+        /// to the attach-failed placard — the session is fine, this panel is
+        /// not on it — and a caller that knows the session has ended passes
+        /// the ended copy instead, because there the default would be false.
         @MainActor
         private func feedHolderAttachFailure(
             reason: String, into terminalView: TerminalView,
@@ -1176,7 +1182,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             } catch {
                 feedHolderAttachFailure(
                     reason: "attach refused: \(error.localizedDescription)", into: terminalView,
-                    message: TerminalPreparationPresentation.holderAttachFailureMessage(for: error))
+                    message: TerminalPreparationPresentation.holderAttachFailureMessage(
+                        for: error, kind: panelKind()))
                 return
             }
             // **Close-on-exec, before anything else touches it.** A descriptor

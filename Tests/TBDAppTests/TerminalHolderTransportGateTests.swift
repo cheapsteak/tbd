@@ -466,23 +466,31 @@ struct TerminalHolderTransportGateTests {
         )
 
         #expect(stub.attaches == 1)
+        // The fixture's tab is a shell, so the copy promises no resume.
         #expect(didFeed(TerminalPreparationPresentation.holderSessionEndedMessage, panel),
                 "an ended session must say it has ended")
         #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "an ended session must not claim it keeps running")
     }
 
-    @Test("only the ended status maps to the session-ended copy")
+    @Test("only the ended status maps to the session-ended copy, and only Claude is promised a resume")
     func holderAttachFailureMessageMapping() {
         typealias Copy = TerminalPreparationPresentation
+        let ended = DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
+        #expect(Copy.holderAttachFailureMessage(for: ended, kind: .claude)
+            == Copy.holderClaudeSessionEndedMessage)
+        for kind: TerminalKind? in [.shell, .codex, nil] {
+            #expect(Copy.holderAttachFailureMessage(for: ended, kind: kind)
+                == Copy.holderSessionEndedMessage)
+        }
+        #expect(!Copy.holderSessionEndedMessage.contains("resume"),
+                "a tab that cannot resume must not be promised one")
         #expect(Copy.holderAttachFailureMessage(
-            for: DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus))
-            == Copy.holderSessionEndedMessage)
-        #expect(Copy.holderAttachFailureMessage(
-            for: DaemonClientError.attachUnavailable("unavailable")) == Copy.holderAttachFailedMessage)
-        #expect(Copy.holderAttachFailureMessage(
-            for: DaemonClientError.rpcError("attach failed: no live holder reader", code: nil))
+            for: DaemonClientError.attachUnavailable("unavailable"), kind: .claude)
             == Copy.holderAttachFailedMessage)
+        #expect(Copy.holderAttachFailureMessage(
+            for: DaemonClientError.rpcError("attach failed: no live holder reader", code: nil),
+            kind: .claude) == Copy.holderAttachFailedMessage)
     }
 
     @MainActor
