@@ -62,6 +62,27 @@ struct HolderClientTests {
         #expect(description.owner == fixture.owner)
     }
 
+    /// A holder outlives the daemon at `ppid == 1`, and the orphan-process
+    /// sweep attributes such a process to a worktree by its cwd. A holder that
+    /// inherited the spawner's cwd — this test process's, the package root —
+    /// was attributed to whichever worktree launched the daemon and killed when
+    /// that worktree was archived. The job, by contrast, must still start in
+    /// the directory its launch request names.
+    @Test func theHolderRunsFromRootWhileItsJobKeepsTheRequestedDirectory() async throws {
+        let fixture = try await SpawnedHolderFixture.start(command: "sleep 30")
+        defer { fixture.tearDown() }
+
+        #expect(FileManager.default.currentDirectoryPath != "/",
+                "the test process must not already sit at /, or this proves nothing")
+        #expect(processCWD(fixture.handle.holderPID) == HolderSpawner.holderWorkingDirectory)
+        // Polled because the job `chdir`s after `fork`, on its own schedule.
+        let requested = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath().path
+        let jobStarted = waitUntilTrue("the job's cwd to be the requested directory") {
+            processCWD(fixture.handle.childPID) == requested
+        }
+        #expect(jobStarted, "job cwd: \(processCWD(fixture.handle.childPID) ?? "unreadable")")
+    }
+
     @Test func handsOverAReadablePTY() async throws {
         let fixture = try await SpawnedHolderFixture.start(command: "printf HOLDER-OK; sleep 30")
         defer { fixture.tearDown() }
@@ -902,6 +923,17 @@ private func waitUntilTrue(
 
 private func processIsAlive(_ pid: Int32) -> Bool {
     pid > 0 && kill(pid, 0) == 0
+}
+
+/// The process's current working directory as the kernel reports it, or nil
+/// when it cannot be read.
+private func processCWD(_ pid: Int32) -> String? {
+    var info = proc_vnodepathinfo()
+    let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+    return withUnsafeBytes(of: &info.pvi_cdir.vip_path) { raw in
+        String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+    }
 }
 
 /// Kills and reaps a spawned holder a test is finished with.

@@ -108,6 +108,11 @@ struct HolderSpawner {
     /// process outside this tree can name.
     static let launchDescriptorNumber: Int32 = 10
 
+    /// The holder process's own cwd: a directory that is never inside a
+    /// worktree, so nothing that classifies processes by cwd can tie a holder
+    /// to whichever worktree happened to launch the daemon. See `launchHolder`.
+    static let holderWorkingDirectory = "/"
+
     /// The lowest number the spawner will relocate an inherited descriptor to.
     ///
     /// Above **every** target number, not merely above its own: with two dup2
@@ -789,6 +794,16 @@ struct HolderSpawner {
         posix_spawn_file_actions_adddup2(&actions, logFD, 2)
         posix_spawn_file_actions_adddup2(&actions, lockSource, Self.lockDescriptorNumber)
         posix_spawn_file_actions_adddup2(&actions, relocatedLaunch, Self.launchDescriptorNumber)
+        // **The holder runs from `/`, never from the daemon's cwd.** A cwd is
+        // inherited, and the daemon's is whichever directory launched it —
+        // the worktree `scripts/restart.sh` ran in. A holder outlives the
+        // daemon at `ppid == 1`, so once that worktree was archived the
+        // orphan-process sweep, which attributes a launchd-parented process to
+        // a worktree by its cwd, read every holder spawned from it as an
+        // escaped job of a dead worktree and killed it with its session's
+        // job. The job's own cwd is unaffected: the holder `chdir`s its child
+        // to `launch.workingDirectory` between fork and exec.
+        posix_spawn_file_actions_addchdir_np(&actions, Self.holderWorkingDirectory)
 
         // Everything the daemon happens to have open without FD_CLOEXEC would
         // otherwise arrive in a process that outlives it. The five descriptors
