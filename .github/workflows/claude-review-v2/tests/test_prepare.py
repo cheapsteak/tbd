@@ -666,6 +666,12 @@ def test_confirmation_tolerates_null_fields() -> None:
     assert find_design_confirmations(comments) == []
 
 
+def test_confirmation_tolerates_a_non_object_user() -> None:
+    # Runs before the skip decision, so a malformed payload must not raise.
+    comment = {"path": _SPEC, "body": "I confirmed the design", "user": "acme-owner"}
+    assert find_design_confirmations([comment]) == []
+
+
 def test_render_confirmation_three_states_are_distinct() -> None:
     confirmed = render_design_confirmation(
         [{"login": "acme-owner", "path": _SPEC}], fetch_ok=True

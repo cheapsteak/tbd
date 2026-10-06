@@ -75,6 +75,27 @@ class DesignConfirmationDenyTests(unittest.TestCase):
                 )
             self._assert_denied(f"gh api graphql -F query=@{path}")
 
+    def test_denies_a_post_inside_an_executed_heredoc(self):
+        self._assert_denied(
+            "bash <<'EOF'\ngh pr review 12 --comment --body 'I confirmed the design'\nEOF"
+        )
+        self._assert_denied(
+            "cat <<'EOF' | sh\ngh pr comment 12 -b 'I confirmed the design'\nEOF"
+        )
+
+    def test_allows_a_written_heredoc_that_mentions_a_post(self):
+        self.assertIsNone(
+            _check(
+                "cat > notes.md <<'EOF'\nrun gh pr review 12 --body 'I confirmed the design'\nEOF"
+            )
+        )
+
+    def test_denies_curl_to_the_rest_api(self):
+        self._assert_denied(
+            "curl -X POST https://api.github.com/repos/acme/acme-app/pulls/12/comments "
+            "-d '{\"body\": \"I confirmed the design\"}'"
+        )
+
     def test_denies_phrase_in_a_heredoc_body(self):
         self._assert_denied(
             "gh pr review 12 --comment --body \"$(cat <<'EOF'\n"

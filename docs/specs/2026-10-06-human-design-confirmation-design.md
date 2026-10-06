@@ -109,7 +109,10 @@ a post. The phrase is searched everywhere, heredoc bodies included, because
 - **The guardrail binds only sessions that load this repo's guardrails.** An
   agent running outside this checkout, or a harness that ignores
   `.claude/settings.json`, is not stopped. It also matches only the Bash tool: an
-  MCP GitHub tool that posts review comments is not intercepted.
+  MCP GitHub tool that posts review comments is not intercepted. Within Bash it
+  is a regex over the command, not a shell parse: a phrase assembled from shell
+  variables, a body file written by an earlier command, or a post made from
+  inside a non-shell interpreter's heredoc (`python3 - <<PY`) is not seen.
 - **Marker detection is heuristic.** An agent that omits the markers and runs
   where the guardrail does not load can post a comment the gate counts. The gate
   reduces the risk; it cannot prove who typed a comment posted from a human's

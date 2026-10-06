@@ -22,7 +22,11 @@ It DENIES a Bash call when both hold:
 The posting command is looked for only in the command's own lines — heredoc
 bodies are split off first with the same splitter `pr_worktree_link` uses — so a
 script or doc *written* through a heredoc that merely mentions `gh pr review`
-and the phrase is not a post. The phrase, by contrast, is looked for everywhere,
+and the phrase is not a post. A heredoc fed to a shell (`bash <<EOF`,
+`cat <<EOF | sh`) is executed, so its body is searched too; another
+interpreter's heredoc body is not. A
+`gh api` call and any command addressing `api.github.com` (curl, a one-liner)
+count alike. The phrase, by contrast, is looked for everywhere,
 heredoc bodies included, because `--body "$(cat <<'EOF'` is the ordinary way to
 compose a review body. Past that split, detection is a regex, not a shell parse,
 and it errs toward denying: a posting command whose text carries the phrase
@@ -54,7 +58,16 @@ CONFIRMATION_RE = re.compile(r"\bI\s+(?:have\s+)?confirmed\s+the\s+design\b", re
 _GH_PR_POST = re.compile(
     r"(?:^|[\s;&|(`/])gh(?:\s+(?:-R|--repo|--hostname)\s+\S+)*\s+pr\s+(?:review|comment)\b"
 )
-_GH_API = re.compile(r"(?:^|[\s;&|(`/])gh\s+api\b")
+# `gh api`, or any program (curl, a python one-liner) addressing the REST API.
+_GH_API = re.compile(r"(?:^|[\s;&|(`/])gh\s+api\b|api\.github\.com")
+# A heredoc whose body runs as shell: an opener line that also names a shell
+# (`bash <<EOF`, `cat <<EOF | sh`, `eval`, `source`). Other interpreters'
+# heredocs (`python3 - <<PY`) are left alone — their bodies are code that
+# routinely writes docs quoting a `gh` command, not shell lines.
+_EXECUTED_HEREDOC = re.compile(
+    r"<<.*(?:^|[\s;&|(])(?:ba|z|da|k)?sh\b"
+    r"|(?:^|[\s;&|(])(?:(?:ba|z|da|k)?sh|eval|source)\b.*<<"
+)
 # REST review surfaces — a PR's comments and reviews, and an existing review
 # comment by id (`pulls/comments/<id>`, whose `/replies` posts a thread reply
 # and whose PATCH edits a body into the phrase) — and any GraphQL call. GraphQL
@@ -126,7 +139,13 @@ class DesignConfirmationRule(Rule):
     def check(self, tool_input: dict, _ctx: dict) -> "Decision | None":
         command = tool_input.get("command", "") or ""
         command_lines, _ = _split_heredoc_bodies(command)
-        if not _posts_review_surface(command_lines):
+        # An executed heredoc's body is commands, not text, so the posting
+        # command is looked for in it too.
+        executed = any(
+            "<<" in line and _EXECUTED_HEREDOC.search(line)
+            for line in command_lines.splitlines()
+        )
+        if not _posts_review_surface(command if executed else command_lines):
             return None
         if CONFIRMATION_RE.search(command):
             return Decision.deny(_MESSAGE)

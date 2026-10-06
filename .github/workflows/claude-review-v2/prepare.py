@@ -464,7 +464,9 @@ def find_design_confirmations(comments: list[dict]) -> list[dict]:
     for comment in comments:
         path = str(comment.get("path") or "")
         body = str(comment.get("body") or "")
-        user = comment.get("user") or {}
+        user = comment.get("user")
+        if not isinstance(user, dict):
+            continue  # no author object: cannot rule out a bot, so it never counts
         if not path.startswith(SPEC_PATH_PREFIX):
             continue
         if _is_bot_user(user):

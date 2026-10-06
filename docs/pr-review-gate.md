@@ -360,7 +360,8 @@ told to omit the markers can — so the `design-confirmation` guardrail
 (`.claude/hooks/guardrails/rules/design_confirmation.py`) denies any Bash command
 that posts a PR review or comment (`gh pr review`, `gh pr comment`, or `gh api`
 against `pulls/<n>/comments`, `pulls/<n>/reviews`, `pulls/comments/<id>` — replies
-and edits — or GraphQL)
+and edits — or GraphQL, and the same endpoints addressed at `api.github.com` by
+any program, including from a heredoc fed to a shell)
 whose text or named body file contains the phrase. It binds only agent sessions
 that load this repo's `.claude/settings.json`, and only the Bash tool. The design
 and its limits: [`docs/specs/2026-10-06-human-design-confirmation-design.md`](specs/2026-10-06-human-design-confirmation-design.md).
