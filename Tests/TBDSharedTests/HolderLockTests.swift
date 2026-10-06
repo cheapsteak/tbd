@@ -42,12 +42,13 @@ struct HolderLockTests {
     /// `.alreadyHeld` against a claim nobody in this test made.
     ///
     /// Any other error fails at once, and the verdict after the budget comes
-    /// from a fresh attempt. The budget is generous because a forked child
-    /// waiting to `exec` on a starved runner can be descheduled for seconds;
-    /// success costs one attempt, so the size only matters when the lock
-    /// genuinely never comes back.
+    /// from a fresh attempt. The budget matches `TestDeadlines.saturatedPass`
+    /// (this target does not link `TestSupport`): a forked child waiting to
+    /// `exec` sits in the same starved scheduler as every other waiter in the
+    /// fast parallel pass. Success costs one attempt, so the size only matters
+    /// when the lock genuinely never comes back.
     private func reacquire(path: String) async throws -> HolderLock {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(90))
         while true {
             do {
                 return try HolderLock.acquire(path: path)
@@ -243,9 +244,22 @@ struct HolderLockTests {
         // the one `release()` knows about.
         lock.release()
         parentStillHoldsLock = false
+        let movedDescriptor = duplicated
         if duplicated >= 0 {
             close(duplicated)
             duplicated = -1
+        }
+        // Deterministic, before the tolerant re-take below: neither of this
+        // process's copies may still be open on the lock file, or the
+        // re-take would pass on a sibling-fork tolerance that also absorbs a
+        // descriptor this test forgot to close.
+        #expect(
+            !descriptorStillOpensLockFile(lock.fileDescriptor, path: path),
+            "release() left the lock file open on its descriptor")
+        if movedDescriptor >= 0 {
+            #expect(
+                !descriptorStillOpensLockFile(movedDescriptor, path: path),
+                "the moved duplicate of the lock is still open")
         }
         close(toChild[1])
 

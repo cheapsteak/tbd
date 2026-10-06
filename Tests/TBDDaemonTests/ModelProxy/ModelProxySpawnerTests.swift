@@ -212,7 +212,9 @@ struct ModelProxySpawnerTests {
         // went away still fails, once the budget is spent.
         var reacquired: HolderLock?
         var unexpected: (any Error)?
-        let outcome = await pollUntilTrue(timeout: .seconds(10), pollInterval: .milliseconds(10)) {
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(10)
+        ) {
             do {
                 reacquired = try HolderLock.acquire(path: fixture.paths.lockPath)
                 return true
