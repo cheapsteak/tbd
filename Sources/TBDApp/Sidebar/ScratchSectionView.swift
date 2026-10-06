@@ -21,6 +21,10 @@ struct ScratchSectionView: View {
     /// the two sections cannot disagree — see `SidebarHeaderMetrics`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    /// Whether wholly parked pads file under a Hibernated header. See
+    /// `AppState.sidebarWorkflowGroupsKey`.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
 
     private var chevronButton: some View {
         SectionDisclosureChevron(
@@ -112,7 +116,7 @@ struct ScratchSectionView: View {
     /// for them while there are none.
     @ViewBuilder
     private var expandedContent: some View {
-        let hibernation = appState.sidebarScratchHibernation
+        let layout = appState.sidebarScratchLayout(grouped: workflowGroups)
         if appState.scratchWorktrees.isEmpty {
             Button {
                 appState.createScratch()
@@ -135,7 +139,7 @@ struct ScratchSectionView: View {
             .listRowBackground(Color.clear)
         }
 
-        ForEach(hibernation.workingRoots) { wt in
+        ForEach(layout.inlineRoots) { wt in
             WorktreeRowView(worktree: wt)   // sectionRepoID nil → no (repo) suffix; repo affordances vanish
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Dimmed while the chevron is hovered, as a project's rows
@@ -146,7 +150,7 @@ struct ScratchSectionView: View {
                 .listRowBackground(Color.clear)
                 .tag(wt.id)
         }
-        if !hibernation.hibernatedRoots.isEmpty {
+        if let hibernation = layout.hibernation {
             let id = SidebarGroupID(owner: .scratch, kind: .hibernated)
             SidebarGroupHeader(id: id, title: "Hibernated (\(hibernation.hibernatedCount))")
                 .listRowInsets(childRowInsets)
