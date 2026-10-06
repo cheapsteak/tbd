@@ -21,11 +21,15 @@ struct SidebarSectionLayout {
     let remoteGroups: SidebarRemoteGroups?
     /// The parked shelf; nil when no Hibernated header renders.
     let hibernation: SidebarHibernationPartition?
+    /// Whether this layout files rows under workflow groups.
+    let grouped: Bool
 
-    /// The subset handed to a drag reorder of `inlineRoots`. Nil means the
-    /// inline rows are the whole top level, so a plain index move applies.
+    /// The subset handed to a drag reorder of `inlineRoots`. Ungrouped, the
+    /// inline rows are the whole top level, so nil asks for a plain index
+    /// move; grouped, they are a subset that `SidebarSubsetOrder` moves in
+    /// place, even when no header happens to render.
     var reorderVisibleIDs: [UUID]? {
-        remoteGroups == nil && hibernation == nil ? nil : inlineRoots.map(\.id)
+        grouped ? inlineRoots.map(\.id) : nil
     }
 
     /// A repository section. Inputs are autoclosures so each mode computes
@@ -40,13 +44,13 @@ struct SidebarSectionLayout {
         guard grouped else {
             return SidebarSectionLayout(
                 inlineRoots: topLevel(), inlineSessions: matchedSessions(),
-                remoteGroups: nil, hibernation: nil)
+                remoteGroups: nil, hibernation: nil, grouped: false)
         }
         let groups = remoteGroups(), partition = hibernation()
         return SidebarSectionLayout(
             inlineRoots: partition.workingRoots, inlineSessions: [],
             remoteGroups: groups.isEmpty ? nil : groups,
-            hibernation: partition.hibernatedRoots.isEmpty ? nil : partition)
+            hibernation: partition.hibernatedRoots.isEmpty ? nil : partition, grouped: true)
     }
 
     /// A remote provider's unmatched sessions.
@@ -57,12 +61,12 @@ struct SidebarSectionLayout {
     ) -> SidebarSectionLayout {
         guard grouped else {
             return SidebarSectionLayout(
-                inlineRoots: [], inlineSessions: sessions(), remoteGroups: nil, hibernation: nil)
+                inlineRoots: [], inlineSessions: sessions(), remoteGroups: nil, hibernation: nil, grouped: false)
         }
         let groups = remoteGroups()
         return SidebarSectionLayout(
             inlineRoots: [], inlineSessions: [],
-            remoteGroups: groups.isEmpty ? nil : groups, hibernation: nil)
+            remoteGroups: groups.isEmpty ? nil : groups, hibernation: nil, grouped: true)
     }
 
     /// The Scratch section's flat rows.
@@ -73,11 +77,11 @@ struct SidebarSectionLayout {
     ) -> SidebarSectionLayout {
         guard grouped else {
             return SidebarSectionLayout(
-                inlineRoots: rows, inlineSessions: [], remoteGroups: nil, hibernation: nil)
+                inlineRoots: rows, inlineSessions: [], remoteGroups: nil, hibernation: nil, grouped: false)
         }
         let partition = hibernation()
         return SidebarSectionLayout(
             inlineRoots: partition.workingRoots, inlineSessions: [], remoteGroups: nil,
-            hibernation: partition.hibernatedRoots.isEmpty ? nil : partition)
+            hibernation: partition.hibernatedRoots.isEmpty ? nil : partition, grouped: true)
     }
 }

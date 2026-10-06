@@ -7,8 +7,9 @@ struct SidebarView: View {
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
-    /// See `AppState.sidebarWorkflowGroupsKey`. Off, no group exists to
-    /// reveal, so the reveal passes are not even computed.
+    /// See `AppState.sidebarWorkflowGroupsKey`. Handed to every
+    /// `revealSidebarGroups` call as `grouped`, which is the reveal's gate.
+    /// Off, the selection reveal is not even computed.
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     /// Height of the scrolling repo list, measured by a `.background`
@@ -60,10 +61,8 @@ struct SidebarView: View {
             }
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }
-                if workflowGroups {
-                    appState.revealSidebarGroups(
-                        appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil), grouped: true)
-                }
+                appState.revealSidebarGroups(
+                    appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil), grouped: workflowGroups)
                 // Defer to the next runloop tick so a freshly-expanded repo's
                 // rows are mounted in the List before we ask to scroll to them.
                 DispatchQueue.main.async {
@@ -78,7 +77,7 @@ struct SidebarView: View {
                     reveal,
                     previous: Self.revealBaseline(previous: previous, reveal: reveal,
                                                   hasRevealed: hasRevealedInitialSelection),
-                    grouped: true)
+                    grouped: workflowGroups)
             }
             .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
                 GeometryReader { geo in

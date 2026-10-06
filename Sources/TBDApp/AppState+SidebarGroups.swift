@@ -223,9 +223,7 @@ extension AppState {
         _ = terminals
         let owner = SidebarGroupID.Owner.repository(repoID)
         if let cached = sidebarHibernationCache[owner] { return cached }
-        let roots = (worktrees[repoID] ?? []).filter {
-            ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil && $0.location.isLocal
-        }.sorted { $0.sortOrder < $1.sortOrder }
+        let roots = Self.topLevelWorktrees(worktrees[repoID] ?? []).filter(\.location.isLocal)
         let partition = SidebarHibernation.partition(roots: roots, terminals: terminals, children: children(of:))
         sidebarHibernationCache[owner] = partition
         return partition
