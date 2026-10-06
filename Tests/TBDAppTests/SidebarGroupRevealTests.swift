@@ -10,6 +10,9 @@ struct SidebarGroupRevealTests {
         let suite = "SidebarGroupRevealTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
+        // Reveal acts only with workflow groups on; the off branch is
+        // covered by SidebarWorkflowGroupsToggleTests.
+        defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]

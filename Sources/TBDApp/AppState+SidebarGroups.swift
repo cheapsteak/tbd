@@ -8,7 +8,167 @@ struct SidebarGroupReveal: Equatable {
     let groups: Set<SidebarGroupID>
 }
 
+extension SidebarGroupID {
+    /// A stable string for persisting an expanded group across launches:
+    /// `<kind>|<owner type>|<owner value>`. The provider name comes last and
+    /// is split off with a bounded split, so a `|` inside it round-trips.
+    var persistenceKey: String {
+        let kindName: String
+        switch kind {
+        case .remote: kindName = "remote"
+        case .exited: kindName = "exited"
+        case .hibernated: kindName = "hibernated"
+        }
+        switch owner {
+        case .repository(let id): return "\(kindName)|repository|\(id.uuidString)"
+        case .provider(let name): return "\(kindName)|provider|\(name)"
+        case .scratch: return "\(kindName)|scratch|"
+        }
+    }
+
+    /// Nil for anything this build does not recognize, so a stale or
+    /// hand-edited entry is dropped rather than misread.
+    init?(persistenceKey: String) {
+        let parts = persistenceKey.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        let kind: Kind
+        switch parts[0] {
+        case "remote": kind = .remote
+        case "exited": kind = .exited
+        case "hibernated": kind = .hibernated
+        default: return nil
+        }
+        let value = String(parts[2])
+        switch parts[1] {
+        case "repository":
+            guard let id = UUID(uuidString: value) else { return nil }
+            self.init(owner: .repository(id), kind: kind)
+        case "provider":
+            guard !value.isEmpty else { return nil }
+            self.init(owner: .provider(value), kind: kind)
+        case "scratch":
+            guard value.isEmpty, kind == .hibernated else { return nil }
+            self.init(owner: .scratch, kind: kind)
+        default:
+            return nil
+        }
+    }
+}
+
 extension AppState {
+    /// UserDefaults key for the Settings → General toggle that files remote,
+    /// exited and hibernated worktrees under collapsible sidebar groups.
+    /// App-side `UserDefaults` rather than a daemon `config` column because
+    /// the behavior is pure sidebar presentation, the same placement as
+    /// `enableTranscriptKey`. Off renders the sidebar with every row inline in
+    /// its usual place and no group headers. Spec:
+    /// `docs/specs/2026-10-06-sidebar-groups-toggle-design.md`.
+    ///
+    /// Three states: an absent key means nobody has chosen and follows
+    /// `sidebarWorkflowGroupsDefault`; the toggle stores an explicit `true`
+    /// or `false` only when flipped. Read through
+    /// `sidebarWorkflowGroupsEnabled(defaults:)` or an `@AppStorage` whose
+    /// default is that constant — never `bool(forKey:)`, which collapses
+    /// "unset" into `false`.
+    static let sidebarWorkflowGroupsKey = "sidebarWorkflowGroupsEnabled"
+
+    /// The one shipped default for `sidebarWorkflowGroupsKey`, for the reason
+    /// spelled out on `enableTranscriptDefault`. Off: grouping moves rows
+    /// users already rely on, so nobody's sidebar rearranges until they ask.
+    /// Graduation is a one-line change here, which reaches everyone who never
+    /// touched the toggle and preserves every explicit choice.
+    static let sidebarWorkflowGroupsDefault = false
+
+    /// UserDefaults key holding the expanded workflow groups, as an array of
+    /// `SidebarGroupID.persistenceKey` strings.
+    static let sidebarExpandedGroupsKey = "sidebarExpandedGroups"
+
+    static func sidebarWorkflowGroupsEnabled(defaults: UserDefaults = .standard) -> Bool {
+        sidebarWorkflowGroupsEnabled(stored: defaults.object(forKey: sidebarWorkflowGroupsKey) as? Bool)
+    }
+
+    /// The three-state decision with the shipped default injected, so a test
+    /// can prove `nil` follows the default while an explicit choice holds
+    /// against either value of it.
+    static func sidebarWorkflowGroupsEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = sidebarWorkflowGroupsDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
+    /// This instance's read of the toggle, on the store it was built with.
+    var sidebarWorkflowGroupsEnabled: Bool {
+        Self.sidebarWorkflowGroupsEnabled(defaults: userDefaults)
+    }
+
+    static func restoredSidebarGroups(defaults: UserDefaults) -> Set<SidebarGroupID> {
+        let keys = defaults.stringArray(forKey: sidebarExpandedGroupsKey) ?? []
+        return Set(keys.compactMap(SidebarGroupID.init(persistenceKey:)))
+    }
+
+    func persistExpandedSidebarGroups() {
+        userDefaults.set(expandedSidebarGroups.map(\.persistenceKey).sorted(), forKey: Self.sidebarExpandedGroupsKey)
+    }
+
+    /// Drops remembered groups whose repository the daemon no longer reports.
+    /// Called only with an authoritative repo list, so a transient empty
+    /// state never forgets anything.
+    func pruneExpandedSidebarGroups(repoIDs: Set<UUID>) {
+        let kept = expandedSidebarGroups.filter {
+            guard case .repository(let id) = $0.owner else { return true }
+            return repoIDs.contains(id)
+        }
+        if kept != expandedSidebarGroups { expandedSidebarGroups = kept }
+    }
+
+    /// Drops remembered groups whose provider is no longer registered. Called
+    /// only after a successful roster fetch, never on a refused or failed one.
+    func pruneExpandedSidebarGroups(providerNames: Set<String>) {
+        let kept = expandedSidebarGroups.filter {
+            guard case .provider(let name) = $0.owner else { return true }
+            return providerNames.contains(name)
+        }
+        if kept != expandedSidebarGroups { expandedSidebarGroups = kept }
+    }
+
+    /// A repository's active and creating top-level rows, local and remote
+    /// alike, in their stored order: the ungrouped section's inline rows.
+    func sidebarTopLevelWorktrees(repoID: UUID) -> [Worktree] {
+        (worktrees[repoID] ?? [])
+            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+            .sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    /// The repository section's rows under the current grouping setting.
+    /// `matchedSessions` is the view's memoized
+    /// `RepoSectionView.matchedRemoteSessions`, evaluated only when ungrouped.
+    func sidebarRepositoryLayout(
+        repoID: UUID, grouped: Bool,
+        matchedSessions: @autoclosure () -> [RemoteSessionInfo]
+    ) -> SidebarSectionLayout {
+        .repository(
+            grouped: grouped, topLevel: sidebarTopLevelWorktrees(repoID: repoID),
+            matchedSessions: matchedSessions(),
+            remoteGroups: sidebarRemoteGroups(repoID: repoID),
+            hibernation: sidebarHibernation(repoID: repoID))
+    }
+
+    /// A provider's unmatched sessions under the current grouping setting.
+    func sidebarProviderLayout(provider: String, grouped: Bool) -> SidebarSectionLayout {
+        .provider(
+            grouped: grouped,
+            sessions: RemoteSectionView.sessions(
+                in: remoteSessions, forProvider: provider,
+                knownRepoIDs: RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)),
+            remoteGroups: sidebarRemoteGroups(provider: provider))
+    }
+
+    /// The Scratch section's rows under the current grouping setting.
+    func sidebarScratchLayout(grouped: Bool) -> SidebarSectionLayout {
+        .scratch(grouped: grouped, rows: scratchWorktrees, hibernation: sidebarScratchHibernation)
+    }
+
     /// One indexed fleet snapshot shared by every section and reveal pass.
     /// Read tracked inputs even on a cache hit, preserving Observation dependencies.
     var sidebarRemoteSnapshot: SidebarRemoteGroups.Snapshot {
@@ -106,7 +266,10 @@ extension AppState {
     /// Membership changes reveal transient groups without overriding a collapsed
     /// repository. Navigation may expand the owning section; a missing previous
     /// value explicitly requests that behavior for initial mounting and scrolls.
+    /// A no-op while workflow groups are off: there is no group to open, and
+    /// the ungrouped sidebar never expanded a section on selection.
     func revealSidebarGroups(_ reveal: SidebarGroupReveal, previous: SidebarGroupReveal? = nil) {
+        guard sidebarWorkflowGroupsEnabled else { return }
         expandedSidebarGroups.formUnion(reveal.groups)
         if let previous,
            previous.generation == reveal.generation,

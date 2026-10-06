@@ -29,6 +29,7 @@ struct SidebarRenderHarness {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(true, forKey: AppState.showScratchSectionKey)
         defaults.set(false, forKey: AppState.nightwatchExperimentalKey)
+        defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         let state = AppState(userDefaults: defaults)
         let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")
         let web = Repo(path: "/tmp/acme-web", displayName: "acme/web")

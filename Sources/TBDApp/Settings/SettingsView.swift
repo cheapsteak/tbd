@@ -44,6 +44,8 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var sidebarWorkflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
@@ -171,6 +173,9 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Put the project chevron before the name", isOn: $chevronBeforeProjectName)
                     .help("Off: each project's expand/collapse chevron trails its name, appearing on hover alongside the row's +, so its position shifts with the length of each name. On: the chevron leads the name in the same column on every row, always visible, and the sidebar's titles and rows shift right to clear that column.")
+
+                Toggle("Group hibernated, remote and exited worktrees", isOn: $sidebarWorkflowGroups)
+                    .help("Off: every worktree and remote session stays in its usual place in the sidebar. On: remote and exited work files under a collapsible Remote group, and wholly parked worktrees under a Hibernated group, in each project and in Scratch. Groups you expand stay expanded across restarts.")
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")

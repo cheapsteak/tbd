@@ -609,8 +609,15 @@ final class AppState {
     /// to scroll the worktree row into view, then clears the value.
     var pendingScrollToWorktreeID: UUID?
 
-    /// Transient disclosures. Polling preserves the user's expansion choices.
-    var expandedSidebarGroups: Set<SidebarGroupID> = []
+    /// Expanded workflow-group disclosures. Polling preserves the user's
+    /// choices, and every change is written to `sidebarExpandedGroupsKey` so
+    /// a restart reopens the same groups; `init` restores it.
+    var expandedSidebarGroups: Set<SidebarGroupID> = [] {
+        didSet {
+            guard expandedSidebarGroups != oldValue else { return }
+            persistExpandedSidebarGroups()
+        }
+    }
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
@@ -2226,6 +2233,7 @@ final class AppState {
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
         remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
+        expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
@@ -3610,6 +3618,7 @@ final class AppState {
             if fetchedRepos != repos {
                 repos = fetchedRepos
             }
+            pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)

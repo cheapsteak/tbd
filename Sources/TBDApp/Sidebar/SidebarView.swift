@@ -7,6 +7,10 @@ struct SidebarView: View {
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
+    /// See `AppState.sidebarWorkflowGroupsKey`. Off, no group exists to
+    /// reveal, so the reveal passes are not even computed.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     /// Height of the scrolling repo list, measured by a `.background`
     /// GeometryReader on that list. Feeds `PinnedDockMetrics`' 40% clamp.
     /// Measured on the LIST, never on the dock — reading the dock's own
@@ -44,7 +48,9 @@ struct SidebarView: View {
             }
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }
-                appState.revealSidebarGroups(appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil))
+                if workflowGroups {
+                    appState.revealSidebarGroups(appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil))
+                }
                 // Defer to the next runloop tick so a freshly-expanded repo's
                 // rows are mounted in the List before we ask to scroll to them.
                 DispatchQueue.main.async {
@@ -52,7 +58,8 @@ struct SidebarView: View {
                     appState.pendingScrollToWorktreeID = nil
                 }
             }
-            .onChange(of: appState.sidebarSelectionReveal, initial: true) { previous, reveal in
+            .onChange(of: workflowGroups ? appState.sidebarSelectionReveal : nil, initial: true) { previous, reveal in
+                guard let reveal else { return }
                 appState.revealSidebarGroups(
                     reveal, previous: hasRevealedInitialSelection ? previous : nil)
                 hasRevealedInitialSelection = true
