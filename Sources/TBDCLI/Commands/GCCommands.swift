@@ -13,21 +13,45 @@ struct GCCommand: ParsableCommand {
     )
 }
 
+/// Parse the `on | off` argument shared by the GC collector switches.
+func parseGCToggleState(_ state: String) throws -> Bool {
+    switch state.lowercased() {
+    case "on", "true", "enable": return true
+    case "off", "false", "disable": return false
+    default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+    }
+}
+
+/// The read-back line a GC collector switch prints when given no argument,
+/// e.g. `Orphan-process GC: on (default off)`. Pure, so it is assertable
+/// without a daemon.
+func gcToggleStatusLine(label: String, enabled: Bool, shippedDefault: Bool) -> String {
+    "\(label): \(enabled ? "on" : "off") (default \(shippedDefault ? "on" : "off"))"
+}
+
+/// The daemon's resolved `Config`, which the GC collector switches read their
+/// current value from when given no argument — the same `config.get` the
+/// Settings toggles read.
+private func fetchGCConfig() throws -> Config {
+    try SocketClient().call(method: RPCMethod.configGet, resultType: Config.self)
+}
+
 /// The soak switch for the profile-dir collector. It quarantines orphaned
 /// `~/tbd/profiles/<uuid>/` directories, which hold per-profile credentials and
 /// user content, so it ships off and is opted into by hand.
 struct GCProfileDirs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "profile-dirs",
-        abstract: "Enable or disable reclaiming orphaned model-profile config dirs (default off)")
-    @Argument(help: "on | off") var state: String
+        abstract: "Show, enable, or disable reclaiming orphaned model-profile config dirs (default off)")
+    @Argument(help: "on | off (omit to print the current value)") var state: String?
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        guard let state else {
+            let config = try fetchGCConfig()
+            print(gcToggleStatusLine(label: "Profile-dir GC", enabled: config.gcProfileDirsEnabled,
+                                     shippedDefault: Config.gcProfileDirsEnabledDefault))
+            return
         }
+        let enabled = try parseGCToggleState(state)
         try SocketClient().callVoid(method: RPCMethod.configSetGCProfileDirsEnabled,
                                     params: ConfigSetGCProfileDirsEnabledParams(enabled: enabled))
         print("Profile-dir GC \(enabled ? "enabled" : "disabled").")
@@ -41,15 +65,16 @@ struct GCProfileDirs: AsyncParsableCommand {
 struct GCOrphanProcesses: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "orphan-processes",
-        abstract: "Enable or disable reclaiming processes that outlived their worktree (default off)")
-    @Argument(help: "on | off") var state: String
+        abstract: "Show, enable, or disable reclaiming processes that outlived their worktree (default off)")
+    @Argument(help: "on | off (omit to print the current value)") var state: String?
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        guard let state else {
+            let config = try fetchGCConfig()
+            print(gcToggleStatusLine(label: "Orphan-process GC", enabled: config.gcOrphanProcessesEnabled,
+                                     shippedDefault: Config.gcOrphanProcessesEnabledDefault))
+            return
         }
+        let enabled = try parseGCToggleState(state)
         try SocketClient().callVoid(
             method: RPCMethod.configSetGCOrphanProcessesEnabled,
             params: ConfigSetGCOrphanProcessesEnabledParams(enabled: enabled))
@@ -65,15 +90,16 @@ struct GCOrphanProcesses: AsyncParsableCommand {
 struct GCHangStacks: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hang-stacks",
-        abstract: "Enable or disable reclaiming old hang-stack diagnostics (default off)")
-    @Argument(help: "on | off") var state: String
+        abstract: "Show, enable, or disable reclaiming old hang-stack diagnostics (default off)")
+    @Argument(help: "on | off (omit to print the current value)") var state: String?
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        guard let state else {
+            let config = try fetchGCConfig()
+            print(gcToggleStatusLine(label: "Hang-stack GC", enabled: config.gcHangStacksEnabled,
+                                     shippedDefault: Config.gcHangStacksEnabledDefault))
+            return
         }
+        let enabled = try parseGCToggleState(state)
         try SocketClient().callVoid(
             method: RPCMethod.configSetGCHangStacksEnabled,
             params: ConfigSetGCHangStacksEnabledParams(enabled: enabled))
@@ -95,7 +121,7 @@ struct GCHangStacks: AsyncParsableCommand {
 struct GCRetainedTranscripts: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "retained-transcripts",
-        abstract: "Enable or disable reclaiming unreferenced retained transcripts (default off)",
+        abstract: "Show, enable, or disable reclaiming unreferenced retained transcripts (default off)",
         discussion: """
             The soak switch for the orphan-GC leg that unlinks retained \
             transcript files nobody references and drops receipts whose expiry \
@@ -110,14 +136,16 @@ struct GCRetainedTranscripts: AsyncParsableCommand {
             earlier one unlinked.
             """
     )
-    @Argument(help: "on | off") var state: String
+    @Argument(help: "on | off (omit to print the current value)") var state: String?
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        guard let state else {
+            let config = try fetchGCConfig()
+            print(gcToggleStatusLine(
+                label: "Retained-transcript GC", enabled: config.gcRetainedTranscriptsEnabled,
+                shippedDefault: Config.gcRetainedTranscriptsEnabledDefault))
+            return
         }
+        let enabled = try parseGCToggleState(state)
         try SocketClient().callVoid(
             method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
             params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))

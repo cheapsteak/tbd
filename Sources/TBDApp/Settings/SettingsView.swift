@@ -180,12 +180,18 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
                 ))
                 .help(Self.autoCreateNotesHelp)
+            }
 
+            Section("Cleanup") {
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
                     set: { newValue in Task { await appState.setGCEnabled(newValue) } }
                 ))
                 .help("Reaps Claude agent worktrees whose run has ended, snapshot-first. Restore from History → Reclaimed.")
+
+                ForEach(GCCollector.allCases, id: \.self) { collector in
+                    gcCollectorToggle(collector)
+                }
             }
 
             Section("Claude") {
@@ -463,6 +469,30 @@ struct GeneralSettingsTab: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// One opt-in orphan-GC collector. Reads the daemon `Config` mirror and
+    /// writes the same RPC as its `tbd gc` subcommand. Disabled while the
+    /// master switch is off, since the daemon reads each one on top of it.
+    @ViewBuilder
+    private func gcCollectorToggle(_ collector: GCCollector) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle(collector.label, isOn: Binding(
+                get: { appState.gcCollectorEnabled(collector) },
+                set: { newValue in Task { await appState.setGCCollectorEnabled(collector, newValue) } }
+            ))
+            .help("\(collector.help). Same switch as `\(collector.cliCommand)`.")
+            Text(Self.gcCollectorCaption(collector, cleanupEnabled: appState.gcEnabled))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(!appState.gcEnabled)
+    }
+
+    static func gcCollectorCaption(_ collector: GCCollector, cleanupEnabled: Bool) -> String {
+        cleanupEnabled
+            ? collector.caption
+            : "\(collector.caption) Requires automatic cleanup to be on."
     }
 
     /// Schedule-based PR polling. Reads the persisted flag from

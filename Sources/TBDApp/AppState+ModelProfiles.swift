@@ -336,7 +336,7 @@ extension AppState {
     /// Fetch the current global Config (used by the scratch-instructions editor to show the effective text).
     func fetchConfig() async -> Config? {
         do {
-            return try await daemonClient.getConfig()
+            return try await configFetcher()
         } catch {
             logger.error("Failed to fetch config: \(error, privacy: .public)")
             handleConnectionError(error)
