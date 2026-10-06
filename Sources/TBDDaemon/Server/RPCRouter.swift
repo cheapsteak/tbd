@@ -153,7 +153,7 @@ public final class RPCRouter: Sendable {
     /// consulted only when a holder attach finds no reader, to tell an ended
     /// session from one that is merely unattachable. Tests replace it.
     nonisolated(unsafe) var holderProcessIsLive: @Sendable (Int32) -> Bool = { pid in
-        ProcessLiveness.isLiveNamedProcess(pid: pid, name: "TBDHolder")
+        HolderSpawner.isLiveHolder(pid: pid)
     }
     nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
     nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in

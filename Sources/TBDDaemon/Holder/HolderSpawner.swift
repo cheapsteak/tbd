@@ -113,6 +113,16 @@ struct HolderSpawner {
     /// to whichever worktree happened to launch the daemon. See `launchHolder`.
     static let holderWorkingDirectory = "/"
 
+    /// Whether `pid` is a live `TBDHolder` process. The one liveness check for
+    /// a recorded holder pid, shared by the attach path's "ended" answer and
+    /// the park's ended-session path so the two cannot disagree about which
+    /// sessions are over. By executable name, so a pid the kernel reissued to
+    /// anything else reads as not a holder; a pid reissued to another session's
+    /// holder reads as live, which is the keep-favoring direction.
+    static func isLiveHolder(pid: Int32) -> Bool {
+        ProcessLiveness.isLiveNamedProcess(pid: pid, name: "TBDHolder")
+    }
+
     /// The lowest number the spawner will relocate an inherited descriptor to.
     ///
     /// Above **every** target number, not merely above its own: with two dup2

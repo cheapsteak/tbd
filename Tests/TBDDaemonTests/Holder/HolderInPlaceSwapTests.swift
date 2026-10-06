@@ -123,6 +123,9 @@ struct HolderInPlaceSwapTests {
             spawner: spawner)
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)
+        // A live holder, so the no-reader rail is what these rows reach;
+        // the ended-session path has tests of its own.
+        await router.hibernationCoordinator.setHolderProcessIsLive { _ in true }
 
         let repoPath = "\(home)/repo"
         try FileManager.default.createDirectory(
@@ -151,7 +154,8 @@ struct HolderInPlaceSwapTests {
     /// `withTranscript: false` leaves the session with NO transcript on disk
     /// at all — the shape a `.fork` refuses and `.inPlace` must not.
     private static func holderRow(
-        _ fixture: Fixture, parked: Bool, withTranscript: Bool = true
+        _ fixture: Fixture, parked: Bool, withTranscript: Bool = true,
+        holderPID: Int32 = 9101, childPID: Int32 = 9102
     ) async throws -> Terminal {
         let transcript = "\(fixture.home)/\(UUID().uuidString).jsonl"
         if withTranscript {
@@ -166,8 +170,8 @@ struct HolderInPlaceSwapTests {
             claudeSessionID: sessionID,
             kind: .claude,
             transport: .holder,
-            holderPID: parked ? nil : 9101,
-            childPID: parked ? nil : 9102)
+            holderPID: parked ? nil : holderPID,
+            childPID: parked ? nil : childPID)
         try await fixture.db.terminals.updateSession(
             id: created.id, sessionID: sessionID, transcriptPath: transcript)
         if parked {
@@ -244,6 +248,36 @@ struct HolderInPlaceSwapTests {
                 "the swap did not open and close exactly one actuation: \(rows)")
         #expect(rows.last?["result"] as? String == "transport-failed",
                 "a refused park was recorded as something other than transport-failed")
+    }
+
+    /// The field report: "Swap profile" on a tab whose holder was killed with
+    /// its job. The park finalizes without the screen rail — nothing is left
+    /// to hold unsent input — so the swap goes on to re-home the row and try
+    /// the wake, where it used to refuse for a reader that cannot come back.
+    ///
+    /// The pids are above macOS's pid range, so the real process table this
+    /// fixture's coordinator asks answers "nothing runs there" for the child;
+    /// the holder's liveness is the seam. This fixture's spawner cannot
+    /// start a holder, so the wake itself fails and leaves the row parked on
+    /// the new account — the outcome
+    /// `swapWakeRefusalLeavesTheRowParkedOnTheNewProfile` pins.
+    @Test("a swap of a session whose holder and job are gone parks it and re-homes it")
+    func swapOfAnEndedSessionGetsPastThePark() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        await fixture.router.hibernationCoordinator.setHolderProcessIsLive { _ in false }
+        let terminal = try await Self.holderRow(
+            fixture, parked: false, holderPID: 999_998, childPID: 999_999)
+
+        let response = try await fixture.swap(terminal.id)
+
+        #expect(response.error != HibernationCoordinator.holderNoReaderRefusal,
+                "the swap still refused at the park for a reader that cannot come back")
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "the ended session was not parked")
+        #expect(after.profileID == fixture.destProfileID, "the swap did not re-home the row")
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "the park left pids naming processes that no longer exist")
     }
 
     /// A holder row whose session has NO transcript on disk is still swapped

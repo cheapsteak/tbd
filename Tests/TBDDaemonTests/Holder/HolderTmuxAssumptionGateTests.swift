@@ -213,6 +213,9 @@ struct HolderTmuxAssumptionGateTests {
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             signaller: signaller, actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
+        // A live holder, so the no-reader rail is what these rows reach;
+        // the ended-session path has tests of its own.
+        await coordinator.setHolderProcessIsLive { _ in true }
         return coordinator
     }
 
@@ -401,6 +404,110 @@ struct HolderTmuxAssumptionGateTests {
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "a park refused at the screen rail still wrote its intent to the row")
+    }
+
+    // MARK: - A session whose holder died
+
+    /// A holder row whose recorded holder is not a live `TBDHolder`, and whose
+    /// child is in whatever state `script` puts the fake process table in.
+    /// No reader and no screen oracle, so a park that does not take the
+    /// ended-session path stops at `holderNoReaderRefusal`, exactly as the
+    /// field report did.
+    private func parkWithDeadHolder(
+        holderPID: Int32? = 9101,
+        holderIsLive: Bool = false,
+        script: (FakeProcessSignaller, Date) -> Void
+    ) async throws -> (HibernateResult, Terminal, Terminal) {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let anchor = Date(timeIntervalSince1970: 1_800_000_000)
+        var terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, holderChildStartedAt: anchor)
+        if holderPID == nil {
+            try await db.terminals.setHolderProcess(
+                id: terminal.id, holderPID: nil, childPID: 9102, startedAt: anchor)
+            terminal = try #require(try await db.terminals.get(id: terminal.id))
+        }
+        let signaller = FakeProcessSignaller()
+        script(signaller, anchor)
+        let coord = await coordinator(
+            db, tmux: TmuxManager(dryRun: true),
+            registry: holderRegistry(listing: [terminal]), signaller: signaller)
+        await coord.setHolderProcessIsLive { _ in holderIsLive }
+        let result = await coord.manualHibernate(terminalID: terminal.id)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        return (result, terminal, after)
+    }
+
+    /// The field report: a tab whose holder was killed, its job with it. There
+    /// is no reader to judge a screen through and nothing left to hold unsent
+    /// input, so the park finalizes — with the pids cleared, as every park
+    /// leaves them — instead of refusing forever for a reader that cannot
+    /// come back.
+    @Test("a session whose holder and job are both gone is parked without the screen rail")
+    func deadHolderAndDeadChildParks() async throws {
+        let (result, _, after) = try await parkWithDeadHolder { signaller, _ in
+            signaller.behaviors[9102] = .init(aliveInitially: false)
+        }
+        #expect(result == .ok, "an ended session was not parked: \(result)")
+        #expect(after.isParked)
+        #expect(after.holderPID == nil && after.childPID == nil,
+                "the park left pids naming processes that no longer exist")
+    }
+
+    /// A recorded child pid now running something else is the same fact once
+    /// the holder is gone: the job left that number long ago.
+    @Test("a dead holder whose child pid names a stranger is parked")
+    func deadHolderAndReusedChildPIDParks() async throws {
+        let (result, _, after) = try await parkWithDeadHolder { signaller, anchor in
+            signaller.startTimes[9102] = anchor.addingTimeInterval(86_400)
+            signaller.cmdlines[9102] = "/bin/zsh -i -l -c claude"
+        }
+        #expect(result == .ok, "\(result)")
+        #expect(after.isParked)
+    }
+
+    @Test("a live holder with no reader is still refused")
+    func liveHolderWithoutAReaderStillRefuses() async throws {
+        let (result, before, after) = try await parkWithDeadHolder(holderIsLive: true) { signaller, _ in
+            signaller.behaviors[9102] = .init(aliveInitially: false)
+        }
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
+    }
+
+    @Test("a dead holder whose child is verifiably alive is still refused")
+    func deadHolderWithALiveChildStillRefuses() async throws {
+        let (result, before, after) = try await parkWithDeadHolder { signaller, anchor in
+            signaller.startTimes[9102] = anchor
+            signaller.cmdlines[9102] = "/bin/zsh -i -l -c claude"
+        }
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
+    }
+
+    @Test("a dead holder whose child's identity cannot be read is still refused")
+    func deadHolderWithAnUncertainChildStillRefuses() async throws {
+        // Alive, with no start time on record: `.startTimeUnreadable`.
+        let (result, before, after) = try await parkWithDeadHolder { signaller, _ in
+            signaller.cmdlines[9102] = "/bin/zsh -i -l -c claude"
+        }
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
+    }
+
+    @Test("a row with no recorded holder pid is still refused")
+    func unrecordedHolderStillRefuses() async throws {
+        let (result, before, after) = try await parkWithDeadHolder(holderPID: nil) { signaller, _ in
+            signaller.behaviors[9102] = .init(aliveInitially: false)
+        }
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "\(result)")
+        #expect(RowFingerprint(after) == RowFingerprint(before))
     }
 
     /// Manual park needs no flag at all, and specifically not the idle sweep's:
@@ -1046,6 +1153,9 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [terminal])
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)
+        // A live holder, so the no-reader rail is what these rows reach;
+        // the ended-session path has tests of its own.
+        await router.hibernationCoordinator.setHolderProcessIsLive { _ in true }
 
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2668,6 +2778,9 @@ struct HolderTmuxAssumptionGateTests {
             exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
             actuationLog: ActuationLog(path: logPath))
         await coordinator.setHolderRegistry(registry)
+        // A live holder, so the no-reader rail is what these rows reach;
+        // the ended-session path has tests of its own.
+        await coordinator.setHolderProcessIsLive { _ in true }
         if let screen {
             await coordinator.setHolderScreenOracle(Self.screenOracle(screen))
         }

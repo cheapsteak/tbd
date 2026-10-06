@@ -371,6 +371,22 @@ extension HibernationCoordinator {
             return .notEligible(reason: "this daemon has no holder registry")
         }
 
+        // **A session whose holder and job are both verifiably gone is parked
+        // without the live rails.** Every rail below asks something of a live
+        // session — its screen, its reader, its transcript mid-write — and a
+        // session with neither process has none of those to give: no reader
+        // exists to read a screen through, and there is no composer left to
+        // hold unsent input. Refusing it would strand the row forever, awake
+        // over nothing, with every wake, hibernate and profile swap refused for
+        // a reader that can never come back. Parking it is the truthful record,
+        // and the invariant this feature is judged on holds trivially: the
+        // child is not running. `holderSessionHasEnded` is fail-closed — an
+        // unrecorded pid or an uncertain identity is not "gone".
+        let sessionEnded = holderSessionHasEnded(currentTerminal)
+        if sessionEnded {
+            logger.info("hibernate: \(terminal.id, privacy: .public)'s holder and job are both gone — parking it without the live rails")
+        }
+
         // Rail: typed-but-unsent input, read off the typed screen oracle.
         // Fail-closed on every answer that is not a live daemon-rendered screen
         // of observed content — a source the daemon is not the live store for,
@@ -399,7 +415,9 @@ extension HibernationCoordinator {
         // under its "Switching account" caption for the second or two the
         // ladder takes. See `holderSwapBackdrop`.
         let capturedSnapshot: String?
-        if policy.honoursLiveRails {
+        if sessionEnded {
+            capturedSnapshot = nil
+        } else if policy.honoursLiveRails {
             switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
             case .refused(let refusal):
                 idleSince[terminal.id] = nil
@@ -422,7 +440,12 @@ extension HibernationCoordinator {
         // the rail rather than inside it: the rail's subject is the screen, and
         // a reader that answered a live screen a moment ago is the one this
         // park writes to.
-        guard let reader = await registry.reader(for: terminal.id) else {
+        let reader: HolderReader?
+        if sessionEnded {
+            reader = nil
+        } else if let live = await registry.reader(for: terminal.id) {
+            reader = live
+        } else {
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
             logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon holds no reader for this session")
@@ -433,7 +456,10 @@ extension HibernationCoordinator {
         // bypassed by the same policy, for the same reason: this park is a
         // user's account switch, not a background reclaim, and the tmux arm
         // has never refused one over a tail that was mid-write.
-        if let refusal = Self.transcriptTailRefusal(
+        // Not asked of an ended session: this rail exists to stop a park
+        // before it ends a process mid-write, and there is no process left to
+        // end. The post-exit check below still reports a cut tail.
+        if !sessionEnded, let refusal = Self.transcriptTailRefusal(
             transcriptPath: currentTerminal.transcriptPath, policy: policy) {
             logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
             return refusal
@@ -479,14 +505,21 @@ extension HibernationCoordinator {
         // either delivers the whole buffer within its budget or throws — so
         // there is no partial-write value to inspect here; if that ever becomes
         // a short count, it belongs in this same log line.
-        do {
-            try await reader.write(Data("/exit\r".utf8))
-        } catch {
-            logger.warning("hibernate: could not write the polite /exit for \(terminal.id, privacy: .public), so the escalation is what will end its job: \(error.localizedDescription, privacy: .public)")
+        //
+        // An ended session skips the whole ladder: there is nothing to tell to
+        // exit and nothing to signal, and `holderSessionHasEnded` has already
+        // established that the child is gone.
+        var gone = sessionEnded
+        if let reader {
+            do {
+                try await reader.write(Data("/exit\r".utf8))
+            } catch {
+                logger.warning("hibernate: could not write the polite /exit for \(terminal.id, privacy: .public), so the escalation is what will end its job: \(error.localizedDescription, privacy: .public)")
+            }
+            gone = await pollUntilChildIsGone(
+                childPID: childPID, terminalID: terminal.id, registry: registry,
+                attempts: exitPollAttempts)
         }
-        var gone = await pollUntilChildIsGone(
-            childPID: childPID, terminalID: terminal.id, registry: registry,
-            attempts: exitPollAttempts)
         // Whether the holder has already been told to let go. Only the forced
         // rung does that, and only as part of killing the job; every other way
         // out of the ladder still owes the holder its `forget`.
@@ -767,6 +800,38 @@ extension HibernationCoordinator {
         case .notRunning: return .gone
         case .startTimeUnreadable, .startTimeMismatch, .commandUnreadable, .foreignExecutable:
             return .unverifiable(verdict)
+        }
+    }
+
+    /// Whether a holder session's holder AND job are both verifiably gone, so
+    /// there is nothing live left for a park's rails to protect.
+    ///
+    /// Fail-closed on every half, because a wrong "gone" finalizes a park over
+    /// a running process — the one outcome this feature may never produce:
+    ///
+    /// - **The holder** must have a recorded pid that is not a live
+    ///   `TBDHolder` — the same check the attach path uses to answer "ended"
+    ///   (`HolderSpawner.isLiveHolder`). No recorded pid is not evidence of
+    ///   anything, and a live holder that has merely lost its reader is a
+    ///   session the daemon has lost track of, not one that ended.
+    /// - **The job** must have a recorded pid whose `ProcessIdentityCheck`
+    ///   positively says it is not this session's child: nothing runs at that
+    ///   number, or what runs there started at another time or runs another
+    ///   executable. With the holder already gone those are the same fact — the
+    ///   holder exits when its child does, and a pid reissued since names a
+    ///   stranger. An unreadable start time or command line is uncertainty, and
+    ///   uncertainty keeps refusing.
+    func holderSessionHasEnded(_ terminal: Terminal) -> Bool {
+        guard let holderPID = terminal.holderPID, holderPID > 1,
+              !holderProcessIsLive(holderPID) else { return false }
+        guard let childPID = terminal.childPID, childPID > 1 else { return false }
+        switch holderChildDisposition(childPID: childPID, terminal: terminal) {
+        case .gone:
+            return true
+        case .unverifiable(.startTimeMismatch), .unverifiable(.foreignExecutable):
+            return true
+        case .ours, .unrecorded, .unverifiable:
+            return false
         }
     }
 
