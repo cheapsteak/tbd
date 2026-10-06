@@ -85,8 +85,10 @@ extension AppState {
     static let sidebarWorkflowGroupsDefault = false
 
     /// UserDefaults key holding the expanded workflow groups, as an array of
-    /// `SidebarGroupID.persistenceKey` strings.
-    static let sidebarExpandedGroupsKey = "sidebarExpandedGroups"
+    /// `SidebarGroupID.persistenceKey` strings. Prefixed like the other
+    /// AppState-owned state keys (`layoutsKey`, `selectionOrderKey`): it is
+    /// remembered state, not a Settings preference.
+    static let sidebarExpandedGroupsKey = "com.tbd.app.sidebarExpandedGroups"
 
     static func sidebarWorkflowGroupsEnabled(defaults: UserDefaults = .standard) -> Bool {
         sidebarWorkflowGroupsEnabled(stored: defaults.object(forKey: sidebarWorkflowGroupsKey) as? Bool)
@@ -107,8 +109,13 @@ extension AppState {
         return Set(keys.compactMap(SidebarGroupID.init(persistenceKey:)))
     }
 
+    /// Writes only when the stored array differs, so restoring at launch —
+    /// which goes through the observed setter — never writes, and an absent
+    /// key is not created for an empty set.
     func persistExpandedSidebarGroups() {
-        userDefaults.set(expandedSidebarGroups.map(\.persistenceKey).sorted(), forKey: Self.sidebarExpandedGroupsKey)
+        let keys = expandedSidebarGroups.map(\.persistenceKey).sorted()
+        guard keys != (userDefaults.stringArray(forKey: Self.sidebarExpandedGroupsKey) ?? []) else { return }
+        userDefaults.set(keys, forKey: Self.sidebarExpandedGroupsKey)
     }
 
     /// Drops remembered groups whose repository the daemon no longer reports.

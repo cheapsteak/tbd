@@ -67,7 +67,8 @@ With grouping on, the groups a user expands stay expanded across restarts.
   serialized as `<kind>|<owner type>|<owner value>`. The provider name comes
   last and is split off with a bounded split, so a separator inside a name
   round-trips. The expanded set is stored as a sorted string array under
-  `sidebarExpandedGroups`.
+  `com.tbd.app.sidebarExpandedGroups`, the prefix AppState's other remembered
+  state uses.
 - **Write** – every change to the expanded set rewrites the array. That
   includes the expansions selection reveal makes, so a group opened to show a
   selected row is still open after a restart, just as a group opened by hand

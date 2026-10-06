@@ -221,6 +221,17 @@ struct SidebarWorkflowGroupsToggleTests {
         }
     }
 
+    @Test func constructingAppStateWritesNoExpansionState() {
+        withDefaults { defaults, _ in
+            _ = AppState(userDefaults: defaults)
+            #expect(defaults.object(forKey: AppState.sidebarExpandedGroupsKey) == nil)
+            let state = AppState(userDefaults: defaults)
+            state.toggleSidebarGroup(.init(owner: .scratch, kind: .hibernated))
+            state.toggleSidebarGroup(.init(owner: .scratch, kind: .hibernated))
+            #expect(defaults.stringArray(forKey: AppState.sidebarExpandedGroupsKey) == [])
+        }
+    }
+
     @Test func unreadableEntriesAreDropped() {
         withDefaults { defaults, _ in
             defaults.set(["remote|repository|not-a-uuid", "sideways|scratch|", "remote|provider|",
