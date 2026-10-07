@@ -758,7 +758,7 @@ private struct DockSplitView<Main: View, Dock: View>: View {
     var body: some View {
         GeometryReader { geometry in
             let totalWidth = geometry.size.width
-            let dividerWidth: CGFloat = isDockVisible ? 4 : 0
+            let dividerWidth: CGFloat = isDockVisible ? SplitDividerMetrics.lineThickness : 0
             let available = totalWidth - dividerWidth
             let dockWidth = isDockVisible ? available * dockRatio : 0
             let mainWidth = available - dockWidth
@@ -771,8 +771,6 @@ private struct DockSplitView<Main: View, Dock: View>: View {
                     Rectangle()
                         .fill(Color.gray.opacity(0.3))
                         .frame(width: dividerWidth)
-                        .contentShape(Rectangle())
-                        .pointerStyle(.columnResize)
                         .overlay {
                             if let preview = previewRatio {
                                 let offsetX = -(preview - dockRatio) * available
@@ -783,24 +781,31 @@ private struct DockSplitView<Main: View, Dock: View>: View {
                                     .allowsHitTesting(false)
                             }
                         }
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    if dragStartRatio == nil {
-                                        dragStartRatio = dockRatio
-                                    }
-                                    guard let startRatio = dragStartRatio, available > 0 else { return }
-                                    let delta = -value.translation.width / available
-                                    previewRatio = max(0.1, min(0.6, startRatio + delta))
-                                }
-                                .onEnded { _ in
-                                    if let preview = previewRatio {
-                                        dockRatio = preview
-                                    }
-                                    previewRatio = nil
-                                    dragStartRatio = nil
-                                }
-                        )
+                        .overlay {
+                            Color.clear
+                                .frame(width: SplitDividerMetrics.grabThickness)
+                                .contentShape(Rectangle())
+                                .pointerStyle(.columnResize)
+                                .gesture(
+                                    DragGesture()
+                                        .onChanged { value in
+                                            if dragStartRatio == nil {
+                                                dragStartRatio = dockRatio
+                                            }
+                                            guard let startRatio = dragStartRatio, available > 0 else { return }
+                                            let delta = -value.translation.width / available
+                                            previewRatio = max(0.1, min(0.6, startRatio + delta))
+                                        }
+                                        .onEnded { _ in
+                                            if let preview = previewRatio {
+                                                dockRatio = preview
+                                            }
+                                            previewRatio = nil
+                                            dragStartRatio = nil
+                                        }
+                                )
+                        }
+                        .zIndex(1)
 
                     dockContent()
                         .frame(width: dockWidth)
