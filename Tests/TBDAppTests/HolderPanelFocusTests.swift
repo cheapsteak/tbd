@@ -66,7 +66,7 @@ struct HolderPanelFocusTests {
         let window: NSWindow
         let tabCloseContext: TabCloseContext
         private let sessionEnd: Int32
-        private let defaults: UserDefaults
+        let defaults: UserDefaults
         private let suiteName: String
 
         init() throws {
@@ -232,6 +232,41 @@ struct HolderPanelFocusTests {
         fixture.state.focusedTabCloseContext = other
         fixture.window.makeFirstResponder(nil)
         #expect(fixture.state.focusedTabCloseContext == other)
+    }
+
+    @MainActor
+    @Test("a click moving focus between split panes of one tab keeps the tab named")
+    func aClickFromASplitSiblingKeepsTheCloseContext() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+
+        // A split sibling in the same tab: it shares the close context and,
+        // like any panel terminal, clears it when it resigns first responder.
+        let sibling = TBDTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 100, height: 100),
+            font: TBDTerminalView.defaultMonospaceFont,
+            appearance: AppearanceSettings(defaults: fixture.defaults))
+        fixture.view.superview?.addSubview(sibling)
+        defer { sibling.removeFromSuperview() }
+        let state = fixture.state
+        let context = fixture.tabCloseContext
+        sibling.onResignFocus = {
+            if state.focusedTabCloseContext == context { state.focusedTabCloseContext = nil }
+        }
+        fixture.window.makeFirstResponder(sibling)
+        fixture.state.focusedTabCloseContext = context
+
+        let claimFocus = try #require(fixture.view.onMouseDownClaimFocus)
+        claimFocus()
+
+        #expect(fixture.window.firstResponder === fixture.view)
+        #expect(fixture.state.focusedTabCloseContext == context, """
+            the sibling's resign cleared the context the click had just named, so the tab \
+            the focused terminal belongs to was left unnamed
+            """)
     }
 
     @MainActor

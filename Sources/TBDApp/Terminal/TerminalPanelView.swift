@@ -2007,18 +2007,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // terminal receives no events at all.
             guard let tv = terminalView as? TBDTerminalView else { return }
             // Claim first responder on any click, so key equivalents (Cmd+W,
-            // Cmd+Arrow) route to this terminal.
+            // Cmd+Arrow) route to this terminal. First responder moves before
+            // the tab is named: the terminal losing focus clears its context
+            // on resign, and a split sibling in the same tab shares this
+            // panel's context, so naming first would see it cleared at once.
             tv.onMouseDownClaimFocus = { [weak self, weak tv] in
                 guard let self, let tv else { return }
-                self.appState?.focusedTabCloseContext = self.tabCloseContext
                 tv.window?.makeFirstResponder(tv)
+                self.appState?.focusedTabCloseContext = self.tabCloseContext
             }
             // Stop naming this tab as the focused one once focus leaves the
             // terminal, however it leaves — a click elsewhere, or a
             // programmatic `makeFirstResponder`. Equality-guarded so a resign
             // never clears another tab's context; whatever takes focus next
             // writes its own (a clicked terminal does so in its mouse-down,
-            // just after AppKit resigns this one).
+            // just after AppKit resigns this one, as ordered above).
             tv.onResignFocus = { [weak self] in
                 guard let self, let appState = self.appState else { return }
                 if appState.focusedTabCloseContext == self.tabCloseContext {
