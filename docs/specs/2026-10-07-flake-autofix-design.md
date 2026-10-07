@@ -295,8 +295,9 @@ baseline (§6.3) chooses which:
   with the same filter, parallelism, and executed-test floor: fast pass 1
   (`--filter '^TBDDaemonTests\.'`) for `TBDDaemonTests`, the serial quiet pass
   for `TBDDaemonLiveTests`, and fast pass 2 (the `--skip` complement) for every
-  other target. An iteration takes about 20 minutes, which is why the count
-  is 3.
+  other target. A pass iteration takes about 8 minutes once warm, and the
+  first iteration of a run can take several times that (§9), which is why the
+  count is 3.
 
 The scope is fixed for the whole attempt: both tries are judged at the scope the
 baseline chose.
@@ -315,7 +316,7 @@ iterations on `main`. The baseline does two jobs:
   then the only "before".
 
 The baseline never runs at pass scope: three pass iterations on `main` would add
-about an hour to every attempt (§9).
+25 to 55 minutes to every attempt (§9).
 
 ### 6.4 The verifier
 
@@ -327,9 +328,8 @@ the session's own account of its results is recorded but never consulted.
 - **`--test <ID>`** – a filter that matches exactly that test, with an
   executed-test floor of 1.
 - **`--pass-of <ID>`** – the filter, parallelism, and floor of the CI pass that
-  contains the test, as §6.2 lists them, with an execution deadline sized to
-  that pass's measured duration rather than the harness's 600-second default,
-  which a 20-minute pass would always exceed.
+  contains the test, as §6.2 lists them, with an execution deadline sized from
+  that pass's measured duration, first-iteration warm-up included.
 
 Both keep everything else the harness already does: induced CPU load with
 spinners captured by PID, the outer per-iteration deadline, the
@@ -449,20 +449,32 @@ Transitions, each owned by the PR driver:
 The account allows five concurrent macOS jobs, shared by every workflow.
 
 - **The `fix` job** holds one macOS slot, at 05:00 UTC, with a 300-minute
-  timeout that ends it by 10:00, before the nightly starts at 11:00. Its worst
-  case is an attempt at pass scope that uses both tries. As ceilings:
+  timeout that ends it by 10:00, before the nightly starts at 11:00.
+
+  The pass-scope figures come from the nightly's whole-fast-pass arm on
+  2026-10-07, which runs both fast passes together (12,164 tests) under induced
+  load. Its warm iterations took about 8 minutes each; its first took about 38,
+  which likely includes first-build and warm-up cost. A single pass runs fewer
+  tests than that arm, so these figures are upper bounds for it. A pass-scope
+  verifier run is therefore about 24 minutes warm and up to about 55 when its
+  first iteration pays the warm-up.
+
+  The worst case is an attempt at pass scope that uses both tries, with both
+  verifier runs paying the warm-up. As ceilings:
   - build from a restored cache – 15 minutes;
   - pre-fix baseline, 20 test-alone iterations – 15 minutes;
   - two sessions, capped at 60 minutes each – 120 minutes;
-  - two verifier runs at pass scope, 3 iterations of about 20 minutes each –
-    120 minutes.
+  - two verifier runs at pass scope, up to 55 minutes each – 110 minutes.
 
-  That totals 270 minutes and leaves 30 for checkout, pushes, and API calls. At
-  test scope the two verifier runs cost about 30 minutes instead, and the
-  attempt fits in about 180. The test-alone iteration time (seconds of test
-  plus `scripts/test.sh` and SwiftPM startup) and the pass durations are
-  estimates; the first implementation slice measures them and adjusts the
-  ceilings so the sum stays under the timeout.
+  That totals 260 minutes and leaves 40 for checkout, pushes, and API calls.
+  Without the warm-up the two verifier runs cost about 48 minutes and the
+  attempt fits in about 200; at test scope they cost about 30 and it fits in
+  about 180. The timeout stays at 300 minutes until the first implementation
+  slice measures whether a verifier run on an incrementally rebuilt candidate
+  pays the first-iteration warm-up. If it does not, 240 minutes covers the
+  worst case and the job can start at 06:00. The test-alone iteration time
+  (seconds of test plus `scripts/test.sh` and SwiftPM startup) is an estimate
+  that slice measures as well.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
   once per attempt and so at most once a night.
 - **The `ledger` and `promote` jobs** run on ubuntu and cost no macOS slot.
@@ -587,9 +599,9 @@ against a fixture that contains one.
   "now passes" is a claim. The verifier makes the decision from xunit output and
   exit codes, which the session cannot change.
 - **Always stressing at pass scope.** It reproduces neighbour-dependent
-  flakes, but three pass iterations cost about an hour where twenty test-alone
-  iterations cost minutes, and they observe the target only three times. Test
-  scope is the better instrument whenever the test fails alone, and the
-  baseline shows when it does.
+  flakes, but three pass iterations cost 25 to 55 minutes where twenty
+  test-alone iterations cost minutes, and they observe the target only three
+  times. Test scope is the better instrument whenever the test fails alone,
+  and the baseline shows when it does.
 - **Auto-merging a verified PR.** A clean stress run cannot prove a fix (§6.5),
   and a fix can change production code. A human merge is the backstop.
