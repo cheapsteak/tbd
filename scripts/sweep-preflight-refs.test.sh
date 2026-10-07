@@ -1039,14 +1039,15 @@ test_the_age_flag_overrides_the_default() {
   rm -rf "$root"
 }
 
-# THE NAMESPACE SHAPE GUARD. An empty namespace would make every branch eligible;
+# THE NAMESPACE ALLOWLIST. An empty namespace would make every branch eligible;
 # one without a trailing slash matches lookalikes; a glob or a nested path is not
-# a directory of branches. Each refuses with 2 before anything is asked.
+# a directory of branches; and another directory of branches (`tbd/`) holds real
+# work. Each refuses with 2 before anything is asked.
 test_a_namespace_that_could_reach_main_is_refused() {
   local root bad; root="$(mktmpd)"
   mkfixture "$root" main
   stub_gh "$root"
-  for bad in "" "main" "refs/heads/" "*" "flakefix" "Flakefix/" "a/b/"; do
+  for bad in "" "main" "refs/heads/" "*" "flakefix" "Flakefix/" "a/b/" "tbd/" "release/"; do
     run_sweep "$root" --apply --namespace "$bad"
     assert_eq "namespace [$bad] refused" "2" "$RC"
     assert_contains "and the refusal for [$bad] says why" "$OUT" "--namespace must match"
@@ -1063,13 +1064,13 @@ test_the_namespace_shape_guard_is_load_bearing() {
   local root; root="$(mktmpd)"
   mkfixture "$root" main
   stub_gh "$root"
+  # A dry run: the plan is the verdict, and whether the fixture's bare remote
+  # would then refuse to delete its HEAD branch depends on the machine's
+  # `init.defaultBranch`, which this case has no business reading.
   run_mutant_sweep "$root" "s/^NAMESPACE_PATTERN=.*$/NAMESPACE_PATTERN='.*'/" \
-    --apply --namespace ""
-  # Not 0: the fixture's bare remote refuses to delete its own HEAD branch, so
-  # the attempt fails and is reported. What matters is that it was attempted.
+    --namespace ""
   assert_missing "an accepted empty namespace is not refused" "$OUT" "--namespace must match"
   assert_contains "and plans main for deletion" "$OUT" "PLAN delete main"
-  assert_contains "and tries to delete it" "$OUT" "delete failed: main"
   rm -rf "$root"
 }
 
@@ -1078,7 +1079,7 @@ test_a_non_positive_or_non_numeric_age_is_refused() {
   mkfixture "$root" main
   push_fresh_ref "$root" flakefix/just-pushed
   stub_gh "$root"
-  for bad in "" "0" "-5" "abc" "1h" "08"; do
+  for bad in "" "0" "-5" "abc" "1h" "08" "1000000000" "18446744073709551616"; do
     run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds "$bad"
     assert_eq "age [$bad] refused" "2" "$RC"
     assert_contains "and the refusal for [$bad] says why" "$OUT" \
@@ -1097,7 +1098,7 @@ test_the_age_validation_is_load_bearing() {
   mkfixture "$root" main
   push_fresh_ref "$root" flakefix/just-pushed
   stub_gh "$root"
-  run_mutant_sweep "$root" 's/=~ \^\[1-9\]\[0-9\]\*\$ \]\]/=~ .* ]]/' \
+  run_mutant_sweep "$root" 's/=~ \^\[1-9\]\[0-9\]\{0,8\}\$ \]\]/=~ .* ]]/' \
     --apply --namespace flakefix/ --min-age-seconds 0
   assert_contains "an accepted zero age plans the fresh branch" "$OUT" \
     "PLAN delete flakefix/just-pushed"

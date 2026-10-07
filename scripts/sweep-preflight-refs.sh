@@ -7,7 +7,7 @@
 #   - **`preflight/*`** — driven by `.github/workflows/preflight-cleanup.yml`
 #     with the defaults (`--namespace preflight/ --min-age-seconds 3600`). The
 #     rest of this header is about that namespace, which is why it exists.
-#   - **`flakefix/*`** — driven by the `ledger` job in `flake-fixer.yml` as
+#   - **`flakefix/*`** — to be driven by the `ledger` job in `flake-fixer.yml` as
 #     `--namespace flakefix/ --min-age-seconds 86400`, per §11 of
 #     docs/specs/2026-10-07-flake-autofix-design.md. The flake bot pushes
 #     `flakefix/issue-<N>` and opens a PR from it; the repository deletes the
@@ -100,7 +100,7 @@
 #
 # `--namespace PREFIX` must match `NAMESPACE_PATTERN` and `--min-age-seconds N`
 # must be a positive integer; anything else exits 2 before `gh` is asked
-# anything. `--branch` names the part of a ref after the namespace, as before.
+# anything. `--branch` names the part of a ref after the namespace.
 #
 # Exit status: 0 clean, 1 something was kept or failed that should not have
 # been (a `gh` query failed, an age could not be read, a delete failed), 2 the
@@ -109,15 +109,16 @@
 REMOTE="origin"
 NAMESPACE="preflight/"
 
-# WHAT `--namespace` MAY BE: one lowercase path segment and its trailing slash.
-# This is the guard that keeps the namespace guard meaningful. `preflight_branch_of`
-# matches `refs/heads/$NAMESPACE?*`, so an empty namespace would make every
-# branch on the remote eligible, `main` among them, and a namespace with no
-# trailing slash (`main`, `flakefix`) would match `main-…` or `flakefix-…`
-# lookalikes. Requiring the slash and refusing anything else — globs, nested
-# paths like `refs/heads/`, uppercase — means a caller can only ever narrow the
-# sweep to a directory of branches, never widen it.
-NAMESPACE_PATTERN='^[a-z0-9-]+/$'
+# WHAT `--namespace` MAY BE: exactly one of the namespaces this script is the
+# reconciler for, with its trailing slash. This is the guard that keeps the
+# namespace guard meaningful. `preflight_branch_of` matches
+# `refs/heads/$NAMESPACE?*`, so an empty namespace would make every branch on
+# the remote eligible, `main` among them; a namespace with no trailing slash
+# (`flakefix`) would match `flakefix-…` lookalikes; and any other directory of
+# branches — `tbd/`, `release/`, `dependabot/` — holds real work whose only
+# protection would be an open PR. So it is an allowlist rather than a shape: a
+# new bot-owned namespace is added here, deliberately, with its caller.
+NAMESPACE_PATTERN='^(preflight|flakefix)/$'
 
 # THE GRACE PERIOD — THE SECOND LINE, AND THE ONLY ONE THAT COVERS PUSH →
 # DISPATCH. `has_live_run` answers the in-use question directly once a run exists;
@@ -321,9 +322,10 @@ main() {
         fi
         NAMESPACE="$1"
         ;;
-      # A positive integer only. Anything else would reach `[[ $age -lt … ]]`,
-      # where bash reads a non-number as a variable name and `0` spares nothing
-      # — an age guard that is silently off.
+      # A positive integer only, of at most nine digits (about 31 years).
+      # Anything else would reach `[[ $age -lt … ]]`, where bash reads a
+      # non-number as a variable name, `0` spares nothing, and a number past
+      # 64 bits wraps — each an age guard that is silently off.
       --min-age-seconds)
         shift
         if [[ $# -eq 0 ]]; then
@@ -331,7 +333,7 @@ main() {
           usage
           return 2
         fi
-        if [[ ! "$1" =~ ^[1-9][0-9]*$ ]]; then
+        if [[ ! "$1" =~ ^[1-9][0-9]{0,8}$ ]]; then
           log "--min-age-seconds must be a positive integer, got [$1]"
           usage
           return 2
