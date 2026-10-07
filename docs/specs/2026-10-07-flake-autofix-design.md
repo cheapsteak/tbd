@@ -210,10 +210,16 @@ Each failure becomes an **occurrence** with a key that names where it happened:
 - `main:<UTC date>` for a rerun-erased failure on `main`. `main` is one branch
   that runs every day, so each day counts once.
 
-A test **qualifies** for a fix attempt when its failures span two or more
-distinct occurrence keys, in any mix. One night and one PR branch qualify; two
-failures on the same night or the same branch do not. The rule is meant to
-separate a test that fails in different places from one bad run.
+A test's failures are grouped into **episodes**. The first episode starts at
+its first recorded failure; a new one starts at each recurrence after a merged
+fix (§4.4). A test **qualifies** for a fix attempt when either:
+
+- its current episode's failures span two or more distinct occurrence keys, in
+  any mix. One night and one PR branch qualify; two failures on the same night
+  or the same branch do not. The rule is meant to separate a test that fails in
+  different places from one bad run; or
+- its current episode is a recurrence. One failure on a commit that contains a
+  merged fix is enough, because it shows that fix did not hold.
 
 ### 4.4 The issue
 
@@ -230,10 +236,39 @@ The issue has three parts:
   hidden sentinel (`<!-- flake-ledger v1 -->`), which the ledger edits in place
   every run. It holds, readable by a human: the failure count, the distinct
   nights and branches, each failure's run link and attempt, the failure
-  signature (the xunit `<failure>` message, first lines), and the bot's attempt
-  history. It also holds the same data as a JSON block inside an HTML comment,
-  which is the ledger's own state. The ledger never edits the issue body or any
+  signature (the xunit `<failure>` message, first lines), each failure's
+  episode, and the outcome of each bot PR. It also holds the same data as a
+  JSON block inside an HTML comment, which is the ledger's own state. The
+  `ledger` job is its only writer. The ledger never edits the issue body or any
   human comment.
+- **Attempt comment** – one comment, marked `<!-- flakefix-attempts v1 -->`,
+  created at the first attempt and edited in place after. The `publish` job is
+  its only writer (§7). It holds one entry per attempt, human-readable and as a
+  JSON block, recording the facts known when `fix` ends (below).
+
+**Who records each attempt outcome.** Every outcome the picker (§5) depends
+on is written as structured state by a job that runs no model, so the picker
+never has to read prose to decide. Each comment has exactly one writing job, so
+no two jobs ever edit the same comment:
+
+- **`publish`** appends an entry to the attempt comment for every `fix` run
+  that picked a target, with the `fix` run's ID and start time, the `main` SHA,
+  the session's notes, and one outcome:
+  - `aborted` – the job ended before producing a candidate artifact (§8);
+  - `no-diff` – the session made no commits;
+  - `push-refused` – GitHub rejected the push (§8);
+  - `pr-opened` – with the PR number, the scope, `N`, the false-pass
+    probability or `unknown`, whether the evidence was weak (§6.5), whether a
+    protected file was touched, and the verdict (`pass` or `fail`).
+- **`ledger`** records what happens to each PR afterwards. Every run it reads
+  each `pr-opened` entry whose PR it has not yet seen close, asks GitHub for
+  that PR's state, and writes `merged` with the merge commit SHA, or
+  `closed-unmerged`, into the ledger comment. GitHub's PR state is the record
+  here, not any event, so a missed webhook or a failed run costs one day of
+  latency and nothing else.
+
+Promotion writes no state: whether a PR is ready is GitHub's own PR state, and
+nothing the picker decides depends on it.
 
 The issue is the ledger's only durable store, because the artifacts it reads
 expire. Their retention differs, and each sets a read window:
@@ -264,12 +299,25 @@ An issue that names a *suite* rather than one test – the nightly stress
 targets' issues, such as #961 – is not reused: two tests in one suite are two
 flakes. The new per-test issue links to it.
 
-**A closed issue that gets a new failure is reopened**, with a comment linking
-the failure and, when there is one, the PR that closed it. Recurrence after a
-fix is exactly the evidence a human needs to see.
+**Recurrence after a merged fix.** Once a test has a `merged` PR, a later
+failure counts as a **recurrence** only if the failing run's commit contains
+the fix: the ledger asks GitHub's compare API whether the fix's merge commit is
+an ancestor of the run's head SHA. A failure on a commit without the fix – a
+branch cut before the merge and never rebased, or a rerun of an old commit –
+is recorded in the history as `pre-fix` and otherwise ignored: it neither
+reopens the issue nor counts toward anything. For a pull-request run the check
+uses the branch's head SHA, while `test.yml` actually tested a merge with the
+base branch, so a branch that has not been rebased since the merge is treated
+as pre-fix even if the tested merge contained the fix. That errs toward
+missing a recurrence rather than inventing one.
 
-The ledger posts nothing besides its one comment per issue. A new failure
-updates that comment; it never adds a second one.
+A recurrence reopens the issue, with a comment linking the failure and the
+merged PR, and starts a new episode (§4.3), which makes the test eligible
+again (§5). Recurrence after a fix is exactly the evidence a human needs to see.
+
+The ledger posts nothing besides its one comment per issue, and the reopen
+comment above. A new failure updates the ledger comment; it never adds a
+second one.
 
 ### 4.5 Report-only mode
 
@@ -288,15 +336,24 @@ list of open PRs, and chooses at most one test. A test is **eligible** when:
   the bot at one open PR per test;
 - its issue does not carry the `flakefix-skip` label, a human's way to keep the
   bot off a test;
-- its last attempt, if any, ended with no open PR – no diff, or a PR a human
-  closed unmerged – **and** the ledger has recorded a failure after that
-  attempt. Without the second condition the bot would retry the same test every
-  night on the same evidence.
+- its last attempt in the current episode, if there is one, allows another,
+  by the outcome recorded for it (§4.4):
+  - `aborted`, `no-diff`, `push-refused`, or `closed-unmerged` – eligible only
+    once the ledger has recorded a failure after that attempt's start. Without
+    that condition the bot would retry the same test every night on the same
+    evidence;
+  - `pr-opened` with no close recorded yet – not eligible; the open-PR check
+    above also covers it;
+  - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
+    new episode with no attempts in it, and the test is eligible at once.
 
 Among eligible tests the picker takes the one with the most failures, then the
 most recent failure, then the lowest issue number. It writes a brief for the
-session: the test ID, file and line, the issue number, the occurrences with run
-links, and the failure signatures. The brief is built only from the ledger's
+session: the test ID, file and line, the issue number, the current episode's
+occurrences with run links, the failure signatures, and every prior attempt
+with its outcome. A merged PR is listed as a prior fix that did not hold, with
+its link and the session notes its attempt entry recorded, so the session
+starts from what was already tried. The brief is built only from the ledger's
 structured data. Human comments on the issue are not copied into it, because
 anyone can comment on a public issue and the session runs with a shell.
 
@@ -448,10 +505,23 @@ baseline chose.
 
 Before the session starts, the verifier runs the target test alone for 20
 iterations on `main`, in the verification tree (§6.1), with the same
-retry-metrics wiring as a verifier run (§6.4). An iteration counts as a
-failure if the test failed, or if the target is quarantined with `.flaky` on
-`main` and its record says `passedOnRetry` or `failed`: a retry the quarantine
-absorbed is still a reproduction. The baseline does two jobs:
+retry-metrics wiring as a verifier run (§6.4). Each iteration is classified:
+
+- **Reproduction** – the target test failed in the xunit output; or the target
+  is quarantined with `.flaky` on `main` and its record says `passedOnRetry`
+  or `failed`, since a retry the quarantine absorbed is still a reproduction;
+  or the iteration was killed at its deadline after the build finished and the
+  target started. At test scope the target is the only test running, so a hang
+  there is the target's own.
+- **Clean** – the target executed and passed, with no retry.
+- **Excluded** – the iteration says nothing about the target: the build
+  failed, the harness errored, the target never executed (below the floor of
+  1), or the retry-metrics wiring failed (§6.4). Excluded iterations count in
+  neither the numerator nor the denominator of `p`.
+
+If more than 2 of the 20 iterations are excluded, the baseline is not measuring
+the test, and the attempt aborts before the session starts: the job ends red,
+and `publish` records `aborted` (§4.4). The baseline does two jobs:
 
 - **It chooses the scope** (§6.2) **and sizes `N`** (below).
 - **It is the "before" for the PR.** The result goes into the brief, so the
@@ -466,7 +536,8 @@ warm, so a pass-scope baseline long enough to estimate a rate would cost more
 than the verifier runs it sizes (§9).
 
 **Sizing `N` from the baseline.** The baseline's failure rate on `main` is
-`p = f / 20`, where `f` is its failing iterations. A candidate that changed
+`p = f / v`, where `f` is its reproductions and `v` its non-excluded
+iterations (18 to 20). A candidate that changed
 nothing would still pass `N` clean iterations with probability `(1 - p)^N`,
 the **false-pass probability**. The verifier picks the smallest `N` that holds
 it under 5%:
@@ -476,7 +547,8 @@ it under 5%:
 then raises it to at least 20, the baseline's own count, and lowers it to at
 most the test-scope cap (§9). Pass scope has no `p` and runs its cap (below).
 For example, `p = 0.05` (1 failure in 20) gives `N = 59`; `p = 0.15` gives 19,
-raised to 20; a test that failed all 20 times has no defined `N` and runs 20.
+raised to 20; a test that failed every valid iteration has no defined `N` and
+runs 20.
 `N` is computed once, after the baseline, and both tries use it.
 
 Three cases follow:
@@ -487,9 +559,8 @@ Three cases follow:
   measurable `p` needs, so this is the expected case.
 - **Test scope, bound not reached** – the cap is below the computed `N`, which
   happens only if the measured iteration time is worse than §9 estimates. The
-  verifier runs the cap. A clean run still makes the PR eligible for ready, and
-  the PR body and the commit status both state the actual false-pass
-  probability `(1 - p)^N`.
+  verifier runs the cap, and the evidence is **weak** (§6.5): the actual
+  false-pass probability `(1 - p)^N` is 5% or more.
 - **Pass scope** – the baseline saw 0 failures, so there is no measured `p` to
   size from, and the baseline never runs at pass scope to get one. The
   verifier runs the pass-scope cap and states the bound as **unknown**. The
@@ -497,8 +568,9 @@ Three cases follow:
   different regime (CI runs without induced load), its numerator misses
   every failure that was never rerun to green, and it has no clean count of
   the runs in which the test executed. A rate built from it would look like a
-  bound without being one. So the PR states the bound as unknown and, for
-  scale, what the cap's `N` would give against `p = 0.05` and `p = 0.15`.
+  bound without being one. So the evidence is **weak** (§6.5), the bound is
+  stated as unknown and, for scale, the PR gives what the cap's `N` would allow
+  against `p = 0.05` and `p = 0.15`.
 
 `p` from 20 iterations is a point estimate. A test whose true rate is lower
 than measured is more likely to slip through than the stated probability says.
@@ -582,8 +654,11 @@ into the session tree's `.build/` is not part of what is judged, and what is
 judged is exactly what gets pushed. Each try's verifier run resets the
 verification tree the same way and rebuilds incrementally.
 
-The verifier's own scripts run from a copy of `main`'s, taken from the
-verification tree before the session starts, never from the candidate's. That
+The verifier's own scripts – `scripts/flake-verify.sh`,
+`scripts/nightly-flake-stress.sh`, and `scripts/nightly-quarantine-audit.sh`,
+whose `inventory` decides whether the target is quarantined – run from a copy
+of `main`'s, taken from the verification tree before the session starts, never
+from the candidate's. That
 keeps the verifier's logic out of the candidate's reach, but not
 everything the verdict depends on: the candidate's tests run
 through its own `scripts/test.sh` and are compiled from its own package
@@ -592,8 +667,11 @@ executes the candidate's copies of the CI test scripts. So the verifier checks
 the candidate's diff against `main` for a **protected list**, every file on the
 verdict's path:
 
-- **The stress and verifier scripts** – `scripts/nightly-flake-stress.sh` and
-  every `scripts/flake-*` file.
+- **The stress and verifier scripts** – `scripts/nightly-flake-stress.sh`,
+  `scripts/nightly-quarantine-audit.sh`, and every `scripts/flake-*` file.
+  The verifier runs `main`'s copies of these, so a candidate's edit to them
+  cannot change this verdict; they are protected because a merged edit would
+  change every later one.
 - **The test runner chain** – `scripts/test.sh`, `scripts/swift-safe`, and the
   scripts `scripts/test.sh` calls: `scripts/remote-verify.sh` and
   `scripts/tbd-home-fingerprint.sh`.
@@ -636,11 +714,23 @@ scope it is weak, and the spec does not pretend otherwise: with today's cap of
 3, a candidate that changed nothing passes with probability 0.86 against a
 flake with `p = 0.05` and 0.61 against one with `p = 0.15`.
 
-The commit status says what was observed and nothing more. `flakefix/stress` =
-`success` is described as "no failure observed in N runs", with `N` filled in
-and never "fixed". When the bound was not reached, the description adds the
-false-pass probability, or says it is unknown at pass scope. The PR body gives
-the baseline, `p`, `N`, the cap, and the false-pass probability or "unknown".
+**Evidence is weak** when the false-pass probability is 5% or more, or unknown.
+A weak-evidence candidate whose runs are clean is still eligible for ready,
+like any other: reviewers weigh the evidence, and the bot does not hold the PR
+in draft on their behalf (§14 gives the rationale). What the design guarantees
+instead is that weak evidence cannot be missed:
+
+- **The commit status** – `flakefix/stress` = `success` is described as "no
+  failure observed in N runs", with `N` filled in and never "fixed". For weak
+  evidence the description continues "; weak evidence: a no-op would pass X%
+  of the time", or "; weak evidence: bound unknown".
+- **A label** – `publish` adds `flakefix-weak-evidence` to the PR, creating
+  the label if it is missing.
+- **The PR body leads with the numbers** – its first lines, above the
+  template's sections, give the scope, the baseline, `p`, `N`, the cap, and
+  the false-pass probability or "unknown", stated as weak.
+
+A strong-evidence PR carries the same numbers in its body, below the summary.
 
 ### 6.6 Two tries
 
@@ -672,13 +762,16 @@ Transitions, each owned by the PR driver:
   diagnosis, the pre-fix baseline, the stress scope and why the baseline chose
   it, the stress result (iterations, failures, core count, spinner count, and
   `load1m` as observed), any other tests that failed at pass scope, and the
-  §6.5 limit in one sentence. The push happens once per attempt, after
+  §6.5 limit in one sentence. For weak evidence the numbers lead the body and
+  the PR gets the `flakefix-weak-evidence` label (§6.5). The driver then
+  records the attempt in the attempt comment (§4.4). The push happens once per
+  attempt, after
   verification, so the PR's CI runs once on the final candidate rather than
   once per try.
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA, described as "no failure
-  observed in N runs", plus the false-pass probability when §6.3's bound was
-  not reached (§6.5). On a fail, it sets `failure`
+  observed in N runs", followed by the weak-evidence clause when the evidence
+  is weak (§6.5). On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
   `failure`, whatever its stress result, with a status description naming the
@@ -695,7 +788,9 @@ Transitions, each owned by the PR driver:
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so
   the gate judges the PR once it is ready, like any other.
 - **Merge or close.** A human does either. `Fixes #N` closes the issue on
-  merge; a recurrence reopens it (§4.4). A PR closed unmerged makes the test
+  merge. The next `ledger` run records `merged` or `closed-unmerged` from the
+  PR's state (§4.4). A recurrence on a commit containing the fix reopens the
+  issue and makes the test eligible again; a PR closed unmerged makes it
   ineligible until it fails again (§5).
 
 ## 8. Failure handling
@@ -721,8 +816,11 @@ Transitions, each owned by the PR driver:
 - **The candidate touches a protected file** (§6.4). The PR opens as a draft
   with `flakefix/stress` = `failure` and a note naming the files; nothing
   promotes it, and a human decides.
-- **The `fix` job dies before uploading its artifact.** `publish` finds no
-  candidate and does nothing; nothing was pushed, so nothing is left behind.
+- **The `fix` job dies before uploading its artifact**, or aborts on its
+  baseline (§6.3). `publish` runs regardless (`if: always()` once the picker
+  chose a target), finds no candidate, pushes nothing, and records `aborted`
+  in the attempt comment, so the picker waits for a new failure before trying
+  that test again.
 - **The push is rejected** – most likely because the candidate touched
   `.github/workflows/`. No PR is opened; the issue gets a comment saying the fix
   appears to need a workflow change, which is a human's job.
@@ -854,6 +952,22 @@ names who reclaims its orphans:
   and the `ledger` job runs under a concurrency group so two runs cannot race to
   create the same one. Issues are records, not leaks; humans close them.
 
+Four more things the bot creates need no reclaimer, each for a stated reason:
+
+- **The `flakefix-candidate` artifact** is uploaded with `retention-days: 7`.
+  `publish` consumes it within minutes; the week is for a human reading a
+  failed attempt. GitHub deletes it on expiry.
+- **Labels** – `flaky`, `flakefix-skip`, and `flakefix-weak-evidence` – are a
+  fixed set of three names, created once if missing and reused after. Their
+  number cannot grow with use, so nothing accumulates.
+- **Commit statuses** (`flakefix/stress`) are one per pushed SHA per attempt,
+  immutable metadata on that commit with no separate lifetime. They are
+  bounded by the number of attempts, at most one a night, and become
+  unreachable with the commit when its branch is reclaimed.
+- **Comments** – one ledger comment and one attempt comment per issue, each
+  edited in place, plus a reopen comment per recurrence and the attempt
+  comments `publish` posts. They live on issues, which are records (above).
+
 ## 12. Placement
 
 This behavior lives in CI scripts and a workflow, which change by editing a
@@ -883,7 +997,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   skipped test cases; a run with two attempts and two same-named artifacts,
   assigned by timestamp; fork runs, `flakefix/*` runs, and the self-test ID,
   all excluded; runs and artifacts outside the 7-day read window ignored;
-  both xunit files of a pass read; test-ID normalization for a top-level suite
+  both xunit files of a pass read; `merged` and `closed-unmerged` recorded from
+  PR state, and recorded once; a post-merge failure whose commit contains the
+  merge commit (recurrence: reopen, new episode) and one whose commit does not
+  (`pre-fix`: no reopen, not counted); a recurrence qualifying on one
+  occurrence key; test-ID normalization for a top-level suite
   (identical forms), a nested suite (`Module.Outer/Inner/test()` becomes
   `Module.Outer.Inner/test()`), and a test outside any suite;
   occurrence keys and the threshold at one and two keys; issue
@@ -891,12 +1009,18 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   the same run processed twice with no change; and an API error that leaves the
   ledger unwritten.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
-  the tie-break order; the re-eligibility rule after an attempt; a dispatched
+  the tie-break order; the re-eligibility rule after each recorded outcome
+  (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
+  `merged`), with and without a later failure; a recurrence after `merged`
+  that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, no ledger
   comment, an unparsable JSON block, an open bot PR); and the refusal to start
   with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
-  failure and with none; `N` sizing for `p` = 0.05 (59), 0.15 (raised to 20),
+  failure and with none; baseline classification of a target failure, a
+  deadline kill after the target started (both reproductions), and a build
+  failure, a harness error, and an unexecuted target (excluded from `p`); the
+  abort at 3 exclusions and not at 2; `N` sizing for `p` = 0.05 (59), 0.15 (raised to 20),
   1.0 (20), a `p` whose `N` exceeds the cap (capped, with the false-pass
   probability in the verdict), and pass scope (the cap, bound unknown); a
   baseline iteration of a quarantined target whose record says
@@ -913,7 +1037,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   one case per entry in the protected list, each marked not eligible for ready
   even with a clean stress run.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
-  head that moved after verification; and the open step for a candidate that
+  head that moved after verification; the attempt entry `publish` writes for
+  each outcome, including `aborted` when no artifact exists; a weak-evidence
+  candidate, which gets the status clause, the label, and numbers at the top
+  of the body, and still promotes when clean; a strong one, which gets none of
+  those; and the open step for a candidate that
   touched a protected file, which records `failure` and names the files.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1, filter
   built from the ID), `--pass-of`, and `--xunit-dir`. The `--pass-of` cases
@@ -948,5 +1076,14 @@ against a fixture that contains one.
   iterations let a no-op through about a third of the time against a 5%
   flake. Sizing `N` from the measured rate spends the budget where the
   evidence needs it, and states what it bought.
+- **Keeping weak-evidence PRs as drafts.** Holding a clean PR in draft until
+  the evidence is strong sounds safer, but at pass scope the evidence is never
+  strong within the budget, so every neighbour-dependent fix would wait on a
+  human to notice and promote it by hand – the drafts would pile up unread.
+  The reviewer is better placed than the bot to weigh a weak run against the
+  diff: a change that removes a race by construction needs little stress
+  evidence, and one that only adjusts timing needs a lot. So the bot promotes a
+  clean PR and makes the weakness impossible to miss – in the status, a label,
+  and the first lines of the body – rather than deciding for the reviewer.
 - **Auto-merging a verified PR.** A clean stress run cannot prove a fix (§6.5),
   and a fix can change production code. A human merge is the backstop.
