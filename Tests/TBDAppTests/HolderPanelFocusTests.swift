@@ -382,6 +382,35 @@ struct HolderPanelFocusTests {
     }
 
     @MainActor
+    @Test("an activating Cmd+click on an OSC 8 link still opens it")
+    func anActivatingCommandClickOpensAnOSC8Link() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+        var opened: [String] = []
+        fixture.view.onFilePathClicked = { opened.append($0) }
+        let point = try fixture.showClickablePath()
+        // Rewrite the row as an OSC 8 hyperlink to the same file: TBD's own
+        // Cmd+click handling defers those to SwiftTerm's mouse-up.
+        let target = fixture.view.worktreePath + "/notes.txt"
+        fixture.view.feed(
+            text: "\u{1b}[H\u{1b}[2J\u{1b}]8;;file://\(target)\u{1b}\\open me\u{1b}]8;;\u{1b}\\")
+
+        let down = fixture.mouseEvent(.leftMouseDown, at: point, [.command], eventNumber: 7)
+        #expect(fixture.view.acceptsFirstMouse(for: down))
+        fixture.view.mouseDown(with: down)
+        fixture.view.mouseUp(
+            with: fixture.mouseEvent(.leftMouseUp, at: point, [.command], eventNumber: 7))
+
+        #expect(opened.count == 1, """
+            the Cmd+click that brought the window forward landed on an OSC 8 link and opened \
+            nothing: \(opened)
+            """)
+    }
+
+    @MainActor
     @Test("a click moving focus between split panes of one tab keeps the tab named")
     func aClickFromASplitSiblingKeepsTheCloseContext() async throws {
         let fixture = try Fixture()
