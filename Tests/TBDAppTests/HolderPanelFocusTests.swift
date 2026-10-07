@@ -15,7 +15,7 @@ import TestSupport
 /// wheel, and then stopped, leaving the view reachable only through the key
 /// view loop, so the user had to press Tab before typing reached the session.
 /// The tmux path had always claimed first responder and installed its click
-/// monitor after its viewer started; the fix hoists both into
+/// routing after its viewer started; the fix hoists both into
 /// `claimKeyboardFocusAndClickRouting` and calls it from the holder path too.
 ///
 /// The view is mounted in a real — but offscreen, never key — `NSWindow`,
@@ -23,8 +23,9 @@ import TestSupport
 /// claim: without a window `makeFirstResponder` is an optional-chained no-op
 /// and the bug is invisible. The window being non-key costs nothing here.
 /// `makeFirstResponder` does not depend on key status; *event delivery* does,
-/// which is why the click half is asserted as "a monitor is installed" rather
-/// than by synthesizing a click that nothing in this process would dispatch.
+/// which is why the click half is driven through the view's click-routing
+/// hooks rather than by synthesizing a click that nothing in this process
+/// would dispatch.
 ///
 /// Tier 2: a real `TBDTerminalView` in a real window, the real reader thread —
 /// no daemon, no tmux, no pty. The suite limit is a hang guard only, and takes
@@ -180,35 +181,75 @@ struct HolderPanelFocusTests {
     }
 
     @MainActor
-    @Test("a live holder attach routes clicks to the terminal")
-    func theHolderPanelInstallsAClickMonitor() async throws {
+    @Test("a click on a live holder panel claims focus and the close context")
+    func aClickClaimsFocus() async throws {
         let fixture = try Fixture()
         defer { fixture.tearDown() }
 
-        #expect(fixture.coordinator.clickMonitor == nil)
+        #expect(fixture.view.onMouseDownClaimFocus == nil)
 
         await fixture.attach()
+        try await fixture.waitForFirstResponder()
 
-        #expect(fixture.coordinator.clickMonitor != nil, """
-            the holder attach installed no click monitor: a click inside the panel never claims \
+        // Move focus away by hand, so the click is what has to bring it back.
+        fixture.window.makeFirstResponder(nil)
+        fixture.state.focusedTabCloseContext = nil
+
+        let claimFocus = try #require(fixture.view.onMouseDownClaimFocus, """
+            the holder attach installed no click routing: a click inside the panel never claims \
             first responder, so key equivalents keep routing to whatever had it
+            """)
+        claimFocus()
+
+        #expect(fixture.window.firstResponder === fixture.view)
+        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext, """
+            the click focused the terminal without naming its tab, so Cmd+W would close some \
+            other tab
             """)
     }
 
     @MainActor
-    @Test("tearing a holder panel down removes its click monitor")
-    func theClickMonitorIsRemovedOnTeardown() async throws {
+    @Test("focus leaving a holder panel clears its close context, and only its own")
+    func resigningFocusClearsTheCloseContext() async throws {
         let fixture = try Fixture()
         defer { fixture.tearDown() }
 
         await fixture.attach()
-        #expect(fixture.coordinator.clickMonitor != nil)
+        try await fixture.waitForFirstResponder()
+        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext)
+
+        fixture.window.makeFirstResponder(nil)
+
+        #expect(fixture.window.firstResponder !== fixture.view)
+        #expect(fixture.state.focusedTabCloseContext == nil, """
+            focus left the terminal but its tab stayed named as the focused one, so the Close Tab \
+            menu item kept offering to close it
+            """)
+
+        // A resign must not clear a context some other tab has since claimed.
+        let other = TabCloseContext(worktreeID: UUID(), tabID: UUID())
+        fixture.view.onMouseDownClaimFocus?()
+        fixture.state.focusedTabCloseContext = other
+        fixture.window.makeFirstResponder(nil)
+        #expect(fixture.state.focusedTabCloseContext == other)
+    }
+
+    @MainActor
+    @Test("tearing a holder panel down uninstalls its click routing")
+    func theClickRoutingIsRemovedOnTeardown() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        #expect(fixture.view.onMouseDownClaimFocus != nil)
+        #expect(fixture.view.onResignFocus != nil)
 
         fixture.coordinator.cleanup()
 
-        #expect(fixture.coordinator.clickMonitor == nil, """
-            the monitor outlived the panel: an app-wide leftMouseDown monitor over a released \
-            view is a leak, and one is installed per panel
+        #expect(fixture.view.onMouseDownClaimFocus == nil, """
+            the click routing outlived the panel: a click on the released view would still write \
+            its tab as the focused one
             """)
+        #expect(fixture.view.onResignFocus == nil)
     }
 }

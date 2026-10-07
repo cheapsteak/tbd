@@ -128,11 +128,13 @@ struct TerminalPanelView: View {
     /// clean). nil for live terminals: the snapshot is fed untouched (it is
     /// the reconnect backdrop on wake).
     var parkedNoticeMessage: String? = nil
-    /// Called on every scroll/click event. When it returns `true`, both
-    /// NSEvent monitors short-circuit — the terminal does NOT consume the
-    /// event, leaving it for whatever SwiftUI overlay (currently a
-    /// transcript-card overlay; see #129) is rendered on top. Must be
-    /// `@MainActor` since it is invoked from inside `assumeIsolated` blocks.
+    /// Called on every scroll-wheel event. When it returns `true`, the scroll
+    /// monitor short-circuits — the terminal does NOT consume the event,
+    /// leaving it for whatever SwiftUI overlay (currently a transcript-card
+    /// overlay; see #129) is rendered on top. Clicks need no such hook: they
+    /// reach the terminal through its own mouse overrides, so an overlay on
+    /// top takes them by hit-testing. Must be `@MainActor` since it is
+    /// invoked from inside an `assumeIsolated` block.
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
     @State private var proxyWarning: String?
@@ -221,9 +223,9 @@ struct TerminalPanelView: View {
             // the input-health indicator above.
             //
             // A sibling in this VStack rather than an overlay, so it never
-            // covers the terminal: the panel's app-wide scroll/click monitors
-            // filter on `tv.bounds.contains(point)`, and a view drawn OVER the
-            // terminal would have to be told to suppress them. This one sits
+            // covers the terminal: the panel's app-wide scroll monitor filters
+            // on `tv.bounds.contains(point)`, and a view drawn OVER the
+            // terminal would have to be told to suppress it. This one sits
             // outside those bounds and carries no controls.
             if let pendingOutgoingBytes {
                 HStack(spacing: 6) {
@@ -561,8 +563,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
         var onRecoveryGuidance: (@MainActor (String) -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
-        /// over this terminal and should receive scroll/click events instead of
-        /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
+        /// over this terminal and should receive scroll-wheel events instead
+        /// of the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
         var shouldSuppressEvents: @MainActor () -> Bool = { false }
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
@@ -737,16 +739,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// revision; see `ChildExitObservation` for why it is lock-guarded
         /// anyway and for the reaper thread that also reads it.
         private let childExitObservation = ChildExitObservation()
-        // `nonisolated(unsafe)`: same pattern as `TBDTerminalView.mouseMonitor`
-        // — set and removed on main, but `deinit` is nonisolated and must be
-        // able to remove a monitor the main-actor teardown missed.
+        // `nonisolated(unsafe)`: set and removed on main, but `deinit` is
+        // nonisolated and must be able to remove a monitor the main-actor
+        // teardown missed.
         nonisolated(unsafe) private var scrollMonitor: Any?
-        /// Internal rather than private so a panel test can ask whether a
-        /// transport installed one at all. The click monitor is the half of
-        /// `claimKeyboardFocusAndClickRouting` that an offscreen window cannot
-        /// exercise — nothing dispatches an `NSEvent` to a window that is never
-        /// key — so its presence is what a test can honestly assert.
-        nonisolated(unsafe) var clickMonitor: Any?
         private var fedPreparationMessages: Set<String> = []
         /// Set while this panel renders through the control-mode path (Phase 2
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
@@ -1995,8 +1991,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// claim first responder, which is what the holder transport shipped
         /// with until this was hoisted out of the tmux path.
         ///
-        /// The click monitor is removed by `cleanup()` and by `deinit`, both
-        /// of which every transport reaches.
+        /// The click routing is uninstalled by `cleanup()`, which every
+        /// transport reaches.
         @MainActor
         private func claimKeyboardFocusAndClickRouting(on terminalView: TerminalView) {
             // Focus on next run loop iteration (needs main actor for window access)
@@ -2005,81 +2001,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 self.appState?.focusedTabCloseContext = self.tabCloseContext
             }
 
-            let ref = WeakTerminalRef(terminalView)
-            // Intercept clicks: claim first responder on any click (so Cmd+Arrow
-            // routes to the focused terminal), and handle Cmd+Click for file paths.
-            //
-            // Visibility filter: each `assumeIsolated` block guards on
-            // `tv.window != nil` for the same reason as scrollMonitor above —
-            // the worktree keep-alive system retains terminal NSViews for
-            // inactive worktrees in a detached state, and we must skip event
-            // processing for those (otherwise clicks would claim first responder
-            // for a hidden terminal, or fire Cmd+Click handlers against
-            // invisible bounds).
-            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-                let location = event.locationInWindow
-
-                // Claim first responder so key equivalents route to this terminal
-                MainActor.assumeIsolated { [weak self] in
-                    guard let self else { return }
-                    guard let tv = ref.view else { return }
-                    guard tv.window != nil else { return }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — leave first-responder where it is so the overlay
-                    // receives key and click events.
-                    if self.shouldSuppressEvents() { return }
-                    let point = tv.convert(location, from: nil)
-                    if !tv.bounds.contains(point) {
-                        if self.appState?.focusedTabCloseContext == self.tabCloseContext,
-                           tv.window?.firstResponder === tv {
-                            self.appState?.focusedTabCloseContext = nil
-                        }
-                        return
-                    }
-                    self.appState?.focusedTabCloseContext = self.tabCloseContext
-                    tv.window?.makeFirstResponder(tv)
+            // Clicks arrive through `TBDTerminalView`'s own mouse overrides, so
+            // a view drawn over the terminal (a split divider's grab strip, an
+            // overlay) takes its clicks by hit-testing. A detached keep-alive
+            // terminal receives no events at all.
+            guard let tv = terminalView as? TBDTerminalView else { return }
+            // Claim first responder on any click, so key equivalents (Cmd+W,
+            // Cmd+Arrow) route to this terminal.
+            tv.onMouseDownClaimFocus = { [weak self, weak tv] in
+                guard let self, let tv else { return }
+                self.appState?.focusedTabCloseContext = self.tabCloseContext
+                tv.window?.makeFirstResponder(tv)
+            }
+            // Stop naming this tab as the focused one once focus leaves the
+            // terminal, however it leaves — a click elsewhere, or a
+            // programmatic `makeFirstResponder`. Equality-guarded so a resign
+            // never clears another tab's context; whatever takes focus next
+            // writes its own (a clicked terminal does so in its mouse-down,
+            // just after AppKit resigns this one).
+            tv.onResignFocus = { [weak self] in
+                guard let self, let appState = self.appState else { return }
+                if appState.focusedTabCloseContext == self.tabCloseContext {
+                    appState.focusedTabCloseContext = nil
                 }
-
-                guard event.modifierFlags.contains(.command) else { return event }
-
-                let consumed = MainActor.assumeIsolated { [weak self] () -> Bool in
-                    guard let self else { return false }
-                    guard let tv = ref.view as? TBDTerminalView else { return false }
-                    guard tv.window != nil else { return false }
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
-
-                    // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
-                    // (requestOpenLink). If we also fired here on mouseDown,
-                    // a single cmd+click would route through both paths and
-                    // open two viewer panes.
-                    if tv.hasOSC8Payload(atWindowLocation: location) {
-                        logger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
-                        return false
-                    }
-
-                    if let filePath = tv.extractFilePath(atWindowLocation: location) {
-                        logger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
-                        tv.onFilePathClicked?(filePath)
-                        return true
-                    }
-                    // Fall back to hyperlink detection (PR pattern; OSC 8 was
-                    // already short-circuited above).
-                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location) {
-                        if let resolved = tv.resolveAsFilePath(urlString) {
-                            logger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
-                            tv.onFilePathClicked?(resolved)
-                            return true
-                        }
-                        if urlString.contains("://"), let url = URL(string: urlString) {
-                            NSWorkspace.shared.open(url)
-                            return true
-                        }
-                    }
-                    return false
-                }
-                return consumed ? nil : event
             }
         }
 
@@ -2236,9 +2180,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
             }
-            if let monitor = clickMonitor {
-                NSEvent.removeMonitor(monitor)
-                clickMonitor = nil
+            if let tv = terminalView as? TBDTerminalView {
+                tv.onMouseDownClaimFocus = nil
+                tv.onResignFocus = nil
             }
             if let preparation = viewSessionReclaim.published {
                 preparation.bridge.cleanupSession(
@@ -2590,9 +2534,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         deinit {
             debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
             if let monitor = scrollMonitor {
-                NSEvent.removeMonitor(monitor)
-            }
-            if let monitor = clickMonitor {
                 NSEvent.removeMonitor(monitor)
             }
             // Reclaim the tmux view session this panel owns. `cleanup()` is
