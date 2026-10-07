@@ -53,9 +53,18 @@ Both problems have the same root: failures are recorded per *run* or per
 
 - **Auto-merge.** The bot never merges. A human merges every bot PR, after the
   normal `claude-review` gate.
-- **Fixing CI itself.** The bot cannot edit `.github/workflows/` — including the
-  review gate under `.github/workflows/claude-review-v2/` that judges its work.
-  Flakes whose fix lies in a workflow file are filed and left for a human.
+- **Fixing CI or the tooling that judges it.** Two different mechanisms keep
+  the bot out of these, and they block different things:
+  - **Workflows** – the App that pushes has no `workflows` permission, so
+    GitHub rejects any push that touches `.github/workflows/`, including the
+    review gate under `.github/workflows/claude-review-v2/`. That block is
+    mechanical: such a candidate never reaches a branch.
+  - **Verdict tooling** – the files the verdict depends on (§6.4 lists them)
+    can be edited and pushed, but a candidate that touches any of them is
+    never promoted. Its PR stays a draft, with a note saying a human must
+    judge it.
+
+  Every other file, test or production code, is the bot's to change.
 - **Proving a flake is fixed.** No stress run can do that; §6.5 states the
   limit.
 - **Replacing the nightly stress loop or the quarantine audit.** The bot reads
@@ -80,22 +89,40 @@ Six components, each with one job:
    PR, records the verdict, comments on the issue, and later marks the PR ready.
 6. **Branch reclaimer** – removes `flakefix/*` branches no open PR uses.
 
-They run in one new workflow, `.github/workflows/flake-fixer.yml`, as three
+They run in one new workflow, `.github/workflows/flake-fixer.yml`, as four
 jobs:
 
 - **`ledger`** (ubuntu) – runs when the nightly workflow completes
-  (`workflow_run`), and on `workflow_dispatch`. Runs the reclaimer, then the
-  ledger.
+  (`workflow_run`), and on `workflow_dispatch`. Runs the reclaimer when
+  `FLAKE_FIXER_ENABLED` is on (§10, §11), then the ledger.
 - **`fix`** (macos-26) – scheduled once a night at 05:00 UTC, and on
   `workflow_dispatch` with an optional issue number. Runs the picker, the
-  fixer session, the verifier, and the PR driver's open step.
+  baseline, the fixer session, and the verifier. It holds no write credential
+  (§6.1) and writes nothing to GitHub; its result is an artifact.
+- **`publish`** (ubuntu) – runs after `fix`, in a separate job that never runs
+  a model. Mints the App token and runs the PR driver's open step: the push,
+  the draft PR, the verdict status, and every issue comment an attempt makes.
 - **`promote`** (ubuntu) – runs when a `test.yml` run completes
   (`workflow_run`). Runs the PR driver's promote step for `flakefix/*` branches.
 
 05:00 UTC falls in the US night, and the `fix` job's timeout (§9) ends it by
-10:00, before the nightly starts at 11:00, so it never overlaps the nightly's
-macOS slot.
-The `fix` job reads the ledger as the previous evening's `ledger` run left it.
+10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
+when it is busy – the last five nightlies started between 15:00 and 19:30 UTC –
+so a delayed `fix` run can still overlap the nightly; that costs a second of
+the five macOS slots, not a failure.
+
+The `fix` job reads the ledger as the most recent `ledger` run left it. That
+run follows the nightly's completion, which over the same five nights fell
+between 15:45 and 19:40 UTC, so the ledger the `fix` job reads is 9 to 14
+hours old. The worst-case latency from a test crossing the threshold to an
+attempt, setting aside other tests ranked ahead of it (§5):
+
+- **Crossed by a nightly failure** – the `ledger` run that follows that nightly
+  records it, and the next 05:00 `fix` run attempts it: up to about 13 hours
+  after the nightly completes.
+- **Crossed by a rerun-erased CI failure** – a rerun that lands just after a
+  `ledger` run waits for the next one, a day or more later, and then for 05:00:
+  about a day and a half, 38 hours at the measured completion times.
 
 ## 4. Detection and the ledger
 
@@ -108,7 +135,7 @@ the sort-order undercount in §1.
 - **The nightly stress loop.** `nightly-flake-stress.sh` gains an
   `--xunit-dir DIR` option that passes `--xunit-output` to each iteration's
   `scripts/test.sh` invocation, and the nightly workflow uploads the directory
-  as a `nightly-xunit` artifact. Every failing `<testcase>` in it is one
+  as a `nightly-xunit` artifact with `retention-days: 7`. Every failing `<testcase>` in it is one
   failure of that test on that night. This is what splits the whole-fast-pass
   arm's catch-all: each test it fails gets its own count and its own issue. The
   existing per-target report and its issue comment are unchanged.
@@ -182,10 +209,22 @@ The issue has three parts:
   which is the ledger's own state. The ledger never edits the issue body or any
   human comment.
 
-The issue is the ledger's only durable store. Artifacts expire after 7 days,
-so the issue must carry the history. Every run rereads the window of runs
-whose artifacts still exist and merges by run ID and attempt, so processing a
-run twice changes nothing and one missed night loses nothing.
+The issue is the ledger's only durable store, because the artifacts it reads
+expire. Their retention differs, and each sets a read window:
+
+- **`xunit-results`** (`test.yml`) – `retention-days: 7`. The ledger reads
+  `test.yml` runs created in the last 7 days. A run whose rerun comes more than
+  7 days after its attempt 1 has lost attempt 1's results and is not counted.
+- **`retry-metrics`** (`test.yml`) – no `retention-days`, so the repository
+  default applies, 90 days today. The ledger still reads only the same 7-day
+  window of runs: the issue already holds anything older, and one window for
+  both `test.yml` artifacts means a run's two sources are always read together.
+- **`nightly-xunit`** (nightly) – `retention-days: 7`, set by this design. The
+  ledger reads nightly runs created in the last 7 days.
+
+Every run rereads its whole window and merges by run ID and attempt, so
+processing a run twice changes nothing, and up to six missed `ledger` runs lose
+nothing.
 
 **Finding the issue for a test**, in order:
 
@@ -248,18 +287,63 @@ brief and the rules below. The session runs on the macOS runner itself, so it
 can build, run the test through `scripts/test.sh --filter`, and stress it while
 it diagnoses.
 
-The session holds no write credential. Its GitHub token is the job's read-only
-`GITHUB_TOKEN`; the App token used for pushing is minted in a later step the
-session cannot reach. The session's outputs are local: commits on the working
-branch, and a notes file (`flakefix-notes.md`) with its diagnosis, what it
-changed and why, and any reproduction rate it measured, labelled as
-session-reported.
+**The session holds no repository write credential**, by these mechanisms
+rather than by instruction:
+
+- **A read-only job token.** The `fix` job's `permissions:` block grants only
+  `contents: read`, `issues: read`, `pull-requests: read` and `actions: read`,
+  so its `GITHUB_TOKEN` cannot write. It grants no `id-token: write`.
+- **No credential left in the checkout.** `actions/checkout` runs with
+  `persist-credentials: false`, so `.git/config` carries no token for the
+  session's shell to find or use.
+- **An explicit token for the action.** `claude-code-action` receives that
+  read-only `GITHUB_TOKEN` as `github_token`. The OIDC-exchange failure
+  CLAUDE.md records is specific to `pull_request_target`; on `schedule` and
+  `workflow_dispatch` the exchange would succeed and hand the session the
+  Claude App's installation token, which can write. Passing `github_token`
+  explicitly, with `id-token: write` withheld, means the exchange is never
+  attempted and could not succeed if it were. The rule is the same as the
+  review workflow's for a different reason: always pass `github_token`.
+- **No App token on the runner.** The `tbd-flake-fixer` App token is minted
+  only in the `publish` job, which runs on a different runner after `fix` has
+  ended and never starts a model. It never exists in the session's
+  environment, on its disk, or in its process table.
+
+The session's outputs are local: commits on the working branch, and a notes
+file (`flakefix-notes.md`) with its diagnosis, what it changed and why, and any
+reproduction rate it measured, labelled as session-reported. After the
+verifier runs, the `fix` job uploads the candidate – a `git bundle` of its
+commits on top of `main` – with the notes, the baseline, and the verdict, as
+the `flakefix-candidate` artifact. `publish` reads that artifact and makes
+every write.
+
+**`CLAUDE_CODE_OAUTH_TOKEN` is reachable from the session's shell**, because
+the action needs it in the environment to reach the model, and this is
+accepted. It grants model usage, not repository writes; the review workflow
+already holds the same secret. The residual risk is exfiltration: a session
+steered by hostile input could send the token off the runner, and the cost
+would be model usage billed to it until the secret is rotated. The mitigations
+narrow that without closing it:
+
+- **Little hostile input reaches the prompt.** The brief is built only from
+  the ledger's structured data, from same-repository runs (§4.1, §5); human
+  comments are never copied in.
+- **A restricted tool list.** `--allowedTools` permits the build and test
+  scripts, local `git` commands, and file reading and editing, and leaves out
+  `WebFetch`, `WebSearch`, and network commands such as `curl`.
+
+That list is a permission control inside the session, not a network sandbox: a
+permitted command such as `scripts/test.sh` runs repository code the session
+can edit, so a determined session can still reach the network. The design
+accepts that because the token grants nothing beyond model access and can be
+rotated.
 
 The bot may change any file, test or production code, using its judgement – a
-flake can be a real bug in the code under test. The one exception is CI: the
-App that pushes has no `workflows` permission, so GitHub rejects any push that
-touches `.github/workflows/`. That makes the exception mechanical rather than a
-prompt instruction.
+flake can be a real bug in the code under test. Workflows and the verdict
+tooling are the two exceptions §2 states: GitHub rejects a push that touches
+`.github/workflows/`, because the App has no `workflows` permission, and a
+candidate that touches a protected file (§6.4) is never promoted. Both are
+enforced by mechanism, not by prompt instruction.
 
 The session prompt states the rules from `Tests/CLAUDE.md`, and the spec
 restates them here because they are the review criteria for every bot PR:
@@ -292,12 +376,32 @@ baseline (§6.3) chooses which:
 - **Pass scope** – the whole CI pass the test runs in, **3 iterations**. Used
   when the baseline showed 0 failures for the test alone, which suggests the
   flake needs its neighbours. The pass is the one `test.yml` runs the test in,
-  with the same filter, parallelism, and executed-test floor: fast pass 1
-  (`--filter '^TBDDaemonTests\.'`) for `TBDDaemonTests`, the serial quiet pass
-  for `TBDDaemonLiveTests`, and fast pass 2 (the `--skip` complement) for every
-  other target. A pass iteration takes about 8 minutes once warm, and the
-  first iteration of a run can take several times that (§9), which is why the
-  count is 3.
+  with the same filter, parallelism, and executed-test floor. A pass iteration
+  takes at most about 8 minutes once warm, and the first iteration of a run can
+  take several times that (§9), which is why the count is 3.
+
+`test.yml` runs four test steps, each through `scripts/ci/watched-test-pass.sh`.
+Their filters partition the package with no gap and no overlap:
+
+- **Fast pass 1a** – `--parallel --filter '^TBDDaemonTests\.[A-O]'`, floor
+  1200: the `TBDDaemonTests` suites whose names start with `A` through `O`.
+- **Fast pass 1b** – `--parallel --filter '^TBDDaemonTests\.' --skip
+  '^TBDDaemonTests\.[A-O]'`, floor 1500: the rest of `TBDDaemonTests`.
+- **Fast pass 2** – `--parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`,
+  floor 1900: every other target.
+- **Quiet pass** – `--no-parallel --filter '^TBDDaemonLiveTests\.'`, floor 35:
+  the tier-3 live suites, serially.
+
+A test ID maps to its pass by applying those same regexes to the ID's xunit
+classname, which begins `<target>.<top-level suite>` (§4.2). The first
+character after `TBDDaemonTests.` decides between 1a and 1b, so a nested suite
+such as `TBDDaemonTests.TBDHomeSerialized.SomeSuite` falls in 1b with its
+parent, exactly as CI places it. `--pass-of` (§6.4) holds the four filters,
+parallelism flags, and floors as data, and its harness checks that data
+against the `watched-test-pass.sh` invocations in `test.yml`, so a change to a
+CI pass that the verifier does not follow fails the `lint` job. The verifier
+omits only CI's `--fingerprint`, which guards the developer's home directories
+and does not change which tests run or how.
 
 The scope is fixed for the whole attempt: both tries are judged at the scope the
 baseline chose.
@@ -352,12 +456,39 @@ induced load carries other flakes the candidate does not claim to fix. The PR
 lists those failures so the reviewer sees them.
 
 The verifier runs from the job's pristine checkout of `main`, not from the
-candidate's tree, so a candidate cannot change how it is judged. If the
-candidate's diff touches the verification toolchain – `scripts/test.sh`,
-`scripts/swift-safe`, `scripts/nightly-flake-stress.sh`, or the verifier
-itself – the verdict is "not eligible for ready" whatever the stress result: the
-candidate's tests run through its own `scripts/test.sh`, which it could have
-changed.
+candidate's tree. That keeps the verifier's own logic out of the candidate's
+reach, but not everything the verdict depends on: the candidate's tests run
+through its own `scripts/test.sh` and are compiled from its own package
+manifest, and the PR's `test.yml` run – which promotion requires green (§7) –
+executes the candidate's copies of the CI test scripts. So the verifier checks
+the candidate's diff against `main` for a **protected list**, every file on the
+verdict's path:
+
+- **The stress and verifier scripts** – `scripts/nightly-flake-stress.sh` and
+  every `scripts/flake-*` file.
+- **The test runner chain** – `scripts/test.sh`, `scripts/swift-safe`, and the
+  scripts `scripts/test.sh` calls: `scripts/remote-verify.sh` and
+  `scripts/tbd-home-fingerprint.sh`.
+- **CI's test-step scripts** – everything under `scripts/ci/`, which includes
+  `watched-test-pass.sh` (each pass's verdict and floor check) and
+  `first-party-wipe-needed.sh`, plus `scripts/repair-spm-workspace.sh`.
+- **The retry-metrics writer** – `Tests/TestSupport/FlakyTestSupport.swift`,
+  which writes the `passedOnRetry` records the verifier reads.
+- **The package definition** – `Package.swift` and `Package.resolved`, which
+  decide what is built, which test targets exist, and which dependency and
+  plugin code runs during the build.
+
+A candidate that touches any protected file is "not eligible for ready"
+whatever the stress result. The bot may still have changed it for a good
+reason, so the PR is opened as usual and stays a draft, and its body names the
+protected files touched and says a human must judge the change.
+
+The verifier runs on the runner the session used. Before it starts, the job
+ends the session's process tree, so the session's own processes are not running
+while the candidate is judged. A process the session deliberately detached
+could survive that, which is one reason the verdict alone never promotes: the
+PR's own `test.yml` run on a fresh runner must also be green (§7), and a human
+reviews and merges.
 
 ### 6.5 What a clean run means
 
@@ -375,7 +506,7 @@ again after its fix reopens its issue (§4.4).
 An attempt allows two tries:
 
 1. The session works and stops. If it produced no commits, the attempt ends: no
-   PR, and a comment on the issue with its notes.
+   PR, and `publish` comments on the issue with the session's notes.
 2. The verifier runs. If it passes, the attempt goes to §7.
 3. If it fails, a second session starts on the same branch, with the first
    session's notes and the verifier's iteration log.
@@ -385,14 +516,16 @@ An attempt allows two tries:
 
 ## 7. PR lifecycle
 
-All PR and branch writes use a token minted for a new GitHub App,
-`tbd-flake-fixer`. A PR opened with the default `GITHUB_TOKEN` triggers no
+All PR, branch, and issue writes an attempt makes use a token minted for a new
+GitHub App, `tbd-flake-fixer`, and only in the `publish` and `promote` jobs,
+neither of which runs a model. A PR opened with the default `GITHUB_TOKEN` triggers no
 workflows, so neither `test.yml` nor `claude-review` would ever run on it. The
 reviewer App is read-focused by design and stays that way.
 
 Transitions, each owned by the PR driver:
 
-- **Open.** At the end of the `fix` job, the driver pushes branch
+- **Open.** In the `publish` job, from the `flakefix-candidate` artifact
+  (§6.1), the driver pushes branch
   `flakefix/issue-<N>` and opens a **draft** PR. The body follows the PR
   template's fix variant and records the test ID, `Fixes #N`, the session's
   diagnosis, the pre-fix baseline, the stress scope and why the baseline chose
@@ -404,7 +537,10 @@ Transitions, each owned by the PR driver:
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA. On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
-  session's notes. The draft stays open for a human to read, finish, or close.
+  session's notes. A candidate that touches a protected file (§6.4) also gets
+  `failure`, whatever its stress result, with a status description naming the
+  files, and its PR body says a human must judge the change. Either way the
+  draft stays open for a human to read, finish, or close.
 - **Promote.** When `test.yml` completes on a `flakefix/*` branch, the
   `promote` job marks the PR ready for review only if all of these hold for the
   run's head SHA: the run concluded `success`, the SHA carries
@@ -439,6 +575,11 @@ Transitions, each owned by the PR driver:
   failing stress run, and the second try gets the build log.
 - **The stress run fails on both tries.** The draft PR stays open with
   `flakefix/stress` = `failure`, and the issue gets the notes.
+- **The candidate touches a protected file** (§6.4). The PR opens as a draft
+  with `flakefix/stress` = `failure` and a note naming the files; nothing
+  promotes it, and a human decides.
+- **The `fix` job dies before uploading its artifact.** `publish` finds no
+  candidate and does nothing; nothing was pushed, so nothing is left behind.
 - **The push is rejected** – most likely because the candidate touched
   `.github/workflows/`. No PR is opened; the issue gets a comment saying the fix
   appears to need a workflow change, which is a human's job.
@@ -448,16 +589,21 @@ Transitions, each owned by the PR driver:
 
 The account allows five concurrent macOS jobs, shared by every workflow.
 
-- **The `fix` job** holds one macOS slot, at 05:00 UTC, with a 300-minute
-  timeout that ends it by 10:00, before the nightly starts at 11:00.
+- **The `fix` job** holds one macOS slot, scheduled at 05:00 UTC, with a
+  300-minute timeout that ends it by 10:00, before the nightly's 11:00
+  schedule (§3 covers a delayed start).
 
   The pass-scope figures come from the nightly's whole-fast-pass arm on
-  2026-10-07, which runs both fast passes together (12,164 tests) under induced
+  2026-10-07. Its filter, `--parallel --skip '^TBDDaemonLiveTests\.'`, runs fast
+  passes 1a, 1b, and 2 together in one process (12,164 tests) under induced
   load. Its warm iterations took about 8 minutes each; its first took about 38,
-  which likely includes first-build and warm-up cost. A single pass runs fewer
-  tests than that arm, so these figures are upper bounds for it. A pass-scope
-  verifier run is therefore about 24 minutes warm and up to about 55 when its
-  first iteration pays the warm-up.
+  which likely includes first-build and warm-up cost. Each fast pass the
+  verifier can run is one of those three, a subset of the arm's tests, so the
+  arm's figures are upper bounds for it. The quiet pass is not in the arm; its
+  healthy CI run takes about 2 minutes (117 seconds of tests), so its warm
+  iterations sit well inside the same bound. A pass-scope verifier run is
+  therefore at most about 24 minutes warm and up to about 55 when its first
+  iteration pays the warm-up.
 
   The worst case is an attempt at pass scope that uses both tries, with both
   verifier runs paying the warm-up. As ceilings:
@@ -466,7 +612,8 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   - two sessions, capped at 60 minutes each – 120 minutes;
   - two verifier runs at pass scope, up to 55 minutes each – 110 minutes.
 
-  That totals 260 minutes and leaves 40 for checkout, pushes, and API calls.
+  That totals 260 minutes and leaves 40 for checkout, the artifact upload, and
+  API calls. The push and PR writes happen in `publish`, outside this budget.
   Without the warm-up the two verifier runs cost about 48 minutes and the
   attempt fits in about 200; at test scope they cost about 30 and it fits in
   about 180. The timeout stays at 300 minutes until the first implementation
@@ -477,7 +624,8 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   that slice measures as well.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
   once per attempt and so at most once a night.
-- **The `ledger` and `promote` jobs** run on ubuntu and cost no macOS slot.
+- **The `ledger`, `publish`, and `promote` jobs** run on ubuntu and cost no
+  macOS slot.
 - **Model usage** is one attempt a night, at most two sessions, authenticated
   with the existing `CLAUDE_CODE_OAUTH_TOKEN` that the review workflow uses.
 
@@ -490,11 +638,14 @@ means off.
 
 - **`FLAKE_LEDGER_ENABLED`** – the `ledger` job writes issues. Off, it runs in
   report-only mode (§4.5).
-- **`FLAKE_FIXER_ENABLED`** – the `fix` job runs on its schedule and the
-  `promote` job acts. Off, both exit at their first step. `workflow_dispatch`
-  of `fix` also requires it.
+- **`FLAKE_FIXER_ENABLED`** – the `fix` job runs on its schedule, `publish`
+  and `promote` act, and the `ledger` job runs the branch reclaimer (§11). Off,
+  `fix`, `publish`, and `promote` exit at their first step and the reclaimer
+  step is skipped; the ledger itself still runs under its own flag.
+  `workflow_dispatch` of `fix` also requires it. The reclaimer sits under this
+  flag because only the fixer creates `flakefix/*` branches.
 
-Both jobs also require that the workflow is running in this repository, not a
+Every job also requires that the workflow is running in this repository, not a
 fork, so a fork that copied the variables cannot run them.
 
 **Enable for the soak** with `gh variable set FLAKE_LEDGER_ENABLED --body true`
@@ -522,11 +673,11 @@ names who reclaims its orphans:
 
 - **Branches** live under one prefix, `flakefix/issue-<N>`, and the issue
   number makes the branch name unique per test. The repository deletes a head
-  branch when its PR merges. The **branch reclaimer**, run at the start of every
-  `ledger` job, deletes every other `flakefix/*` branch that has no open PR,
+  branch when its PR merges. The **branch reclaimer**, run at the start of
+  every `ledger` job while `FLAKE_FIXER_ENABLED` is on, deletes every other `flakefix/*` branch that has no open PR,
   sparing one whose commit is under a day old or that a workflow run is still
-  using. That covers PRs closed unmerged and a `fix` job that died between the
-  push and opening the PR. It follows `scripts/sweep-preflight-refs.sh`, whose
+  using. That covers PRs closed unmerged and a `publish` job that died between
+  the push and opening the PR. It follows `scripts/sweep-preflight-refs.sh`, whose
   live-run and age guards address the same push-to-use window; the
   implementation should generalize that script with a prefix argument rather
   than copy it.
@@ -550,7 +701,7 @@ file. The placement battery from `docs/theory-placement.md` agrees:
   those scripts, not compiled constants.
 - **Nothing compiles.** The daemon, the app, and the CLI do not change. The only
   code changes outside the new scripts are in test tooling (the stress
-  harness's `--xunit-dir` and `--test` options).
+  harness's `--xunit-dir`, `--test`, and `--pass-of` options).
 
 ## 13. Testing
 
@@ -564,7 +715,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 - **`flake-ledger.test.sh`** – xunit fixtures with failing, passing, and
   skipped test cases; a run with two attempts and two same-named artifacts,
   assigned by timestamp; fork runs, `flakefix/*` runs, and the self-test ID,
-  all excluded; occurrence keys and the threshold at one and two keys; issue
+  all excluded; runs and artifacts outside the 7-day read window ignored;
+  occurrence keys and the threshold at one and two keys; issue
   lookup by title, by `.flaky` trait, and by creation; a closed issue reopened;
   the same run processed twice with no change; and an API error that leaves the
   ledger unwritten.
@@ -574,13 +726,18 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   failure and with none; and the judge over synthetic iteration logs and xunit
   files at both scopes: a pass; a failing iteration; a wedged iteration; a test
   absent from the xunit output; a `passedOnRetry` record; another test failing
-  at pass scope while the target passes; and a diff touching the verification
-  toolchain.
-- **`flake-pr.test.sh`** – promotion's three conditions, each failing alone, and
-  a head that moved after verification.
+  at pass scope while the target passes; and a diff touching a protected file,
+  one case per entry in the protected list, each marked not eligible for ready
+  even with a clean stress run.
+- **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
+  head that moved after verification; and the open step for a candidate that
+  touched a protected file, which records `failure` and names the files.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1, filter
-  built from the ID), `--pass-of` (each test target maps to the pass, filter,
-  and floor `test.yml` uses), and `--xunit-dir`.
+  built from the ID), `--pass-of`, and `--xunit-dir`. The `--pass-of` cases
+  map a test ID from each of the four passes – including suites starting with
+  `A`, `O`, and `P`, and a nested suite – and check the pass table against the
+  `watched-test-pass.sh` invocations parsed from `test.yml`, so a fixture
+  `test.yml` with a changed filter or floor makes the check fail.
 
 Every harness must prove it can fail: each case that expects a finding runs
 against a fixture that contains one.
