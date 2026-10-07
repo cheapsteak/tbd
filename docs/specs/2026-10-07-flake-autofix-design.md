@@ -56,7 +56,7 @@ Both problems have the same root: failures are recorded per *run* or per
 - **Fixing CI itself.** The bot cannot edit `.github/workflows/` — including the
   review gate under `.github/workflows/claude-review-v2/` that judges its work.
   Flakes whose fix lies in a workflow file are filed and left for a human.
-- **Proving a flake is fixed.** No stress run can do that; §6.4 states the
+- **Proving a flake is fixed.** No stress run can do that; §6.5 states the
   limit.
 - **Replacing the nightly stress loop or the quarantine audit.** The bot reads
   their output; it does not change what they measure.
@@ -72,9 +72,10 @@ Six components, each with one job:
    ledger, or none.
 3. **Fixer session** – `anthropics/claude-code-action` on a macOS runner,
    diagnosing and changing the code for one test.
-4. **Verifier** (`scripts/flake-verify.sh`) – stress-runs the target test on
-   the candidate tree and returns a verdict. Its verdict, not the session's
-   claim, decides whether the PR may become ready.
+4. **Verifier** (`scripts/flake-verify.sh`) – runs a pre-fix baseline on
+   `main`, which picks the stress scope (the test alone or its whole CI pass),
+   then stress-runs the candidate tree at that scope and returns a verdict. Its
+   verdict, not the session's claim, decides whether the PR may become ready.
 5. **PR driver** (`scripts/flake-pr.sh`) – pushes the branch, opens the draft
    PR, records the verdict, comments on the issue, and later marks the PR ready.
 6. **Branch reclaimer** – removes `flakefix/*` branches no open PR uses.
@@ -85,14 +86,15 @@ jobs:
 - **`ledger`** (ubuntu) – runs when the nightly workflow completes
   (`workflow_run`), and on `workflow_dispatch`. Runs the reclaimer, then the
   ledger.
-- **`fix`** (macos-26) – scheduled once a night at 06:00 UTC, and on
+- **`fix`** (macos-26) – scheduled once a night at 05:00 UTC, and on
   `workflow_dispatch` with an optional issue number. Runs the picker, the
   fixer session, the verifier, and the PR driver's open step.
 - **`promote`** (ubuntu) – runs when a `test.yml` run completes
   (`workflow_run`). Runs the PR driver's promote step for `flakefix/*` branches.
 
-06:00 UTC falls in the US night, ends before the nightly starts at 11:00 under
-the `fix` job's timeout (§9), and so never overlaps the nightly's macOS slot.
+05:00 UTC falls in the US night, and the `fix` job's timeout (§9) ends it by
+10:00, before the nightly starts at 11:00, so it never overlaps the nightly's
+macOS slot.
 The `fix` job reads the ledger as the previous evening's `ledger` run left it.
 
 ## 4. Detection and the ledger
@@ -164,8 +166,10 @@ separate a test that fails in different places from one bad run.
 
 Each test with at least one recorded failure has exactly one issue. The ledger
 creates it at the first failure rather than at the threshold, because the issue
-is where the history lives (below): a failure recorded nowhere else would be
-lost when its artifact expires. The threshold gates fix attempts, not issues. The issue has three parts:
+is where the history lives (below): CI keeps the xunit artifacts for only 7
+days, so a failure recorded nowhere else would be lost before a second one
+arrived to meet the threshold. The threshold gates fix attempts, not issues.
+The issue has three parts:
 
 - **Title** – `Flaky test: <test ID>`, exact. The title is the lookup key.
 - **Label** – `flaky`. The ledger creates the label if it is missing.
@@ -275,26 +279,77 @@ restates them here because they are the review criteria for every bot PR:
 - **Assertion hygiene** – assert contracts, not incidents; no wall-clock
   freshness windows; timeouts report observed state.
 
-### 6.2 The verifier
+### 6.2 Stress scope
+
+A flake fails either on its own or only among neighbours. PR #960's test failed
+only when a parallel suite forked; stressed alone, it would likely have passed
+every time. So the verifier stresses at one of two scopes, and the pre-fix
+baseline (§6.3) chooses which:
+
+- **Test scope** – the target test alone, **20 iterations**. Used when the
+  baseline reproduced the failure with the test alone (at least one failing
+  iteration of 20).
+- **Pass scope** – the whole CI pass the test runs in, **3 iterations**. Used
+  when the baseline showed 0 failures for the test alone, which suggests the
+  flake needs its neighbours. The pass is the one `test.yml` runs the test in,
+  with the same filter, parallelism, and executed-test floor: fast pass 1
+  (`--filter '^TBDDaemonTests\.'`) for `TBDDaemonTests`, the serial quiet pass
+  for `TBDDaemonLiveTests`, and fast pass 2 (the `--skip` complement) for every
+  other target. An iteration takes about 20 minutes, which is why the count
+  is 3.
+
+The scope is fixed for the whole attempt: both tries are judged at the scope the
+baseline chose.
+
+### 6.3 The pre-fix baseline
+
+Before the session starts, the verifier runs the target test alone for 20
+iterations on `main`. The baseline does two jobs:
+
+- **It chooses the scope** (§6.2).
+- **It is the "before" for the PR.** The result goes into the brief, so the
+  session starts with a reproduction or knows it lacks one, and into the PR, so
+  the reviewer can read before and after side by side. When the baseline shows
+  0 of 20, the PR says the test-alone regime did not reproduce the flake and
+  that the pre-fix rate at pass scope was not measured; the ledger's counts are
+  then the only "before".
+
+The baseline never runs at pass scope: three pass iterations on `main` would add
+about an hour to every attempt (§9).
+
+### 6.4 The verifier
 
 The verifier decides whether a candidate may become a ready PR. It is a script;
 the session's own account of its results is recorded but never consulted.
 
-`nightly-flake-stress.sh` gains a `--test <ID>` mode: a single ad-hoc target
-whose filter matches exactly that test, with an executed-test floor of 1. It
-keeps everything else the harness already does: induced CPU load with spinners
-captured by PID, the outer per-iteration deadline, the remote-verification
-valve forced off, and the verdict built from the summary line, the floor, and
-the exit code together.
+`nightly-flake-stress.sh` gains two ad-hoc target modes:
 
-The verifier runs that mode for **20 iterations** on the candidate tree and
-passes only when all of these hold:
+- **`--test <ID>`** – a filter that matches exactly that test, with an
+  executed-test floor of 1.
+- **`--pass-of <ID>`** – the filter, parallelism, and floor of the CI pass that
+  contains the test, as §6.2 lists them, with an execution deadline sized to
+  that pass's measured duration rather than the harness's 600-second default,
+  which a 20-minute pass would always exceed.
 
-- every iteration passed;
+Both keep everything else the harness already does: induced CPU load with
+spinners captured by PID, the outer per-iteration deadline, the
+remote-verification valve forced off, and the verdict built from the summary
+line, the floor, and the exit code together.
+
+The verifier runs the chosen mode on the candidate tree and passes only when all
+of these hold, at that scope:
+
+- every iteration completed – a wedged or truncated iteration, or one below its
+  floor, fails the run;
 - every iteration's xunit output shows the target test executed and passed – a
   deleted, renamed, or disabled test cannot pass by running nothing;
 - the `retry-metrics` records for the target show no `passedOnRetry` – a fix
   that added `.flaky` must not pass on retries the quarantine hides.
+
+At pass scope the verdict is about the target test. Another test failing in the
+same iteration does not fail the candidate: a pass of thousands of tests under
+induced load carries other flakes the candidate does not claim to fix. The PR
+lists those failures so the reviewer sees them.
 
 The verifier runs from the job's pristine checkout of `main`, not from the
 candidate's tree, so a candidate cannot change how it is judged. If the
@@ -304,28 +359,18 @@ itself – the verdict is "not eligible for ready" whatever the stress result: t
 candidate's tests run through its own `scripts/test.sh`, which it could have
 changed.
 
-### 6.3 The pre-fix sample
-
-Before the session starts, the verifier runs the same 20 iterations on `main`.
-The result goes into the brief, so the session starts with a reproduction or
-knows it lacks one, and into the PR, so the reviewer can read the before and
-after side by side. A pre-fix sample of 0 of 20 means this regime did not
-reproduce the flake; the PR says so plainly, because a clean post-fix run then
-carries little information. It does not change the ready bar.
-
-### 6.4 What a clean run means
+### 6.5 What a clean run means
 
 The stress harness's header already states the limit, and the PR repeats it: a
 clean run is one sample from a gentler regime than the one many of these flakes
 appear in, not proof of a fix. CI runners have about four idle cores; the
-regime #503 characterised was a load average near 150 on 12 shared cores.
-Stressing one test alone also removes the population it normally runs among,
-and some flakes need that population – PR #960's test failed only when a
-parallel suite forked. The bar is a filter that rejects fixes which do not hold
-even under modest load. The human reviewer and the ledger carry the rest: a
-test that fails again after its fix reopens its issue (§4.4).
+regime #503 characterised was a load average near 150 on 12 shared cores. Pass
+scope restores the population a test normally runs among, but for only three
+iterations. The bar is a filter that rejects fixes which do not hold even under
+modest load. The human reviewer and the ledger carry the rest: a test that fails
+again after its fix reopens its issue (§4.4).
 
-### 6.5 Two tries
+### 6.6 Two tries
 
 An attempt allows two tries:
 
@@ -334,8 +379,9 @@ An attempt allows two tries:
 2. The verifier runs. If it passes, the attempt goes to §7.
 3. If it fails, a second session starts on the same branch, with the first
    session's notes and the verifier's iteration log.
-4. The verifier runs again. Pass or fail, the attempt goes to §7, which opens
-   the PR either way and marks it eligible for ready only on a pass.
+4. The verifier runs again, at the same scope. Pass or fail, the attempt goes
+   to §7, which opens the PR either way and marks it eligible for ready only on
+   a pass.
 
 ## 7. PR lifecycle
 
@@ -349,10 +395,12 @@ Transitions, each owned by the PR driver:
 - **Open.** At the end of the `fix` job, the driver pushes branch
   `flakefix/issue-<N>` and opens a **draft** PR. The body follows the PR
   template's fix variant and records the test ID, `Fixes #N`, the session's
-  diagnosis, the pre-fix sample, the stress result (iterations, failures,
-  core count, spinner count, and `load1m` as observed), and the §6.4 limit in
-  one sentence. The push happens once per attempt, after verification, so the
-  PR's CI runs once on the final candidate rather than once per try.
+  diagnosis, the pre-fix baseline, the stress scope and why the baseline chose
+  it, the stress result (iterations, failures, core count, spinner count, and
+  `load1m` as observed), any other tests that failed at pass scope, and the
+  §6.5 limit in one sentence. The push happens once per attempt, after
+  verification, so the PR's CI runs once on the final candidate rather than
+  once per try.
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA. On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
@@ -400,12 +448,21 @@ Transitions, each owned by the PR driver:
 
 The account allows five concurrent macOS jobs, shared by every workflow.
 
-- **The `fix` job** holds one macOS slot, at 06:00 UTC, with a 240-minute
-  timeout that ends it before the nightly starts at 11:00. Its budget, as
-  ceilings: the build from a restored cache; the pre-fix sample; up to two
-  sessions capped at 60 minutes each; up to two verifier runs. A single-test
-  iteration is seconds of test plus `scripts/test.sh` and `swift test` startup;
-  the first implementation slice measures it and sizes the session caps to fit.
+- **The `fix` job** holds one macOS slot, at 05:00 UTC, with a 300-minute
+  timeout that ends it by 10:00, before the nightly starts at 11:00. Its worst
+  case is an attempt at pass scope that uses both tries. As ceilings:
+  - build from a restored cache – 15 minutes;
+  - pre-fix baseline, 20 test-alone iterations – 15 minutes;
+  - two sessions, capped at 60 minutes each – 120 minutes;
+  - two verifier runs at pass scope, 3 iterations of about 20 minutes each –
+    120 minutes.
+
+  That totals 270 minutes and leaves 30 for checkout, pushes, and API calls. At
+  test scope the two verifier runs cost about 30 minutes instead, and the
+  attempt fits in about 180. The test-alone iteration time (seconds of test
+  plus `scripts/test.sh` and SwiftPM startup) and the pass durations are
+  estimates; the first implementation slice measures them and adjusts the
+  ceilings so the sum stays under the timeout.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
   once per attempt and so at most once a night.
 - **The `ledger` and `promote` jobs** run on ubuntu and cost no macOS slot.
@@ -476,9 +533,9 @@ file. The placement battery from `docs/theory-placement.md` agrees:
 - **Two reasonable projects** could pick a different threshold, a different
   iteration count, or no bot at all – all theories, and all held in editable
   scripts.
-- **The tunable numbers** – two occurrences, 20 iterations, one attempt a
-  night, two tries – are named constants in those scripts, not compiled
-  constants.
+- **The tunable numbers** – two occurrences, 20 test-alone iterations, 3
+  pass iterations, one attempt a night, two tries – are named constants in
+  those scripts, not compiled constants.
 - **Nothing compiles.** The daemon, the app, and the CLI do not change. The only
   code changes outside the new scripts are in test tooling (the stress
   harness's `--xunit-dir` and `--test` options).
@@ -501,13 +558,17 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   ledger unwritten.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; and the re-eligibility rule after an attempt.
-- **`flake-verify.test.sh`** – the judge over synthetic iteration logs and xunit
-  files: a pass; a failing iteration; a test absent from the xunit output; a
-  `passedOnRetry` record; and a diff touching the verification toolchain.
+- **`flake-verify.test.sh`** – scope selection from a baseline with one
+  failure and with none; and the judge over synthetic iteration logs and xunit
+  files at both scopes: a pass; a failing iteration; a wedged iteration; a test
+  absent from the xunit output; a `passedOnRetry` record; another test failing
+  at pass scope while the target passes; and a diff touching the verification
+  toolchain.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone, and
   a head that moved after verification.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1, filter
-  built from the ID) and `--xunit-dir`.
+  built from the ID), `--pass-of` (each test target maps to the pass, filter,
+  and floor `test.yml` uses), and `--xunit-dir`.
 
 Every harness must prove it can fail: each case that expects a finding runs
 against a fixture that contains one.
@@ -525,15 +586,10 @@ against a fixture that contains one.
 - **Letting the session judge its own result.** A model's report that the test
   "now passes" is a claim. The verifier makes the decision from xunit output and
   exit codes, which the session cannot change.
-- **Auto-merging a verified PR.** A clean stress run cannot prove a fix (§6.4),
+- **Always stressing at pass scope.** It reproduces neighbour-dependent
+  flakes, but three pass iterations cost about an hour where twenty test-alone
+  iterations cost minutes, and they observe the target only three times. Test
+  scope is the better instrument whenever the test fails alone, and the
+  baseline shows when it does.
+- **Auto-merging a verified PR.** A clean stress run cannot prove a fix (§6.5),
   and a fix can change production code. A human merge is the backstop.
-
-## 15. Open question
-
-- **What the stress filter should select.** The verifier stresses the target
-  test alone. Flakes that need a population – PR #960's test failed only when a
-  parallel suite forked – may not reproduce that way, so both the pre-fix and
-  post-fix samples can read clean. Stressing the test's whole suite, or its
-  fast pass, would restore some of that population at a cost in iteration time.
-  The first months of pre-fix samples (§6.3) will show how often a single-test
-  filter fails to reproduce a flake the ledger has seen.
