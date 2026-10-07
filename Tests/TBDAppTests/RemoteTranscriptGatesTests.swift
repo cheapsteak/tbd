@@ -5,68 +5,51 @@ import TBDShared
 
 /// The remote-transcript gates in `RemoteSessionDetailGates` and the remote
 /// composer's state. Each gate is tested on both branches, per repo policy for
-/// behavior-gating conditionals: the capability present and absent, and the
-/// flag on and off.
+/// behavior-gating conditionals: the capability present and absent.
 @Suite("Remote transcript — pure gates and composer state")
 struct RemoteTranscriptGatesTests {
-    // MARK: - showsTranscriptToggle(capabilities:featureEnabled:)
+    // MARK: - showsTranscriptToggle(capabilities:)
 
-    @Test func toggleShownWithTranscriptReadAndTheFlagOn() {
+    @Test func toggleShownWithTranscriptRead() {
         #expect(RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: ["attach", "transcript.read"], featureEnabled: true))
-    }
-
-    @Test func toggleHiddenWithTheFlagOffEvenWhenDeclared() {
-        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: ["attach", "transcript.read"], featureEnabled: false))
+            capabilities: ["attach", "transcript.read"]))
     }
 
     @Test func toggleHiddenWithoutTranscriptRead() {
-        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(capabilities: [], featureEnabled: true))
+        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(capabilities: []))
         // The pre-namespace spelling and the sibling transcript capabilities
         // are not `transcript.read`.
         #expect(!RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: ["transcript", "transcript.retain", "transcript.recall"], featureEnabled: true))
+            capabilities: ["transcript", "transcript.retain", "transcript.recall"]))
     }
 
-    // MARK: - showsTranscriptPane(capabilities:featureEnabled:open:)
+    // MARK: - showsTranscriptPane(capabilities:open:)
 
     @Test func paneShownWhenToggleOfferedAndOpen() {
         #expect(RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["transcript.read"], featureEnabled: true, open: true))
+            capabilities: ["transcript.read"], open: true))
     }
 
     @Test func paneHiddenWhenClosed() {
         #expect(!RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["transcript.read"], featureEnabled: true, open: false))
-    }
-
-    @Test func paneHiddenWhenFlagOffEvenIfOpen() {
-        #expect(!RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["transcript.read"], featureEnabled: false, open: true))
+            capabilities: ["transcript.read"], open: false))
     }
 
     @Test func paneHiddenWithoutTranscriptReadEvenIfOpen() {
         #expect(!RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["attach"], featureEnabled: true, open: true))
+            capabilities: ["attach"], open: true))
     }
 
     // MARK: - offersComposer
 
-    @Test func composerOfferedWithSendSubmitAndTheFlag() {
-        #expect(RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send-submit"], remoteTranscriptEnabled: true))
+    @Test func composerOfferedWithSendSubmit() {
+        #expect(RemoteSessionDetailGates.offersComposer(capabilities: ["send-submit"]))
     }
 
     @Test func composerNotOfferedWithoutSendSubmit() {
         // Raw `send` is keystrokes, not a submitted message.
         #expect(!RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send", "transcript.read"], remoteTranscriptEnabled: true))
-    }
-
-    @Test func composerNotOfferedWithTheFlagOff() {
-        #expect(!RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send-submit"], remoteTranscriptEnabled: false))
+            capabilities: ["send", "transcript.read"]))
     }
 
     // MARK: - RemoteComposerState.resolve
@@ -79,12 +62,9 @@ struct RemoteTranscriptGatesTests {
 
     private func resolve(
         capabilities: [String] = ["send-submit"],
-        session: RemoteSessionPayload?,
-        remoteTranscriptEnabled: Bool = true
+        session: RemoteSessionPayload?
     ) -> RemoteComposerState {
-        RemoteComposerState.resolve(
-            capabilities: capabilities, session: session,
-            remoteTranscriptEnabled: remoteTranscriptEnabled)
+        RemoteComposerState.resolve(capabilities: capabilities, session: session)
     }
 
     @Test func composerRunningForAWorkingOrIdleSession() {
@@ -115,10 +95,6 @@ struct RemoteTranscriptGatesTests {
 
     @Test func composerHiddenWithoutSendSubmit() {
         #expect(resolve(capabilities: ["send"], session: session()) == .hidden)
-    }
-
-    @Test func composerHiddenWithTheFlagOff() {
-        #expect(resolve(session: session(), remoteTranscriptEnabled: false) == .hidden)
     }
 
     @Test func composerHiddenForASessionNotInTheMirror() {

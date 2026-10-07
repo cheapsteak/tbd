@@ -277,7 +277,7 @@ struct RemoteSessionDetailView: View {
     // MARK: - Content
 
     /// A horizontal split: the terminal side on the left, and — when the
-    /// provider declares `transcript.read`, the flag is on and the shared
+    /// provider declares `transcript.read` and the shared
     /// `remoteTranscriptOpen` preference says open — the transcript on the
     /// right. The split is always the container, even with one child, so
     /// opening or closing the transcript only adds or removes the second

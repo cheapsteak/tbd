@@ -859,21 +859,13 @@ extension RPCRouter {
     /// The contract's 30-second budget for `send <id> --submit`.
     static let sendMessageTimeout: TimeInterval = 30
 
-    /// The refusal for `remote.transcriptSync` while `remote_transcript_enabled`
-    /// is off. Names the flag and the command that turns it on, for the reason
-    /// `remoteDeleteDisabledResponse` does; tests assert equality against it.
-    static let remoteTranscriptDisabledResponse = RPCResponse(error:
-        "remote transcripts are disabled (config remote_transcript_enabled); " +
-        "turn them on with `tbd config set remote-transcript on`")
-
     /// `remote.transcriptSync` — bring a session's local transcript cache up to
     /// date through `transcript read --since`, and say where it is
     /// (`docs/specs/2026-09-25-remote-session-transcript-design.md` § RPCs).
     ///
     /// Gate order: the backends gate and the cloud gate first, as every
-    /// provider-named verb (`RPCMethod.providerNamedRemoteMethods`); then
-    /// `remote_transcript_enabled`; then the provider's `transcript.read`
-    /// declaration, checked before anything is invoked because the contract
+    /// provider-named verb (`RPCMethod.providerNamedRemoteMethods`); then the
+    /// provider's `transcript.read` declaration, checked before anything is invoked because the contract
     /// forbids invoking an undeclared verb.
     ///
     /// The work itself is `RemoteTranscriptSync`'s: one fetch lane per session,
@@ -886,9 +878,6 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteTranscriptSyncParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard try await db.config.get().remoteTranscriptEnabled else {
-            return Self.remoteTranscriptDisabledResponse
-        }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.transcriptRead) else {
             return Self.missingCapabilityResponse(
@@ -964,9 +953,6 @@ extension RPCRouter {
     /// (`docs/remote-provider-contract.md` § `--submit`).
     ///
     /// Refused, without invoking anything:
-    /// - unless `remote_transcript_enabled` is on. The daemon reads the flag
-    ///   itself rather than trusting the app to hide the composer, so a direct
-    ///   RPC call cannot send input the hidden composer would not;
     /// - unless the provider declares `send-submit` — a caller MUST NOT pass
     ///   `--submit` otherwise;
     /// - when the provider's snapshot is stale, as `remote.send` is;
@@ -975,11 +961,10 @@ extension RPCRouter {
     /// - when the session has exited.
     ///
     /// Sends to one session are serialized (`RemoteSendMessageSerializer`), and
-    /// the flag and state checks run again inside the lane, so a send queued
-    /// behind another is judged against the flags and the mirror as they stand
-    /// when its turn comes. Each
-    /// send that reaches the provider is recorded in the actuation log, as
-    /// `remote.send` is.
+    /// the snapshot and state checks run inside the lane, so a send queued
+    /// behind another is judged against the mirror as it stands when its turn
+    /// comes. Each send that reaches the provider is recorded in the actuation
+    /// log, as `remote.send` is.
     ///
     /// Three outcomes, never retried. Exit 0 answers `.sent`. A non-zero exit
     /// is not sent and answers with an RPC error carrying the provider's error
@@ -995,7 +980,6 @@ extension RPCRouter {
         }
         let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        if let refusal = try await sendMessageFlagRefusal() { return refusal }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.sendSubmit) else {
             return Self.missingCapabilityResponse(
@@ -1009,24 +993,11 @@ extension RPCRouter {
         }
     }
 
-    /// The refusal for `remote.sendMessage` while the flag it needs is off,
-    /// or nil when it is on. Read before the send is queued, for a prompt
-    /// answer, and again inside the lane, so a send queued behind another is
-    /// judged against the flags as they stand when its turn comes.
-    private func sendMessageFlagRefusal() async throws -> RPCResponse? {
-        let config = try await db.config.get()
-        guard config.remoteTranscriptEnabled else {
-            return Self.remoteTranscriptDisabledResponse
-        }
-        return nil
-    }
-
     /// One serialized `remote.sendMessage`, from the state checks to the
     /// actuation outcome.
     private func sendMessage(
         _ params: RemoteSendMessageParams, manager: RemoteProviderManager, actor: ActuationActor?
     ) async throws -> RPCResponse {
-        if let refusal = try await sendMessageFlagRefusal() { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }

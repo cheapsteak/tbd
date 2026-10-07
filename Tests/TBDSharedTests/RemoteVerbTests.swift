@@ -68,7 +68,6 @@ struct RemoteTranscriptSyncWireTests {
     @Test func methodNames() {
         #expect(RPCMethod.remoteTranscriptSync == "remote.transcriptSync")
         #expect(RPCMethod.remoteSendMessage == "remote.sendMessage")
-        #expect(RPCMethod.configSetRemoteTranscriptEnabled == "config.setRemoteTranscriptEnabled")
     }
 
     /// Both are addressed by a provider name, so the cloud gate must cover them.

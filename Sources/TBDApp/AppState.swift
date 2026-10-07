@@ -1868,13 +1868,6 @@ final class AppState {
         { [daemonClient] terminalID in
             try await daemonClient.terminalCompletions(terminalID: terminalID)
         }
-    /// How `setRemoteTranscriptEnabled` persists the remote-transcript gate —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored
-    lazy var remoteTranscriptFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setRemoteTranscriptEnabled(enabled: enabled)
-        }
     /// How a remote transcript pane runs `remote.transcriptSync` — injectable
     /// so the pane can be driven in a test with no daemon.
     @ObservationIgnored

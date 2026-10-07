@@ -982,8 +982,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
-            case RPCMethod.configSetRemoteTranscriptEnabled:
-                return try await handleConfigSetRemoteTranscriptEnabled(request.paramsData)
             case RPCMethod.configSetModelProxyEnabled:
                 return try await handleConfigSetModelProxyEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
@@ -1086,7 +1084,6 @@ public final class RPCRouter: Sendable {
         // streaming on with the proxy off streams nothing, and the app should
         // not have to re-derive that.
         result.transcriptStreamingEnabled = config.transcriptStreamingEffective
-        result.remoteTranscriptEnabled = config.remoteTranscriptEnabled
         // One actor hop for all three, so a port and a version cannot come
         // from either side of a proxy replacement. With no supervisor wired
         // they keep their initializer defaults — false, nil, nil — which is the

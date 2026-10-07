@@ -87,11 +87,9 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         providerOK(#"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"}]}"#)
     }
 
-    /// Everything `remote.sendMessage` needs on: remote backends, and the
-    /// remote-transcript flag the daemon checks itself.
-    private func enableSend(remoteTranscript: Bool = true) async throws {
+    /// Everything `remote.sendMessage` needs on: remote backends.
+    private func enableSend() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(remoteTranscript)
     }
 
     private func poll(_ manager: RemoteProviderManager) async {
@@ -112,7 +110,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     // MARK: - Shared gates
 
     @Test func bothAreRefusedWhileRemoteBackendsAreOff() async throws {
-        try await db.config.setRemoteTranscriptEnabled(true)
         let invoker = FakeProviderInvoker(script: [])
         let r = router(await manager(invoker, describe: false))
         #expect(await sync(r).error == "remote backends disabled")
@@ -120,10 +117,9 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(invoker.callsSnapshot().isEmpty)
     }
 
-    /// The flag is on in the DB but the daemon booted without a manager.
+    /// The remote-backends flag is on in the DB but the daemon booted without a manager.
     @Test func bothAreRefusedWithNoManager() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         let r = router(nil)
         #expect(await sync(r).error == "remote backends disabled")
         #expect(try await send(r).error == "remote backends disabled")
@@ -131,29 +127,8 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     // MARK: - remote.transcriptSync
 
-    @Test func syncIsRefusedWithTheFlagOff() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRead])])
-        let r = router(await manager(invoker))
-        let response = await sync(r)
-        #expect(response.success == false)
-        #expect(response.error == RPCRouter.remoteTranscriptDisabledResponse.error)
-        #expect(invoker.callsSnapshot() == [["describe"]])
-    }
-
-    /// An explicit `false` refuses too — not only the unset default.
-    @Test func syncIsRefusedWithTheFlagExplicitlyOff() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(false)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRead])])
-        let r = router(await manager(invoker))
-        #expect(await sync(r).error == RPCRouter.remoteTranscriptDisabledResponse.error)
-        #expect(invoker.callsSnapshot() == [["describe"]])
-    }
-
     @Test func syncIsRefusedWithoutTranscriptRead() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["transcript", RemoteCapability.transcriptRecall, "log"]),
         ])
@@ -166,7 +141,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     @Test func syncWritesTheCacheAndReturnsWhereItIs() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring([RemoteCapability.transcriptRead]),
             ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor": "c-1"}"#),
@@ -194,7 +168,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     /// open pane cannot rebuild a cache the dismiss discarded.
     @Test func syncIsRefusedForADismissedSession() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "agentbox",
             sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
@@ -221,7 +194,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     /// form of that race: the sync still refuses and removes what it wrote.
     @Test func aSessionDismissedDuringItsSyncKeepsNoCache() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "agentbox",
             sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
@@ -250,7 +222,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     /// The other branch: the same mirror row, not dismissed, syncs.
     @Test func syncProceedsForAMirroredSessionThatIsNotDismissed() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "agentbox",
             sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
@@ -268,7 +239,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     @Test func syncSurfacesAProviderFailure() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        try await db.config.setRemoteTranscriptEnabled(true)
         let invoker = FakeProviderInvoker(outcomes: [
             .result(describeDeclaring([RemoteCapability.transcriptRead])),
             .result(ProviderResult(
@@ -283,30 +253,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     // MARK: - remote.sendMessage refusals
-
-    /// The flag off refuses before anything is invoked — the daemon reads the
-    /// flag itself, so a direct RPC call cannot send what the hidden composer
-    /// would not.
-    @Test func sendIsRefusedWithTheFlagOff() async throws {
-        try await enableSend(remoteTranscript: false)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
-        let r = router(await manager(invoker))
-        let response = try await send(r)
-        #expect(response.success == false)
-        #expect(response.error == RPCRouter.remoteTranscriptDisabledResponse.error)
-        #expect(invoker.callsSnapshot() == [["describe"]])
-        #expect(try actuationRows().isEmpty)
-    }
-
-    /// The flag unset: the shipped default refuses as well, not only an
-    /// explicit `false`.
-    @Test func sendIsRefusedWithTheFlagUnset() async throws {
-        try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
-        let r = router(await manager(invoker))
-        #expect(try await send(r).error == RPCRouter.remoteTranscriptDisabledResponse.error)
-        #expect(invoker.callsSnapshot() == [["describe"]])
-    }
 
     @Test func sendIsRefusedWithoutSendSubmit() async throws {
         try await enableSend()
@@ -531,51 +477,6 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(await trace.events == ["in", "out", "in", "out"])
         let stdins = invoker.stdinsSnapshot().dropFirst().map { $0.flatMap { String(data: $0, encoding: .utf8) } }
         #expect(stdins == ["one", "two"])
-    }
-
-    /// A send queued behind another is judged against the flags as they stand
-    /// when its turn comes: switching the remote transcript off while it waits
-    /// refuses it, and only the first send reaches the provider.
-    @Test func aQueuedSendIsRefusedWhenAFlagTurnsOffBeforeItsTurn() async throws {
-        try await enableSend()
-        let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["send", RemoteCapability.sendSubmit]),
-            providerOK("{}"),
-        ])
-        let trace = Trace()
-        let gate = Gate()
-        invoker.onCall = { verb in
-            guard verb.first == "send" else { return }
-            _ = await trace.enter()
-            await gate.wait()
-            await trace.exit()
-        }
-        let r = router(await manager(invoker))
-
-        let one = try RPCRequest(
-            method: RPCMethod.remoteSendMessage,
-            params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "one"))
-        let two = try RPCRequest(
-            method: RPCMethod.remoteSendMessage,
-            params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "two"))
-        async let first = r.handle(one)
-        let firstEntered = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await trace.events == ["in"]
-        }
-        async let second = r.handle(two)
-        let secondQueued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await r.remoteSendMessageSerializer.admittedCount == 2
-        }
-        try await db.config.setRemoteTranscriptEnabled(false)
-        await gate.open()
-
-        let firstResponse = await first
-        let secondResponse = await second
-        #expect(firstEntered == .satisfied)
-        #expect(secondQueued == .satisfied)
-        #expect(firstResponse.success)
-        #expect(secondResponse.error == RPCRouter.remoteTranscriptDisabledResponse.error)
-        #expect(Self.sends(invoker).count == 1)
     }
 
     private struct SpawnFailure: Error {}

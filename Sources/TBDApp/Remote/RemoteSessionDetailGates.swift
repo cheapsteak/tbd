@@ -89,11 +89,9 @@ enum RemoteSessionDetailGates {
     // MARK: - Remote transcript
 
     /// Whether the window toolbar offers the Transcript toggle for a remote
-    /// session: the provider declares `transcript.read` and
-    /// `remote_transcript_enabled` is on. The flag is a parameter, not read
-    /// here, so this stays a pure function of its inputs.
-    static func showsTranscriptToggle(capabilities: [String], featureEnabled: Bool) -> Bool {
-        featureEnabled && capabilities.contains(transcriptReadCapability)
+    /// session: the provider declares `transcript.read`.
+    static func showsTranscriptToggle(capabilities: [String]) -> Bool {
+        capabilities.contains(transcriptReadCapability)
     }
 
     /// Whether the detail pane shows the transcript half of its split: the
@@ -101,16 +99,14 @@ enum RemoteSessionDetailGates {
     /// says open. A hidden toggle hides the pane too, so a provider that
     /// stops declaring `transcript.read` never leaves a pane nothing can
     /// close.
-    static func showsTranscriptPane(capabilities: [String], featureEnabled: Bool, open: Bool) -> Bool {
-        open && showsTranscriptToggle(capabilities: capabilities, featureEnabled: featureEnabled)
+    static func showsTranscriptPane(capabilities: [String], open: Bool) -> Bool {
+        open && showsTranscriptToggle(capabilities: capabilities)
     }
 
     /// Whether a remote session can have a submitting composer at all:
-    /// the provider declares `send-submit` and `remote_transcript_enabled` is
-    /// on. The composer's finer states live in `RemoteComposerState`.
-    static func offersComposer(
-        capabilities: [String], remoteTranscriptEnabled: Bool
-    ) -> Bool {
-        remoteTranscriptEnabled && capabilities.contains(sendSubmitCapability)
+    /// the provider declares `send-submit`. The composer's finer states live in
+    /// `RemoteComposerState`.
+    static func offersComposer(capabilities: [String]) -> Bool {
+        capabilities.contains(sendSubmitCapability)
     }
 }
