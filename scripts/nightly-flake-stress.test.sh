@@ -273,6 +273,7 @@ mk_stub_wrapper() {
   printf 'lock_timeout=%s\n' "${TBD_SWIFT_LOCK_TIMEOUT_SECONDS-<unset>}"
   printf 'TBD_REMOTE_VERIFY=%s\n' "${TBD_REMOTE_VERIFY-<unset>}"
   printf 'TBD_SWIFT_QUEUE_YIELD_SECONDS=%s\n' "${TBD_SWIFT_QUEUE_YIELD_SECONDS-<unset>}"
+  printf 'TBD_RETRY_METRICS_PATH=%s\n' "${TBD_RETRY_METRICS_PATH-<unset>}"
   printf 'argv=%s\n' "$*"
 } > "$STUB_RECORD"
 EOF
@@ -427,6 +428,111 @@ test_targets_reference_only_open_ledger_issues() {
     case " $seen " in *" $issue "*) ;; *) seen="$seen $issue" ;; esac
   done
   assert_eq "the loop attaches to exactly the documented issue set" " 494 503 496" "$seen"
+}
+
+# ---------------------------------------------------------------------------
+# Structured outputs (flake autofix, docs/specs/2026-10-07-flake-autofix-design.md §4.1, §6.4)
+# ---------------------------------------------------------------------------
+
+test_xunit_dir_names_one_file_per_iteration() {
+  local out
+  out="$(XUNIT_DIR=/x; iteration_args FastPassWhole 3 | tr '\n' ' ')"
+  assert_contains "xunit-dir passes --xunit-output per iteration" "$out" "--xunit-output /x/FastPassWhole-3.xml"
+  assert_contains "and asks for failure messages inside the XML" "$out" "--experimental-xunit-message-failure"
+  out="$(XUNIT_DIR=""; iteration_args FastPassWhole 3)"
+  assert_eq "no xunit-dir, no extra args" "" "$out"
+}
+
+test_filters_are_never_glob_expanded() {
+  # `[A-O]` in an unquoted expansion is a glob. A file in cwd named like the
+  # pattern would silently replace the filter.
+  local d; d="$(mktmpd)"
+  local want=$'--parallel\n--filter\n^TBDDaemonTests\\.[A-O]'
+  ( cd "$d" && : > '^TBDDaemonTests.A' && filter_args_of '--parallel --filter ^TBDDaemonTests\.[A-O]' ) > "$d/out"
+  assert_eq "filter survives a matching file in cwd" "$want" "$(cat "$d/out")"
+  # MUTATION: the unquoted word-split this replaced. The file in the cwd wins.
+  local mutant
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of 's/read -r -a parts <<< "\$1"/parts=($1)/')"
+  ( cd "$d" && bash -c "source '$mutant'; filter_args_of '--parallel --filter ^TBDDaemonTests\.[A-O]'" ) > "$d/mutant.out"
+  assert_contains "mutation: an unquoted split expands the filter into the file name" \
+    "$(cat "$d/mutant.out")" "^TBDDaemonTests.A"
+  assert_eq "mutation: and the filter is gone" "0" "$(grep -c '\[A-O\]' "$d/mutant.out")"
+  rm -rf "$d"
+}
+
+test_results_tsv_records_every_iteration_verdict() {
+  local d; d="$(mktmpd)"
+  local old="$RESULTS_TSV"
+  RESULTS_TSV="$d/r.tsv"
+  record_result Test 1 "PASS 1" 0 "2.5" 4 4 31
+  record_result Test 2 "FAIL rc=1 with 1 tests executed" 1 "3.0" 4 4 29
+  record_result Test 3 "FAIL ran 0 tests, below the measured floor of 1" 0 "3.0" 4 4 2
+  record_result Test 4 "FAIL no 'Test run with N tests' summary — truncated log or wedged run (rc=1)" 1 "3.0" 4 4 5
+  RESULTS_TSV="$old"
+  assert_eq "four rows" "4" "$(wc -l < "$d/r.tsv" | tr -d ' ')"
+  assert_eq "every row has ten columns" "10" "$(awk -F'\t' '{print NF}' "$d/r.tsv" | sort -u)"
+  assert_eq "row 2 verdict column" "FAIL" "$(sed -n 2p "$d/r.tsv" | cut -f3)"
+  assert_eq "row 1 count column" "1" "$(sed -n 1p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 2 count column parsed from reason" "1" "$(sed -n 2p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 3 below-floor count parsed" "0" "$(sed -n 3p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 4 no summary, no count" "" "$(sed -n 4p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 1 seconds column" "31" "$(sed -n 1p "$d/r.tsv" | cut -f9)"
+  assert_eq "row 2 reason column" "rc=1 with 1 tests executed" "$(sed -n 2p "$d/r.tsv" | cut -f10)"
+  rm -rf "$d"
+}
+
+test_metrics_dir_reaches_the_fenced_run() {
+  local d; d="$(mktmpd)"
+  local record="$d/record"
+  mk_stub_wrapper "$d/scripts" test.sh
+  ( SCRIPT_DIR="$d/scripts"; ITER_METRICS_PATH="$d/m/T-1.jsonl"
+    STUB_RECORD="$record" run_governed_fenced 5 "$d/log" --no-fingerprint )
+  assert_eq "TBD_RETRY_METRICS_PATH set per iteration" "$d/m/T-1.jsonl" "$(recorded "$record" TBD_RETRY_METRICS_PATH)"
+  ( SCRIPT_DIR="$d/scripts"; ITER_METRICS_PATH=""
+    STUB_RECORD="$record" run_governed_fenced 5 "$d/log" --no-fingerprint )
+  assert_eq "and not set at all without --metrics-dir" "<unset>" "$(recorded "$record" TBD_RETRY_METRICS_PATH)"
+  rm -rf "$d"
+}
+
+# Drive one real iteration of run_target against the stub wrapper, in a child
+# shell so the globals it sets stay there. The caller reads the stub's record
+# and the files left behind.
+run_one_stub_iteration() {
+  local script="$1" d="$2"
+  STUB_RECORD="$d/record" bash -c "source '$script'
+    SCRIPT_DIR='$d/scripts'; REPORT_DIR='$d/reports'; NCPU=4
+    XUNIT_DIR='$d/x'; METRICS_DIR='$d/m'; LOG_DIR='$d/logs'; RESULTS_TSV='$d/r.tsv'
+    run_target 'Stub|--parallel --filter ^M\\.S/f\\(\\)|1|adhoc|stub target' 1 '$d/work'" >/dev/null 2>&1
+}
+
+test_run_target_wires_every_structured_output() {
+  local d; d="$(mktmpd)"
+  mk_stub_wrapper "$d/scripts" test.sh
+  mkdir -p "$d/reports" "$d/x" "$d/m" "$d/logs" "$d/work"
+  run_one_stub_iteration "$SCRIPT" "$d"
+  assert_eq "the metrics file is pre-created, empty" "empty" \
+    "$( [[ -f "$d/m/Stub-1.jsonl" && ! -s "$d/m/Stub-1.jsonl" ]] && echo empty || echo absent-or-nonempty)"
+  assert_eq "and its path reached the test process" "$d/m/Stub-1.jsonl" "$(recorded "$d/record" TBD_RETRY_METRICS_PATH)"
+  assert_eq "the filter and the xunit args reach test.sh as separate words" \
+    "--no-fingerprint --parallel --filter ^M\\.S/f\\(\\) --xunit-output $d/x/Stub-1.xml --experimental-xunit-message-failure" \
+    "$(recorded "$d/record" argv)"
+  assert_eq "the iteration log lands in --log-dir" "yes" "$([[ -f "$d/logs/Stub-1.log" ]] && echo yes || echo no)"
+  assert_eq "one results row" "1" "$(wc -l < "$d/r.tsv" | tr -d ' ')"
+  assert_eq "scored FAIL: the stub printed no summary" "FAIL" "$(cut -f3 "$d/r.tsv")"
+  assert_eq "with the core count" "4" "$(cut -f8 "$d/r.tsv")"
+  assert_eq "and a numeric seconds column" "yes" "$([[ "$(cut -f9 "$d/r.tsv")" =~ ^[0-9]+$ ]] && echo yes || echo no)"
+
+  # MUTATION: drop the pre-create, and an iteration whose test process never
+  # wrote a record leaves no file at all.
+  local e; e="$(mktmpd)"
+  mk_stub_wrapper "$e/scripts" test.sh
+  mkdir -p "$e/reports" "$e/x" "$e/m" "$e/logs" "$e/work"
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  run_one_stub_iteration "$(mutant_of '/: > "\$ITER_METRICS_PATH"/d')" "$e"
+  assert_eq "mutation: without the pre-create the metrics file is absent" "absent" \
+    "$([[ -e "$e/m/Stub-1.jsonl" ]] && echo present || echo absent)"
+  rm -rf "$d" "$e"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do

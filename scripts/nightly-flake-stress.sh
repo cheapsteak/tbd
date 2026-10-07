@@ -19,6 +19,22 @@
 # Usage:
 #   scripts/nightly-flake-stress.sh [--iterations N] [--spinners K]
 #                                   [--target NAME] [--report-dir DIR] [--no-load]
+#                                   [--xunit-dir DIR] [--metrics-dir DIR]
+#                                   [--log-dir DIR] [--results-tsv FILE]
+#
+# Structured outputs, one per iteration i of target T (the flake ledger and the
+# flake fixer's verifier read these instead of console text —
+# docs/specs/2026-10-07-flake-autofix-design.md §4.1 and §6.4):
+#   --xunit-dir DIR      SwiftPM writes DIR/T-i.xml (XCTest cases) AND
+#                        DIR/T-i-swift-testing.xml (Swift Testing cases). A
+#                        reader that globs only T-i.xml sees no Swift Testing case.
+#   --metrics-dir DIR    the iteration runs with TBD_RETRY_METRICS_PATH=DIR/T-i.jsonl,
+#                        created EMPTY first: the writer opens it only on its first
+#                        record, so a missing file would not distinguish "no .flaky
+#                        test ran" from "the variable never reached the test process".
+#   --log-dir DIR        keep iteration logs at DIR/T-i.log (default: a mktemp dir).
+#   --results-tsv FILE   append one tab-separated row per iteration, no header:
+#                        target iteration PASS|FAIL count rc load1m spinners cores seconds reason
 #
 # Exit: 0 = every target clean, 1 = at least one target FAILED, 2 = harness error.
 #
@@ -119,8 +135,50 @@ NO_VALVE_ENV=(TBD_REMOTE_VERIFY=0 TBD_SWIFT_QUEUE_YIELD_SECONDS=)
 SPINNER_PIDS=()
 REPORT_DIR=""
 FAILED_TARGETS=0
+NCPU=""
+
+# Structured per-iteration outputs; each is off when empty. See the Usage block.
+XUNIT_DIR=""
+METRICS_DIR=""
+LOG_DIR=""
+RESULTS_TSV=""
+ITER_METRICS_PATH=""   # set per iteration by run_target when METRICS_DIR is set
 
 die() { echo "nightly-flake-stress: $*" >&2; exit 2; }
+
+# --- per-iteration arguments and results --------------------------------------
+
+# Word-split a filter string into one arg per line WITHOUT pathname expansion.
+# `read -a` splits on IFS and never globs; an unquoted `$filter` would, and
+# `^TBDDaemonTests\.[A-O]` is a glob that a file of a matching name in the cwd
+# would silently replace.
+filter_args_of() {
+  local -a parts
+  read -r -a parts <<< "$1"
+  printf '%s\n' "${parts[@]}"
+}
+
+# The extra `swift test` args for iteration $2 of target $1, one per line.
+iteration_args() {
+  local name="$1" i="$2"
+  [[ -n "$XUNIT_DIR" ]] || return 0
+  printf '%s\n' --xunit-output "$XUNIT_DIR/$name-$i.xml" --experimental-xunit-message-failure
+}
+
+# Append one iteration's row to RESULTS_TSV (no-op when unset). `count` is the
+# executed-test count when the verdict carried one, else empty.
+record_result() {
+  local name="$1" i="$2" verdict="$3" rc="$4" load="$5" spinners="$6" cores="$7" seconds="$8"
+  [[ -n "$RESULTS_TSV" ]] || return 0
+  local kind="${verdict%% *}" reason="${verdict#* }" count=""
+  if [[ "$kind" == PASS ]]; then
+    count="$reason"
+  else
+    count="$(printf '%s' "$reason" | sed -n 's/.*with \([0-9]*\) tests.*/\1/p; s/^ran \([0-9]*\) tests.*/\1/p' | head -1)"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$i" "$kind" "$count" "$rc" "$load" "$spinners" "$cores" "$seconds" "$reason" >> "$RESULTS_TSV"
+}
 
 # --- load generation ----------------------------------------------------------
 
@@ -243,11 +301,15 @@ run_governed_swift() {
 # `NO_VALVE_ENV` matters most on THIS leg, because `test.sh` is the only caller
 # that opts into the remote verification valve. See its definition above for why
 # an iteration must never route.
+#
+# `ITER_METRICS_PATH`, when run_target set it, reaches the test process as
+# `TBD_RETRY_METRICS_PATH` — the only way `.flaky` writes a record.
 run_governed_fenced() {
   local command_deadline_s="$1" log="$2"; shift 2
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
   run_with_deadline "$outer_deadline_s" "$log" env \
     "${NO_VALVE_ENV[@]}" \
+    ${ITER_METRICS_PATH:+"TBD_RETRY_METRICS_PATH=$ITER_METRICS_PATH"} \
     TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
     "$SCRIPT_DIR/test.sh" "$@"
 }
@@ -335,10 +397,20 @@ run_target() {
   echo "═══ $name — issue #$issue — $iterations iteration(s), floor $floor"
   echo "    $description"
 
-  local failures=0 pass_counts=() signatures=() i verdict log load_before
+  local failures=0 pass_counts=() signatures=() i verdict log load_before t0 line
+  local -a args
   for ((i = 1; i <= iterations; i++)); do
-    log="$work_dir/$name-$i.log"
+    log="${LOG_DIR:-$work_dir}/$name-$i.log"
+    # Built as an array, never from an unquoted `$filter`: see filter_args_of.
+    # A `while read` loop because bash 3.2 has no `mapfile`.
+    args=(--no-fingerprint)
+    while IFS= read -r line; do args+=("$line"); done < <(filter_args_of "$filter"; iteration_args "$name" "$i")
+    ITER_METRICS_PATH="${METRICS_DIR:+$METRICS_DIR/$name-$i.jsonl}"
+    # Pre-created EMPTY, so a missing file after the iteration means the
+    # variable never reached the test process (spec §6.4, the retry check).
+    [[ -n "$ITER_METRICS_PATH" ]] && : > "$ITER_METRICS_PATH"
     load_before="$(loadavg)"
+    t0=$SECONDS
     local rc=0
     # Through scripts/test.sh, not bare `swift test`: this script's documented
     # use is LOCAL reproduction under induced load, where a bare run writes into
@@ -347,9 +419,9 @@ run_target() {
     # legitimately across the many minutes these iterations take, so the
     # detection layer would report the machine rather than the run. The fence,
     # which is what actually prevents the leak, is always on.
-    # shellcheck disable=SC2086 # $filter is a deliberately word-split arg list
-    run_governed_fenced "$ITERATION_DEADLINE_S" "$log" --no-fingerprint $filter || rc=$?
+    run_governed_fenced "$ITERATION_DEADLINE_S" "$log" "${args[@]}" || rc=$?
     verdict="$(judge_iteration "$rc" "$log" "$floor")"
+    record_result "$name" "$i" "$verdict" "$rc" "$load_before" "${#SPINNER_PIDS[@]}" "$NCPU" "$((SECONDS - t0))"
     if [[ "$verdict" == PASS* ]]; then
       pass_counts+=("${verdict#PASS }")
       printf '    %2d/%d  pass (%s tests, load1m %s at start, %d spinners)\n' "$i" "$iterations" "${verdict#PASS }" "$load_before" "${#SPINNER_PIDS[@]}"
@@ -398,6 +470,10 @@ main() {
       --target)     only_target="${2:-}"; shift 2 ;;
       --report-dir) REPORT_DIR="${2:-}"; shift 2 ;;
       --no-load)    induce_load=0; shift ;;
+      --xunit-dir)   XUNIT_DIR="${2:-}"; shift 2 ;;
+      --metrics-dir) METRICS_DIR="${2:-}"; shift 2 ;;
+      --log-dir)     LOG_DIR="${2:-}"; shift 2 ;;
+      --results-tsv) RESULTS_TSV="${2:-}"; shift 2 ;;
       *) die "unknown argument $1" ;;
     esac
   done
@@ -405,12 +481,17 @@ main() {
   command -v swift >/dev/null 2>&1 || die "swift not found"
   [[ -n "$REPORT_DIR" ]] || REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flake-stress-reports.XXXXXX")"
   mkdir -p "$REPORT_DIR" || die "cannot create report dir $REPORT_DIR"
+  local dir
+  for dir in "$XUNIT_DIR" "$METRICS_DIR" "$LOG_DIR"; do
+    [[ -z "$dir" ]] || mkdir -p "$dir" || die "cannot create $dir"
+  done
+  [[ -z "$RESULTS_TSV" ]] || mkdir -p "$(dirname "$RESULTS_TSV")" || die "cannot create the directory for $RESULTS_TSV"
   local work_dir; work_dir="$(mktemp -d "${TMPDIR:-/tmp}/flake-stress.XXXXXX")" || die "cannot create work dir"
 
-  local ncpu; ncpu="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-  [[ -n "$spinners" ]] || spinners="$ncpu"
+  NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+  [[ -n "$spinners" ]] || spinners="$NCPU"
 
-  echo "nightly-flake-stress: $ncpu cores, baseline load $(loadavg)"
+  echo "nightly-flake-stress: $NCPU cores, baseline load $(loadavg)"
   echo "logs: $work_dir   reports: $REPORT_DIR"
 
   # Build ONCE up front so the first iteration's timing is not dominated by the
