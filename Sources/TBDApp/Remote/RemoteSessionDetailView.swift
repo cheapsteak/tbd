@@ -96,9 +96,9 @@ enum RemoteSessionSendPayload {
 /// Laid out like a local session: the terminal fills the pane, and the
 /// session's name and its Reconnect / Stop actions live in the window
 /// toolbar (`ContentView`). The only chrome here is a compact warning strip,
-/// rendered only while a warning actually applies, and — only while no live
-/// attached terminal is showing — a send footer (see
-/// `RemoteSessionDetailGates.showsSendFooter`). When the transcript is
+/// rendered only while a warning actually applies, and — only while neither a
+/// live attached terminal nor the transcript's enabled composer is showing — a
+/// send footer (see `RemoteSessionDetailGates.showsSendFooter`). When the transcript is
 /// available and open, the session's conversation sits beside the terminal in
 /// a horizontal split (`RemoteTranscriptPaneView`).
 ///
@@ -439,7 +439,11 @@ struct RemoteSessionDetailView: View {
         RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: isGone,
             snapshotFresh: providerStatus?.hasStaleSnapshot != true,
-            hasLiveAttachedPane: showsAttachSlot)
+            hasLiveAttachedPane: showsAttachSlot,
+            transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
+                capabilities: capabilities,
+                transcriptOpen: appState.remoteTranscriptOpen,
+                composerState: appState.remoteComposerState(for: selection)))
     }
 
     private var sendFooter: some View {

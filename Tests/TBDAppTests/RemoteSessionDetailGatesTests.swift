@@ -65,30 +65,35 @@ struct RemoteSessionDetailGatesTests {
         #expect(RemoteSessionDetailGates.content(capabilities: ["attach"], gone: false, exited: true) == .unsupported)
     }
 
-    // MARK: - showsSendFooter(capabilities:gone:snapshotFresh:hasLiveAttachedPane:)
+    // MARK: - showsSendFooter(capabilities:gone:snapshotFresh:hasLiveAttachedPane:transcriptComposerTakesInput:)
 
     @Test func sendFooterShownWhenNoLiveTerminalIsAttached() {
         // No attach capability at all, the log fallback, and an attach
         // provider whose pane shows the Detached or auth prompt.
         for capabilities in [["send"], ["log", "send"], ["attach", "send"], ["attach", "log", "send"]] {
             #expect(RemoteSessionDetailGates.showsSendFooter(
-                capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
+                capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: false))
         }
     }
 
     @Test func sendFooterHiddenWhileALiveTerminalIsAttached() {
         // The attached terminal takes typing directly.
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: ["attach", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true))
+            capabilities: ["attach", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true,
+            transcriptComposerTakesInput: false))
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: ["attach", "log", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true))
+            capabilities: ["attach", "log", "send"], gone: false, snapshotFresh: true, hasLiveAttachedPane: true,
+            transcriptComposerTakesInput: false))
     }
 
     @Test func sendFooterHiddenWithoutTheSendCapability() {
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: ["log"], gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
+            capabilities: ["log"], gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: false))
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: [], gone: false, snapshotFresh: true, hasLiveAttachedPane: false))
+            capabilities: [], gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: false))
     }
 
     @Test func sendFooterHiddenWhenGoneOrStale() {
@@ -96,9 +101,75 @@ struct RemoteSessionDetailGatesTests {
         // declared, but the provider no longer reports it; a stale snapshot
         // makes mutating a session unsafe.
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: ["attach", "log", "send"], gone: true, snapshotFresh: true, hasLiveAttachedPane: false))
+            capabilities: ["attach", "log", "send"], gone: true, snapshotFresh: true, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: false))
         #expect(!RemoteSessionDetailGates.showsSendFooter(
-            capabilities: ["log", "send"], gone: false, snapshotFresh: false, hasLiveAttachedPane: false))
+            capabilities: ["log", "send"], gone: false, snapshotFresh: false, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: false))
+    }
+
+    /// The transcript's composer, on screen and enabled, is the input path:
+    /// the footer below it would be a second, redundant one.
+    @Test func sendFooterHiddenWhileTheTranscriptComposerTakesInput() {
+        for capabilities in [["send", "send-submit"], ["attach", "log", "send", "send-submit"]] {
+            #expect(!RemoteSessionDetailGates.showsSendFooter(
+                capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
+                transcriptComposerTakesInput: true))
+        }
+    }
+
+    // MARK: - transcriptComposerTakesInput(capabilities:transcriptOpen:composerState:)
+
+    private static let transcriptCapabilities = ["send", "transcript.read", "send-submit"]
+
+    private func footerShown(
+        capabilities: [String] = transcriptCapabilities,
+        transcriptOpen: Bool = true,
+        composerState: RemoteComposerState = .running
+    ) -> Bool {
+        RemoteSessionDetailGates.showsSendFooter(
+            capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
+            transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
+                capabilities: capabilities, transcriptOpen: transcriptOpen,
+                composerState: composerState))
+    }
+
+    @Test func composerTakesInputWithThePaneOpenAndARunningSession() {
+        #expect(RemoteSessionDetailGates.transcriptComposerTakesInput(
+            capabilities: Self.transcriptCapabilities, transcriptOpen: true, composerState: .running))
+        #expect(!footerShown())
+    }
+
+    @Test func footerStaysWhileTheTranscriptPaneIsClosed() {
+        #expect(!RemoteSessionDetailGates.transcriptComposerTakesInput(
+            capabilities: Self.transcriptCapabilities, transcriptOpen: false, composerState: .running))
+        #expect(footerShown(transcriptOpen: false))
+    }
+
+    @Test func footerStaysWithoutTranscriptRead() {
+        // No `transcript.read`: no pane, so no composer, whatever is open.
+        #expect(footerShown(capabilities: ["send", "send-submit"]))
+    }
+
+    /// Without `send-submit` the resolver hides the composer, and the footer —
+    /// raw `send` — is the only input path left.
+    @Test func footerStaysWhenTheProviderLacksSendSubmit() {
+        let capabilities = ["send", "transcript.read"]
+        let state = RemoteComposerState.resolve(
+            capabilities: capabilities,
+            session: RemoteSessionPayload(id: "s1", state: .running, agentState: .working))
+        #expect(state == .hidden)
+        #expect(footerShown(capabilities: capabilities, composerState: state))
+    }
+
+    /// A composer that is rendered but cannot send leaves the footer: a blocked
+    /// one asks for the prompt to be answered in the terminal, which with no
+    /// live terminal attached is what the footer is for.
+    @Test(arguments: [
+        RemoteComposerState.blocked, .exited, .starting, .stateUnknown, .hidden,
+    ])
+    func footerStaysWhileTheComposerCannotSend(state: RemoteComposerState) {
+        #expect(footerShown(composerState: state))
     }
 
     // MARK: - showsStop(sessionExists:gone:snapshotFresh:)

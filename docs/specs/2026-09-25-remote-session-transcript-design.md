@@ -159,7 +159,7 @@ For a remote target:
 
 The attached terminal and the composer are independent writers to the same session. Text left unsent in the agent's own input box is prefixed to the composer's message. This is the limitation the local composer already accepts.
 
-The existing send footer is unchanged: it still appears only when no terminal is live.
+The existing send footer appears only when no terminal is live and the composer is not on screen taking messages. A composer that is shown but cannot send — blocked on a prompt, starting, unknown, or exited — leaves the footer in place, because with no live terminal its raw keystrokes are the only way to answer a prompt.
 
 ## Testing
 
