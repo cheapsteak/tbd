@@ -4107,13 +4107,13 @@ extension RPCRouter {
     /// one uninterrupted write.
     ///
     /// **The child's modes decide the bytes.** `HolderSendComposition` wraps a
-    /// non-empty body in `ESC[200~`…`ESC[201~` exactly when the child has
-    /// bracketed paste on, and the submitting `\r` follows the end marker — so
-    /// the Enter is provably outside the paste, which is the property the tmux
-    /// arm gets from delivering in two acts and a mode-blind composition cannot
-    /// have at all. A child
-    /// that never asked for bracketing gets bare bytes, because markers it does
-    /// not understand are markers it prints.
+    /// non-empty body in `ESC[200~`…`ESC[201~` when the child has bracketed
+    /// paste on — or, for an agent session, when the reading cannot rule that
+    /// out — and the submitting `\r` follows the end marker, so the Enter is
+    /// provably outside the paste, which is the property the tmux arm gets from
+    /// delivering in two acts and a mode-blind composition cannot have at all.
+    /// A child seen not to ask for bracketing gets bare bytes, because markers
+    /// it does not understand are markers it prints.
     ///
     /// The oracle is consulted at composition time, which is a moment, and the
     /// child can change a mode between that moment and the write. **How wide
@@ -4125,6 +4125,17 @@ extension RPCRouter {
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
     /// the child changed since then is invisible here for as long as the viewer
     /// holds it — possibly hours.
+    ///
+    /// **So a stale reading is trusted in one direction only.** A viewer
+    /// ordinarily takes the pty within milliseconds of a spawn or a wake,
+    /// before an agent TUI has turned bracketing on, so the frozen emulator's
+    /// commonest answer is "off" about a child that is now on — and composing
+    /// bare on it loses the Enter silently, the defect this composition exists
+    /// to end. A stale "off" therefore falls back to the unobserved rule below
+    /// (wrap for an agent session, bare for a shell), while a stale "on" is
+    /// obeyed: the child was seen to ask for bracketing, and if it has since
+    /// turned it off the cost is markers printed around the text, which
+    /// somebody can see.
     ///
     /// **A third case is not a window at all.** A reading whose `modesObserved`
     /// is `false` comes from an emulator built over a child that was already
@@ -4140,20 +4151,19 @@ extension RPCRouter {
     /// wrapping it would only hand a `sudo`/`ssh`/`rm -i` prompt markers to
     /// print for a stall that cannot happen.
     /// `HolderSendComposition.bracketedPaste(for:unobservedShouldWrap:)` owns
-    /// that rule, keyed on `carriesDispatchEnvelope`, and the row's
-    /// `modesObserved` discloses the guess.
+    /// both rules, keyed on `carriesDispatchEnvelope`, and the row records the
+    /// reading's own flag (`modeBracketedPaste`) beside what was made of it
+    /// (`bracketedPaste`), with `modeSource` and `modesObserved` saying why.
     ///
-    /// Both windows are accepted, and the wide one is accepted by ruling: the
-    /// design's "Proceeding on stale modes" section weighs a rare wrong
-    /// composition against rails that fail closed exactly when supervision most
-    /// needs to send. What a wrong reading costs is a wrong composition, and a
-    /// wrong composition is visible in the composer or diagnosable from the
-    /// row's `modeSource` and its age — never a send that vanished. Read as on
-    /// when it is off, a shell that has bracketing off prints the `ESC[200~` and
-    /// `ESC[201~` markers around the text and runs the line it made of them.
-    /// Read as off when it is on, a multi-line body goes bare to a TUI that
-    /// turned bracketing on after the attach, and its paste-burst heuristic can
-    /// absorb the submitting `\r` into the text.
+    /// What remains is accepted by ruling: the design's "Proceeding on stale
+    /// modes" section weighs a rare wrong composition against rails that fail
+    /// closed exactly when supervision most needs to send. What a wrong reading
+    /// costs is a wrong composition, and a wrong composition is visible in the
+    /// composer or diagnosable from the row — never a send that vanished. A
+    /// stale "on" for a child that has since turned bracketing off prints the
+    /// `ESC[200~` and `ESC[201~` markers around the text; a shell that did so
+    /// runs the line it made of them. A stale "off" for a shell that has since
+    /// turned bracketing on goes bare, which its line editor submits anyway.
     private func performHolderSend(
         payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
@@ -4342,6 +4352,9 @@ extension RPCRouter {
         // whose age or provenance these could be.
         let modeAge = reading?.ageMilliseconds
         let modesObserved = reading?.modesObserved
+        let modeBracketedPaste = reading?.modes.bracketedPaste
+        let bracketedPaste = HolderSendComposition.bracketedPaste(
+            for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal))
 
         // Same envelope rule as the tmux arm, and for the same reasons — see
         // the long comment there. Empty text stays empty: `--text "" --submit`
@@ -4354,9 +4367,7 @@ extension RPCRouter {
                     id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
                 : text)
         let message = HolderSendComposition.compose(
-            body: body, submit: submit,
-            bracketedPaste: HolderSendComposition.bracketedPaste(
-                for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
+            body: body, submit: submit, bracketedPaste: bracketedPaste)
 
         guard !message.isEmpty else {
             // Nothing to write, reached two ways. `--text ""` with no
@@ -4377,7 +4388,9 @@ extension RPCRouter {
                 actuationID, .dispatched,
                 modeSource: composed ? modeSource : nil,
                 modeAgeMilliseconds: composed ? modeAge : nil,
-                modesObserved: composed ? modesObserved : nil)
+                modesObserved: composed ? modesObserved : nil,
+                modeBracketedPaste: composed ? modeBracketedPaste : nil,
+                bracketedPaste: composed ? bracketedPaste : nil)
             return .ok()
         }
 
@@ -4386,7 +4399,8 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .dispatched,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste,
+                bracketedPaste: bracketedPaste)
             // Hand off to the observation, exactly as the tmux arm does after
             // `.dispatched`: reached only on a successful write, only when the
             // send was verify-armed, and only for a non-empty body — a
@@ -4412,7 +4426,8 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .transportFailed, error: reason,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste,
+                bracketedPaste: bracketedPaste)
             return RPCResponse(error: reason)
         }
     }
@@ -4441,6 +4456,7 @@ extension RPCRouter {
         let modeAge = reading?.ageMilliseconds
         let modesObserved = reading?.modesObserved
         let modes = reading?.modes
+        let modeBracketedPaste = modes?.bracketedPaste
 
         // Validate the whole sequence before writing a byte: an unknown name
         // refuses the send by that name and records a refusal, not a transport
@@ -4471,14 +4487,14 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .transportFailed, error: reason,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste)
             return RPCResponse(error: reason)
         }
 
         await finishActuation(
             actuationID, .dispatched,
             modeSource: modeSource, modeAgeMilliseconds: modeAge,
-            modesObserved: modesObserved)
+            modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste)
         return .ok()
     }
 

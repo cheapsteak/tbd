@@ -118,6 +118,32 @@ struct ActuationLogTests {
         #expect(actor["kind"] as? String == "daemon")
     }
 
+    /// A holder send's outcome carries what it composed against **and** what
+    /// it made of it. The two bracketed-paste keys are separate because they
+    /// disagree on purpose — a stale "off" is wrapped for an agent session —
+    /// and a lost Enter is diagnosable only with both on the row.
+    @Test("a holder send outcome records the reading's paste flag beside the wrap decision")
+    func outcomeCarriesPasteReadingAndDecision() async throws {
+        let directory = try Self.makeDirectory()
+        let path = directory.appendingPathComponent("actuations.jsonl").path
+        let log = ActuationLog(path: path)
+
+        let requestID = try await log.appendRequest(sendRow())
+        await log.appendOutcome(
+            confirms: requestID, result: .dispatched,
+            modeSource: .staleDaemon, modeAgeMilliseconds: 19, modesObserved: true,
+            modeBracketedPaste: false, bracketedPaste: true)
+
+        let outcome = try #require(try rows(at: path).last)
+        #expect(Set(outcome.keys) == [
+            "actor", "bracketedPaste", "confirms", "id", "kind", "modeAgeMilliseconds",
+            "modeBracketedPaste", "modeSource", "modesObserved", "result", "ts",
+        ])
+        #expect(outcome["modeSource"] as? String == "staleDaemon")
+        #expect(outcome["modeBracketedPaste"] as? Bool == false)
+        #expect(outcome["bracketedPaste"] as? Bool == true)
+    }
+
     @Test("a failed outcome carries its result and the error text")
     func outcomeCarriesFailureDetail() async throws {
         let directory = try Self.makeDirectory()

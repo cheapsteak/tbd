@@ -102,12 +102,13 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     ///
     /// A consumer's policy is keyed on this field, so the policy cannot be
     /// applied by accident. The consumers the design names read it as follows:
-    /// the input-path oracle proceeds on `staleDaemon` modes and records the
-    /// source on the actuation row; the hibernation pending-input rail refuses
-    /// on anything but `daemon`, because a frozen screen cannot prove the
-    /// composer is empty and a live one a viewer answered has somebody at its
-    /// keyboard; and a person reading `tbd terminal output` is shown the source
-    /// and the age on stderr.
+    /// the input-path oracle proceeds on `staleDaemon` modes — trusting a
+    /// stale bracketed-paste "on", and a stale "off" only for a shell — and
+    /// records the source on the actuation row; the hibernation pending-input
+    /// rail refuses on anything but `daemon`, because a frozen screen cannot
+    /// prove the composer is empty and a live one a viewer answered has
+    /// somebody at its keyboard; and a person reading `tbd terminal output` is
+    /// shown the source and the age on stderr.
     ///
     /// **The raw values must stay identical to `ActuationModeSource`'s.** A
     /// supervisor correlates the `screen.source` it read from `tbd terminal
