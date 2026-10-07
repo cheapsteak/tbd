@@ -87,6 +87,7 @@ struct PRStatusPresentation: Equatable {
         case pending
         case nonMergeable
         case draft
+        case closed
         case mergeable
         case merged
     }
@@ -120,6 +121,7 @@ struct PRStatusPresentation: Equatable {
             )
         case .nonMergeable:     return .red
         case .draft:            return .secondary
+        case .closed:           return .gray
         case .mergeable:
             // Light: muted forest #3D7D40.
             // Dark:  GitHub success.fg #3FB950.
@@ -144,6 +146,7 @@ struct PRStatusPresentation: Equatable {
             }
         case .nonMergeable:     return .systemRed
         case .draft:            return .secondaryLabelColor
+        case .closed:           return .systemGray
         case .mergeable:
             return NSColor(name: nil) { appearance in
                 appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -185,7 +188,7 @@ struct PRStatusPresentation: Equatable {
         case .merged:
             return PRStatusPresentation(glyph: .asset("git-merge"), colorSemantic: .merged)
         case .closed:
-            return PRStatusPresentation(glyph: .asset("git-pull-request-closed"), colorSemantic: .nonMergeable)
+            return PRStatusPresentation(glyph: .asset("git-pull-request-closed"), colorSemantic: .closed)
         }
     }
 
