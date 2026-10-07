@@ -587,8 +587,8 @@ class TBDTerminalView: TerminalView {
     /// instead of only raising the window. The activating click does nothing
     /// else, as in any macOS terminal: it reaches neither SwiftTerm — whose
     /// mouse-down would drop the selection the user came back to copy — nor
-    /// the pane. A Cmd+click is not consumed that way: it still opens its
-    /// path or link, through SwiftTerm's mouse-up for an OSC 8 hyperlink.
+    /// the pane. A Cmd+click still opens its path or link, through
+    /// SwiftTerm's mouse-up for an OSC 8 hyperlink.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         guard onMouseDownClaimFocus != nil else { return false }
         activationClickEventNumber = event?.eventNumber
@@ -643,7 +643,11 @@ class TBDTerminalView: TerminalView {
                 return
             }
         }
-        if isActivationClick, !event.modifierFlags.contains(.command) {
+        // An activating Cmd+click on an OSC 8 hyperlink goes on to SwiftTerm,
+        // whose mouse-up opens it; anything else TBD did not open is consumed.
+        if isActivationClick,
+           !(event.modifierFlags.contains(.command)
+             && hasOSC8Payload(atWindowLocation: event.locationInWindow)) {
             pressBypassesSwiftTerm = true
             return
         }

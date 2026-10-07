@@ -375,6 +375,17 @@ struct HolderPanelFocusTests {
             to copy
             """)
 
+        // An activating Cmd+click on plain text opens nothing, and keeps the
+        // selection too.
+        fixture.window.makeFirstResponder(nil)
+        let commandActivating = fixture.mouseEvent(
+            .leftMouseDown, at: point, [.command], eventNumber: 44)
+        #expect(fixture.view.acceptsFirstMouse(for: commandActivating))
+        fixture.view.mouseDown(with: commandActivating)
+        fixture.view.mouseUp(
+            with: fixture.mouseEvent(.leftMouseUp, at: point, [.command], eventNumber: 44))
+        #expect(fixture.view.selectionActive, "an activating Cmd+click on plain text dropped the selection")
+
         // Any later click in the now-key window is an ordinary one.
         fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, eventNumber: 43))
         fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, eventNumber: 43))
