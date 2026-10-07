@@ -170,9 +170,35 @@ The ledger excludes:
 ### 4.2 Test identity
 
 A test's ID is `<xunit classname>/<xunit name>`, for example
-`TBDDaemonTests.HolderLockTests/lockIsReacquirableAfterRelease()`. That is the
-format the `retry-metrics` ledger already uses for `testID`, so a test seen in
-both sources has one key.
+`TBDDaemonTests.HolderLockTests/lockIsReacquirableAfterRelease()`. The two
+sources spell a test the same way only when its suite is top-level, so the
+ledger normalizes the `retry-metrics` form into the xunit form.
+
+- **xunit** – Swift Testing writes the module and every enclosing suite, joined
+  by `.`, as `classname`, and the function name as `name`. A test in a nested
+  suite reads `classname="TBDDaemonTests.TBDHomeSerialized.ActuationLogSpawnWiringTests"`.
+  Each CI pass writes two files, `xunit-<pass>.xml` for XCTest cases and
+  `xunit-<pass>-swift-testing.xml` for Swift Testing cases; the ledger reads
+  every XML file in the artifact. XCTest names carry no `()`, and the same
+  `<classname>/<name>` rule applies to them.
+- **`retry-metrics`** – `RetryMetrics.stableID` in
+  `Tests/TestSupport/FlakyTestSupport.swift` joins the module and the *first*
+  name component with `.`, then appends each remaining component after a `/`.
+  For a top-level suite that equals the xunit form; for a nested one it does
+  not: the test above would be recorded as
+  `TBDDaemonTests.TBDHomeSerialized/ActuationLogSpawnWiringTests/<name>`.
+- **Normalization** – split a `testID` on `/`; the last segment is the name,
+  and the segments before it, joined with `.`, are the classname. A `testID`
+  with no `/` is a test outside any suite: everything up to the first `.` is
+  the classname (module names contain no `.`) and the rest is the name. Swift
+  type and function names cannot contain `/`, so the split is unambiguous.
+
+Evidence, from `test.yml` run 37679063383: the one `retry-metrics` record,
+`TBDDaemonTests.FlakyQuarantineSelfTests/retriesUntilPass()`, matches its xunit
+`<testcase>` exactly, and the xunit files carry nested classnames such as the
+one above. No `.flaky` test sits in a nested suite today, so the nested
+`testID` form is read from `stableID` rather than from a recorded sample; the
+ledger's harness pins both forms (§13).
 
 ### 4.3 Occurrences and the threshold
 
@@ -274,18 +300,30 @@ links, and the failure signatures. The brief is built only from the ledger's
 structured data. Human comments on the issue are not copied into it, because
 anyone can comment on a public issue and the session runs with a shell.
 
-`workflow_dispatch` may name an issue directly; the picker then checks only that
-the issue exists and has no open bot PR.
+`workflow_dispatch` may name an issue directly. The picker then skips the
+ranking, the threshold, and the re-eligibility rule, but still requires that
+the issue exists and is open, carries the `flaky` label, has a ledger comment
+whose JSON block parses and names a test ID, and has no open bot PR. The brief
+comes from that ledger comment, as on the schedule. An issue that fails any of
+these is refused, and the job ends red naming the condition.
 
 ## 6. Fixing and verifying
 
 ### 6.1 The fixer session
 
-The `fix` job checks out `main`, restores the SwiftPM build cache read-only (the
-nightly's precedent), builds once, and starts `claude-code-action` with the
-brief and the rules below. The session runs on the macOS runner itself, so it
-can build, run the test through `scripts/test.sh --filter`, and stress it while
-it diagnoses.
+The `fix` job checks `main` out twice, at one SHA, into two trees:
+
+- **The session tree** – the job's primary checkout. It restores the SwiftPM
+  build cache read-only (the nightly's precedent) and builds, so the session
+  starts warm. The session works only here.
+- **The verification tree** – a second, separate checkout at its own path,
+  which the session is never pointed at. It builds from cold, and the baseline
+  (§6.3) and every verifier run (§6.4) happen in it.
+
+The job then starts `claude-code-action` in the session tree with the brief and
+the rules below. The session runs on the macOS runner itself, so it can build,
+run the test through `scripts/test.sh --filter`, and stress it while it
+diagnoses.
 
 **The session holds no repository write credential**, by these mechanisms
 rather than by instruction:
@@ -370,15 +408,15 @@ only when a parallel suite forked; stressed alone, it would likely have passed
 every time. So the verifier stresses at one of two scopes, and the pre-fix
 baseline (§6.3) chooses which:
 
-- **Test scope** – the target test alone, **20 iterations**. Used when the
-  baseline reproduced the failure with the test alone (at least one failing
-  iteration of 20).
-- **Pass scope** – the whole CI pass the test runs in, **3 iterations**. Used
-  when the baseline showed 0 failures for the test alone, which suggests the
-  flake needs its neighbours. The pass is the one `test.yml` runs the test in,
-  with the same filter, parallelism, and executed-test floor. A pass iteration
-  takes at most about 8 minutes once warm, and the first iteration of a run can
-  take several times that (§9), which is why the count is 3.
+- **Test scope** – the target test alone. Used when the baseline reproduced
+  the failure with the test alone (at least one failing iteration of 20).
+- **Pass scope** – the whole CI pass the test runs in. Used when the baseline
+  showed 0 failures for the test alone, which suggests the flake needs its
+  neighbours. The pass is the one `test.yml` runs the test in, with the same
+  filter, parallelism, and executed-test floor.
+
+How many iterations each scope runs, `N`, is sized from the baseline (§6.3)
+and capped by the time budget (§9).
 
 `test.yml` runs four test steps, each through `scripts/ci/watched-test-pass.sh`.
 Their filters partition the package with no gap and no overlap:
@@ -409,9 +447,13 @@ baseline chose.
 ### 6.3 The pre-fix baseline
 
 Before the session starts, the verifier runs the target test alone for 20
-iterations on `main`. The baseline does two jobs:
+iterations on `main`, in the verification tree (§6.1), with the same
+retry-metrics wiring as a verifier run (§6.4). An iteration counts as a
+failure if the test failed, or if the target is quarantined with `.flaky` on
+`main` and its record says `passedOnRetry` or `failed`: a retry the quarantine
+absorbed is still a reproduction. The baseline does two jobs:
 
-- **It chooses the scope** (§6.2).
+- **It chooses the scope** (§6.2) **and sizes `N`** (below).
 - **It is the "before" for the PR.** The result goes into the brief, so the
   session starts with a reproduction or knows it lacks one, and into the PR, so
   the reviewer can read before and after side by side. When the baseline shows
@@ -419,8 +461,49 @@ iterations on `main`. The baseline does two jobs:
   that the pre-fix rate at pass scope was not measured; the ledger's counts are
   then the only "before".
 
-The baseline never runs at pass scope: three pass iterations on `main` would add
-25 to 55 minutes to every attempt (§9).
+The baseline never runs at pass scope: a pass iteration takes about 8 minutes
+warm, so a pass-scope baseline long enough to estimate a rate would cost more
+than the verifier runs it sizes (§9).
+
+**Sizing `N` from the baseline.** The baseline's failure rate on `main` is
+`p = f / 20`, where `f` is its failing iterations. A candidate that changed
+nothing would still pass `N` clean iterations with probability `(1 - p)^N`,
+the **false-pass probability**. The verifier picks the smallest `N` that holds
+it under 5%:
+
+    N = ceil(ln(0.05) / ln(1 - p))
+
+then raises it to at least 20, the baseline's own count, and lowers it to at
+most the test-scope cap (§9). Pass scope has no `p` and runs its cap (below).
+For example, `p = 0.05` (1 failure in 20) gives `N = 59`; `p = 0.15` gives 19,
+raised to 20; a test that failed all 20 times has no defined `N` and runs 20.
+`N` is computed once, after the baseline, and both tries use it.
+
+Three cases follow:
+
+- **Test scope, bound reached** – `N` fits under the cap. The verdict carries
+  the false-pass probability `(1 - p)^N`, which is under 5%. With the §9
+  estimates the test-scope cap is 73, above the 59 that the smallest
+  measurable `p` needs, so this is the expected case.
+- **Test scope, bound not reached** – the cap is below the computed `N`, which
+  happens only if the measured iteration time is worse than §9 estimates. The
+  verifier runs the cap. A clean run still makes the PR eligible for ready, and
+  the PR body and the commit status both state the actual false-pass
+  probability `(1 - p)^N`.
+- **Pass scope** – the baseline saw 0 failures, so there is no measured `p` to
+  size from, and the baseline never runs at pass scope to get one. The
+  verifier runs the pass-scope cap and states the bound as **unknown**. The
+  ledger's own record is not used as a stand-in for `p`: it comes from a
+  different regime (CI runs without induced load), its numerator misses
+  every failure that was never rerun to green, and it has no clean count of
+  the runs in which the test executed. A rate built from it would look like a
+  bound without being one. So the PR states the bound as unknown and, for
+  scale, what the cap's `N` would give against `p = 0.05` and `p = 0.15`.
+
+`p` from 20 iterations is a point estimate. A test whose true rate is lower
+than measured is more likely to slip through than the stated probability says.
+The stated figure is the false-pass probability at the measured rate, not a
+confidence bound, and the PR says so.
 
 ### 6.4 The verifier
 
@@ -447,17 +530,62 @@ of these hold, at that scope:
   floor, fails the run;
 - every iteration's xunit output shows the target test executed and passed – a
   deleted, renamed, or disabled test cannot pass by running nothing;
-- the `retry-metrics` records for the target show no `passedOnRetry` – a fix
-  that added `.flaky` must not pass on retries the quarantine hides.
+- every iteration's retry-metrics ledger is present and readable, and shows the
+  target never needed a retry, by the rule below.
+
+**The retry check.** `.flaky` writes a record only when
+`TBD_RETRY_METRICS_PATH` is set, and nothing in the nightly sets it, so the
+verifier sets it itself. For each iteration, at both scopes and in the
+baseline, it:
+
+1. creates an empty file at a fresh per-iteration path and exports that path
+   as `TBD_RETRY_METRICS_PATH` to the iteration's `scripts/test.sh` run.
+   Pre-creating the file matters: the writer opens it only on the first record
+   (`O_CREAT` on append), so without it "no `.flaky` test ran" and "the
+   variable never reached the test process" would both leave no file;
+2. after the iteration, fails the verdict if that file is missing or cannot be
+   read, if any line fails to parse as a record, or if the iteration's output
+   contains the writer's `warning: retry metrics disabled` line, which it
+   prints when an open or write fails;
+3. reads the target's records, matched by the normalized ID (§4.2).
+
+Which records the target must have depends on whether it carries `.flaky` in
+the verification tree, as the quarantine audit's `inventory` subcommand reports
+it:
+
+- **Quarantined target** – the writer records every execution, clean
+  first-try passes included, so each iteration must hold at least one record
+  for the target (one per test case), and every one must say
+  `passedFirstTry`. No record, or any `passedOnRetry` or `failed`, fails the
+  verdict. A fix that added `.flaky` therefore cannot pass on retries the
+  quarantine hides.
+- **Unquarantined target** – the target writes no records, so none is
+  expected, and an empty file is a pass for this check. A record for the
+  target here means the inventory and the build disagree, and fails the
+  verdict.
+
+Records for other tests are ignored, except that they prove the wiring
+reached the test process: at pass scope 1a, `FlakyQuarantineSelfTests`
+always writes one.
 
 At pass scope the verdict is about the target test. Another test failing in the
 same iteration does not fail the candidate: a pass of thousands of tests under
 induced load carries other flakes the candidate does not claim to fix. The PR
 lists those failures so the reviewer sees them.
 
-The verifier runs from the job's pristine checkout of `main`, not from the
-candidate's tree. That keeps the verifier's own logic out of the candidate's
-reach, but not everything the verdict depends on: the candidate's tests run
+**The candidate is judged in a clean tree.** The verifier never runs tests in
+the session tree. It bundles the session's commits (`git bundle`, the same
+bundle `publish` pushes), checks that they descend from the `main` SHA both
+trees started at, and resets the verification tree to that `main` SHA plus
+those commits. Anything the session left uncommitted, untracked, or written
+into the session tree's `.build/` is not part of what is judged, and what is
+judged is exactly what gets pushed. Each try's verifier run resets the
+verification tree the same way and rebuilds incrementally.
+
+The verifier's own scripts run from a copy of `main`'s, taken from the
+verification tree before the session starts, never from the candidate's. That
+keeps the verifier's logic out of the candidate's reach, but not
+everything the verdict depends on: the candidate's tests run
 through its own `scripts/test.sh` and are compiled from its own package
 manifest, and the PR's `test.yml` run – which promotion requires green (§7) –
 executes the candidate's copies of the CI test scripts. So the verifier checks
@@ -483,10 +611,12 @@ whatever the stress result. The bot may still have changed it for a good
 reason, so the PR is opened as usual and stays a draft, and its body names the
 protected files touched and says a human must judge the change.
 
-The verifier runs on the runner the session used. Before it starts, the job
-ends the session's process tree, so the session's own processes are not running
-while the candidate is judged. A process the session deliberately detached
-could survive that, which is one reason the verdict alone never promotes: the
+The verifier runs on the runner the session used, as the same user. Before it
+starts, the job ends the session's process tree, so the session's own processes
+are not running while the candidate is judged. The clean tree and that kill
+keep the session's working state out of the verdict; they do not stop a session
+that sets out to tamper with files elsewhere on the runner, or a process it
+deliberately detached. That is why the verdict alone never promotes: the
 PR's own `test.yml` run on a fresh runner must also be green (§7), and a human
 reviews and merges.
 
@@ -496,10 +626,21 @@ The stress harness's header already states the limit, and the PR repeats it: a
 clean run is one sample from a gentler regime than the one many of these flakes
 appear in, not proof of a fix. CI runners have about four idle cores; the
 regime #503 characterised was a load average near 150 on 12 shared cores. Pass
-scope restores the population a test normally runs among, but for only three
-iterations. The bar is a filter that rejects fixes which do not hold even under
-modest load. The human reviewer and the ledger carry the rest: a test that fails
-again after its fix reopens its issue (§4.4).
+scope restores the population a test normally runs among, but only for as
+many iterations as the budget allows. The human reviewer and the ledger carry
+the rest: a test that fails again after its fix reopens its issue (§4.4).
+
+The sizing in §6.3 makes the filter's strength explicit rather than fixed. At
+test scope it is a stated false-pass probability, normally under 5%. At pass
+scope it is weak, and the spec does not pretend otherwise: with today's cap of
+3, a candidate that changed nothing passes with probability 0.86 against a
+flake with `p = 0.05` and 0.61 against one with `p = 0.15`.
+
+The commit status says what was observed and nothing more. `flakefix/stress` =
+`success` is described as "no failure observed in N runs", with `N` filled in
+and never "fixed". When the bound was not reached, the description adds the
+false-pass probability, or says it is unknown at pass scope. The PR body gives
+the baseline, `p`, `N`, the cap, and the false-pass probability or "unknown".
 
 ### 6.6 Two tries
 
@@ -510,7 +651,7 @@ An attempt allows two tries:
 2. The verifier runs. If it passes, the attempt goes to §7.
 3. If it fails, a second session starts on the same branch, with the first
    session's notes and the verifier's iteration log.
-4. The verifier runs again, at the same scope. Pass or fail, the attempt goes
+4. The verifier runs again, at the same scope and the same `N`. Pass or fail, the attempt goes
    to §7, which opens the PR either way and marks it eligible for ready only on
    a pass.
 
@@ -535,7 +676,9 @@ Transitions, each owned by the PR driver:
   verification, so the PR's CI runs once on the final candidate rather than
   once per try.
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
-  `flakefix/stress` = `success` on the pushed SHA. On a fail, it sets `failure`
+  `flakefix/stress` = `success` on the pushed SHA, described as "no failure
+  observed in N runs", plus the false-pass probability when §6.3's bound was
+  not reached (§6.5). On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
   `failure`, whatever its stress result, with a status description naming the
@@ -601,27 +744,41 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   verifier can run is one of those three, a subset of the arm's tests, so the
   arm's figures are upper bounds for it. The quiet pass is not in the arm; its
   healthy CI run takes about 2 minutes (117 seconds of tests), so its warm
-  iterations sit well inside the same bound. A pass-scope verifier run is
-  therefore at most about 24 minutes warm and up to about 55 when its first
-  iteration pays the warm-up.
+  iterations sit well inside the same bound. A test-alone iteration – seconds
+  of test plus `scripts/test.sh` and SwiftPM startup – is estimated at 45
+  seconds.
 
-  The worst case is an attempt at pass scope that uses both tries, with both
-  verifier runs paying the warm-up. As ceilings:
-  - build from a restored cache – 15 minutes;
+  The job's fixed costs, as ceilings:
+  - session-tree build from a restored cache – 15 minutes;
+  - verification-tree cold build – 25 minutes (the first CI test step, which
+    pays the whole compile, measured 1250 seconds on a cache miss);
   - pre-fix baseline, 20 test-alone iterations – 15 minutes;
-  - two sessions, capped at 60 minutes each – 120 minutes;
-  - two verifier runs at pass scope, up to 55 minutes each – 110 minutes.
+  - two sessions, capped at 45 minutes each – 90 minutes;
+  - checkouts, ending the session's processes, the bundle, the artifact
+    upload, and API calls – 20 minutes.
 
-  That totals 260 minutes and leaves 40 for checkout, the artifact upload, and
-  API calls. The push and PR writes happen in `publish`, outside this budget.
-  Without the warm-up the two verifier runs cost about 48 minutes and the
-  attempt fits in about 200; at test scope they cost about 30 and it fits in
-  about 180. The timeout stays at 300 minutes until the first implementation
-  slice measures whether a verifier run on an incrementally rebuilt candidate
-  pays the first-iteration warm-up. If it does not, 240 minutes covers the
-  worst case and the job can start at 06:00. The test-alone iteration time
-  (seconds of test plus `scripts/test.sh` and SwiftPM startup) is an estimate
-  that slice measures as well.
+  That is 165 minutes, which leaves 135 of the 300-minute timeout for the two
+  verifier runs: an allotment `R` of 65 minutes each, with 5 to spare. The
+  push and PR writes happen in `publish`, outside this budget. The session cap
+  is 45 rather than 60 because every session minute comes out of the verifier
+  runs, and those are what make the verdict mean something.
+
+  Each scope's cap on `N` (§6.3) is what fits in one allotment:
+
+      cap = floor((R - B - W) / t)
+
+  where `B` is the verifier's incremental rebuild of the candidate (ceiling 10
+  minutes), `W` is the extra time a run's first iteration takes, and `t` is a
+  warm iteration's time. These are named constants in the verifier, so new
+  measurements change the caps by editing one line each:
+  - **Test scope** – `t` = 0.75 minutes and `W` = 0, so the cap is 73.
+  - **Pass scope** – `t` = 8 minutes, and `W` is up to 30 minutes (the arm's
+    first iteration, 38 minutes, less a warm one), so the cap is 3. If a run on
+    an incrementally rebuilt candidate turns out not to pay that warm-up,
+    `W` = 0 and the cap becomes 6.
+
+  The first implementation slice measures `t`, `W`, `B`, and the cold build,
+  and sets the constants from what it finds.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
   once per attempt and so at most once a night.
 - **The `ledger`, `publish`, and `promote` jobs** run on ubuntu and cost no
@@ -644,6 +801,15 @@ means off.
   step is skipped; the ledger itself still runs under its own flag.
   `workflow_dispatch` of `fix` also requires it. The reclaimer sits under this
   flag because only the fixer creates `flakefix/*` branches.
+
+**The fixer requires the ledger.** With `FLAKE_FIXER_ENABLED` on and
+`FLAKE_LEDGER_ENABLED` off, the issues hold no ledger comments the fixer can
+trust – report-only mode writes none, and any it finds would be stale – so the
+`fix` job refuses to start. Its first step writes a job summary line saying
+the fixer is on but the ledger is off and naming `FLAKE_LEDGER_ENABLED`, and
+ends the job red before the picker runs, on the schedule and on
+`workflow_dispatch` alike. `promote` is unaffected: it judges PRs the fixer
+already opened, from their commit statuses and CI, not from the ledger.
 
 Every job also requires that the workflow is running in this repository, not a
 fork, so a fork that copied the variables cannot run them.
@@ -696,9 +862,10 @@ file. The placement battery from `docs/theory-placement.md` agrees:
 - **Two reasonable projects** could pick a different threshold, a different
   iteration count, or no bot at all – all theories, and all held in editable
   scripts.
-- **The tunable numbers** – two occurrences, 20 test-alone iterations, 3
-  pass iterations, one attempt a night, two tries – are named constants in
-  those scripts, not compiled constants.
+- **The tunable numbers** – two occurrences, 20 baseline iterations, the 5%
+  false-pass target, the minimum `N` of 20, the per-run allotment and the
+  timing constants behind each cap, one attempt a night, two tries – are named
+  constants in those scripts, not compiled constants.
 - **Nothing compiles.** The daemon, the app, and the CLI do not change. The only
   code changes outside the new scripts are in test tooling (the stress
   harness's `--xunit-dir`, `--test`, and `--pass-of` options).
@@ -716,14 +883,30 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   skipped test cases; a run with two attempts and two same-named artifacts,
   assigned by timestamp; fork runs, `flakefix/*` runs, and the self-test ID,
   all excluded; runs and artifacts outside the 7-day read window ignored;
+  both xunit files of a pass read; test-ID normalization for a top-level suite
+  (identical forms), a nested suite (`Module.Outer/Inner/test()` becomes
+  `Module.Outer.Inner/test()`), and a test outside any suite;
   occurrence keys and the threshold at one and two keys; issue
   lookup by title, by `.flaky` trait, and by creation; a closed issue reopened;
   the same run processed twice with no change; and an API error that leaves the
   ledger unwritten.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
-  the tie-break order; and the re-eligibility rule after an attempt.
+  the tie-break order; the re-eligibility rule after an attempt; a dispatched
+  issue refused for each missing condition (closed, no `flaky` label, no ledger
+  comment, an unparsable JSON block, an open bot PR); and the refusal to start
+  with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
-  failure and with none; and the judge over synthetic iteration logs and xunit
+  failure and with none; `N` sizing for `p` = 0.05 (59), 0.15 (raised to 20),
+  1.0 (20), a `p` whose `N` exceeds the cap (capped, with the false-pass
+  probability in the verdict), and pass scope (the cap, bound unknown); a
+  baseline iteration of a quarantined target whose record says
+  `passedOnRetry`, counted as a failure; the retry check with a missing
+  metrics file, an unreadable one, an unparsable line, the writer's disabled
+  warning in the output, a quarantined target with no record, a quarantined
+  target with a `passedOnRetry` record, and an unquarantined target with an
+  empty file, which passes; the clean tree, where an uncommitted change in the
+  session tree is not judged and a bundle that does not descend from the start
+  SHA is refused; and the judge over synthetic iteration logs and xunit
   files at both scopes: a pass; a failing iteration; a wedged iteration; a test
   absent from the xunit output; a `passedOnRetry` record; another test failing
   at pass scope while the target passes; and a diff touching a protected file,
@@ -756,9 +939,14 @@ against a fixture that contains one.
   "now passes" is a claim. The verifier makes the decision from xunit output and
   exit codes, which the session cannot change.
 - **Always stressing at pass scope.** It reproduces neighbour-dependent
-  flakes, but three pass iterations cost 25 to 55 minutes where twenty
-  test-alone iterations cost minutes, and they observe the target only three
-  times. Test scope is the better instrument whenever the test fails alone,
+  flakes, but a pass iteration costs about 8 minutes where a test-alone one
+  costs under one, so the budget buys 3 pass iterations against 73 test-alone
+  ones. Test scope is the better instrument whenever the test fails alone,
   and the baseline shows when it does.
+- **A fixed iteration count.** One `N` for every test is too many for a test
+  that fails often and far too few for one that fails rarely: 20 clean
+  iterations let a no-op through about a third of the time against a 5%
+  flake. Sizing `N` from the measured rate spends the budget where the
+  evidence needs it, and states what it bought.
 - **Auto-merging a verified PR.** A clean stress run cannot prove a fix (§6.5),
   and a fix can change production code. A human merge is the backstop.
