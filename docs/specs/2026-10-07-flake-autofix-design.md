@@ -93,10 +93,11 @@ They run in one new workflow, `.github/workflows/flake-fixer.yml`, as four
 jobs:
 
 - **`ledger`** (ubuntu) – runs when the nightly workflow completes
-  (`workflow_run`), and on `workflow_dispatch`. Runs the reclaimer when
-  `FLAKE_FIXER_ENABLED` is on (§10, §11), then the ledger.
+  (`workflow_run`), and on `workflow_dispatch` with `job: ledger`. Runs the
+  reclaimer when `FLAKE_FIXER_ENABLED` is on (§10, §11), then the ledger.
 - **`fix`** (macos-26) – scheduled once a night at 05:00 UTC, and on
-  `workflow_dispatch` with an optional issue number. Runs the picker, the
+  `workflow_dispatch` with `job: fix` and an optional issue number. Runs the
+  picker, the
   baseline, the fixer session, and the verifier. It holds no write credential
   (§6.1) and writes nothing to GitHub; its result is an artifact.
 - **`publish`** (ubuntu) – runs after `fix`, in a separate job that never runs
@@ -104,6 +105,11 @@ jobs:
   the draft PR, the verdict status, and every issue comment an attempt makes.
 - **`promote`** (ubuntu) – runs when a `test.yml` run completes
   (`workflow_run`). Runs the PR driver's promote step for `flakefix/*` branches.
+
+The workflow's `workflow_dispatch` takes a required `job` input, a choice of
+`ledger` or `fix`, and an optional `issue` number that only `fix` reads. Each
+job's job-level `if:` selects it by trigger and, on dispatch, by `job`, so one
+workflow file serves both manual paths.
 
 05:00 UTC falls in the US night, and the `fix` job's timeout (§9) ends it by
 10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
@@ -170,7 +176,7 @@ The ledger excludes:
 ### 4.2 Test identity
 
 A test's ID is `<xunit classname>/<xunit name>`, for example
-`TBDDaemonTests.HolderLockTests/lockIsReacquirableAfterRelease()`. The two
+`TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()`. The two
 sources spell a test the same way only when its suite is top-level, so the
 ledger normalizes the `retry-metrics` form into the xunit form.
 
@@ -219,7 +225,7 @@ fix (§4.4). A test **qualifies** for a fix attempt when either:
   or the same branch do not. The rule is meant to separate a test that fails in
   different places from one bad run; or
 - its current episode is a recurrence. One failure on a commit that contains a
-  merged fix is enough, because it shows that fix did not hold.
+  recorded fix (§4.4) is enough, because it shows that fix did not hold.
 
 ### 4.4 The issue
 
@@ -232,9 +238,9 @@ The issue has three parts:
 
 - **Title** – `Flaky test: <test ID>`, exact. The title is the lookup key.
 - **Label** – `flaky`. The ledger creates the label if it is missing.
-- **Ledger comment** – one comment, authored by the workflow and marked with a
-  hidden sentinel (`<!-- flake-ledger v1 -->`), which the ledger edits in place
-  every run. It holds, readable by a human: the failure count, the distinct
+- **Ledger comment** – one comment, authored by the bot's own identity (below)
+  and marked with a hidden sentinel (`<!-- flake-ledger v1 -->`), which the
+  ledger edits in place every run. It holds, readable by a human: the failure count, the distinct
   nights and branches, each failure's run link and attempt, the failure
   signature (the xunit `<failure>` message, first lines), each failure's
   episode, and the outcome of each bot PR. It also holds the same data as a
@@ -270,6 +276,20 @@ no two jobs ever edit the same comment:
 Promotion writes no state: whether a PR is ready is GitHub's own PR state, and
 nothing the picker decides depends on it.
 
+**Only the bot's own comments are state.** Both comments are written with the
+`tbd-flake-fixer` App token – the `ledger` job mints it too, for every issue
+write – so their author is the App's bot account, `tbd-flake-fixer[bot]`. A
+reader accepts a comment as ledger or attempt state only if it carries the
+sentinel **and** its `user.login` is exactly that login with `user.type` =
+`Bot`. GitHub reserves the `[bot]` suffix for Apps (a person's login cannot
+contain `[`), so nobody else can author a comment under that name. The jobs
+that mint the token check that the action's `app-slug` output plus `[bot]`
+equals the login; the readers without a token – the picker, in the read-only
+`fix` job – use the same login from one constant in `scripts/flake_lib.py`. A
+comment with a sentinel and any other author is ignored, and the `ledger`
+job's summary lists it so a human can see the attempt. Any number of such
+forgeries changes nothing the bot reads.
+
 The issue is the ledger's only durable store, because the artifacts it reads
 expire. Their retention differs, and each sets a read window:
 
@@ -291,29 +311,73 @@ nothing.
 
 1. An issue whose title matches exactly, open or closed.
 2. A `.flaky(issue: N)` trait on that test in `Tests/` – the quarantine audit's
-   `inventory` subcommand already lists these. Issue N is the test's issue: the
-   ledger adds the `flaky` label and its comment, and leaves the title alone.
+   `inventory` subcommand already lists these – when issue N belongs to this
+   test alone. Issue N is then the test's issue: the ledger adds the `flaky`
+   label and its comment, and leaves the title alone.
 3. Otherwise the ledger creates one.
 
-An issue that names a *suite* rather than one test – the nightly stress
-targets' issues, such as #961 – is not reused: two tests in one suite are two
-flakes. The new per-test issue links to it.
+**Matching an inventory row to a test.** An inventory row carries the file,
+the function name without its parameter list, and the issue – no suite. The
+ledger matches a row to a test ID when the row's file is the test's file (from
+the test's `retry-metrics` records, which carry the repo-relative file and run
+whenever a `.flaky` test runs in CI) and the row's function name is the ID's
+name up to its `(`. A row that matches no recorded test, or two – the same
+function name in two suites of one file – is skipped and listed in the job
+summary; the test then falls through to step 3.
 
-**Recurrence after a merged fix.** Once a test has a `merged` PR, a later
-failure counts as a **recurrence** only if the failing run's commit contains
-the fix: the ledger asks GitHub's compare API whether the fix's merge commit is
-an ancestor of the run's head SHA. A failure on a commit without the fix – a
-branch cut before the merge and never rebased, or a rerun of an old commit –
-is recorded in the history as `pre-fix` and otherwise ignored: it neither
-reopens the issue nor counts toward anything. For a pull-request run the check
-uses the branch's head SHA, while `test.yml` actually tested a merge with the
-base branch, so a branch that has not been rebased since the merge is treated
-as pre-fix even if the tested merge contained the fix. That errs toward
-missing a recurrence rather than inventing one.
+**Issue N belongs to this test alone** when exactly one inventory row names
+it and it carries no bot ledger comment for a different test ID. Otherwise –
+several tests' traits name N, N already holds another test's ledger, or N is a
+suite-level issue such as the nightly stress targets' #961 – the ledger opens a
+separate per-test issue and links N from it: two tests are two flakes. The
+per-test issue is the one everything keys on: the `flakefix/issue-<N>` branch
+name, the one-open-PR rule (§5), the ledger and attempt comments, and the
+PR's `Fixes #N`. The shared issue gets nothing beyond the link.
 
-A recurrence reopens the issue, with a comment linking the failure and the
-merged PR, and starts a new episode (§4.3), which makes the test eligible
-again (§5). Recurrence after a fix is exactly the evidence a human needs to see.
+**Closed issues: recurrence or not.** What a new failure does to a closed
+issue depends on how it was closed. The ledger reads the issue's latest
+`ClosedEvent` through the GraphQL API: its `stateReason`, and its `closer`,
+which GitHub sets to the commit or the merged pull request that closed it.
+
+- **Closed as completed, with a closer** – a fix landed, whether the bot's PR
+  or a human's PR or commit. The **fix commit** is the closer commit, or the
+  closer PR's merge commit. A merged bot PR whose `Fixes #N` was removed from
+  its body leaves the issue open with no closer; its `merged` attempt record
+  (above) supplies the fix commit instead.
+- **Closed as not planned, or as completed with no closer** – no fix is on
+  record. The issue **stays closed**: the ledger never reopens it, and the
+  picker never selects a closed issue. The ledger still records new failures
+  in its comment, so the history is there if a human reopens it.
+
+**A failure after a fix commit** counts as a **recurrence** only if the
+failing run's commit contains the fix: the ledger asks GitHub's compare API
+whether the fix commit is an ancestor of the run's head SHA. A failure on a
+commit without the fix – a branch cut before the fix and never rebased, or a
+rerun of an old commit – is recorded in the history as `pre-fix` and otherwise
+ignored: it neither reopens the issue nor counts toward anything. For a
+pull-request run the check uses the branch's head SHA, while `test.yml`
+actually tested a merge with the base branch, so a branch that has not been
+rebased since the fix is treated as pre-fix even if the tested merge contained
+it. That errs toward missing a recurrence rather than inventing one.
+
+A recurrence reopens the issue, with a comment linking the failure and the fix,
+and starts a new episode (§4.3), which makes the test eligible again (§5). The
+brief lists the fix as a prior attempt that did not hold. Recurrence after a
+fix is exactly the evidence a human needs to see.
+
+**Worked example: PR #960.** Under this design the first failure of
+`TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()` opens its
+issue, and the second distinct branch qualifies it. Suppose a human's PR #960
+carries `Fixes #<that issue>`: merging it closes the issue as completed, with
+#960 as the closer and its merge commit as the fix commit. A later failure on a
+branch cut before #960 and not rebased is `pre-fix` and changes nothing. A
+failure on a commit that contains #960's merge commit reopens the issue,
+starts episode 2, and makes the test eligible that night, with #960 in the
+brief as the fix that did not hold. Had a human instead closed the issue as not
+planned, the same failure would be recorded in the ledger comment and the
+issue would stay closed. Had #960 not referenced the issue at all, the issue
+would stay open with no fix on record, and the bot could pick it; a human
+closing it by hand, as completed with no closer, ends that.
 
 The ledger posts nothing besides its one comment per issue, and the reopen
 comment above. A new failure updates the ledger comment; it never adds a
@@ -354,13 +418,19 @@ occurrences with run links, the failure signatures, and every prior attempt
 with its outcome. A merged PR is listed as a prior fix that did not hold, with
 its link and the session notes its attempt entry recorded, so the session
 starts from what was already tried. The brief is built only from the ledger's
-structured data. Human comments on the issue are not copied into it, because
-anyone can comment on a public issue and the session runs with a shell.
+structured data, read only from the bot's own comments (§4.4). No human-written
+text reaches it: not issue comments, not the issue body or title, not PR
+bodies, and not a sentinel comment someone else posted, because anyone can
+comment on a public issue and the session runs with a shell. The failure
+signatures are xunit messages from same-repository runs (§4.1), and the
+session notes in prior attempts are the bot's own sessions' output, recorded
+by `publish`.
 
 `workflow_dispatch` may name an issue directly. The picker then skips the
 ranking, the threshold, and the re-eligibility rule, but still requires that
 the issue exists and is open, carries the `flaky` label, has a ledger comment
-whose JSON block parses and names a test ID, and has no open bot PR. The brief
+from the bot's own login whose JSON block parses and names a test ID, and has
+no open bot PR. The brief
 comes from that ledger comment, as on the schedule. An issue that fails any of
 these is refused, and the job ends red naming the condition.
 
@@ -370,11 +440,13 @@ these is refused, and the job ends red naming the condition.
 
 The `fix` job checks `main` out twice, at one SHA, into two trees:
 
-- **The session tree** – the job's primary checkout. It restores the SwiftPM
-  build cache read-only (the nightly's precedent) and builds, so the session
-  starts warm. The session works only here.
-- **The verification tree** – a second, separate checkout at its own path,
-  which the session is never pointed at. It builds from cold, and the baseline
+- **The session tree** – the job's primary checkout, at the workspace root
+  (`$GITHUB_WORKSPACE`). `actions/cache/restore` restores the SwiftPM build
+  cache read-only (the nightly's precedent) to the paths it was saved from,
+  which are relative to the workspace root, so only this tree can use it. It
+  builds, so the session starts warm. The session works only here.
+- **The verification tree** – a second, separate checkout under
+  `$RUNNER_TEMP`, outside the workspace, which the session is never pointed at. It builds from cold, and the baseline
   (§6.3) and every verifier run (§6.4) happen in it.
 
 The job then starts `claude-code-action` in the session tree with the brief and
@@ -400,8 +472,8 @@ rather than by instruction:
   attempted and could not succeed if it were. The rule is the same as the
   review workflow's for a different reason: always pass `github_token`.
 - **No App token on the runner.** The `tbd-flake-fixer` App token is minted
-  only in the `publish` job, which runs on a different runner after `fix` has
-  ended and never starts a model. It never exists in the session's
+  only in the ubuntu jobs that never start a model – `ledger`, `publish`, and
+  `promote` – and `publish` runs on a different runner after `fix` has ended. It never exists in the session's
   environment, on its disk, or in its process table.
 
 The session's outputs are local: commits on the working branch, and a notes
@@ -485,13 +557,20 @@ Their filters partition the package with no gap and no overlap:
 - **Fast pass 2** – `--parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`,
   floor 1900: every other target.
 - **Quiet pass** – `--no-parallel --filter '^TBDDaemonLiveTests\.'`, floor 35:
-  the tier-3 live suites, serially.
+  the tier-3 live suites, serially, on an otherwise idle machine.
 
-A test ID maps to its pass by applying those same regexes to the ID's xunit
-classname, which begins `<target>.<top-level suite>` (§4.2). The first
-character after `TBDDaemonTests.` decides between 1a and 1b, so a nested suite
-such as `TBDDaemonTests.TBDHomeSerialized.SomeSuite` falls in 1b with its
-parent, exactly as CI places it. `--pass-of` (§6.4) holds the four filters,
+A test ID maps to its pass by applying those same regexes to the form
+SwiftPM's `--filter` and `--skip` actually match, not to the xunit classname.
+That form is the `retry-metrics` one (§4.2): the module and the first name
+component joined by `.`, the rest by `/` – `TBDDaemonTests.TBDHomeSerialized/SomeSuite/test()`
+for a nested suite, `TBDDaemonTests.nilPreferredKeepsOrder()` for a test
+outside any suite. The difference matters: that suite-less test's xunit
+classname is plain `TBDDaemonTests`, which `^TBDDaemonTests\.` does not match,
+yet CI runs it in pass 1b, because its filter form starts `TBDDaemonTests.n`.
+The first character after `TBDDaemonTests.` decides between 1a and 1b, so a
+nested suite falls in 1b with its `TBDHomeSerialized` parent, exactly as CI
+places it. `TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()`,
+the #960 test, is in fast pass 2. `--pass-of` (§6.4) holds the four filters,
 parallelism flags, and floors as data, and its harness checks that data
 against the `watched-test-pass.sh` invocations in `test.yml`, so a change to a
 CI pass that the verifier does not follow fails the `lint` job. The verifier
@@ -585,15 +664,22 @@ the session's own account of its results is recorded but never consulted.
 `nightly-flake-stress.sh` gains two ad-hoc target modes:
 
 - **`--test <ID>`** – a filter that matches exactly that test, with an
-  executed-test floor of 1.
+  executed-test floor of 1. It converts the ledger's ID back to the filter
+  form (§6.2), escapes it as a regex, and anchors it as `^<form>(/|$)`: the
+  start anchor stops a match inside a longer ID, and the trailing group stops
+  `testFoo` from also matching `testFooBar` while still allowing a trailing
+  source-location component.
 - **`--pass-of <ID>`** – the filter, parallelism, and floor of the CI pass that
   contains the test, as §6.2 lists them, with an execution deadline sized from
   that pass's measured duration, first-iteration warm-up included.
 
-Both keep everything else the harness already does: induced CPU load with
-spinners captured by PID, the outer per-iteration deadline, the
-remote-verification valve forced off, and the verdict built from the summary
-line, the floor, and the exit code together.
+Both keep everything else the harness already does – the outer per-iteration
+deadline, the remote-verification valve forced off, and the verdict built from
+the summary line, the floor, and the exit code together – and both apply
+induced CPU load, with spinners captured by PID, with one exception: the
+quiet pass runs **without** induced load. It exists to run the tier-3 live
+suites serially on an idle machine, so loading it would test a regime CI never
+runs them in.
 
 The verifier runs the chosen mode on the candidate tree and passes only when all
 of these hold, at that scope:
@@ -658,23 +744,27 @@ The verifier's own scripts – `scripts/flake-verify.sh`,
 `scripts/nightly-flake-stress.sh`, and `scripts/nightly-quarantine-audit.sh`,
 whose `inventory` decides whether the target is quarantined – run from a copy
 of `main`'s, taken from the verification tree before the session starts, never
-from the candidate's. That
-keeps the verifier's logic out of the candidate's reach, but not
-everything the verdict depends on: the candidate's tests run
-through its own `scripts/test.sh` and are compiled from its own package
-manifest, and the PR's `test.yml` run – which promotion requires green (§7) –
+from the candidate's. The same copy supplies the test runner: the verifier
+invokes `main`'s `scripts/test.sh` and `scripts/swift-safe` with the
+verification tree as the working directory, so the candidate's tests run
+through the runner `main` ships, not one the candidate edited. That keeps the
+verifier's logic out of the candidate's reach, but not everything the verdict
+depends on: the candidate's tests are compiled from its own package manifest,
+and the PR's `test.yml` run – which promotion requires green (§7) –
 executes the candidate's copies of the CI test scripts. So the verifier checks
 the candidate's diff against `main` for a **protected list**, every file on the
 verdict's path:
 
 - **The stress and verifier scripts** – `scripts/nightly-flake-stress.sh`,
-  `scripts/nightly-quarantine-audit.sh`, and every `scripts/flake-*` file.
+  `scripts/nightly-quarantine-audit.sh`, `scripts/flake_lib.py`, and every
+  `scripts/flake-*` file.
   The verifier runs `main`'s copies of these, so a candidate's edit to them
   cannot change this verdict; they are protected because a merged edit would
   change every later one.
 - **The test runner chain** – `scripts/test.sh`, `scripts/swift-safe`, and the
   scripts `scripts/test.sh` calls: `scripts/remote-verify.sh` and
-  `scripts/tbd-home-fingerprint.sh`.
+  `scripts/tbd-home-fingerprint.sh`. The verifier runs `main`'s copies; the
+  PR's `test.yml` runs the candidate's.
 - **CI's test-step scripts** – everything under `scripts/ci/`, which includes
   `watched-test-pass.sh` (each pass's verdict and floor check) and
   `first-party-wipe-needed.sh`, plus `scripts/repair-spm-workspace.sh`.
@@ -689,12 +779,17 @@ whatever the stress result. The bot may still have changed it for a good
 reason, so the PR is opened as usual and stays a draft, and its body names the
 protected files touched and says a human must judge the change.
 
-The verifier runs on the runner the session used, as the same user. Before it
-starts, the job ends the session's process tree, so the session's own processes
-are not running while the candidate is judged. The clean tree and that kill
-keep the session's working state out of the verdict; they do not stop a session
-that sets out to tamper with files elsewhere on the runner, or a process it
-deliberately detached. That is why the verdict alone never promotes: the
+The verifier runs on the runner the session used, as the same user. **Leftover
+processes are ended by PID, never by name.** Immediately before each session
+starts, the job records the full process list. After the session ends, it
+lists processes again and sends `SIGTERM`, then `SIGKILL`, to every PID that is
+new since the snapshot, except the current step's own ancestry. A process the
+session detached is new by PID however it renamed or re-parented itself, so
+the snapshot catches it where a tree walk would not. If any new PID is still
+alive after the kill, the attempt aborts and `publish` records `aborted`. The
+clean tree and the kill keep the session's working state and processes out of
+the verdict; they do not stop a session that tampers with files elsewhere on
+the runner before it ends. That is why the verdict alone never promotes: the
 PR's own `test.yml` run on a fresh runner must also be green (§7), and a human
 reviews and merges.
 
@@ -715,10 +810,16 @@ scope it is weak, and the spec does not pretend otherwise: with today's cap of
 flake with `p = 0.05` and 0.61 against one with `p = 0.15`.
 
 **Evidence is weak** when the false-pass probability is 5% or more, or unknown.
-A weak-evidence candidate whose runs are clean is still eligible for ready,
-like any other: reviewers weigh the evidence, and the bot does not hold the PR
-in draft on their behalf (§14 gives the rationale). What the design guarantees
-instead is that weak evidence cannot be missed:
+
+**Decision: a weak-evidence candidate whose runs are clean is still promoted
+to ready.** This was a deliberate human decision, not an oversight. Reviewers
+weigh the evidence against the diff; the bot does not hold the PR in draft on
+their behalf. A fix that removes a race by construction needs little stress
+evidence, and one that only adjusts timing needs a lot, and only a reader of
+the diff can tell which it is. Holding weak PRs in draft would strand every
+pass-scope fix, because pass scope never reaches the bound within the budget.
+§14 records the rejected alternative. What the design guarantees instead is
+that weak evidence cannot be missed:
 
 - **The commit status** – `flakefix/stress` = `success` is described as "no
   failure observed in N runs", with `N` filled in and never "fixed". For weak
@@ -748,8 +849,8 @@ An attempt allows two tries:
 ## 7. PR lifecycle
 
 All PR, branch, and issue writes an attempt makes use a token minted for a new
-GitHub App, `tbd-flake-fixer`, and only in the `publish` and `promote` jobs,
-neither of which runs a model. A PR opened with the default `GITHUB_TOKEN` triggers no
+GitHub App, `tbd-flake-fixer`, and only in the `ledger`, `publish`, and
+`promote` jobs, none of which runs a model. A PR opened with the default `GITHUB_TOKEN` triggers no
 workflows, so neither `test.yml` nor `claude-review` would ever run on it. The
 reviewer App is read-focused by design and stays that way.
 
@@ -801,7 +902,12 @@ Transitions, each owned by the PR driver:
   per issue and idempotent, so a run that dies midway leaves earlier issues
   correct and the next run converges. The job going red is the signal; on the
   first red run after a green one the job posts one comment to the nightly
-  tracking issue, and nothing on later consecutive reds.
+  tracking issue, #519 (`TRACKING_ISSUE` in `nightly.yml`), and nothing on
+  later consecutive reds. "After a green one" comes from GitHub, not from
+  stored state: a final step that runs on failure asks the Actions API for the
+  conclusion of the `ledger` job in the most recent earlier completed run of
+  this workflow that ran it, and posts only if that conclusion was `success` or
+  there is no such run.
 - **The picker cannot read the ledger.** No attempt that night. The `fix` job
   ends red without starting a session.
 - **The build fails before the session starts.** No attempt; the job ends red.
@@ -894,23 +1000,27 @@ means off.
 - **`FLAKE_LEDGER_ENABLED`** – the `ledger` job writes issues. Off, it runs in
   report-only mode (§4.5).
 - **`FLAKE_FIXER_ENABLED`** – the `fix` job runs on its schedule, `publish`
-  and `promote` act, and the `ledger` job runs the branch reclaimer (§11). Off,
-  `fix`, `publish`, and `promote` exit at their first step and the reclaimer
-  step is skipped; the ledger itself still runs under its own flag.
-  `workflow_dispatch` of `fix` also requires it. The reclaimer sits under this
+  and `promote` act, and the `ledger` job runs the branch reclaimer (§11). The
+  flag is read in job-level `if:` conditions (`vars.FLAKE_FIXER_ENABLED ==
+  'true'`), so with it off `fix`, `publish`, and `promote` are skipped without
+  starting a runner, and the reclaimer step's own `if:` skips it; the ledger
+  itself still runs under its own flag. `workflow_dispatch` of `fix` also
+  requires it. The reclaimer sits under this
   flag because only the fixer creates `flakefix/*` branches.
 
 **The fixer requires the ledger.** With `FLAKE_FIXER_ENABLED` on and
 `FLAKE_LEDGER_ENABLED` off, the issues hold no ledger comments the fixer can
 trust – report-only mode writes none, and any it finds would be stale – so the
-`fix` job refuses to start. Its first step writes a job summary line saying
-the fixer is on but the ledger is off and naming `FLAKE_LEDGER_ENABLED`, and
-ends the job red before the picker runs, on the schedule and on
-`workflow_dispatch` alike. `promote` is unaffected: it judges PRs the fixer
+`fix` job refuses to start. This one case is deliberately not a job-level
+`if:`, because a skipped job is easy to miss: the job starts, and its first
+step writes a job summary line saying the fixer is on but the ledger is off
+and naming `FLAKE_LEDGER_ENABLED`, then ends the job red before the picker
+runs, on the schedule and on `workflow_dispatch` alike. `promote` is unaffected: it judges PRs the fixer
 already opened, from their commit statuses and CI, not from the ledger.
 
-Every job also requires that the workflow is running in this repository, not a
-fork, so a fork that copied the variables cannot run them.
+Every job's `if:` also requires that the workflow is running in this
+repository (`github.repository`), not a fork, so a fork that copied the
+variables cannot run them.
 
 **Enable for the soak** with `gh variable set FLAKE_LEDGER_ENABLED --body true`
 and, later, `gh variable set FLAKE_FIXER_ENABLED --body true`; delete a variable
@@ -998,14 +1108,25 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   assigned by timestamp; fork runs, `flakefix/*` runs, and the self-test ID,
   all excluded; runs and artifacts outside the 7-day read window ignored;
   both xunit files of a pass read; `merged` and `closed-unmerged` recorded from
-  PR state, and recorded once; a post-merge failure whose commit contains the
-  merge commit (recurrence: reopen, new episode) and one whose commit does not
-  (`pre-fix`: no reopen, not counted); a recurrence qualifying on one
-  occurrence key; test-ID normalization for a top-level suite
+  PR state, and recorded once; the fix commit taken from a `ClosedEvent` whose
+  closer is a commit, one whose closer is a merged PR (the bot's and a
+  human's), and a `merged` attempt record on an issue left open; a post-fix
+  failure whose commit contains the fix commit (recurrence: reopen, new
+  episode) and one whose commit does not (`pre-fix`: no reopen, not counted);
+  an issue closed as not planned, and one closed as completed with no closer,
+  each of which records the new failure and stays closed; a recurrence
+  qualifying on one occurrence key; a forged ledger comment and a forged
+  attempt comment – the right sentinel under a human login, and under a
+  look-alike login without `[bot]` – each ignored and listed in the summary;
+  inventory matching by file and function name, and a function name shared by
+  two suites in one file, skipped and listed; a `.flaky(issue: N)` that N
+  serves alone (adopted), one N shared by two tests' traits, one N already
+  holding another test's ledger, and a suite-level N, each getting its own
+  per-test issue that links N; test-ID normalization for a top-level suite
   (identical forms), a nested suite (`Module.Outer/Inner/test()` becomes
   `Module.Outer.Inner/test()`), and a test outside any suite;
   occurrence keys and the threshold at one and two keys; issue
-  lookup by title, by `.flaky` trait, and by creation; a closed issue reopened;
+  lookup by title, by `.flaky` trait, and by creation;
   the same run processed twice with no change; and an API error that leaves the
   ledger unwritten.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
@@ -1014,8 +1135,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   `merged`), with and without a later failure; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, no ledger
-  comment, an unparsable JSON block, an open bot PR); and the refusal to start
-  with the fixer flag on and the ledger flag off.
+  comment, a ledger comment from a login other than the bot's, an unparsable
+  JSON block, an open bot PR); a closed issue, never picked whatever its
+  failures; a brief built from fixtures that also hold human comments and
+  forged sentinel comments, none of whose text appears in it; and the refusal
+  to start with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
   failure and with none; baseline classification of a target failure, a
   deadline kill after the target started (both reproductions), and a build
@@ -1030,12 +1154,18 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   target with a `passedOnRetry` record, and an unquarantined target with an
   empty file, which passes; the clean tree, where an uncommitted change in the
   session tree is not judged and a bundle that does not descend from the start
-  SHA is refused; and the judge over synthetic iteration logs and xunit
+  SHA is refused; leftover processes, where a PID new since the pre-session
+  snapshot is killed, a PID in the snapshot is left alone, and a new PID that
+  survives the kill aborts the attempt; the test runner taken from `main`'s
+  copy even when the candidate edited `scripts/test.sh`; and the judge over synthetic iteration logs and xunit
   files at both scopes: a pass; a failing iteration; a wedged iteration; a test
   absent from the xunit output; a `passedOnRetry` record; another test failing
   at pass scope while the target passes; and a diff touching a protected file,
   one case per entry in the protected list, each marked not eligible for ready
   even with a clean stress run.
+- **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
+  after a green `ledger` job posts to #519, a red run after a red one does
+  not, and a red first-ever run does.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
   head that moved after verification; the attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists; a weak-evidence
@@ -1043,10 +1173,15 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that
   touched a protected file, which records `failure` and names the files.
-- **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1, filter
-  built from the ID), `--pass-of`, and `--xunit-dir`. The `--pass-of` cases
-  map a test ID from each of the four passes – including suites starting with
-  `A`, `O`, and `P`, and a nested suite – and check the pass table against the
+- **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1; the
+  filter built from a top-level, a nested, and a suite-less ID, escaped and
+  anchored, and not matching a test whose name extends the target's),
+  `--pass-of`, and `--xunit-dir`. The `--pass-of` cases map a test ID from
+  each of the four passes – including suites starting with `A`, `O`, and `P`,
+  a nested suite, the suite-less `TBDDaemonTests.nilPreferredKeepsOrder()`
+  (pass 1b), and `TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()`
+  (pass 2) – check that the quiet pass starts no load spinners, and check the
+  pass table against the
   `watched-test-pass.sh` invocations parsed from `test.yml`, so a fixture
   `test.yml` with a changed filter or floor makes the check fail.
 
