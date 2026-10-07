@@ -135,7 +135,7 @@ struct TerminalPanelView: View {
     /// through its own mouse overrides, so the overlay takes the clicks that
     /// land on it by hit-testing; a click on the terminal area it leaves
     /// uncovered still arrives, and while this returns `true` that click
-    /// claims neither focus nor a Cmd+click. Must be `@MainActor` since it is
+    /// runs no Cmd+click. Must be `@MainActor` since it is
     /// invoked from inside an `assumeIsolated` block.
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
@@ -566,7 +566,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onRecoveryGuidance: (@MainActor (String) -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll-wheel events and
-        /// keyboard focus instead of the terminal. Set by
+        /// Cmd+clicks instead of the terminal. Set by
         /// `TerminalPanelRepresentable.makeNSView`.
         var shouldSuppressEvents: @MainActor () -> Bool = { false }
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
@@ -2010,31 +2010,30 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // terminal receives no events at all.
             guard let tv = terminalView as? TBDTerminalView else { return }
             // Claim first responder on any click, so key equivalents (Cmd+W,
-            // Cmd+Arrow) route to this terminal. First responder moves before
-            // the tab is named: the terminal losing focus clears its context
-            // on resign, and a split sibling in the same tab shares this
-            // panel's context, so naming first would see it cleared at once.
-            //
-            // While a SwiftUI overlay owns this terminal's events (a transcript
-            // card inset over it, or a file frame over every terminal), a
-            // click on the part it leaves uncovered claims nothing, so focus
-            // stays with the overlay.
+            // Cmd+Arrow) route to this terminal. While a SwiftUI overlay owns
+            // this terminal's events (a transcript card inset over it, or a
+            // file frame over every terminal), a click on the part it leaves
+            // uncovered runs no Cmd+click behind it.
             tv.onMouseDownClaimFocus = { [weak self, weak tv] in
                 guard let self, let tv else { return false }
                 if self.shouldSuppressEvents() { return false }
                 tv.window?.makeFirstResponder(tv)
-                self.appState?.focusedTabCloseContext = self.tabCloseContext
                 return true
             }
-            // Stop naming this tab as the focused one once focus leaves the
-            // terminal, however it leaves — a click elsewhere, or a
-            // programmatic `makeFirstResponder`. Equality-guarded so a resign
-            // never clears another tab's context; whatever takes focus next
-            // writes its own (a clicked terminal does so in its mouse-down,
-            // just after AppKit resigns this one, as ordered above).
-            tv.onResignFocus = { [weak self] in
+            // Name this tab as the one Cmd+W closes exactly while the terminal
+            // is first responder, however focus arrives or leaves. AppKit
+            // resigns the old responder before the new one becomes, so a
+            // split sibling sharing this tab clears the context and this view
+            // then writes it back. The resign is equality-guarded so it never
+            // clears another tab's context, and the write is skipped when
+            // unchanged because every observable write re-evaluates the menu.
+            tv.onFocusChange = { [weak self] focused in
                 guard let self, let appState = self.appState else { return }
-                if appState.focusedTabCloseContext == self.tabCloseContext {
+                if focused {
+                    if appState.focusedTabCloseContext != self.tabCloseContext {
+                        appState.focusedTabCloseContext = self.tabCloseContext
+                    }
+                } else if appState.focusedTabCloseContext == self.tabCloseContext {
                     appState.focusedTabCloseContext = nil
                 }
             }
@@ -2195,7 +2194,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             if let tv = terminalView as? TBDTerminalView {
                 tv.onMouseDownClaimFocus = nil
-                tv.onResignFocus = nil
+                tv.onFocusChange = nil
             }
             if let preparation = viewSessionReclaim.published {
                 preparation.bridge.cleanupSession(

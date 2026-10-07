@@ -160,7 +160,28 @@ struct HolderPanelFocusTests {
                 eventNumber: eventNumber, clickCount: 1, pressure: 1)!
         }
 
+        private var scratchDirectories: [URL] = []
+
+        /// Puts a real file's path on the grid's first row and returns a point
+        /// on it. Relative to the worktree, so the path fits on one row, and
+        /// `./`-led, so SwiftTerm's own implicit-link detection matches it too
+        /// — the second opener a handled Cmd+click must not reach.
+        func showClickablePath() throws -> CGPoint {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tbd-cmdclick-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            scratchDirectories.append(directory)
+            try Data("x".utf8).write(to: directory.appendingPathComponent("notes.txt"))
+            view.worktreePath = directory.path
+            view.feed(text: "\u{1b}[H\u{1b}[2J./notes.txt")
+            let cell = view.cellDimensions()
+            return CGPoint(x: cell.width * 2.5, y: view.bounds.height - cell.height * 0.5)
+        }
+
         func tearDown() {
+            for directory in scratchDirectories {
+                try? FileManager.default.removeItem(at: directory)
+            }
             coordinator.cleanup()
             window.contentView = nil
             window.close()
@@ -251,29 +272,50 @@ struct HolderPanelFocusTests {
     }
 
     @MainActor
-    @Test("while an overlay owns the terminal's events, a click claims nothing")
-    func aClickUnderAnOverlayClaimsNothing() async throws {
+    @Test("focus returning without a click names the tab again")
+    func focusReturningWithoutAClickNamesTheTab() async throws {
         let fixture = try Fixture()
         defer { fixture.tearDown() }
 
         await fixture.attach()
         try await fixture.waitForFirstResponder()
         fixture.window.makeFirstResponder(nil)
-        fixture.state.focusedTabCloseContext = nil
-        let claimFocus = try #require(fixture.view.onMouseDownClaimFocus)
-
-        fixture.coordinator.shouldSuppressEvents = { true }
-        #expect(!claimFocus())
-        #expect(fixture.window.firstResponder !== fixture.view, """
-            a click beside a transcript overlay took first responder from it, so Esc and typing \
-            went to the session underneath
-            """)
         #expect(fixture.state.focusedTabCloseContext == nil)
 
+        // The way a find bar hands focus back on Esc, or the key view loop
+        // reaches the terminal: no click, no autofocus.
+        fixture.window.makeFirstResponder(fixture.view)
+
+        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext, """
+            focus came back to the terminal without a click and its tab stayed unnamed, so Close \
+            Tab stayed disabled and Cmd+W did nothing
+            """)
+    }
+
+    @MainActor
+    @Test("while an overlay owns the terminal's events, a Cmd+click opens nothing behind it")
+    func aCommandClickUnderAnOverlayOpensNothing() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+        var opened: [String] = []
+        fixture.view.onFilePathClicked = { opened.append($0) }
+        let point = try fixture.showClickablePath()
+
+        fixture.coordinator.shouldSuppressEvents = { true }
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
+        #expect(opened.isEmpty, """
+            a Cmd+click beside a transcript overlay opened a path in the terminal behind it
+            """)
+        #expect(!fixture.view.pressBypassesSwiftTerm)
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point))
+
         fixture.coordinator.shouldSuppressEvents = { false }
-        #expect(claimFocus())
-        #expect(fixture.window.firstResponder === fixture.view)
-        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, [.command]))
+        #expect(opened.count == 1)
     }
 
     @MainActor
@@ -282,27 +324,13 @@ struct HolderPanelFocusTests {
         let fixture = try Fixture()
         defer { fixture.tearDown() }
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-cmdclick-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("notes.txt")
-        try Data("x".utf8).write(to: file)
-
         await fixture.attach()
         try await fixture.waitForFirstResponder()
 
         var opened: [String] = []
         fixture.view.onFilePathClicked = { opened.append($0) }
-        // Relative to the worktree, so the path fits on one row of the grid,
-        // and `./`-led, so SwiftTerm's own implicit-link detection also
-        // matches it: that is the second opener the release must not reach.
-        fixture.view.worktreePath = directory.path
-        fixture.view.feed(text: "\u{1b}[H\u{1b}[2J./\(file.lastPathComponent)")
+        let point = try fixture.showClickablePath()
 
-        let cell = fixture.view.cellDimensions()
-        let point = CGPoint(
-            x: cell.width * 2.5, y: fixture.view.bounds.height - cell.height * 0.5)
         fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
         #expect(opened.count == 1, "the Cmd+click on a path did not open it on mouse-down")
         #expect(fixture.view.pressBypassesSwiftTerm)
@@ -364,6 +392,7 @@ struct HolderPanelFocusTests {
 
         // A split sibling in the same tab: it shares the close context and,
         // like any panel terminal, clears it when it resigns first responder.
+        // AppKit resigns it before the clicked view becomes first responder.
         let sibling = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 100, height: 100),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -372,8 +401,8 @@ struct HolderPanelFocusTests {
         defer { sibling.removeFromSuperview() }
         let state = fixture.state
         let context = fixture.tabCloseContext
-        sibling.onResignFocus = {
-            if state.focusedTabCloseContext == context { state.focusedTabCloseContext = nil }
+        sibling.onFocusChange = { focused in
+            if !focused, state.focusedTabCloseContext == context { state.focusedTabCloseContext = nil }
         }
         fixture.window.makeFirstResponder(sibling)
         fixture.state.focusedTabCloseContext = context
@@ -383,8 +412,8 @@ struct HolderPanelFocusTests {
 
         #expect(fixture.window.firstResponder === fixture.view)
         #expect(fixture.state.focusedTabCloseContext == context, """
-            the sibling's resign cleared the context the click had just named, so the tab \
-            the focused terminal belongs to was left unnamed
+            the sibling's resign cleared the shared context and nothing named it again, so the \
+            tab the focused terminal belongs to was left unnamed
             """)
     }
 
@@ -396,7 +425,7 @@ struct HolderPanelFocusTests {
 
         await fixture.attach()
         #expect(fixture.view.onMouseDownClaimFocus != nil)
-        #expect(fixture.view.onResignFocus != nil)
+        #expect(fixture.view.onFocusChange != nil)
 
         fixture.coordinator.cleanup()
 
@@ -404,6 +433,6 @@ struct HolderPanelFocusTests {
             the click routing outlived the panel: a click on the released view would still write \
             its tab as the focused one
             """)
-        #expect(fixture.view.onResignFocus == nil)
+        #expect(fixture.view.onFocusChange == nil)
     }
 }

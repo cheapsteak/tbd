@@ -557,25 +557,28 @@ class TBDTerminalView: TerminalView {
     /// The hosting panel's click routing, installed once its transport is
     /// live (`TerminalPanelRepresentable.Coordinator`). Called on every left
     /// mouse-down this view receives, before SwiftTerm's own handling: the
-    /// panel makes this view first responder and marks its tab as the one
-    /// Cmd+W closes. Returns false when the panel declines the click — a
-    /// SwiftUI overlay owns this terminal's events — and Cmd+click routing
-    /// then stands down too. Nil — a remote attach terminal, or a panel still
-    /// connecting — leaves clicks to SwiftTerm alone, Cmd+click included.
+    /// panel makes this view first responder. Returns false when the panel
+    /// declines the click — a SwiftUI overlay owns this terminal's events —
+    /// and Cmd+click routing then stands down too. Nil — a remote attach
+    /// terminal, or a panel still connecting — leaves clicks to SwiftTerm
+    /// alone, Cmd+click included.
     var onMouseDownClaimFocus: (() -> Bool)?
-    /// Called when this view gives up first responder, so the panel can stop
-    /// naming its tab as the focused one. Set alongside
-    /// `onMouseDownClaimFocus`.
-    var onResignFocus: (() -> Void)?
+    /// Called with `true` when this view becomes first responder and `false`
+    /// when it gives that up, however focus moved — a click, the key view
+    /// loop, a find bar handing focus back — so the panel can keep its tab
+    /// named as the one Cmd+W closes exactly while this view has focus. Set
+    /// alongside `onMouseDownClaimFocus`.
+    var onFocusChange: ((Bool) -> Void)?
 
-    /// SwiftTerm's `resignFirstResponder` is `public`, not `open`; it reports
-    /// a successful resign through this `open` property, which is the only
-    /// focus-loss hook reachable from this module.
+    /// SwiftTerm's `becomeFirstResponder` / `resignFirstResponder` are
+    /// `public`, not `open`; each reports a successful change through this
+    /// `open` property, which is the only focus hook reachable from this
+    /// module.
     override var hasFocus: Bool {
         get { super.hasFocus }
         set {
             super.hasFocus = newValue
-            if !newValue { onResignFocus?() }
+            onFocusChange?(newValue)
         }
     }
 
