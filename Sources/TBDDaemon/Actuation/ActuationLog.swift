@@ -175,17 +175,20 @@ public actor ActuationLog {
     /// lives in a type this signature does not accept (`ObservedResult`), and
     /// reaches the file only through `appendObservation`.
     ///
-    /// `modeSource`, `modeAgeMilliseconds` and `modesObserved` are defaulted to
-    /// nil because only one caller has them: a holder send, which composed its
-    /// bytes against a mode oracle and records what it composed against. Every
-    /// other act passes nothing and writes none of the three keys.
+    /// `modeSource`, `modeAgeMilliseconds`, `modesObserved`,
+    /// `modeBracketedPaste` and `bracketedPaste` are defaulted to nil because
+    /// only one caller has them: a holder send, which composed its bytes
+    /// against a mode oracle and records what it composed against. Every other
+    /// act passes nothing and writes none of those keys.
     func appendOutcome(
         confirms: String,
         result: ActuationOutcome,
         error: String? = nil,
         modeSource: ActuationModeSource? = nil,
         modeAgeMilliseconds: Int? = nil,
-        modesObserved: Bool? = nil
+        modesObserved: Bool? = nil,
+        modeBracketedPaste: Bool? = nil,
+        bracketedPaste: Bool? = nil
     ) {
         var row = ActuationRow(actor: .daemon(), kind: .outcome)
         row.id = Self.mintID()
@@ -195,6 +198,8 @@ public actor ActuationLog {
         row.modeSource = modeSource
         row.modeAgeMilliseconds = modeAgeMilliseconds
         row.modesObserved = modesObserved
+        row.modeBracketedPaste = modeBracketedPaste
+        row.bracketedPaste = bracketedPaste
         row.error = error
         try? appendWithOneRetry(row, failClosed: false)
     }

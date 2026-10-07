@@ -1905,6 +1905,84 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome["modeAgeMilliseconds"] as? Int == 2_460_000)
     }
 
+    /// The field defect at the router: a viewer took the pty milliseconds
+    /// after the spawn, so the frozen emulator says bracketing is off — observed,
+    /// because it did watch the child from birth — while the agent TUI turned
+    /// it on since. Composed bare, the body and its `\r` went out in one write
+    /// and the TUI swallowed the Enter. A stale "off" is not trusted for an
+    /// agent session, so the send wraps, stays one write, and the row records
+    /// both the reading's flag and the decision made from it.
+    @Test("a stale 'off' wraps an agent send and records the reading beside the decision")
+    func staleOffWrapsAnAgentSend() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(
+            bracketedPaste: false, modesObserved: true, source: .staleDaemon,
+            ageMilliseconds: 600_000)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(writes.all.count == 1, "the whole send must be one write, not two")
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(text.hasPrefix("\u{1b}[200~<tbd-dispatch id="),
+                "a stale 'off' composed an agent send bare: \(text.debugDescription)")
+        #expect(text.hasSuffix("/>\nhello\u{1b}[201~\r"))
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "staleDaemon")
+        #expect(outcome["modesObserved"] as? Bool == true)
+        #expect(outcome["modeBracketedPaste"] as? Bool == false)
+        #expect(outcome["bracketedPaste"] as? Bool == true)
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    /// The shell counterpart: a stale "off" for a shell composes bare, because
+    /// a shell's line editor submits bare input and markers would only be
+    /// printed at its prompt. If the stale fallback is not scoped by child
+    /// kind, this test's marker assertions fail.
+    @Test("a stale 'off' leaves a shell send bare")
+    func staleOffLeavesAShellSendBare() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.shell, kind: .shell, transport: .holder,
+            holderPID: 9101, childPID: 9102)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(
+            bracketedPaste: false, modesObserved: true, source: .staleDaemon,
+            ageMilliseconds: 600_000)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let written = try #require(writes.all.first)
+        #expect(written == Data("hello\r".utf8))
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["modeBracketedPaste"] as? Bool == false)
+        #expect(outcome["bracketedPaste"] as? Bool == false)
+    }
+
     /// A caller with something to say whose message composes to nothing, and
     /// the row still says what it was composed against.
     ///
