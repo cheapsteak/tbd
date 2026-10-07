@@ -199,7 +199,7 @@ struct HolderPanelFocusTests {
             the holder attach installed no click routing: a click inside the panel never claims \
             first responder, so key equivalents keep routing to whatever had it
             """)
-        claimFocus()
+        #expect(claimFocus())
 
         #expect(fixture.window.firstResponder === fixture.view)
         #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext, """
@@ -228,10 +228,36 @@ struct HolderPanelFocusTests {
 
         // A resign must not clear a context some other tab has since claimed.
         let other = TabCloseContext(worktreeID: UUID(), tabID: UUID())
-        fixture.view.onMouseDownClaimFocus?()
+        _ = fixture.view.onMouseDownClaimFocus?()
         fixture.state.focusedTabCloseContext = other
         fixture.window.makeFirstResponder(nil)
         #expect(fixture.state.focusedTabCloseContext == other)
+    }
+
+    @MainActor
+    @Test("while an overlay owns the terminal's events, a click claims nothing")
+    func aClickUnderAnOverlayClaimsNothing() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+        fixture.window.makeFirstResponder(nil)
+        fixture.state.focusedTabCloseContext = nil
+        let claimFocus = try #require(fixture.view.onMouseDownClaimFocus)
+
+        fixture.coordinator.shouldSuppressEvents = { true }
+        #expect(!claimFocus())
+        #expect(fixture.window.firstResponder !== fixture.view, """
+            a click beside a transcript overlay took first responder from it, so Esc and typing \
+            went to the session underneath
+            """)
+        #expect(fixture.state.focusedTabCloseContext == nil)
+
+        fixture.coordinator.shouldSuppressEvents = { false }
+        #expect(claimFocus())
+        #expect(fixture.window.firstResponder === fixture.view)
+        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext)
     }
 
     @MainActor
@@ -260,7 +286,7 @@ struct HolderPanelFocusTests {
         fixture.state.focusedTabCloseContext = context
 
         let claimFocus = try #require(fixture.view.onMouseDownClaimFocus)
-        claimFocus()
+        #expect(claimFocus())
 
         #expect(fixture.window.firstResponder === fixture.view)
         #expect(fixture.state.focusedTabCloseContext == context, """

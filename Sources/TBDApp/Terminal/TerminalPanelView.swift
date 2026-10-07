@@ -131,9 +131,11 @@ struct TerminalPanelView: View {
     /// Called on every scroll-wheel event. When it returns `true`, the scroll
     /// monitor short-circuits — the terminal does NOT consume the event,
     /// leaving it for whatever SwiftUI overlay (currently a transcript-card
-    /// overlay; see #129) is rendered on top. Clicks need no such hook: they
-    /// reach the terminal through its own mouse overrides, so an overlay on
-    /// top takes them by hit-testing. Must be `@MainActor` since it is
+    /// overlay; see #129) is rendered on top. Clicks reach the terminal
+    /// through its own mouse overrides, so the overlay takes the clicks that
+    /// land on it by hit-testing; a click on the terminal area it leaves
+    /// uncovered still arrives, and while this returns `true` that click
+    /// claims neither focus nor a Cmd+click. Must be `@MainActor` since it is
     /// invoked from inside an `assumeIsolated` block.
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
@@ -563,8 +565,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
         var onRecoveryGuidance: (@MainActor (String) -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
-        /// over this terminal and should receive scroll-wheel events instead
-        /// of the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
+        /// over this terminal and should receive scroll-wheel events and
+        /// keyboard focus instead of the terminal. Set by
+        /// `TerminalPanelRepresentable.makeNSView`.
         var shouldSuppressEvents: @MainActor () -> Bool = { false }
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
@@ -2011,10 +2014,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the tab is named: the terminal losing focus clears its context
             // on resign, and a split sibling in the same tab shares this
             // panel's context, so naming first would see it cleared at once.
+            //
+            // While a SwiftUI overlay owns this terminal's events (a transcript
+            // card inset over it, or a file frame over every terminal), a
+            // click on the part it leaves uncovered claims nothing, so focus
+            // stays with the overlay.
             tv.onMouseDownClaimFocus = { [weak self, weak tv] in
-                guard let self, let tv else { return }
+                guard let self, let tv else { return false }
+                if self.shouldSuppressEvents() { return false }
                 tv.window?.makeFirstResponder(tv)
                 self.appState?.focusedTabCloseContext = self.tabCloseContext
+                return true
             }
             // Stop naming this tab as the focused one once focus leaves the
             // terminal, however it leaves — a click elsewhere, or a

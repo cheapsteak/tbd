@@ -557,9 +557,11 @@ class TBDTerminalView: TerminalView {
     /// live (`TerminalPanelRepresentable.Coordinator`). Called on every left
     /// mouse-down this view receives, before SwiftTerm's own handling: the
     /// panel makes this view first responder and marks its tab as the one
-    /// Cmd+W closes. Nil — a remote attach terminal, or a panel still
+    /// Cmd+W closes. Returns false when the panel declines the click — a
+    /// SwiftUI overlay owns this terminal's events — and Cmd+click routing
+    /// then stands down too. Nil — a remote attach terminal, or a panel still
     /// connecting — leaves clicks to SwiftTerm alone, Cmd+click included.
-    var onMouseDownClaimFocus: (() -> Void)?
+    var onMouseDownClaimFocus: (() -> Bool)?
     /// Called when this view gives up first responder, so the panel can stop
     /// naming its tab as the focused one. Set alongside
     /// `onMouseDownClaimFocus`.
@@ -594,8 +596,7 @@ class TBDTerminalView: TerminalView {
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = convert(event.locationInWindow, from: nil)
         didDrag = false
-        if let claimFocus = onMouseDownClaimFocus {
-            claimFocus()
+        if let claimFocus = onMouseDownClaimFocus, claimFocus() {
             // Cmd+click routing belongs to panel-routed terminals, the ones
             // that resolve paths against a worktree. A consumed click never
             // reaches SwiftTerm, so it starts no selection.
