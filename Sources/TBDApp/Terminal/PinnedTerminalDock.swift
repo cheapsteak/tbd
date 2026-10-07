@@ -58,7 +58,7 @@ private struct DockCellDivider: View {
         Rectangle()
             .fill(Color.gray.opacity(0.3))
             .contentShape(Rectangle())
-            .cursor(.resizeUpDown)
+            .pointerStyle(.rowResize)
             .overlay(alignment: .top) {
                 if dragOffset != 0 {
                     Rectangle()
@@ -133,7 +133,7 @@ private struct PinnedTerminalCell: View {
                         .onTapGesture {
                             appState.navigateToActiveWorktree(terminal.worktreeID, terminalID: terminal.id)
                         }
-                        .cursor(.pointingHand)
+                        .pointerStyle(.link)
                         .help("Go to \(worktree.displayName)")
                 }
                 Spacer()
