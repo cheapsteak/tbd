@@ -146,6 +146,20 @@ struct HolderPanelFocusTests {
             }
         }
 
+        /// A mouse event addressed to the fixture's window, handed straight to
+        /// the view's override: nothing dispatches events to a window that is
+        /// never key, so the override is called the way AppKit would call it.
+        func mouseEvent(
+            _ type: NSEvent.EventType, at point: CGPoint,
+            _ modifiers: NSEvent.ModifierFlags = [], eventNumber: Int = 0
+        ) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: type, location: view.convert(point, to: nil), modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: eventNumber, clickCount: 1, pressure: 1)!
+        }
+
         func tearDown() {
             coordinator.cleanup()
             window.contentView = nil
@@ -195,11 +209,13 @@ struct HolderPanelFocusTests {
         fixture.window.makeFirstResponder(nil)
         fixture.state.focusedTabCloseContext = nil
 
-        let claimFocus = try #require(fixture.view.onMouseDownClaimFocus, """
+        #expect(fixture.view.onMouseDownClaimFocus != nil, """
             the holder attach installed no click routing: a click inside the panel never claims \
             first responder, so key equivalents keep routing to whatever had it
             """)
-        #expect(claimFocus())
+        let point = CGPoint(x: 10, y: 10)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point))
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point))
 
         #expect(fixture.window.firstResponder === fixture.view)
         #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext, """
@@ -258,6 +274,45 @@ struct HolderPanelFocusTests {
         #expect(claimFocus())
         #expect(fixture.window.firstResponder === fixture.view)
         #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext)
+    }
+
+    @MainActor
+    @Test("a Cmd+click on a path opens it once, and its release stays out of SwiftTerm")
+    func aCommandClickOpensAPathOnce() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-cmdclick-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("notes.txt")
+        try Data("x".utf8).write(to: file)
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+
+        var opened: [String] = []
+        fixture.view.onFilePathClicked = { opened.append($0) }
+        // Relative to the worktree, so the path fits on one row of the grid,
+        // and `./`-led, so SwiftTerm's own implicit-link detection also
+        // matches it: that is the second opener the release must not reach.
+        fixture.view.worktreePath = directory.path
+        fixture.view.feed(text: "\u{1b}[H\u{1b}[2J./\(file.lastPathComponent)")
+
+        let cell = fixture.view.cellDimensions()
+        let point = CGPoint(
+            x: cell.width * 2.5, y: fixture.view.bounds.height - cell.height * 0.5)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
+        #expect(opened.count == 1, "the Cmd+click on a path did not open it on mouse-down")
+        #expect(fixture.view.pressBypassesSwiftTerm)
+
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, [.command]))
+        #expect(opened.count == 1, """
+            the release of a Cmd+click TBD had already handled reached SwiftTerm, whose own link \
+            detection opened the same path again: \(opened)
+            """)
+        #expect(!fixture.view.pressBypassesSwiftTerm)
     }
 
     @MainActor

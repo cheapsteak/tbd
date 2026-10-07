@@ -550,8 +550,9 @@ class TBDTerminalView: TerminalView {
     // hit-tested top view, so a view covering the terminal receives the click
     // and this one never sees it. A geometry-only monitor could not tell.
     //
-    // Every override calls `super` (except on a consumed Cmd+click), so
-    // SwiftTerm's selection, link and semantic-prompt handling still run.
+    // Every override calls `super`, so SwiftTerm's selection, link and
+    // semantic-prompt handling still run — except for the whole of a press
+    // whose mouse-down TBD consumed (`pressBypassesSwiftTerm`).
 
     /// The hosting panel's click routing, installed once its transport is
     /// live (`TerminalPanelRepresentable.Coordinator`). Called on every left
@@ -592,16 +593,25 @@ class TBDTerminalView: TerminalView {
     private var mouseDownLocation: CGPoint = .zero
     private var didDrag: Bool = false
     private static let dragThreshold: CGFloat = 3.0
+    /// Set when TBD consumed this press's mouse-down (a Cmd+click that opened
+    /// a path or link), so its drags and release skip SwiftTerm and the pane
+    /// too. SwiftTerm never saw the press begin, and its mouse-up would
+    /// otherwise open the same implicit link a second time, or, with Cmd let
+    /// go before the button, the release would reach the pane as a plain
+    /// click.
+    private(set) var pressBypassesSwiftTerm = false
 
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = convert(event.locationInWindow, from: nil)
         didDrag = false
+        pressBypassesSwiftTerm = false
         if let claimFocus = onMouseDownClaimFocus, claimFocus() {
             // Cmd+click routing belongs to panel-routed terminals, the ones
             // that resolve paths against a worktree. A consumed click never
             // reaches SwiftTerm, so it starts no selection.
             if event.modifierFlags.contains(.command),
                handleCommandClick(atWindowLocation: event.locationInWindow) {
+                pressBypassesSwiftTerm = true
                 return
             }
         }
@@ -615,10 +625,15 @@ class TBDTerminalView: TerminalView {
         if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
             didDrag = true
         }
+        guard !pressBypassesSwiftTerm else { return }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !pressBypassesSwiftTerm else {
+            pressBypassesSwiftTerm = false
+            return
+        }
         let location = convert(event.locationInWindow, from: nil)
         // AppKit delivers the mouse-up to the view that took the mouse-down
         // even when the pointer has left it; a release outside is no click.
