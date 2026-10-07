@@ -856,6 +856,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
             guard tabCloseContext != context else { return }
+            // A focused terminal named its old context; carry the name over,
+            // or its resign would no longer match and never clear it.
+            if let old = tabCloseContext, appState?.focusedTabCloseContext == old {
+                appState?.focusedTabCloseContext = context
+            }
             tabCloseContext = context
             appState?.registerTerminalCloseContext(context, for: terminalID)
         }
@@ -1999,9 +2004,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @MainActor
         private func claimKeyboardFocusAndClickRouting(on terminalView: TerminalView) {
             // Focus on next run loop iteration (needs main actor for window access)
+            // The tab is named by the focus hook below when the claim lands;
+            // a detached keep-alive terminal has no window and names nothing.
             DispatchQueue.main.async {
                 terminalView.window?.makeFirstResponder(terminalView)
-                self.appState?.focusedTabCloseContext = self.tabCloseContext
             }
 
             // Clicks arrive through `TBDTerminalView`'s own mouse overrides, so
@@ -2033,7 +2039,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     if appState.focusedTabCloseContext != self.tabCloseContext {
                         appState.focusedTabCloseContext = self.tabCloseContext
                     }
-                } else if appState.focusedTabCloseContext == self.tabCloseContext {
+                } else if let context = self.tabCloseContext,
+                          appState.focusedTabCloseContext == context {
                     appState.focusedTabCloseContext = nil
                 }
             }

@@ -479,6 +479,27 @@ struct HolderPanelFocusTests {
     }
 
     @MainActor
+    @Test("a focused panel whose tab context changes keeps the new one named, then clears it")
+    func aContextChangeWhileFocusedIsCarriedOver() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+        #expect(fixture.state.focusedTabCloseContext == fixture.tabCloseContext)
+
+        let moved = TabCloseContext(worktreeID: fixture.tabCloseContext.worktreeID, tabID: UUID())
+        fixture.coordinator.syncTabCloseContext(moved, for: fixture.tabCloseContext.tabID)
+        #expect(fixture.state.focusedTabCloseContext == moved)
+
+        fixture.window.makeFirstResponder(nil)
+        #expect(fixture.state.focusedTabCloseContext == nil, """
+            the focused terminal's context changed under it, and its resign compared against the \
+            new value, so the old one stayed named after focus left
+            """)
+    }
+
+    @MainActor
     @Test("tearing a holder panel down uninstalls its click routing")
     func theClickRoutingIsRemovedOnTeardown() async throws {
         let fixture = try Fixture()
