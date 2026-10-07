@@ -78,8 +78,14 @@ push_fresh_ref() {
 # reachable from `main`. The unreachability is what lets a `--single-branch`
 # clone of `main` be genuinely missing the object; see `clone_without_namespace`.
 push_aged_ref() {
+  push_aged_ref_seconds "$1" "$2" "$FIXTURE_SEED_AGE_SECONDS"
+}
+
+# push_aged_ref_seconds ROOT REF AGE -> the same, with the commit dated AGE
+# seconds ago, for a case that needs an age between two thresholds.
+push_aged_ref_seconds() {
   local root="$1" ref="$2" when
-  when="@$(( $(date +%s) - FIXTURE_SEED_AGE_SECONDS ))"
+  when="@$(( $(date +%s) - $3 ))"
   GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" \
     "${GIT_FIXTURE[@]}" -C "$root/work" commit -q --allow-empty -m "aged $ref"
   git -C "$root/work" push -q origin "HEAD:refs/heads/$ref"
@@ -927,6 +933,191 @@ test_an_unknown_argument_refuses() {
   assert_contains "names the argument" "$OUT" "unknown argument: --force"
   assert_eq "refuses with 2" "2" "$RC"
   assert_eq "the ref survives" "main preflight/orphan " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# --- other namespaces: `--namespace` and `--min-age-seconds` -------------------
+#
+# The flake bot's `flakefix/issue-<N>` branches are reclaimed by this same sweep
+# (docs/specs/2026-10-07-flake-autofix-design.md §11), one namespace per pass,
+# with a one-day age guard. Every guard above applies unchanged; these cases pin
+# that a second namespace is reached only when asked for, that it cannot be
+# spelled wide enough to reach `main`, and that its age guard is its own.
+
+test_default_namespace_and_age_are_unchanged() {
+  # The preflight cases above cover behaviour; this pins the defaults the
+  # existing caller, `preflight-cleanup.yml`, relies on by passing neither flag.
+  assert_eq "default namespace" "preflight/" "$NAMESPACE"
+  assert_eq "default age" "3600" "$MIN_AGE_SECONDS"
+}
+
+test_flakefix_namespace_reclaims_an_orphan_branch() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main flakefix/issue-12 preflight/x
+  stub_gh "$root"
+  run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds 86400
+  assert_contains "the orphan is planned" "$OUT" "PLAN delete flakefix/issue-12"
+  assert_contains "the preflight ref is outside this pass" "$OUT" \
+    "SKIP outside-namespace refs/heads/preflight/x"
+  assert_eq "only the flakefix branch went" "main preflight/x " "$(refs_on_origin "$root")"
+  assert_eq "exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# And the reverse: a default pass never reaches the bot's branches.
+test_a_default_pass_leaves_flakefix_branches_alone() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main flakefix/issue-12 preflight/x
+  stub_gh "$root"
+  run_sweep "$root" --apply
+  assert_contains "flakefix skipped by name" "$OUT" \
+    "SKIP outside-namespace refs/heads/flakefix/issue-12"
+  assert_eq "only the preflight ref went" "flakefix/issue-12 main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+test_flakefix_branch_with_open_pr_survives() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main flakefix/issue-12
+  stub_gh "$root" "flakefix/issue-12"
+  run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds 86400
+  assert_contains "kept for its open PR" "$OUT" "KEEP open-pr flakefix/issue-12"
+  assert_eq "the branch survives" "flakefix/issue-12 main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+test_flakefix_branch_with_a_live_run_survives() {
+  if [ "$(have_jq)" != yes ]; then echo "ok   - SKIP flakefix live-run case: no jq"; return; fi
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main flakefix/issue-12
+  stub_gh "$root" "" "flakefix/issue-12"
+  run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds 86400
+  assert_contains "kept for its live run" "$OUT" "KEEP live-run flakefix/issue-12"
+  assert_eq "the branch survives" "flakefix/issue-12 main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# THE ONE-DAY GUARD. Twelve hours clears the default hour, so this branch is
+# spared by the flag and by nothing else.
+test_a_day_old_guard_spares_a_twelve_hour_old_branch() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_aged_ref_seconds "$root" flakefix/issue-9 43200
+  stub_gh "$root"
+  run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds 86400
+  assert_contains "kept as too young" "$OUT" "KEEP too-young flakefix/issue-9"
+  assert_eq "the branch survives" "flakefix/issue-9 main " "$(refs_on_origin "$root")"
+  assert_eq "a spared young branch is not a problem" "0" "$RC"
+  rm -rf "$root"
+}
+
+# MUTATION. Compare against 0 instead of the configured age and the same
+# twelve-hour branch is deleted, so the case above reads the comparison.
+test_the_configured_age_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_aged_ref_seconds "$root" flakefix/issue-9 43200
+  stub_gh "$root"
+  run_mutant_sweep "$root" 's/if \[\[ \$age -lt \$MIN_AGE_SECONDS \]\]; then/if [[ $age -lt 0 ]]; then/' \
+    --apply --namespace flakefix/ --min-age-seconds 86400
+  assert_contains "without the age comparison it is planned" "$OUT" "PLAN delete flakefix/issue-9"
+  assert_eq "and deleted" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# And the flag really overrides the default: the same twelve-hour branch under
+# the default hour goes. Without this, a script that ignored the flag and
+# hard-coded a day would pass the case above.
+test_the_age_flag_overrides_the_default() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_aged_ref_seconds "$root" flakefix/issue-9 43200
+  stub_gh "$root"
+  run_sweep "$root" --apply --namespace flakefix/
+  assert_contains "under the default hour it is planned" "$OUT" "PLAN delete flakefix/issue-9"
+  assert_eq "and deleted" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# THE NAMESPACE SHAPE GUARD. An empty namespace would make every branch eligible;
+# one without a trailing slash matches lookalikes; a glob or a nested path is not
+# a directory of branches. Each refuses with 2 before anything is asked.
+test_a_namespace_that_could_reach_main_is_refused() {
+  local root bad; root="$(mktmpd)"
+  mkfixture "$root" main
+  stub_gh "$root"
+  for bad in "" "main" "refs/heads/" "*" "flakefix" "Flakefix/" "a/b/"; do
+    run_sweep "$root" --apply --namespace "$bad"
+    assert_eq "namespace [$bad] refused" "2" "$RC"
+    assert_contains "and the refusal for [$bad] says why" "$OUT" "--namespace must match"
+  done
+  run_sweep "$root" --apply --namespace
+  assert_eq "a missing namespace is refused" "2" "$RC"
+  assert_eq "main still there" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# MUTATION. Accept any namespace and `--namespace ''` sweeps every branch on the
+# remote, `main` included — the shape check is what stands between them.
+test_the_namespace_shape_guard_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  stub_gh "$root"
+  run_mutant_sweep "$root" "s/^NAMESPACE_PATTERN=.*$/NAMESPACE_PATTERN='.*'/" \
+    --apply --namespace ""
+  # Not 0: the fixture's bare remote refuses to delete its own HEAD branch, so
+  # the attempt fails and is reported. What matters is that it was attempted.
+  assert_missing "an accepted empty namespace is not refused" "$OUT" "--namespace must match"
+  assert_contains "and plans main for deletion" "$OUT" "PLAN delete main"
+  assert_contains "and tries to delete it" "$OUT" "delete failed: main"
+  rm -rf "$root"
+}
+
+test_a_non_positive_or_non_numeric_age_is_refused() {
+  local root bad; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_fresh_ref "$root" flakefix/just-pushed
+  stub_gh "$root"
+  for bad in "" "0" "-5" "abc" "1h" "08"; do
+    run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds "$bad"
+    assert_eq "age [$bad] refused" "2" "$RC"
+    assert_contains "and the refusal for [$bad] says why" "$OUT" \
+      "--min-age-seconds must be a positive integer"
+  done
+  run_sweep "$root" --apply --namespace flakefix/ --min-age-seconds
+  assert_eq "a missing age is refused" "2" "$RC"
+  assert_eq "the fresh branch survives" "flakefix/just-pushed main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# MUTATION. Accept any age and `--min-age-seconds 0` disables the guard, deleting
+# a branch pushed this second.
+test_the_age_validation_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_fresh_ref "$root" flakefix/just-pushed
+  stub_gh "$root"
+  run_mutant_sweep "$root" 's/=~ \^\[1-9\]\[0-9\]\*\$ \]\]/=~ .* ]]/' \
+    --apply --namespace flakefix/ --min-age-seconds 0
+  assert_contains "an accepted zero age plans the fresh branch" "$OUT" \
+    "PLAN delete flakefix/just-pushed"
+  assert_eq "and deletes it" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# The close-path spelling works in another namespace too, and its "nothing here"
+# line names the namespace it looked in.
+test_a_named_branch_in_another_namespace() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main flakefix/issue-3 flakefix/issue-4
+  stub_gh "$root"
+  run_sweep "$root" --apply --namespace flakefix/ --branch issue-3
+  assert_contains "the named branch goes" "$OUT" "PLAN delete flakefix/issue-3"
+  assert_contains "the other is left alone" "$OUT" "SKIP other-branch refs/heads/flakefix/issue-4"
+  assert_eq "only the named one was reclaimed" "flakefix/issue-4 main " "$(refs_on_origin "$root")"
+  run_sweep "$root" --apply --namespace flakefix/ --branch issue-99
+  assert_contains "nothing-here names the namespace" "$OUT" \
+    "no flakefix ref for issue-99; nothing to reclaim"
   rm -rf "$root"
 }
 
