@@ -66,9 +66,7 @@ struct RemoteDetailSplit<Leading: View, Trailing: View>: View {
             .frame(maxHeight: .infinity)
             .padding(.horizontal, (Self.dividerHitWidth - 1) / 2)
             .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-            }
+            .pointerStyle(.columnResize)
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in

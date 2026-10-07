@@ -772,7 +772,7 @@ private struct DockSplitView<Main: View, Dock: View>: View {
                         .fill(Color.gray.opacity(0.3))
                         .frame(width: dividerWidth)
                         .contentShape(Rectangle())
-                        .cursor(.resizeLeftRight)
+                        .pointerStyle(.columnResize)
                         .overlay {
                             if let preview = previewRatio {
                                 let offsetX = -(preview - dockRatio) * available
