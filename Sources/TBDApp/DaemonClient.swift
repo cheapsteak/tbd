@@ -1212,16 +1212,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the transcript-composer gate (default OFF). Read per request by
-    /// the daemon, so no restart is needed; the app re-reads capabilities right
-    /// after writing so the toggle reflects the daemon's persisted state.
-    func setTranscriptComposerEnabled(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetTranscriptComposerEnabled,
-            params: ConfigSetTranscriptComposerEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the remote-transcript gate (default OFF). Read per request by
     /// the daemon, so no restart is needed; re-read capabilities after writing
     /// so a toggle reflects the daemon's persisted state.
@@ -2310,7 +2300,6 @@ actor DaemonClient {
     }
 
     /// What slash commands, skills and subagents this terminal's session knows.
-    /// Refused by the daemon when the composer flag is off.
     func terminalCompletions(terminalID: UUID) async throws -> TerminalCompletionsResult {
         try await callAsync(
             method: RPCMethod.terminalCompletions,

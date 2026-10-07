@@ -427,32 +427,6 @@ extension AppState {
         }
     }
 
-    /// Help text for the composer toggle. A stored constant rather than a
-    /// literal in the view so it is assertable, and so it says exactly what the
-    /// switch turns on — the field, its completion menu, and its attachments.
-    static let transcriptComposerHelp = """
-        Adds a message box under the live transcript, so you can reply to a \
-        Claude session without switching to its terminal. It completes slash \
-        commands, skills and subagents from the session's own Claude Code, and \
-        accepts pasted or dropped images. Claude sessions on local worktrees \
-        only. Off by default (soaking).
-        """
-
-    /// Persist the transcript-composer gate, then re-fetch capabilities so the
-    /// Settings toggle reflects the daemon's persisted state. Takes effect on
-    /// the next transcript pane render — no restart in either direction.
-    func setTranscriptComposerEnabled(_ enabled: Bool) async {
-        do {
-            try await transcriptComposerFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set transcript composer: \(error, privacy: .public)")
-            showAlert(
-                "Failed to set the transcript composer: \(error.localizedDescription)",
-                isError: true)
-        }
-    }
-
     /// Help text for the model-proxy toggle. A stored constant rather than a
     /// literal in the view so it is assertable: it must say what the switch
     /// puts in the request path and when the change takes hold, because a

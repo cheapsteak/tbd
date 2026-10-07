@@ -53,22 +53,20 @@ struct RemoteTranscriptGatesTests {
 
     // MARK: - offersComposer
 
-    @Test func composerOfferedWithSendSubmitAndBothFlags() {
+    @Test func composerOfferedWithSendSubmitAndTheFlag() {
         #expect(RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send-submit"], remoteTranscriptEnabled: true, composerEnabled: true))
+            capabilities: ["send-submit"], remoteTranscriptEnabled: true))
     }
 
     @Test func composerNotOfferedWithoutSendSubmit() {
         // Raw `send` is keystrokes, not a submitted message.
         #expect(!RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send", "transcript.read"], remoteTranscriptEnabled: true, composerEnabled: true))
+            capabilities: ["send", "transcript.read"], remoteTranscriptEnabled: true))
     }
 
-    @Test func composerNotOfferedWithEitherFlagOff() {
+    @Test func composerNotOfferedWithTheFlagOff() {
         #expect(!RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send-submit"], remoteTranscriptEnabled: false, composerEnabled: true))
-        #expect(!RemoteSessionDetailGates.offersComposer(
-            capabilities: ["send-submit"], remoteTranscriptEnabled: true, composerEnabled: false))
+            capabilities: ["send-submit"], remoteTranscriptEnabled: false))
     }
 
     // MARK: - RemoteComposerState.resolve
@@ -82,12 +80,11 @@ struct RemoteTranscriptGatesTests {
     private func resolve(
         capabilities: [String] = ["send-submit"],
         session: RemoteSessionPayload?,
-        remoteTranscriptEnabled: Bool = true,
-        composerEnabled: Bool = true
+        remoteTranscriptEnabled: Bool = true
     ) -> RemoteComposerState {
         RemoteComposerState.resolve(
             capabilities: capabilities, session: session,
-            remoteTranscriptEnabled: remoteTranscriptEnabled, composerEnabled: composerEnabled)
+            remoteTranscriptEnabled: remoteTranscriptEnabled)
     }
 
     @Test func composerRunningForAWorkingOrIdleSession() {
@@ -120,9 +117,8 @@ struct RemoteTranscriptGatesTests {
         #expect(resolve(capabilities: ["send"], session: session()) == .hidden)
     }
 
-    @Test func composerHiddenWithEitherFlagOff() {
+    @Test func composerHiddenWithTheFlagOff() {
         #expect(resolve(session: session(), remoteTranscriptEnabled: false) == .hidden)
-        #expect(resolve(session: session(), composerEnabled: false) == .hidden)
     }
 
     @Test func composerHiddenForASessionNotInTheMirror() {

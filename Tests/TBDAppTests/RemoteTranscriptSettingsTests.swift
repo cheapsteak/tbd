@@ -24,10 +24,9 @@ struct RemoteTranscriptSettingsTests {
     }
 
     private static func capabilities(
-        remoteTranscript: Bool, composer: Bool
+        remoteTranscript: Bool
     ) -> DaemonCapabilitiesResult {
-        var result = DaemonCapabilitiesResult(
-            controlModeEnabled: false, transcriptComposerEnabled: composer)
+        var result = DaemonCapabilitiesResult(controlModeEnabled: false)
         result.remoteTranscriptEnabled = remoteTranscript
         return result
     }
@@ -50,7 +49,7 @@ struct RemoteTranscriptSettingsTests {
             state.remoteTranscriptFlagSetter = { @MainActor enabled in written.append(enabled) }
             state.daemonCapabilitiesFetcher = { @MainActor in
                 refreshes += 1
-                return Self.capabilities(remoteTranscript: true, composer: false)
+                return Self.capabilities(remoteTranscript: true)
             }
 
             await state.setRemoteTranscriptEnabled(true)
@@ -66,7 +65,7 @@ struct RemoteTranscriptSettingsTests {
             var written: [Bool] = []
             state.remoteTranscriptFlagSetter = { @MainActor enabled in written.append(enabled) }
             state.daemonCapabilitiesFetcher = { @MainActor in
-                Self.capabilities(remoteTranscript: false, composer: false)
+                Self.capabilities(remoteTranscript: false)
             }
 
             await state.setRemoteTranscriptEnabled(false)
@@ -96,14 +95,14 @@ struct RemoteTranscriptSettingsTests {
 
     // MARK: - Composer gate
 
-    @Test("the remote composer needs send-submit and both flags")
+    @Test("the remote composer needs send-submit and the flag")
     func composerGate() async {
         await withAppState { state in
             state.remoteProviders = [Self.provider(capabilities: [
                 RemoteCapability.transcriptRead, RemoteCapability.sendSubmit,
             ])]
             // Not in the mirror yet: hidden whatever the flags say.
-            state.daemonCapabilities = Self.capabilities(remoteTranscript: true, composer: true)
+            state.daemonCapabilities = Self.capabilities(remoteTranscript: true)
             #expect(state.remoteComposerState(for: Self.selection) == .hidden)
 
             state.remoteSessions = [RemoteSessionInfo(
@@ -112,13 +111,10 @@ struct RemoteTranscriptSettingsTests {
                 gone: false, dismissed: false, lastSeen: Date())]
             #expect(state.remoteComposerState(for: Self.selection) == .running)
 
-            state.daemonCapabilities = Self.capabilities(remoteTranscript: false, composer: true)
+            state.daemonCapabilities = Self.capabilities(remoteTranscript: false)
             #expect(state.remoteComposerState(for: Self.selection) == .hidden)
 
-            state.daemonCapabilities = Self.capabilities(remoteTranscript: true, composer: false)
-            #expect(state.remoteComposerState(for: Self.selection) == .hidden)
-
-            state.daemonCapabilities = Self.capabilities(remoteTranscript: true, composer: true)
+            state.daemonCapabilities = Self.capabilities(remoteTranscript: true)
             state.remoteProviders = [Self.provider(capabilities: [RemoteCapability.transcriptRead])]
             #expect(state.remoteComposerState(for: Self.selection) == .hidden)
         }

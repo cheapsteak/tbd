@@ -330,22 +330,12 @@ struct ComposerMountingTests {
     }
 
     private func mount(
-        terminal: Terminal?, worktree: Worktree?, enabled: Bool = true
+        terminal: Terminal?, worktree: Worktree?
     ) -> TableTranscriptPaneView.ComposerMount? {
-        TableTranscriptPaneView.composerMount(
-            terminal: terminal, worktree: worktree, composerEnabled: enabled)
+        TableTranscriptPaneView.composerMount(terminal: terminal, worktree: worktree)
     }
 
-    /// **The flag-off branch.** With the daemon capability off the pane renders
-    /// exactly as it did before: no composer is built at all, so
-    /// `MessageComposerView` — which reads `AppState` non-optionally from the
-    /// environment — is never evaluated.
-    @Test func theFlagOffMountsNoComposer() {
-        let wt = worktree()
-        #expect(mount(terminal: terminal(worktreeID: wt.id), worktree: wt, enabled: false) == nil)
-    }
-
-    /// **The flag-on branch.** A live Claude terminal on a local worktree gets a
+    /// A live Claude terminal on a local worktree gets a
     /// running composer, and the mount carries the `LocalWorktree` the view's
     /// initializer takes.
     @Test func aLiveClaudeTerminalOnALocalWorktreeMounts() throws {
@@ -503,8 +493,8 @@ struct ComposerMountingTests {
         #expect(state.composerCommandTerminalID == transcript)
     }
 
-    /// **The negative.** No composer registered anywhere — the flag is off, or
-    /// the pane has not mounted one — and the accessor answers nil, which is
+    /// **The negative.** No composer registered anywhere — the pane has not
+    /// mounted one — and the accessor answers nil, which is
     /// what the two menu items' `.disabled(…)` reads. `focusComposer` on a
     /// terminal with no registered composer is a no-op, so an enabled item there
     /// would be an offer of nothing.

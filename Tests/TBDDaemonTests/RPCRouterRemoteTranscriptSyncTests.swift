@@ -87,12 +87,11 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         providerOK(#"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"}]}"#)
     }
 
-    /// Everything `remote.sendMessage` needs on: remote backends, and both of
-    /// the flags the daemon checks itself.
-    private func enableSend(remoteTranscript: Bool = true, composer: Bool = true) async throws {
+    /// Everything `remote.sendMessage` needs on: remote backends, and the
+    /// remote-transcript flag the daemon checks itself.
+    private func enableSend(remoteTranscript: Bool = true) async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         try await db.config.setRemoteTranscriptEnabled(remoteTranscript)
-        try await db.config.setTranscriptComposerEnabled(composer)
     }
 
     private func poll(_ manager: RemoteProviderManager) async {
@@ -285,27 +284,23 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
 
     // MARK: - remote.sendMessage refusals
 
-    /// Either flag off refuses before anything is invoked — the daemon reads
-    /// the flags itself, so a direct RPC call cannot send what the hidden
-    /// composer would not.
-    @Test(arguments: [(false, true), (true, false), (false, false)])
-    func sendIsRefusedWithEitherFlagOff(remoteTranscript: Bool, composer: Bool) async throws {
-        try await enableSend(remoteTranscript: remoteTranscript, composer: composer)
+    /// The flag off refuses before anything is invoked — the daemon reads the
+    /// flag itself, so a direct RPC call cannot send what the hidden composer
+    /// would not.
+    @Test func sendIsRefusedWithTheFlagOff() async throws {
+        try await enableSend(remoteTranscript: false)
         let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
         let r = router(await manager(invoker))
         let response = try await send(r)
         #expect(response.success == false)
-        let expected = remoteTranscript
-            ? RPCRouter.transcriptComposerDisabledResponse.error
-            : RPCRouter.remoteTranscriptDisabledResponse.error
-        #expect(response.error == expected)
+        #expect(response.error == RPCRouter.remoteTranscriptDisabledResponse.error)
         #expect(invoker.callsSnapshot() == [["describe"]])
         #expect(try actuationRows().isEmpty)
     }
 
-    /// Both flags unset: the shipped defaults refuse as well, not only an
+    /// The flag unset: the shipped default refuses as well, not only an
     /// explicit `false`.
-    @Test func sendIsRefusedWithBothFlagsUnset() async throws {
+    @Test func sendIsRefusedWithTheFlagUnset() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [describeDeclaring(["send", RemoteCapability.sendSubmit])])
         let r = router(await manager(invoker))
@@ -539,8 +534,8 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     }
 
     /// A send queued behind another is judged against the flags as they stand
-    /// when its turn comes: switching the composer off while it waits refuses
-    /// it, and only the first send reaches the provider.
+    /// when its turn comes: switching the remote transcript off while it waits
+    /// refuses it, and only the first send reaches the provider.
     @Test func aQueuedSendIsRefusedWhenAFlagTurnsOffBeforeItsTurn() async throws {
         try await enableSend()
         let invoker = FakeProviderInvoker(script: [
@@ -571,7 +566,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let secondQueued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await r.remoteSendMessageSerializer.admittedCount == 2
         }
-        try await db.config.setTranscriptComposerEnabled(false)
+        try await db.config.setRemoteTranscriptEnabled(false)
         await gate.open()
 
         let firstResponse = await first
@@ -579,7 +574,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(firstEntered == .satisfied)
         #expect(secondQueued == .satisfied)
         #expect(firstResponse.success)
-        #expect(secondResponse.error == RPCRouter.transcriptComposerDisabledResponse.error)
+        #expect(secondResponse.error == RPCRouter.remoteTranscriptDisabledResponse.error)
         #expect(Self.sends(invoker).count == 1)
     }
 

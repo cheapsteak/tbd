@@ -28,8 +28,7 @@ import TBDShared
 ///
 /// Below the transcript sits the shared `MessageComposerView` for a
 /// `.remote` target, when `RemoteComposerState` offers one: the provider
-/// declares `send-submit` and both `remote_transcript_enabled` and
-/// `transcript_composer_enabled` are on.
+/// declares `send-submit` and `remote_transcript_enabled` is on.
 struct RemoteTranscriptPaneView: View {
     let selection: RemoteSessionSelection
     let path: String?

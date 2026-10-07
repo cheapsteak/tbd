@@ -53,15 +53,13 @@ extension AppState {
     }
 
     /// What the transcript pane's composer offers for `selection`: hidden
-    /// unless the provider declares `send-submit` and both
-    /// `remote_transcript_enabled` and `transcript_composer_enabled` are on;
-    /// otherwise running, blocked or exited from the provider's own report.
+    /// unless the provider declares `send-submit` and
+    /// `remote_transcript_enabled` is on; otherwise running, blocked or exited from the provider's own report.
     func remoteComposerState(for selection: RemoteSessionSelection) -> RemoteComposerState {
         RemoteComposerState.resolve(
             capabilities: remoteProviderCapabilities(for: selection),
             session: remoteSessionPayload(for: selection),
-            remoteTranscriptEnabled: remoteTranscriptEnabled,
-            composerEnabled: transcriptComposerEnabled)
+            remoteTranscriptEnabled: remoteTranscriptEnabled)
     }
 
     // MARK: - Sync drivers
@@ -90,8 +88,8 @@ extension AppState {
     /// assertable.
     static let remoteTranscriptHelp = """
         Adds a Transcript pane beside a remote session's terminal, for \
-        providers that can serve one. With the message composer also on, it \
-        can send messages to the session too. Off by default (soaking).
+        providers that can serve one, with a message box for providers that \
+        accept submitted messages. Off by default (soaking).
         """
 
     /// Persist `remote_transcript_enabled`, then re-fetch capabilities so the

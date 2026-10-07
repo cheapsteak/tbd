@@ -1748,10 +1748,10 @@ final class AppState {
     /// already resolved daemon-side, so the app never re-derives the pair.
     ///
     /// False until capabilities have been fetched, which is the conservative
-    /// reading and the same one `transcriptComposerEnabled` takes: a pane that
-    /// registers no stream file renders exactly what it renders today, while a
-    /// provisional row that appeared and then vanished on the first capability
-    /// fetch would be worse than one that appeared a moment late.
+    /// reading: a pane that registers no stream file renders exactly what it
+    /// renders today, while a provisional row that appeared and then vanished on
+    /// the first capability fetch would be worse than one that appeared a
+    /// moment late.
     var transcriptStreamingEnabled: Bool {
         daemonCapabilities?.transcriptStreamingEnabled ?? false
     }
@@ -1867,13 +1867,6 @@ final class AppState {
         @MainActor (UUID) async throws -> TerminalCompletionsResult =
         { [daemonClient] terminalID in
             try await daemonClient.terminalCompletions(terminalID: terminalID)
-        }
-    /// How `setTranscriptComposerEnabled` persists the composer gate —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored
-    lazy var transcriptComposerFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
         }
     /// How `setRemoteTranscriptEnabled` persists the remote-transcript gate —
     /// injectable for the same reason as `controlModeSetter`.

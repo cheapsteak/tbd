@@ -124,14 +124,12 @@ struct RemoteTranscriptFlagTests {
         #expect(try await db.config.get().remoteTranscriptEnabled == false)
     }
 
-    /// The flag is its own. In particular it does not switch the composer on:
-    /// the remote composer needs both, so the two are chosen separately.
+    /// The flag is its own: setting it switches nothing else on.
     @Test func theFlagIsIndependentOfTheOthers() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setRemoteTranscriptEnabled(true)
         let config = try await db.config.get()
         #expect(config.remoteTranscriptEnabled)
-        #expect(config.transcriptComposerEnabled == Config.transcriptComposerEnabledDefault)
         #expect(config.remoteBackendsEnabled == false)
     }
 

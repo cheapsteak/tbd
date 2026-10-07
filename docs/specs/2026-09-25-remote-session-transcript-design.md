@@ -99,7 +99,7 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
 - **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless `remote_transcript_enabled` is on and the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
 - **`remote.sendMessage {provider, sessionID, text}`** invokes `send <id> --submit` with `text` on stdin and a 30-second timeout. It is refused:
-  - unless both `remote_transcript_enabled` and `transcript_composer_enabled` are on — the daemon checks the flags itself, so a direct RPC call cannot send input the hidden composer would not;
+  - unless `remote_transcript_enabled` is on — the daemon checks the flag itself, so a direct RPC call cannot send input the hidden composer would not;
   - unless the provider declares `send-submit`;
   - when the provider's snapshot is stale, as `remote.send` is;
   - while the mirrored `agent_state` is `waiting_input`, because the agent is blocked on a prompt and an Enter would choose its highlighted option — the refusal says to answer the prompt in the terminal;
@@ -113,7 +113,7 @@ The existing `remote.transcript` RPC and `tbd remote transcript` keep their full
 
 ### Flag
 
-`remote_transcript_enabled` is a new `config` column with no SQL default, resolved as `remote_transcript_enabled ?? Config.remoteTranscriptEnabledDefault`, which is `false`. It gates `remote.transcriptSync`, the pane, and the composer. The composer also requires the existing `transcript_composer_enabled`, so remote and local composers are switched together. Graduation flips `Config.remoteTranscriptEnabledDefault`.
+`remote_transcript_enabled` is a new `config` column with no SQL default, resolved as `remote_transcript_enabled ?? Config.remoteTranscriptEnabledDefault`, which is `false`. It gates `remote.transcriptSync`, the pane, and the composer. Graduation flips `Config.remoteTranscriptEnabledDefault`.
 
 ### Reclaiming the cache
 
@@ -153,7 +153,7 @@ The remote pane reuses `MessageComposerView` and its send coordinator. A compose
 
 For a remote target:
 
-- **Visibility** – shown only when the provider declares `send-submit` and both flags are on.
+- **Visibility** – shown only when the provider declares `send-submit` and `remote_transcript_enabled` is on.
 - **Disabled states** – "Session has exited" when it has; "Waiting on a prompt — answer it in the terminal" while `agent_state` is `waiting_input`.
 - **Omissions** – no slash-command menu, since the completion inventory comes from a local terminal (a typed `/command` is still sent as text); no image attachments, since staged images are local paths the remote machine cannot read; no wake path for an exited session.
 - **Submission** – submit calls `remote.sendMessage`. The text stays in the composer until the call succeeds, and success triggers a sync. Not sent shows the composer's failure banner. Unknown shows a distinct banner — "May have been sent — check the transcript before sending again" — triggers a sync so the transcript can answer the question, and keeps the text without offering a one-keystroke resend: the user must edit the text or confirm before it can be sent again. Neither outcome resubmits automatically.
@@ -178,7 +178,7 @@ Each gate is tested on both branches.
   - paths follow `TBD_HOME`.
 - **RPC gates**:
   - `remote.transcriptSync` refused with the flag off, without `transcript.read`, or for a dismissed session;
-  - `remote.sendMessage` refused with either flag off, without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
+  - `remote.sendMessage` refused with the flag off, without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
   - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
@@ -189,7 +189,7 @@ Each gate is tested on both branches.
 
 ## Rollout
 
-- Everything ships behind `remote_transcript_enabled`, default off; the composer also needs `transcript_composer_enabled`. The soak enables both against a provider that implements `transcript.read` and `send-submit`.
+- Everything ships behind `remote_transcript_enabled`, default off. The soak enables it against a provider that implements `transcript.read` and `send-submit`.
 - The namespace rename is a hard cutover in TBD. A provider that has not adopted the namespaced spellings loses, until it does, every transcript operation it declares under a bare spelling — `transcript` (read), `retain`, `import`, and `recall` alike. Every other capability keeps working. No provider shipped the bare `transcript` or `import`, so in practice an un-updated provider loses retain and recall.
 - Provider implementations of `transcript read` (with paging and `reset`), `send --submit`, and the renamed verbs are tracked with each provider.
 

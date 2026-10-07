@@ -4,7 +4,7 @@ import Testing
 import TBDShared
 
 /// `AppState.remoteTranscriptEnabled` is read from `daemon.capabilities`, the
-/// same route `transcriptComposerEnabled` takes. Each test uses a throwaway
+/// the same route every daemon-side flag takes. Each test uses a throwaway
 /// `UserDefaults` suite, because `UserDefaults.standard` on this unbundled
 /// executable is the developer's real `TBDApp.plist`.
 @MainActor
@@ -41,18 +41,6 @@ struct RemoteTranscriptFlagAppTests {
             caps.remoteTranscriptEnabled = false
             state.daemonCapabilities = caps
             #expect(state.remoteTranscriptEnabled == false)
-        }
-    }
-
-    /// The remote flag does not imply the composer flag: the remote composer
-    /// needs both, so each is read on its own.
-    @Test func doesNotImplyTheComposerFlag() async {
-        await withAppState { state in
-            var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
-            caps.remoteTranscriptEnabled = true
-            state.daemonCapabilities = caps
-            #expect(state.remoteTranscriptEnabled)
-            #expect(state.transcriptComposerEnabled == false)
         }
     }
 }

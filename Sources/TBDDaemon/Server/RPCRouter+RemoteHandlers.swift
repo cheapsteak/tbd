@@ -956,12 +956,6 @@ extension RPCRouter {
 
     static let sendMessageExitedRefusal = "session has exited; a message cannot be sent to it"
 
-    /// The refusal for `remote.sendMessage` while `transcript_composer_enabled`
-    /// is off. `remote_transcript_enabled` off answers with
-    /// `remoteTranscriptDisabledResponse`, as `remote.transcriptSync` does.
-    static let transcriptComposerDisabledResponse = RPCResponse(error:
-        "the transcript composer is disabled (config transcript_composer_enabled); " +
-        "turn on \"Message composer in the transcript pane\" in Settings")
     static let sendMessageWaitingInputRefusal =
         "the agent is waiting on a prompt; answer it in the terminal"
 
@@ -970,10 +964,9 @@ extension RPCRouter {
     /// (`docs/remote-provider-contract.md` § `--submit`).
     ///
     /// Refused, without invoking anything:
-    /// - unless both `remote_transcript_enabled` and `transcript_composer_enabled`
-    ///   are on. The daemon reads the flags itself rather than trusting the app
-    ///   to hide the composer, so a direct RPC call cannot send input the
-    ///   hidden composer would not;
+    /// - unless `remote_transcript_enabled` is on. The daemon reads the flag
+    ///   itself rather than trusting the app to hide the composer, so a direct
+    ///   RPC call cannot send input the hidden composer would not;
     /// - unless the provider declares `send-submit` — a caller MUST NOT pass
     ///   `--submit` otherwise;
     /// - when the provider's snapshot is stale, as `remote.send` is;
@@ -1016,17 +1009,14 @@ extension RPCRouter {
         }
     }
 
-    /// The refusal for `remote.sendMessage` while either flag it needs is off,
-    /// or nil when both are on. Read before the send is queued, for a prompt
+    /// The refusal for `remote.sendMessage` while the flag it needs is off,
+    /// or nil when it is on. Read before the send is queued, for a prompt
     /// answer, and again inside the lane, so a send queued behind another is
     /// judged against the flags as they stand when its turn comes.
     private func sendMessageFlagRefusal() async throws -> RPCResponse? {
         let config = try await db.config.get()
         guard config.remoteTranscriptEnabled else {
             return Self.remoteTranscriptDisabledResponse
-        }
-        guard config.transcriptComposerEnabled else {
-            return Self.transcriptComposerDisabledResponse
         }
         return nil
     }

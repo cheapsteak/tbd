@@ -21,8 +21,8 @@ import TBDShared
 /// composer, an exited remote session stays disabled: there is no wake path
 /// for a remote target (spec non-goal).
 enum RemoteComposerState: Equatable {
-    /// No composer: the provider does not declare `send-submit`, either flag
-    /// is off, or the session is not in the mirror.
+    /// No composer: the provider does not declare `send-submit`, the remote
+    /// transcript flag is off, or the session is not in the mirror.
     case hidden
     /// The session is running and not blocked; submitting sends the message.
     case running
@@ -70,13 +70,11 @@ enum RemoteComposerState: Equatable {
     static func resolve(
         capabilities: [String],
         session: RemoteSessionPayload?,
-        remoteTranscriptEnabled: Bool,
-        composerEnabled: Bool
+        remoteTranscriptEnabled: Bool
     ) -> RemoteComposerState {
         guard RemoteSessionDetailGates.offersComposer(
             capabilities: capabilities,
-            remoteTranscriptEnabled: remoteTranscriptEnabled,
-            composerEnabled: composerEnabled),
+            remoteTranscriptEnabled: remoteTranscriptEnabled),
             let session
         else { return .hidden }
 

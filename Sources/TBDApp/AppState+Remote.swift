@@ -257,8 +257,7 @@ extension AppState {
     /// (`remote_transcript_enabled`). Read from the capability payload, so it
     /// is the shipped default (off) until capabilities have been fetched: a
     /// Transcript toggle that flashed in and then disappeared would be worse
-    /// than one that appeared a moment late. The remote composer additionally
-    /// needs `transcriptComposerEnabled`.
+    /// than one that appeared a moment late.
     var remoteTranscriptEnabled: Bool {
         daemonCapabilities?.remoteTranscriptEnabled ?? Config.remoteTranscriptEnabledDefault
     }

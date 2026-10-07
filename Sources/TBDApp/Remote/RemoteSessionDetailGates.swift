@@ -106,12 +106,11 @@ enum RemoteSessionDetailGates {
     }
 
     /// Whether a remote session can have a submitting composer at all:
-    /// the provider declares `send-submit`, and both
-    /// `remote_transcript_enabled` and `transcript_composer_enabled` are on.
-    /// The composer's finer states live in `RemoteComposerState`.
+    /// the provider declares `send-submit` and `remote_transcript_enabled` is
+    /// on. The composer's finer states live in `RemoteComposerState`.
     static func offersComposer(
-        capabilities: [String], remoteTranscriptEnabled: Bool, composerEnabled: Bool
+        capabilities: [String], remoteTranscriptEnabled: Bool
     ) -> Bool {
-        remoteTranscriptEnabled && composerEnabled && capabilities.contains(sendSubmitCapability)
+        remoteTranscriptEnabled && capabilities.contains(sendSubmitCapability)
     }
 }
