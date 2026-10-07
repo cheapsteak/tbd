@@ -580,12 +580,20 @@ class TBDTerminalView: TerminalView {
     }
 
     /// A panel-routed terminal takes the click that activates its window, so
-    /// clicking a terminal in a background window focuses that terminal (and
-    /// forwards the click in a mouse-mode app) instead of only raising the
-    /// window.
+    /// clicking a terminal in a background window focuses that terminal
+    /// instead of only raising the window. The activating click does nothing
+    /// else, as in any macOS terminal: it reaches neither SwiftTerm — whose
+    /// mouse-down would drop the selection the user came back to copy — nor
+    /// the pane. A Cmd+click still opens its path or link.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        onMouseDownClaimFocus != nil
+        guard onMouseDownClaimFocus != nil else { return false }
+        activationClickEventNumber = event?.eventNumber
+        return true
     }
+    /// The event number of the mouse-down AppKit last asked about in
+    /// `acceptsFirstMouse`, which it asks only for a click into a window
+    /// that is not key. The matching `mouseDown` is that activating click.
+    private var activationClickEventNumber: Int?
 
     // Track the mouse-down position to distinguish clicks from drags.
     // Single clicks are forwarded to tmux for pane switching;
@@ -594,8 +602,9 @@ class TBDTerminalView: TerminalView {
     private var didDrag: Bool = false
     private static let dragThreshold: CGFloat = 3.0
     /// Set when TBD consumed this press's mouse-down (a Cmd+click that opened
-    /// a path or link), so its drags and release skip SwiftTerm and the pane
-    /// too. SwiftTerm never saw the press begin, and its mouse-up would
+    /// a path or link, or a window's activating click), so its drags and
+    /// release skip SwiftTerm and the pane too. SwiftTerm never saw the press
+    /// begin, and its mouse-up would
     /// otherwise open the same implicit link a second time, or, with Cmd let
     /// go before the button, the release would reach the pane as a plain
     /// click.
@@ -605,6 +614,8 @@ class TBDTerminalView: TerminalView {
         mouseDownLocation = convert(event.locationInWindow, from: nil)
         didDrag = false
         pressBypassesSwiftTerm = false
+        let isActivationClick = event.eventNumber == activationClickEventNumber
+        activationClickEventNumber = nil
         if let claimFocus = onMouseDownClaimFocus, claimFocus() {
             // Cmd+click routing belongs to panel-routed terminals, the ones
             // that resolve paths against a worktree. A consumed click never
@@ -614,6 +625,10 @@ class TBDTerminalView: TerminalView {
                 pressBypassesSwiftTerm = true
                 return
             }
+        }
+        if isActivationClick {
+            pressBypassesSwiftTerm = true
+            return
         }
         super.mouseDown(with: event)
     }

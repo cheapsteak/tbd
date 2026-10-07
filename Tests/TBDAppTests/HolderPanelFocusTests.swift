@@ -316,6 +316,44 @@ struct HolderPanelFocusTests {
     }
 
     @MainActor
+    @Test("the click that activates a window focuses the terminal and keeps its selection")
+    func theActivatingClickKeepsTheSelection() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        let point = CGPoint(x: 10, y: 10)
+        let activating = fixture.mouseEvent(.leftMouseDown, at: point, eventNumber: 42)
+        #expect(!fixture.view.acceptsFirstMouse(for: activating), """
+            a terminal with no panel routing took the activating click, which only SwiftTerm \
+            would then see
+            """)
+
+        await fixture.attach()
+        try await fixture.waitForFirstResponder()
+        fixture.view.feed(text: "\u{1b}[H\u{1b}[2Jselect me")
+        fixture.window.makeFirstResponder(nil)
+        fixture.view.selectAll()
+        #expect(fixture.view.selectionActive)
+
+        #expect(fixture.view.acceptsFirstMouse(for: activating))
+        fixture.view.mouseDown(with: activating)
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, eventNumber: 42))
+
+        #expect(fixture.window.firstResponder === fixture.view, """
+            the click that brought the window forward did not focus the terminal under it
+            """)
+        #expect(fixture.view.selectionActive, """
+            the click that brought the window forward dropped the selection the user came back \
+            to copy
+            """)
+
+        // Any later click in the now-key window is an ordinary one.
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, eventNumber: 43))
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, eventNumber: 43))
+        #expect(!fixture.view.selectionActive)
+    }
+
+    @MainActor
     @Test("a click moving focus between split panes of one tab keeps the tab named")
     func aClickFromASplitSiblingKeepsTheCloseContext() async throws {
         let fixture = try Fixture()
