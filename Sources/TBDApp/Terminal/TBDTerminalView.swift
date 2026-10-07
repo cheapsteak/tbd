@@ -594,6 +594,19 @@ class TBDTerminalView: TerminalView {
         activationClickEventNumber = event?.eventNumber
         return true
     }
+    /// Under the Metal renderer SwiftTerm covers this view with a
+    /// `CAMetalLayer`-backed surface that does not override `hitTest`, so
+    /// AppKit would ask *it* whether to take the activating click — and it
+    /// declines. A hit on that surface is a hit on the terminal; every other
+    /// subview (scroller, find bar) keeps its own clicks.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if let hit, hit !== self, hit.superview === self, hit.layer is CAMetalLayer {
+            return self
+        }
+        return hit
+    }
+
     /// The event number of the mouse-down AppKit last asked about in
     /// `acceptsFirstMouse`, which it asks only for a click into a window
     /// that is not key. The matching `mouseDown` is that activating click.

@@ -410,6 +410,38 @@ struct HolderPanelFocusTests {
             """)
     }
 
+    /// Stands in for SwiftTerm's Metal surface: a full-size subview backed by
+    /// a `CAMetalLayer`, with no `hitTest` override of its own.
+    private final class MetalSurfaceStandIn: NSView {
+        override func makeBackingLayer() -> CALayer { CAMetalLayer() }
+    }
+
+    @MainActor
+    @Test("a click on the Metal render surface hit-tests to the terminal")
+    func theMetalSurfaceHitTestsToTheTerminal() throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        let surface = MetalSurfaceStandIn(frame: fixture.view.bounds)
+        surface.wantsLayer = true
+        fixture.view.addSubview(surface)
+        let plain = NSView(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+        fixture.view.addSubview(plain)
+        defer {
+            surface.removeFromSuperview()
+            plain.removeFromSuperview()
+        }
+
+        // `hitTest` takes a point in the superview's coordinates.
+        let onSurface = fixture.view.convert(CGPoint(x: 300, y: 150), to: fixture.view.superview)
+        #expect(fixture.view.hitTest(onSurface) === fixture.view, """
+            the Metal surface took the hit, so AppKit asked it rather than the terminal whether \
+            to accept the click that activates the window
+            """)
+        let onPlain = fixture.view.convert(CGPoint(x: 10, y: 10), to: fixture.view.superview)
+        #expect(fixture.view.hitTest(onPlain) === plain)
+    }
+
     @MainActor
     @Test("a click moving focus between split panes of one tab keeps the tab named")
     func aClickFromASplitSiblingKeepsTheCloseContext() async throws {
