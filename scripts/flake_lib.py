@@ -433,6 +433,29 @@ def code_span(text: str) -> str:
     return f"`{flat}`"
 
 
+def fenced(text: str, info: str = "text") -> str:
+    """A fenced block no content can close: the fence is a run of backticks
+    longer than any inside it (a backtick fence is closed only by backticks)."""
+    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{info}\n{text}\n{fence}"
+
+
+def load_ledger():
+    """`scripts/flake-ledger.py` as a module, for its issue reader and its `gh`
+    helpers, so the picker and the PR driver read and write GitHub exactly as
+    the ledger does. Registered in `sys.modules` before it runs, because its
+    dataclasses resolve their annotations through it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("flake_ledger", Path(__file__).resolve().parent / "flake-ledger.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["flake_ledger"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_url(repo: str, run_id: int, attempt: int) -> str:
     return f"https://github.com/{repo}/actions/runs/{run_id}/attempts/{attempt}"
 

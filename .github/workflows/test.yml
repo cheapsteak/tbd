@@ -247,6 +247,9 @@ jobs:
           bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/flake-ledger.test.sh
+          bash scripts/flake-pick.test.sh
+          bash scripts/flake-verify.test.sh
+          bash scripts/flake-pr.test.sh
           bash scripts/restart-guard-lib.test.sh
           bash scripts/ci/first-party-wipe-needed.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
