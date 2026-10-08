@@ -2,36 +2,8 @@ import Foundation
 import Testing
 @testable import TBDApp
 
-@Suite("MarkdownViewerFlag")
-struct MarkdownViewerFlagTests {
-
-    private func makeDefaults() -> (UserDefaults, String) {
-        let name = "MarkdownViewerFlagTests-\(UUID().uuidString)"
-        return (UserDefaults(suiteName: name)!, name)
-    }
-
-    @Test("defaults to off")
-    func defaultsOff() {
-        let (defaults, name) = makeDefaults()
-        defer { defaults.removePersistentDomain(forName: name) }
-        #expect(MarkdownViewerPreferences.useWebView(defaults) == false)
-    }
-
-    @Test("reads an explicit opt-in")
-    func readsOptIn() {
-        let (defaults, name) = makeDefaults()
-        defer { defaults.removePersistentDomain(forName: name) }
-        defaults.set(true, forKey: MarkdownViewerPreferences.useWebViewKey)
-        #expect(MarkdownViewerPreferences.useWebView(defaults) == true)
-    }
-
-    @Test("reads an explicit opt-out")
-    func readsOptOut() {
-        let (defaults, name) = makeDefaults()
-        defer { defaults.removePersistentDomain(forName: name) }
-        defaults.set(false, forKey: MarkdownViewerPreferences.useWebViewKey)
-        #expect(MarkdownViewerPreferences.useWebView(defaults) == false)
-    }
+@Suite("MarkdownRenderService")
+struct MarkdownRenderServiceTests {
 
     @Test("render service produces a document for a real file")
     func renderServiceWorks() async throws {

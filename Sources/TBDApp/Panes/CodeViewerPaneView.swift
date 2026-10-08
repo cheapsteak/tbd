@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 @preconcurrency import Highlightr
-import MarkdownUI
 import TBDShared
 
 // MARK: - CodeViewerPaneView
@@ -12,196 +11,6 @@ struct HasRenderableContentKey: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) {
         value = value || nextValue()
     }
-}
-
-// MARK: - Custom Markdown Theme
-
-/// GitHub-like markdown theme with transparent background and font sizes
-/// tuned for the code viewer pane (13pt base instead of 16pt).
-private extension MarkdownUI.Theme {
-    @MainActor static let codeViewer = MarkdownUI.Theme()
-        .text {
-            ForegroundColor(.codeViewerText)
-            FontSize(13)
-        }
-        .code {
-            FontFamilyVariant(.monospaced)
-            FontSize(.em(0.85))
-            BackgroundColor(.codeViewerSecondaryBg)
-        }
-        .strong {
-            FontWeight(.semibold)
-        }
-        .link {
-            ForegroundColor(.codeViewerLink)
-        }
-        .heading1 { configuration in
-            VStack(alignment: .leading, spacing: 0) {
-                configuration.label
-                    .relativePadding(.bottom, length: .em(0.3))
-                    .relativeLineSpacing(.em(0.125))
-                    .markdownMargin(top: 24, bottom: 16)
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(2))
-                    }
-                Divider().overlay(Color.codeViewerDivider)
-            }
-        }
-        .heading2 { configuration in
-            VStack(alignment: .leading, spacing: 0) {
-                configuration.label
-                    .relativePadding(.bottom, length: .em(0.3))
-                    .relativeLineSpacing(.em(0.125))
-                    .markdownMargin(top: 24, bottom: 16)
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.5))
-                    }
-                Divider().overlay(Color.codeViewerDivider)
-            }
-        }
-        .heading3 { configuration in
-            configuration.label
-                .relativeLineSpacing(.em(0.125))
-                .markdownMargin(top: 24, bottom: 16)
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(1.25))
-                }
-        }
-        .heading4 { configuration in
-            configuration.label
-                .relativeLineSpacing(.em(0.125))
-                .markdownMargin(top: 24, bottom: 16)
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                }
-        }
-        .heading5 { configuration in
-            configuration.label
-                .relativeLineSpacing(.em(0.125))
-                .markdownMargin(top: 24, bottom: 16)
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(0.875))
-                }
-        }
-        .heading6 { configuration in
-            configuration.label
-                .relativeLineSpacing(.em(0.125))
-                .markdownMargin(top: 24, bottom: 16)
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(0.85))
-                    ForegroundColor(.codeViewerTertiaryText)
-                }
-        }
-        .paragraph { configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.25))
-                .markdownMargin(top: 0, bottom: 16)
-        }
-        .blockquote { configuration in
-            HStack(spacing: 0) {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.codeViewerBorder)
-                    .relativeFrame(width: .em(0.2))
-                configuration.label
-                    .markdownTextStyle { ForegroundColor(.codeViewerSecondaryText) }
-                    .relativePadding(.horizontal, length: .em(1))
-            }
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .codeBlock { configuration in
-            ScrollView(.horizontal) {
-                configuration.label
-                    .fixedSize(horizontal: false, vertical: true)
-                    .relativeLineSpacing(.em(0.225))
-                    .markdownTextStyle {
-                        FontFamilyVariant(.monospaced)
-                        FontSize(.em(0.85))
-                    }
-                    .padding(16)
-            }
-            .background(Color.codeViewerSecondaryBg)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .markdownMargin(top: 0, bottom: 16)
-        }
-        .listItem { configuration in
-            configuration.label
-                .markdownMargin(top: .em(0.25))
-        }
-        .taskListMarker { configuration in
-            Image(systemName: configuration.isCompleted ? "checkmark.square.fill" : "square")
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color.codeViewerCheckbox, Color.codeViewerCheckboxBg)
-                .imageScale(.small)
-                .relativeFrame(minWidth: .em(1.5), alignment: .trailing)
-        }
-        .table { configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .markdownTableBorderStyle(.init(color: .codeViewerBorder))
-                .markdownTableBackgroundStyle(
-                    .alternatingRows(Color.clear, Color.codeViewerSecondaryBg)
-                )
-                .markdownMargin(top: 0, bottom: 16)
-        }
-        .tableCell { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    if configuration.row == 0 {
-                        FontWeight(.semibold)
-                    }
-                    BackgroundColor(nil)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 13)
-                .relativeLineSpacing(.em(0.25))
-        }
-        .thematicBreak {
-            Divider()
-                .relativeFrame(height: .em(0.25))
-                .overlay(Color.codeViewerBorder)
-                .markdownMargin(top: 24, bottom: 24)
-        }
-}
-
-private extension Color {
-    static let codeViewerText = Color(
-        light: Color(red: 0.024, green: 0.024, blue: 0.024),
-        dark: Color(red: 0.984, green: 0.984, blue: 0.988)
-    )
-    static let codeViewerSecondaryText = Color(
-        light: Color(red: 0.42, green: 0.43, blue: 0.48),
-        dark: Color(red: 0.573, green: 0.58, blue: 0.627)
-    )
-    static let codeViewerTertiaryText = Color(
-        light: Color(red: 0.42, green: 0.43, blue: 0.48),
-        dark: Color(red: 0.427, green: 0.44, blue: 0.49)
-    )
-    // Slightly lighter than atom-one-dark bg for code blocks / alt table rows
-    static let codeViewerSecondaryBg = Color(
-        light: Color(red: 0.969, green: 0.969, blue: 0.976),
-        dark: Color(white: 1, opacity: 0.06)
-    )
-    static let codeViewerLink = Color(
-        light: Color(red: 0.173, green: 0.396, blue: 0.812),
-        dark: Color(red: 0.298, green: 0.557, blue: 0.973)
-    )
-    static let codeViewerBorder = Color(
-        light: Color(red: 0.894, green: 0.894, blue: 0.91),
-        dark: Color(white: 1, opacity: 0.15)
-    )
-    static let codeViewerDivider = Color(
-        light: Color(red: 0.816, green: 0.816, blue: 0.827),
-        dark: Color(white: 1, opacity: 0.1)
-    )
-    static let codeViewerCheckbox = Color(red: 0.725, green: 0.725, blue: 0.733)
-    static let codeViewerCheckboxBg = Color(red: 0.933, green: 0.933, blue: 0.937)
 }
 
 /// Files that have a rich rendered view in addition to raw source code.
@@ -223,16 +32,15 @@ private func isRenderableFile(_ path: String) -> Bool {
 /// internally.
 ///
 /// Only a *single* selected markdown file qualifies. A multi-file selection
-/// with the flag on would hit the same zero-height collapse, and stacking N
-/// internally-scrolling webviews needs a layout design of its own, so it falls
-/// back to the MarkdownUI rendering — a known limitation for the soak.
+/// would hit the same zero-height collapse, and stacking N internally-scrolling
+/// webviews needs a layout design of its own, so a markdown file in a
+/// multi-file selection shows its highlighted source instead.
 enum MarkdownPaneLayout {
     static func usesFullPaneWebView(
         showSourceCode: Bool,
-        selectedFiles: [String],
-        useWebView: Bool
+        selectedFiles: [String]
     ) -> Bool {
-        guard useWebView, !showSourceCode, selectedFiles.count == 1 else { return false }
+        guard !showSourceCode, selectedFiles.count == 1 else { return false }
         return isRenderableFile(selectedFiles[0])
     }
 }
@@ -257,8 +65,7 @@ struct CodeViewerPaneView: View {
     private var usesFullPaneWebView: Bool {
         MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: showSourceCode,
-            selectedFiles: selectedFiles,
-            useWebView: MarkdownViewerPreferences.useWebView()
+            selectedFiles: selectedFiles
         )
     }
 
@@ -294,7 +101,7 @@ struct CodeViewerPaneView: View {
                     filePath: selectedFiles[0],
                     worktreePath: worktreePath,
                     showSourceCode: showSourceCode,
-                    useWebViewMarkdown: true,
+                    rendersMarkdown: true,
                     onOpenFile: { openLinkedFile($0) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -309,16 +116,16 @@ struct CodeViewerPaneView: View {
                                     if selectedFiles.count > 1 {
                                         fileHeader(filePath)
                                     }
-                                    // Always the MarkdownUI renderer here: a
-                                    // webview nested in this ScrollView has no
-                                    // height. With the flag on, this is reached
-                                    // only by a multi-file selection — the known
-                                    // limitation named in `MarkdownPaneLayout`.
+                                    // Never rendered markdown here: a webview
+                                    // nested in this ScrollView has no height.
+                                    // A markdown file reaches this stack only
+                                    // in source mode or a multi-file selection
+                                    // — see `MarkdownPaneLayout`.
                                     FilePreviewView(
                                         filePath: filePath,
                                         worktreePath: worktreePath,
                                         showSourceCode: showSourceCode,
-                                        useWebViewMarkdown: false,
+                                        rendersMarkdown: false,
                                         onOpenFile: { openLinkedFile($0) }
                                     )
                                 }
@@ -330,7 +137,12 @@ struct CodeViewerPaneView: View {
                 .colorScheme(.dark)
             }
         }
-        .preference(key: HasRenderableContentKey.self, value: selectedFiles.contains(where: isRenderableFile))
+        // Only a single markdown selection has a rendered view to toggle to;
+        // a multi-file selection always shows source (see `MarkdownPaneLayout`).
+        .preference(
+            key: HasRenderableContentKey.self,
+            value: selectedFiles.count == 1 && isRenderableFile(selectedFiles[0])
+        )
         .onAppear {
             if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
                 selectedFiles = [path]
@@ -421,10 +233,11 @@ private struct FilePreviewView: View {
     /// Trust boundary for local image inlining in the rendered markdown path.
     let worktreePath: String
     let showSourceCode: Bool
-    /// Decided by the pane, not read from `UserDefaults` here: only the pane
-    /// knows whether this preview owns the full height the webview needs.
-    let useWebViewMarkdown: Bool
-    /// Where a repo-local markdown link goes. Only the webview path raises it.
+    /// Decided by the pane: only the pane knows whether this preview owns the
+    /// full height the markdown webview needs. When false, a markdown file
+    /// falls through to its highlighted source.
+    let rendersMarkdown: Bool
+    /// Where a repo-local markdown link goes. Only the rendered path raises it.
     let onOpenFile: (URL) -> Void
 
     @State private var revision: Int = 0
@@ -432,12 +245,11 @@ private struct FilePreviewView: View {
 
     var body: some View {
         Group {
-            if !showSourceCode && isRenderableFile(filePath) {
+            if rendersMarkdown && !showSourceCode && isRenderableFile(filePath) {
                 RenderedContentView(
                     filePath: filePath,
                     worktreePath: worktreePath,
                     revision: revision,
-                    useWebView: useWebViewMarkdown,
                     onOpenFile: onOpenFile
                 )
             } else if isImageFile(filePath) {
@@ -469,9 +281,7 @@ private struct RenderedContentView: View {
     let filePath: String
     let worktreePath: String
     let revision: Int
-    let useWebView: Bool
     let onOpenFile: (URL) -> Void
-    @State private var content: String?
     @State private var loadError: String?
     @State private var renderedHTML: String?
     /// The path `renderedHTML` belongs to. `@State` survives a `filePath`
@@ -508,44 +318,27 @@ private struct RenderedContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(12)
-            } else if useWebView {
-                if let renderedHTML {
-                    MarkdownWebView(html: renderedHTML, onOpenFile: onOpenFile)
-                } else {
-                    ProgressView().controlSize(.small)
-                }
-            } else if let content {
-                Markdown(content, baseURL: URL(fileURLWithPath: filePath))
-                    .markdownTheme(.codeViewer)
-                    .textSelection(.enabled)
-                    .environment(\.openURL, OpenURLAction { url in
-                        if url.isFileURL {
-                            NSWorkspace.shared.open(url)
-                            return .handled
-                        }
-                        return .systemAction
-                    })
-                    .padding(16)
+            } else if let renderedHTML {
+                MarkdownWebView(html: renderedHTML, onOpenFile: onOpenFile)
             } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 100)
+                ProgressView().controlSize(.small)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: "\(filePath)#\(revision)#\(useWebView)#\(cssRevision)") {
+        .task(id: "\(filePath)#\(revision)#\(cssRevision)") {
             await loadContent()
         }
         // Re-armed on every `cssRevision` bump, which is what recovers a watch
         // whose stream finished because the stylesheet was deleted, and what
         // picks up a file that did not exist when the viewer opened.
-        .task(id: "md-css-file#\(useWebView)#\(stylesheetPath ?? "")#\(cssRevision)") {
-            guard useWebView, let path = stylesheetPath else { return }
+        .task(id: "md-css-file#\(stylesheetPath ?? "")#\(cssRevision)") {
+            guard let path = stylesheetPath else { return }
             for await _ in stylesheetWatcher.changes(for: path) {
                 reloadStylesheetIfChanged()
             }
         }
-        .task(id: "md-css-dir#\(useWebView)#\(stylesheetPath ?? "")") {
-            guard useWebView, stylesheetPath != nil else { return }
+        .task(id: "md-css-dir#\(stylesheetPath ?? "")") {
+            guard stylesheetPath != nil else { return }
             let directory = TBDConstants.markdownThemesDir
             guard MarkdownStylesheet.ensureThemesDirectoryExists(directory) else { return }
             for await _ in themesDirWatcher.changes(for: directory.path) {
@@ -562,7 +355,6 @@ private struct RenderedContentView: View {
     }
 
     private func loadContent() async {
-        content = nil
         loadError = nil
         let fm = FileManager.default
         if let attrs = try? fm.attributesOfItem(atPath: filePath),
@@ -578,26 +370,18 @@ private struct RenderedContentView: View {
         if renderedPath != filePath { renderedHTML = nil }
         renderedPath = filePath
 
-        if useWebView {
-            // Resolved per render, never cached: that is what lets an edit to
-            // the user stylesheet show up without relaunching the app.
-            let css = MarkdownStylesheet.resolve()
-            appliedCSS = css
-            let html = await MarkdownRenderService.shared.render(
-                path: filePath,
-                worktreeRoot: worktreePath,
-                css: css
-            )
-            guard !Task.isCancelled else { return }
-            renderedHTML = html
-            if html == nil { loadError = "Unable to render this file." }
-            return
-        }
-        do {
-            content = try String(contentsOfFile: filePath, encoding: .utf8)
-        } catch {
-            loadError = "Could not read file"
-        }
+        // Resolved per render, never cached: that is what lets an edit to the
+        // user stylesheet show up without relaunching the app.
+        let css = MarkdownStylesheet.resolve()
+        appliedCSS = css
+        let html = await MarkdownRenderService.shared.render(
+            path: filePath,
+            worktreeRoot: worktreePath,
+            css: css
+        )
+        guard !Task.isCancelled else { return }
+        renderedHTML = html
+        if html == nil { loadError = "Unable to render this file." }
     }
 }
 

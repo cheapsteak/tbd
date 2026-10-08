@@ -3,19 +3,6 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 
-/// Default-off gate for the webview markdown viewer.
-///
-/// App-only behavior, so `UserDefaults` is the right home per CLAUDE.md —
-/// precedent is `enableTranscript`. Graduation: flip the default after a soak,
-/// then delete the MarkdownUI path from the viewer.
-enum MarkdownViewerPreferences {
-    static let useWebViewKey = "markdown.viewer.usewebview"
-
-    static func useWebView(_ defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: useWebViewKey)
-    }
-}
-
 /// Reads and renders markdown off the main actor.
 ///
 /// Mirrors `CodeViewerHighlightService` (added in commit 4fc71bcc), which moved
