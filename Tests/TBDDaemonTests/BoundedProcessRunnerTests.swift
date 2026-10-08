@@ -308,10 +308,10 @@ struct BoundedProcessRunnerTests {
     /// git in deleted worktree folders leaked two descriptors per poll that way
     /// until pipe(2) hit EMFILE and every spawn in the process failed.
     ///
-    /// The hook records a weak reference and the identity (device, inode) of
-    /// each descriptor. A descriptor counts as released once it is closed or
-    /// names a different file: the suite runs in parallel, so a sibling test may
-    /// already have been handed the same number.
+    /// The hook records a weak reference to the `Process` and the identity
+    /// (device, inode) of each descriptor, and holds every pipe open with a
+    /// duplicate so that identity cannot be handed to another pipe meanwhile —
+    /// see `SpawnProbe` for why an unpinned identity proves nothing.
     @Test func aFailedSpawnDoesNotOutliveTheCall() async throws {
         let dir = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -338,7 +338,7 @@ struct BoundedProcessRunnerTests {
                 stdin: Data("x".utf8),
                 timeout: .seconds(10), didCreateProcess: probe.record)
         }
-        #expect(probe.descriptorCount == 4, "expected stdout, stderr and both stdin ends")
+        #expect(probe.descriptorCount == 6, "expected both ends of stdout, stderr and stdin")
         await Self.expectReleased(probe)
     }
 
@@ -651,20 +651,40 @@ struct BoundedProcessRunnerTests {
         kill(pid, 0) == 0 || errno != ESRCH
     }
 
-    /// Waits for the probed `Process` to deallocate and each recorded descriptor
-    /// to be released. Polled because the deadline's clock armer is a cancelled
-    /// `Task` that drops its capture only once it next runs.
+    /// Expects every descriptor the runner closes synchronously to be closed
+    /// already, then waits for the probed `Process` to deallocate and every
+    /// recorded descriptor to be released.
+    ///
+    /// The write ends and stdin's read end are checked at once because the
+    /// runner closes them before it resumes the caller; were any left to the
+    /// `Process`'s deallocation, the wait below would pass by releasing them
+    /// late. The stdout and stderr read ends are left to the wait: each had a
+    /// `readabilityHandler`, and Foundation defers the `close(2)` of such a
+    /// handle to its dispatch source's cancellation handler, which runs
+    /// asynchronously after `close()` returns — measured on Darwin 25, 199 of
+    /// 200 such handles were still open straight after `close()` and none 20 ms
+    /// later. The `Process` is polled because the deadline's clock armer is a
+    /// cancelled `Task` that drops its capture only once it next runs.
     private static func expectReleased(
         _ probe: SpawnProbe, sourceLocation: SourceLocation = #_sourceLocation
     ) async {
+        defer { probe.closeDuplicates() }
+        #expect(probe.failures.isEmpty, "the hook could not watch: \(probe.failures)",
+                sourceLocation: sourceLocation)
         #expect(probe.descriptorCount >= 2, "the hook recorded no pipe descriptors",
+                sourceLocation: sourceLocation)
+        // These ends are closed before the call resumes its caller, so they
+        // must already be gone; only the `Process` and the drained read ends,
+        // whose close Foundation defers, may linger.
+        let heldOnReturn = probe.heldDescriptors(closedOnReturnOnly: true)
+        #expect(heldOnReturn.isEmpty, "a failed spawn returned still holding \(heldOnReturn)",
                 sourceLocation: sourceLocation)
         let outcome = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
-        ) { probe.processIsGone && probe.heldDescriptors.isEmpty }
+        ) { probe.processIsGone && probe.heldDescriptors().isEmpty }
         if outcome == .timedOut {
             let alive = !probe.processIsGone
-            let held = probe.heldDescriptors
+            let held = probe.heldDescriptors()
             Issue.record(
                 "failed spawn outlived the call: process alive=\(alive), still-open descriptors=\(held)",
                 sourceLocation: sourceLocation)
@@ -673,9 +693,36 @@ struct BoundedProcessRunnerTests {
 }
 
 /// What `didCreateProcess` saw: a weak reference to the `Process` and the
-/// identity of every pipe descriptor it was configured with.
+/// identity of every pipe descriptor it was configured with, each pipe held
+/// open by a duplicate so that identity stays meaningful.
+///
+/// An unpinned identity proves nothing. The suite runs in parallel, so a
+/// sibling test may already have been handed the closed descriptor's number,
+/// and on macOS a pipe's `st_dev` is 0 and its `st_ino` is derived from the
+/// kernel pipe's address, which the allocator hands to the next pipe at once:
+/// in a pipe()/close() loop, 9,999 of 9,999 new pipes came back with both the
+/// closed descriptor's number and its inode, so a sibling's fresh pipe was
+/// indistinguishable from ours.
+///
+/// The probe therefore keeps a close-on-exec duplicate of each pipe's read end.
+/// While any end of a pipe is open the kernel cannot free it, so no other pipe
+/// can be given either end's inode, and "this number still names the inode it
+/// was recorded with" means exactly "the runner still holds this end". With the
+/// pipe pinned, no reuse was observed across 10,000 new pipes.
+///
+/// The question is asked of this process's descriptor table only. Watching
+/// the other end for EOF (or EPIPE) instead would also count every copy a
+/// sibling test's child inherited: `Pipe()` descriptors are not close-on-exec,
+/// and `Process` closes nothing that lacks `FD_CLOEXEC` (see
+/// `HolderDescriptorInheritanceTests`), so an unrelated long-running child
+/// could fake a leak.
 private final class SpawnProbe: @unchecked Sendable {
     private struct Descriptor {
+        let role: String
+        /// Whether the runner closes this end before it resumes the caller.
+        /// False for a read end it drained with a `readabilityHandler`, whose
+        /// close Foundation completes asynchronously (see `expectReleased`).
+        let closedOnReturn: Bool
         let fd: Int32
         let device: dev_t
         let inode: ino_t
@@ -684,45 +731,81 @@ private final class SpawnProbe: @unchecked Sendable {
     private let lock = NSLock()
     private weak var process: Process?
     private var descriptors: [Descriptor] = []
+    private var pins: [Int32] = []
+    private var pinFailures: [String] = []
+
+    deinit { closeDuplicates() }
 
     var record: @Sendable (Process) -> Void {
         { [self] process in
             var found: [Descriptor] = []
-            let handles = [
-                (process.standardOutput as? Pipe)?.fileHandleForWriting,
-                (process.standardError as? Pipe)?.fileHandleForWriting,
-                (process.standardInput as? Pipe)?.fileHandleForReading,
-                (process.standardInput as? Pipe)?.fileHandleForWriting
-            ]
-            for case let handle? in handles {
-                let fd = handle.fileDescriptor
-                if let identity = Self.identity(of: fd) {
-                    found.append(Descriptor(fd: fd, device: identity.device, inode: identity.inode))
+            var newPins: [Int32] = []
+            var failures: [String] = []
+            func watch(_ role: String, _ handle: FileHandle, closedOnReturn: Bool = true) {
+                var info = stat()
+                guard fstat(handle.fileDescriptor, &info) == 0 else {
+                    failures.append("\(role): fstat errno \(errno)")
+                    return
                 }
+                found.append(Descriptor(
+                    role: role, closedOnReturn: closedOnReturn, fd: handle.fileDescriptor,
+                    device: info.st_dev, inode: info.st_ino))
+            }
+            let pipes: [(String, Any?)] = [
+                ("stdout", process.standardOutput),
+                ("stderr", process.standardError),
+                ("stdin", process.standardInput)
+            ]
+            for case let (name, pipe as Pipe) in pipes {
+                let pin = fcntl(pipe.fileHandleForReading.fileDescriptor, F_DUPFD_CLOEXEC, 0)
+                guard pin >= 0 else {
+                    failures.append("\(name): dup errno \(errno)")
+                    continue
+                }
+                newPins.append(pin)
+                // A failed spawn leaves the runner owning both ends of every
+                // pipe: the child never received its end, and the snapshot
+                // closes the stdout and stderr read ends — the two it drained,
+                // so their close completes only after the call returns.
+                watch("\(name) write end", pipe.fileHandleForWriting)
+                watch("\(name) read end", pipe.fileHandleForReading, closedOnReturn: name == "stdin")
             }
             lock.withLock {
                 self.process = process
                 descriptors = found
+                pins = newPins
+                pinFailures = failures
             }
         }
     }
 
     var descriptorCount: Int { lock.withLock { descriptors.count } }
     var processIsGone: Bool { lock.withLock { process == nil } }
+    /// Pipes the hook could not pin or stat, with the errno; empty when all
+    /// were watched.
+    var failures: [String] { lock.withLock { pinFailures } }
 
-    /// Recorded descriptors that are still open on the same file.
-    var heldDescriptors: [Int32] {
+    /// Recorded descriptors the runner still holds, as "role (fd N)", limited
+    /// to those it closes before returning when `closedOnReturnOnly` is set.
+    /// Sound only while the pins are open, so call it before `closeDuplicates()`.
+    func heldDescriptors(closedOnReturnOnly: Bool = false) -> [String] {
         lock.withLock {
-            descriptors.filter { recorded in
-                guard let now = Self.identity(of: recorded.fd) else { return false }
-                return now.device == recorded.device && now.inode == recorded.inode
-            }.map(\.fd)
+            // Unpinned, a match proves nothing: fail closed rather than pass.
+            guard !pins.isEmpty || descriptors.isEmpty else { return ["probe read after its pins closed"] }
+            return descriptors.filter { recorded in
+                if closedOnReturnOnly && !recorded.closedOnReturn { return false }
+                var info = stat()
+                guard fstat(recorded.fd, &info) == 0 else { return false }
+                return info.st_dev == recorded.device && info.st_ino == recorded.inode
+            }.map { "\($0.role) (fd \($0.fd))" }
         }
     }
 
-    private static func identity(of fd: Int32) -> (device: dev_t, inode: ino_t)? {
-        var info = stat()
-        guard fstat(fd, &info) == 0 else { return nil }
-        return (info.st_dev, info.st_ino)
+    /// Closes the pins. Idempotent.
+    func closeDuplicates() {
+        lock.withLock {
+            for pin in pins { close(pin) }
+            pins = []
+        }
     }
 }
