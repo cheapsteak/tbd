@@ -31,7 +31,10 @@ CLI, for bash callers:
         for every retry-metrics record whose normalized ID is ID: file, outcome.
         Exit 2 on an unreadable file or an unparsable line.
     python3 scripts/flake_lib.py bot-login
-        prints BOT_LOGIN, so a workflow can compare it with the App token's slug.
+        prints BOT_LOGIN.
+    python3 scripts/flake_lib.py check-app-slug SLUG
+        exit 0 when a minted App token's slug names BOT_LOGIN, else 1: the
+        one check every workflow job that mints the token runs.
 """
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ import sys
 # The only login whose sentinel comments are state. The `ledger` and `publish`
 # jobs write with the `tbd-flake-fixer` App's token, so GitHub records this as
 # the author; the jobs that mint the token check its `app-slug` output against
-# this constant (`bot-login` below), and the readers without a token use it
+# this constant (`check-app-slug` below), and the readers without a token use it
 # directly. Spec §4.4.
 BOT_LOGIN = "tbd-flake-fixer[bot]"
 BOT_USER_TYPE = "Bot"

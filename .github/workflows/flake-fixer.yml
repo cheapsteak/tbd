@@ -175,7 +175,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           APP_TOKEN: ${{ steps.notice-app-token.outputs.token }}
-          JOB_TOKEN: ${{ github.token }}
           USE_APP_TOKEN: ${{ steps.notice-bot-login.outcome == 'success' }}
         run: |
           set -euo pipefail
@@ -184,7 +183,8 @@ jobs:
           if [ "$USE_APP_TOKEN" = "true" ]; then
             token="$APP_TOKEN"; extra=()
           else
-            token="$JOB_TOKEN"; extra=(--job-token)
+            token="$GH_TOKEN"; extra=(--job-token)
           fi
           FLAKE_WRITE_TOKEN="$token" python3 scripts/flake-ledger.py report-red-run \
-            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE" "${extra[@]}"
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --issue "$TRACKING_ISSUE" "${extra[@]}"

@@ -925,13 +925,15 @@ Transitions, each owned by the PR driver:
 - **The ledger cannot read or write GitHub.** The ledger fails closed: it exits
   non-zero and writes nothing more that run. Two answers are definite rather
   than missing, and do not fail the run: GitHub saying that an issue a
-  `.flaky(issue:)` trait names does not exist, and saying that a commit a
-  compare call names does not exist. An issue that answers 404 – most likely a
-  mistyped number for the test's real issue – skips the tests whose trait
-  names it, since a new issue could split that test's history; one that
-  answers 410, deleted, gives them issues of their own. A compare that answers
-  404 leaves only that one failure unrecorded, and a later run that can compare
-  it records it. The job summary lists each. It never posts a partial ledger
+  `.flaky(issue:)` trait names does not exist (404, or 410 for a deleted
+  issue), and saying that a failing run's head commit does not exist. A test
+  whose trait names a missing issue gets an issue of its own, and the summary
+  lists the number: a mistyped trait then shows as a second public issue
+  beside the real one rather than as a test nobody tracks. A compare that
+  answers 404 is followed by a lookup of the fix commit alone. If the fix
+  commit exists, the failing head is what is gone, and only that failure goes
+  unrecorded, listed in the summary. If the fix commit is gone, every later
+  failure of the test would be unplaceable, so the run fails closed. It never posts a partial ledger
   comment and never comments about its own failure on a flake issue. Writes are
   per issue and idempotent, so a run that dies midway leaves earlier issues
   correct and the next run converges. The job going red is the signal; on the
@@ -943,7 +945,9 @@ Transitions, each owned by the PR driver:
   run of this workflow whose `ledger` job finished, and posts only if that
   conclusion was `success` or there is no such run. That earlier run need not
   have completed: its own `ledger-notice` job may still be running, and the
-  next run's `ledger` job, queued behind it, can fail first.
+  next run's `ledger` job, queued behind it, can fail first. A re-run attempt
+  first reads its own previous attempt's `ledger` job, so re-running a red run
+  does not post a second note for one streak.
 
   The note posts in report-only mode too (§4.5). Its token is the App token
   when the ledger flag is on, the mint succeeds, and the App's login checks out
@@ -1198,10 +1202,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   occurrence keys and the threshold at one and two keys; issue
   lookup by title, by `.flaky` trait, and by creation;
   the same run processed twice with no change; an API error that leaves the
-  ledger unwritten; a trait issue that answers 404 (its tests skipped, the run
-  green, a 502 still red) and one that answers 410 (a fresh issue); a compare
-  that answers 404 (that failure dropped, the test still planned, a 500 still
-  red); a title search that reads every page, fails closed on an incomplete
+  ledger unwritten; a trait issue that answers 404 (the run
+  green, a 502 still red), and one that answers 410, each giving the test a
+  fresh issue that links nothing; a compare that answers 404 with the fix
+  commit present (that failure dropped, the test still planned), with the fix
+  commit gone (red), and a compare that answers 500 (red); a title search that reads every page, fails closed on an incomplete
   answer, and keeps a quote or an overlong title from breaking the phrase; and
   expired or never-uploaded artifacts, each listed in the summary.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
@@ -1241,8 +1246,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   even with a clean stress run.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
-  not, and a red first-ever run does; a note posted with the job token says
-  so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
+  not, and a red first-ever run does; a re-run attempt reads its own earlier
+  attempt, and an earlier run still in progress counts; a note posted with the
+  job token says so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
   back to the job token when the App token is missing, and grants
   `issues: write` to no other job.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a

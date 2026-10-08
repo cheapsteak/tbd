@@ -1073,6 +1073,20 @@ test_previous_ledger_conclusion_counts_an_earlier_run_still_in_progress() {
     "$(FLAKE_GH_CMD="$d/gh" python3 "$mutant/flake-ledger.py" previous-ledger-conclusion --repo "$REPO" --run-id 500 --now 2026-10-08T00:00:00Z)"
 }
 
+test_a_rerun_attempt_counts_its_own_earlier_attempt() {
+  local d out mutant
+  d="$(mktmpd)"
+  runs_world "$d" "[$(run_entry 499 workflow_run)]" 499=success
+  jq '[{match: "actions/runs/500/attempts/1/jobs", out: (({name: "ledger", conclusion: "failure"} | tojson) + "\n")}] + .' "$d/routes.json" > "$d/r.json" && mv "$d/r.json" "$d/routes.json"
+  out="$(FLAKE_GH_CMD="$d/gh" python3 "$LEDGER" previous-ledger-conclusion --repo "$REPO" --run-id 500 --run-attempt 2 --now 2026-10-08T00:00:00Z)"
+  assert_eq "attempt 2 of a red run: its attempt 1 already posted" "failure" "$out"
+  assert_eq "attempt 1 looks only at earlier runs" "success" "$(prev "$d")"
+  assert_contains "the workflow passes the attempt" "$(step_block "$WORKFLOW" "Report the first red")" '--run-attempt "$GITHUB_RUN_ATTEMPT"'
+  mutant="$(mutant_of 's/^    if run_attempt > 1:$/    if False:/' "$LEDGER")"
+  out="$(FLAKE_GH_CMD="$d/gh" python3 "$mutant/flake-ledger.py" previous-ledger-conclusion --repo "$REPO" --run-id 500 --run-attempt 2 --now 2026-10-08T00:00:00Z)"
+  assert_eq "mutation: ignoring the earlier attempt posts again" "success" "$out"
+}
+
 test_previous_ledger_conclusion_is_none_when_no_ledger_ran() {
   local d
   d="$(mktmpd)"
@@ -1141,7 +1155,7 @@ test_a_trait_naming_a_missing_issue_skips_only_that_issue_in_fetch() {
   d="$(mktmpd)"; stub_world "$d" "$(jq -n --arg e "$NOT_FOUND" '[{match: "repos/cheapsteak/tbd/issues/499$", exit: 1, err: $e}]')"
   out="$(ledger_run "$d")" || rc=$?
   assert_eq "a 404 does not fail the run" "0" "$rc"
-  assert_contains "the missing issue is listed" "$out" "#499, named by a \`.flaky(issue:)\` trait: GitHub says it does not exist"
+  assert_contains "the missing issue is listed" "$out" "#499 (HTTP 404): a failing test whose trait names it gets an issue of its own"
   assert_contains "and the failing test is still reported" "$out" "$HOLDER"
   d="$(mktmpd)"; stub_world "$d" '[{"match": "repos/cheapsteak/tbd/issues/499$", "exit": 1, "err": "gh: Server Error (HTTP 502)\n"}]'
   rc=0; ledger_run "$d" > /dev/null || rc=$?
@@ -1164,28 +1178,20 @@ trait_world() {
   printf '%s' "$w"
 }
 
-test_a_test_whose_trait_issue_is_missing_is_skipped_and_the_rest_planned() {
-  local w out mutant
-  w="$(trait_world '{"gone_issues": {"600": 404}}')"
-  out="$(analyze "$w")"
-  assert_eq "only the other test is planned" "$HOLDER" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")"
-  assert_contains "the skipped test is listed with its reason" "$(jq -r '.notes.skipped[]' <<< "$out")" "\`TBDSharedTests.OtherTests/flaky()\`: its \`.flaky(issue: 600)\` names #600, which GitHub says does not exist (HTTP 404); skipped"
-  assert_contains "and the report shows it" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "Skipped (every other test was still planned)"
-  mutant="$(mutant_of 's/^        elif gone is not None:$/        elif False:/' "$LEDGER")"
+test_a_test_whose_trait_issue_is_gone_gets_its_own_issue() {
+  local w out mutant status
+  for status in 404 410; do
+    w="$(trait_world "{\"gone_issues\": {\"600\": $status}}")"
+    out="$(analyze "$w")"
+    assert_eq "HTTP $status: the test gets a fresh issue that links nothing, beside the other test" \
+      "Flaky test: TBDSharedTests.OtherTests/flaky() false|$HOLDER" \
+      "$(jq -r '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600"))"][0] + "|" + ([.actions[].test_id | select(. != "TBDSharedTests.OtherTests/flaky()")] | join(","))' <<< "$out")"
+    assert_contains "HTTP $status: the number is listed" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "#600 (HTTP $status): a failing test whose trait names it gets an issue of its own"
+  done
+  mutant="$(mutant_of 's/^        if trait is not None and trait in ctx.gone_issues:$/        if False:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
-  assert_contains "mutation: without the skip a second issue is created for it" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")" "OtherTests/flaky()"
-}
-
-test_a_test_whose_trait_issue_was_deleted_gets_its_own_issue() {
-  local w out mutant
-  w="$(trait_world '{"gone_issues": {"600": 410}}')"
-  out="$(analyze "$w")"
-  assert_eq "the test gets a fresh issue, linking nothing" "Flaky test: TBDSharedTests.OtherTests/flaky() []" \
-    "$(jq -r '.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600") | if . then "[600]" else "[]" end)"' <<< "$out")"
-  assert_contains "and the deletion is listed" "$(jq -r '.notes.skipped[]' <<< "$out")" "#600, named by a \`.flaky(issue:)\` trait, was deleted (HTTP 410)"
-  mutant="$(mutant_of 's/^ISSUE_DELETED_STATUS = 410$/ISSUE_DELETED_STATUS = 0/' "$LEDGER")"
-  out="$(analyze "$w" "$mutant")"
-  assert_eq "mutation: a deleted issue read as a typo skips the test forever" "0" "$(jq '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()")] | length' <<< "$out")"
+  assert_contains "mutation: without the rule the new issue links a number that does not exist" \
+    "$(jq -r '.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | .create.body' <<< "$out")" "#600"
 }
 
 test_a_compare_404_does_not_fail_the_run() {
@@ -1196,11 +1202,12 @@ test_a_compare_404_does_not_fail_the_run() {
     {match: "issues\\?labels=flaky", out: ($issue + "\n")},
     {match: "issues/970/comments\\?per_page", out: ""},
     {match: "graphql", out: $close},
-    {match: "compare/9609609\\.\\.\\.538ba7eb", exit: 1, err: $e}]')"
+    {match: "compare/9609609\\.\\.\\.538ba7eb", exit: 1, err: $e},
+    {match: "commits/9609609 ", out: "9609609\n"}]')"
   d="$(mktmpd)"; stub_world "$d" "$routes"
   out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)" || rc=$?
-  assert_eq "a 404 from compare does not fail the run" "0" "$rc"
-  assert_contains "the failure is listed as not recorded" "$out" "\`$HOLDER\`: failure 37517751216:1:xunit-app-swift-testing.xml not recorded: GitHub could not compare the fix with its commit (9609609..538ba7eb)"
+  assert_eq "a 404 from compare, with the fix commit present, does not fail the run" "0" "$rc"
+  assert_contains "the failure is listed as not recorded" "$out" "\`$HOLDER\`: failure 37517751216:1:xunit-app-swift-testing.xml not recorded: its commit 538ba7eb no longer exists"
   assert_lacks "and nothing reopens the issue on it" "$(writes_in "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/970 "
   d="$(mktmpd)"; stub_world "$d" "$(jq '(.[] | select(.match | startswith("compare"))) |= (.err = "gh: Server Error (HTTP 500)\n")' <<< "$routes")"
   rc=0; FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null || rc=$?
@@ -1209,6 +1216,17 @@ test_a_compare_404_does_not_fail_the_run() {
   mutant="$(mutant_of 's/^COMPARE_GONE_STATUSES = .*$/COMPARE_GONE_STATUSES = ()/' "$LEDGER")"
   rc=0; FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" --write > /dev/null || rc=$?
   assert_eq "mutation: without the 404 rule the whole run fails" "2" "$rc"
+  # The fix commit itself gone would make every later failure unplaceable.
+  local gone_fix
+  gone_fix="$(jq --arg e "$NOT_FOUND" '(.[] | select(.match == "commits/9609609 ")) |= {match: .match, exit: 1, err: $e}' <<< "$routes")"
+  d="$(mktmpd)"; stub_world "$d" "$gone_fix"
+  rc=0; out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)" || rc=$?
+  assert_eq "a missing fix commit fails closed" "2" "$rc"
+  assert_contains "and says why" "$out" "the fix commit 9609609 no longer exists"
+  d="$(mktmpd)"; stub_world "$d" "$gone_fix"
+  mutant="$(mutant_of 's/^                gh\("api", f"repos\/\{repo\}\/commits\/\{base\}", "--jq", ".sha"\)$/                pass/' "$LEDGER")"
+  rc=0; FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" --write > /dev/null || rc=$?
+  assert_eq "mutation: without probing the fix commit its loss is silent" "0" "$rc"
 }
 
 test_an_uncomparable_failure_is_dropped_and_the_test_still_planned() {
@@ -1224,7 +1242,7 @@ test_an_uncomparable_failure_is_dropped_and_the_test_still_planned() {
   assert_eq "the comparable failure still reopens the issue" "true 1" "$(jq -r '"\(.actions[0].reopen) \(.tests[0].episode)"' <<< "$out")"
   assert_contains "it is recorded" "$(jq -r '.actions[0].comment_body' <<< "$out")" '1901:1:xunit-app-swift-testing.xml'
   assert_lacks "and the dropped one is not" "$(jq -r '.actions[0].comment_body' <<< "$out")" '1902:1:xunit-app-swift-testing.xml'
-  assert_contains "the other is listed" "$(jq -r '.notes.skipped[]' <<< "$out")" "failure 1902:1:xunit-app-swift-testing.xml not recorded"
+  assert_contains "the other is listed" "$(jq -r '.notes.dropped[]' <<< "$out")" "failure 1902:1:xunit-app-swift-testing.xml not recorded"
   mutant="$(mutant_of 's/^        if contains is None and pair in ctx.unresolved:$/        if False:/' "$LEDGER")"
   analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
   assert_eq "mutation: without dropping it the whole analysis fails" "2" "$rc"
@@ -1398,8 +1416,7 @@ check_job_token_writes_only_the_notice() {
   [[ "$(grep -c '^      issues: write$' "$file")" == 1 ]] || return 1
   job_block "$file" ledger-notice | grep -q '^      issues: write$' || return 1
   job_block "$file" ledger | grep -q '^      issues: read$' || return 1
-  [[ "$(grep -c '\$JOB_TOKEN' "$file")" == 1 ]] || return 1
-  grep -q 'token="\$JOB_TOKEN"; extra=(--job-token)$' "$file" || return 1
+  grep -q 'token="\$GH_TOKEN"; extra=(--job-token)$' "$file" || return 1
   ! grep -q 'FLAKE_WRITE_TOKEN: \${{ github.token }}' "$file"
 }
 
