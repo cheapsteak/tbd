@@ -805,19 +805,60 @@ whatever the stress result. The bot may still have changed it for a good
 reason, so the PR is opened as usual and stays a draft, and its body names the
 protected files touched and says a human must judge the change.
 
-The verifier runs on the runner the session used, as the same user. **Leftover
-processes are ended by PID, never by name.** Immediately before each session
-starts, the job records the full process list. After the session ends, it
-lists processes again and sends `SIGTERM`, then `SIGKILL`, to every PID that is
-new since the snapshot, except the current step's own ancestry. A process the
-session detached is new by PID however it renamed or re-parented itself, so
-the snapshot catches it where a tree walk would not. If any new PID is still
-alive after the kill, the attempt aborts and `publish` records `aborted`. The
-clean tree and the kill keep the session's working state and processes out of
-the verdict; they do not stop a session that tampers with files elsewhere on
-the runner before it ends. That is why the verdict alone never promotes: the
-PR's own `test.yml` run on a fresh runner must also be green (§7), and a human
-reviews and merges.
+The verifier runs on the runner the session used, as the same user, so every
+file on that runner and every variable a later step inherits is within the
+session's reach. The job therefore carries what the verifier relies on across
+each session as a step output taken before the session starts, which no
+session can rewrite, and checks the runner against it afterwards:
+
+- **Leftover processes are ended by PID, never by name.** Immediately before
+  each session starts, the job records the full process list. After the
+  session ends, it lists processes again and sends `SIGTERM`, then `SIGKILL`,
+  to every PID that is new since the snapshot, except the current step's own
+  ancestry. A process the session detached is new by PID however it renamed or
+  re-parented itself, so the snapshot catches it where a tree walk would not.
+  The kill runs from a private copy of the verifier's scripts, checked against
+  their fingerprint first, and every check below runs after it, once nothing
+  of the session is left to undo an edit.
+- **The verifier's scripts are checked, not trusted.** The copy of `main`'s
+  scripts is fingerprinted before session 1 – every path, file content and
+  symlink target – and checked again after each session.
+- **So is the verification tree.** The verifier runs that tree's `git` and
+  its build, so a hook or an `fsmonitor` command in its `.git/config`, or a
+  replaced product in its `.build`, would speak for the candidate. Before each
+  session the job takes a digest of the whole tree – checkout, `.git` and
+  `.build` – over every path, file content, symlink target and permission bit,
+  and after the session it takes the digest again. Checking rather than
+  re-creating the tree keeps its warm `.build`: a fresh clone gives every
+  source a new modification time, and SwiftPM then rebuilds from cold, about
+  19.5 minutes (§9) against the 5-minute rebuild allowance `B` inside an
+  allotment. The digest is cheap by comparison; it took 3.5 seconds over a
+  4.4 GB `.build` on a development machine.
+- **The verifier's environment is the one recorded before session 1.** A
+  session can append to `$GITHUB_ENV` and `$GITHUB_PATH`, and the runner hands
+  both to every later step: `BASH_ENV`, `PYTHONPATH`, `DYLD_*`, a `PATH` entry
+  ahead of `git`, or new values for the job's own paths. So the job records
+  its environment as a step output just before session 1, and every later
+  `run:` step runs under `bash -p`, which reads no `BASH_ENV` or `ENV` and
+  imports no exported function, unsets every variable except the ones its own
+  `env:` sets, and restores the record. A path a `with:` or
+  `working-directory:` names comes from the `runner.temp` context, never from
+  `env`. The verifier's Python runs isolated (`-I -S`), so no `PYTHON*`
+  variable or site directory reaches the verdict.
+- **Try 1's output is digested before session 2.** When session 2 makes no
+  commit, try 1's verdict stands (§6.6). It is used only if it matches, byte
+  for byte, the digest taken before session 2 started, and it is removed after
+  session 2 either way, so a verdict session 2 wrote there is never read.
+
+If any check fails, or a new PID is still alive after the kill, the attempt
+aborts and `publish` records `aborted`. These checks keep the session's working
+state, processes and environment out of the verdict, and the verifier's own
+scripts and tree unchanged; they do not stop a session that tampers with tools
+elsewhere on the runner before it ends – a Homebrew binary, a Python site
+directory, `~/.gitconfig`. Nor do they cover the candidate's own tests, which
+run during the stress loop as the same user; those are in the diff a human
+reviews. That is why the verdict alone never promotes: the PR's own `test.yml`
+run on a fresh runner must also be green (§7), and a human reviews and merges.
 
 ### 6.5 What a clean run means
 
@@ -870,7 +911,9 @@ An attempt allows two tries:
    session's notes and the verifier's iteration log.
 4. The verifier runs again, at the same scope and the same `N`. Pass or fail, the attempt goes
    to §7, which opens the PR either way and marks it eligible for ready only on
-   a pass.
+   a pass. If the second session made no new commit, the candidate is the
+   first try's, and so is its verdict: it is not stressed again, because a
+   chance pass would only overwrite a failure already observed.
 
 ## 7. PR lifecycle
 
@@ -1026,8 +1069,10 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
     seconds is 8.3);
   - two sessions, capped at 60 minutes each – 120 minutes;
-  - checkouts, ending the session's processes, the bundle, the artifact
-    upload, and API calls – 20 minutes (not measured).
+  - checkouts, ending the session's processes, the verification tree's
+    digest before and after each session (§6.4), the bundle, the artifact
+    upload, and API calls – 20 minutes (not measured on CI; one digest of a
+    4.4 GB `.build` took 3.5 seconds on a development machine).
 
   That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
   verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
