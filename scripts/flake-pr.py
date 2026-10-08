@@ -21,9 +21,15 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
         a second. Only a comment the bot wrote is ever edited.
     comment --repo R --issue N --body F
         posts one issue comment.
-    promote-facts --repo R --branch B --sha S --conclusion C --event E --out F
+    promote-resolve --repo R --sha S
+        prints the branch of the one open flakefix/issue-<N> PR from R whose
+        head is S, or nothing. Reads only.
+    promote-facts --repo R --branch B --sha S --trigger test-run|status
+                  [--conclusion C --event E] --out F
         reads what promotion is decided on: the open PR on B, the commit
-        statuses on S, and the PR's changed files. Reads only.
+        statuses on S, the `test.yml` runs on S, the PR's draft conversions,
+        and its changed files. C and E describe the Test run that started a
+        test-run promote. Reads only.
     promote-decide --facts F
         pure: prints `PROMOTE`, `PROMOTE label` (promote, adding the weak
         label first), or `SKIP <reason>`.
@@ -312,11 +318,34 @@ def ensure_weak_label(repo: str, pr: int) -> None:
 
 PROMOTE_BRANCH = re.compile(r"flakefix/issue-[0-9]+")
 PROMOTE_EVENT = "pull_request"
+# What can start a promote: a Test run's completion, or the bot's stress status.
+PROMOTE_TRIGGERS = ("test-run", "status")
+TEST_WORKFLOW = ".github/workflows/test.yml"
 # GitHub's pull-request files endpoint lists at most this many files.
 PR_FILES_LISTED_MAX = 3000
 
 
-def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str) -> dict:
+def resolve_branch(pulls: list, repo: str, sha: str) -> str:
+    """The branch of the one open flakefix/issue-<N> PR from `repo` whose head
+    is `sha`, or "" when there is none or more than one. A status names a
+    commit, not a PR; promote-facts then reads that PR again by its branch."""
+    if not isinstance(pulls, list):
+        raise Malformed("the commit's pulls listing is not a list")
+    branches = set()
+    for p in pulls:
+        head = p.get("head") or {}
+        if p.get("state") == "open" and head.get("sha") == sha \
+                and (head.get("repo") or {}).get("full_name") == repo \
+                and PROMOTE_BRANCH.fullmatch(head.get("ref") or ""):
+            branches.add(head["ref"])
+    return branches.pop() if len(branches) == 1 else ""
+
+
+def promote_resolve(repo: str, sha: str) -> str:
+    return resolve_branch(ledger.gh_json("api", f"repos/{repo}/commits/{sha}/pulls?per_page=100"), repo, sha)
+
+
+def promote_facts(repo: str, branch: str, sha: str, trigger: str, conclusion: str | None, event: str | None) -> dict:
     """Everything promote-decide reads, from GitHub. A failed read raises, so
     the PR stays a draft (fail closed)."""
     owner = repo.split("/", 1)[0]
@@ -335,8 +364,9 @@ def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str)
         "labels": [label.get("name") for label in p.get("labels") or []],
         "changed_files": None,
     } for p in raw]
-    facts = {"repo": repo, "branch": branch, "run_conclusion": conclusion,
-             "run_event": event, "run_head_sha": sha, "prs": prs, "statuses": [], "files": []}
+    facts = {"repo": repo, "branch": branch, "trigger": trigger, "run_conclusion": conclusion,
+             "run_event": event, "run_head_sha": sha, "prs": prs, "statuses": [], "test_runs": [],
+             "drafted": [], "files": []}
     if len(prs) != 1:
         return facts
     number = prs[0]["number"]
@@ -346,6 +376,15 @@ def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str)
     facts["statuses"] = ledger.gh_lines(
         "api", "--paginate", f"repos/{repo}/commits/{sha}/statuses?per_page=100", "--jq",
         ".[] | {context, state, description, creator: .creator.login, creator_type: .creator.type, created_at, id}")
+    facts["test_runs"] = ledger.gh_lines(
+        "api", "--paginate",
+        f"repos/{repo}/actions/workflows/test.yml/runs?head_sha={sha}&event={PROMOTE_EVENT}&per_page=100",
+        "--jq", ".workflow_runs[] | {id, event, path, status, conclusion, head_sha, head_branch,"
+        " head_repo: .head_repository.full_name, created_at}")
+    # Every return to draft: the bot's own (promote's undo) and a human's hold.
+    facts["drafted"] = ledger.gh_lines(
+        "api", "--paginate", f"repos/{repo}/issues/{number}/timeline?per_page=100", "--jq",
+        '.[] | select(.event == "convert_to_draft") | {actor: .actor.login, actor_type: .actor.type, created_at}')
     facts["files"] = ledger.gh_lines(
         "api", "--paginate", f"repos/{repo}/pulls/{number}/files?per_page=100", "--jq",
         ".[] | {filename, previous_filename}")
@@ -354,12 +393,18 @@ def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str)
 
 def promote_decision(facts: dict) -> str:
     """Spec §7: ready only when the PR's own CI passed on the head the verifier
-    passed. Every condition is required; the first that fails names the skip."""
+    passed. A Test completion and the bot's stress status each start a promote,
+    so whichever lands last promotes; both are judged on the same facts. Every
+    condition is required; the first that fails names the skip."""
     try:
-        if facts["run_event"] != PROMOTE_EVENT:
-            return f"SKIP the run was a {facts['run_event']} run, not the PR's own CI"
-        if facts["run_conclusion"] != "success":
-            return f"SKIP the PR's CI concluded {facts['run_conclusion']}"
+        trigger = facts["trigger"]
+        if trigger not in PROMOTE_TRIGGERS:
+            raise Malformed(f"unknown promote trigger {trigger!r}")
+        if trigger == "test-run":
+            if facts["run_event"] != PROMOTE_EVENT:
+                return f"SKIP the run was a {facts['run_event']} run, not the PR's own CI"
+            if facts["run_conclusion"] != "success":
+                return f"SKIP the PR's CI concluded {facts['run_conclusion']}"
         if not PROMOTE_BRANCH.fullmatch(facts["branch"] or ""):
             return "SKIP not a flakefix/issue-<N> branch"
         prs = facts["prs"]
@@ -376,8 +421,22 @@ def promote_decision(facts: dict) -> str:
             return "SKIP the PR's head is in another repository"
         if not fl.trusted_author(pr["author"], pr["author_type"]):
             return f"SKIP the PR was opened by {pr['author']}, not the bot"
+        # A human who returns the PR to draft is holding it; the bot never
+        # overrides that. Only a human marking it ready releases the hold.
+        held = [d for d in facts["drafted"] if not fl.trusted_author(d["actor"], d["actor_type"])]
+        if held:
+            return f"SKIP {held[0]['actor']} returned the PR to draft (a hold); only a human marks it ready now"
         if pr["head_sha"] != facts["run_head_sha"]:
             return "SKIP the PR's head moved after the run (a push the verifier never judged)"
+        runs = [r for r in facts["test_runs"]
+                if r["event"] == PROMOTE_EVENT and r["path"].split("@", 1)[0] == TEST_WORKFLOW
+                and r["head_sha"] == facts["run_head_sha"] and r["head_branch"] == facts["branch"]
+                and r["head_repo"] == facts["repo"]]
+        if not runs:
+            return "SKIP the PR's own Test run has not run on the head"
+        latest = max(runs, key=lambda r: (r["created_at"], int(r["id"])))
+        if latest["status"] != "completed" or latest["conclusion"] != "success":
+            return f"SKIP the PR's newest Test run on the head is {latest['status']}, {latest['conclusion']}"
         mine = [s for s in facts["statuses"]
                 if s["context"] == STATUS_CONTEXT and fl.trusted_author(s["creator"], s["creator_type"])]
         if not mine:
@@ -438,12 +497,16 @@ def main(argv: list[str]) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--body", type=Path, required=True)
+    p = sub.add_parser("promote-resolve")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--sha", required=True)
     p = sub.add_parser("promote-facts")
     p.add_argument("--repo", required=True)
     p.add_argument("--branch", required=True)
     p.add_argument("--sha", required=True)
-    p.add_argument("--conclusion", required=True)
-    p.add_argument("--event", required=True)
+    p.add_argument("--trigger", choices=PROMOTE_TRIGGERS, required=True)
+    p.add_argument("--conclusion")
+    p.add_argument("--event")
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("promote-decide")
     p.add_argument("--facts", type=Path, required=True)
@@ -463,8 +526,10 @@ def main(argv: list[str]) -> int:
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
         elif args.command == "promote-facts":
-            facts = promote_facts(args.repo, args.branch, args.sha, args.conclusion, args.event)
+            facts = promote_facts(args.repo, args.branch, args.sha, args.trigger, args.conclusion, args.event)
             args.out.write_text(json.dumps(facts) + "\n")
+        elif args.command == "promote-resolve":
+            print(promote_resolve(args.repo, args.sha))
         elif args.command == "promote-decide":
             print(promote_decision(read_json(args.facts)))
         elif args.command == "weak-label":

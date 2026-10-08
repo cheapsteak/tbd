@@ -1138,8 +1138,10 @@ PSHA=1111111111111111111111111111111111111111
 PBRANCH=flakefix/issue-10
 
 # pworld [JQ_PR] [JQ_STATUSES] [JQ_FILES] -> D, a stub gh answering for one
-# PR on PBRANCH whose every promotion condition holds; each JQ edits one part.
-# The stub applies no --jq, so statuses and files are routed already projected.
+# PR on PBRANCH whose every promotion condition holds; each JQ edits one part,
+# and PW_RUNS and PW_DRAFTED, when set, edit the PR's Test runs on the head and
+# its returns to draft. The stub applies no --jq, so everything read through
+# one is routed already projected.
 pworld() {
   local d; d="$(mktmpd)"
   stub_gh "$d"
@@ -1150,6 +1152,11 @@ pworld() {
       creator: $bot, creator_type: "Bot", created_at: "2026-10-08T06:00:00Z", id: 1}]' | jq "${2:-.}" | jq -c '.[]' > "$d/statuses"
   jq -n '[{filename: "Tests/TBDSharedTests/HolderLockTests.swift", previous_filename: null}]' | jq "${3:-.}" | jq -c '.[]' > "$d/files"
   jq -n --argjson n "$(wc -l < "$d/files" | tr -d ' ')" '{changed_files: $n}' > "$d/one.json"
+  jq -n --arg sha "$PSHA" --arg ref "$PBRANCH" --arg repo "$REPO" \
+    '[{id: 500, event: "pull_request", path: ".github/workflows/test.yml", status: "completed", conclusion: "success",
+       head_sha: $sha, head_branch: $ref, head_repo: $repo, created_at: "2026-10-08T06:30:00Z"}]' \
+    | jq "${PW_RUNS:-.}" | jq -c '.[]' > "$d/runs"
+  jq -n '[]' | jq "${PW_DRAFTED:-.}" | jq -c '.[]' > "$d/drafted"
   echo "$PSHA" > "$d/head-after"
   jq -n --arg d "$d" '[
     {match: "^api repos/cheapsteak/tbd/pulls\\?head=cheapsteak:flakefix/issue-10&state=open", file: ($d + "/pulls.json")},
@@ -1157,6 +1164,9 @@ pworld() {
     {match: "^api repos/cheapsteak/tbd/pulls/77 --jq .head.sha$", file: ($d + "/head-after")},
     {match: "^pr ready 77 --repo cheapsteak/tbd --undo$", out: ""},
     {match: "commits/1111111111111111111111111111111111111111/statuses", file: ($d + "/statuses")},
+    {match: "^api repos/cheapsteak/tbd/commits/1111111111111111111111111111111111111111/pulls\\?per_page=100$", file: ($d + "/pulls.json")},
+    {match: "actions/workflows/test.yml/runs\\?head_sha=1111111111111111111111111111111111111111&event=pull_request", file: ($d + "/runs")},
+    {match: "issues/77/timeline", file: ($d + "/drafted")},
     {match: "pulls/77/files", file: ($d + "/files")},
     {match: "labels\\?per_page", out: ""},
     {match: "-X POST", out: "{}"},
@@ -1165,12 +1175,18 @@ pworld() {
   printf '%s' "$d"
 }
 
-# promote D [DIR] [CONCLUSION] [EVENT] -> exit code; output in D/out
+# promote D [DIR] [CONCLUSION] [EVENT] -> exit code; output in D/out. With
+# PMODE=status it runs as the status trigger does, and takes no CONCLUSION or
+# EVENT.
 promote() {
-  local d="$1" dir="${2:-$HERE}" rc=0
+  local d="$1" dir="${2:-$HERE}" rc=0 how
+  if [[ "${PMODE:-}" == status ]]; then
+    how=(--from-status)
+  else
+    how=(--branch "$PBRANCH" --conclusion "${3:-success}" --event "${4:-pull_request}")
+  fi
   (cd "$d" && GH_TOKEN=job-token APP_TOKEN=app-token FLAKE_GH_CMD="$d/gh" \
-    bash "$dir/flake-pr.sh" promote --repo "$REPO" --branch "$PBRANCH" --sha "$PSHA" \
-      --conclusion "${3:-success}" --event "${4:-pull_request}") > "$d/out" 2>&1 || rc=$?
+    bash "$dir/flake-pr.sh" promote --repo "$REPO" --sha "$PSHA" "${how[@]}") > "$d/out" 2>&1 || rc=$?
   echo "$rc"
 }
 promoted() { grep -q '^app-token pr ready 77 --repo cheapsteak/tbd$' "$1/log" && echo yes || echo no; }
@@ -1327,6 +1343,94 @@ test_promote_decide_is_pure_and_rejects_malformed_facts() {
   assert_eq "malformed facts exit 2" "2" "$rc"
 }
 
+# --- the second trigger, and the PR's own Test run (spec §7) ------------------
+
+# Whichever of the Test completion and the stress status lands last promotes.
+test_a_status_landing_after_the_test_run_promotes() {
+  local d; d="$(pworld)"
+  assert_eq "exit 0" "0" "$(PMODE=status promote "$d")"
+  assert_eq "marked ready" "yes" "$(promoted "$d")"
+  assert_contains "the PR is found from the status's commit" "$(logged "$d")" "job-token api repos/$REPO/commits/$PSHA/pulls?per_page=100"
+}
+
+test_a_status_landing_before_the_test_run_completes_skips() {
+  local mode d
+  for mode in status test-run; do
+    PW_RUNS='.[0].status = "in_progress" | .[0].conclusion = null' PMODE="$mode" \
+      skips "a Test run still running ($mode)" 's/if latest\["status"\] != "completed" or latest\["conclusion"\] != "success":/if False:/'
+  done
+  d="$(PW_RUNS='[]' pworld)"
+  assert_eq "no Test run on the head: exit 0" "0" "$(PMODE=status promote "$d")"
+  assert_eq "no Test run on the head: stays a draft" "no" "$(promoted "$d")"
+  assert_contains "no Test run on the head: says why" "$(cat "$d/out")" "has not run on the head"
+}
+
+test_only_the_prs_own_test_run_counts() {
+  PW_RUNS='.[0].event = "push"' PMODE=status \
+    skips "a push run" 's/if r\["event"\] == PROMOTE_EVENT and /if /'
+  PW_RUNS='.[0].head_branch = "flakefix/issue-11"' PMODE=status \
+    skips "a run on another branch" 's/and r\["head_branch"\] == facts\["branch"\]//'
+  PW_RUNS='.[0].head_repo = "mallory/tbd"' PMODE=status \
+    skips "a fork's run" 's/and r\["head_repo"\] == facts\["repo"\]\]/]/'
+  PW_RUNS='.[0].path = ".github/workflows/other.yml"' PMODE=status \
+    skips "another workflow's run" 's/and r\["path"\]\.split\("@", 1\)\[0\] == TEST_WORKFLOW//'
+}
+
+test_a_newer_red_test_run_overrides_an_older_green_one() {
+  PW_RUNS='[.[0], (.[0] | .id = 501 | .conclusion = "failure" | .created_at = "2026-10-08T07:00:00Z")]' PMODE=status \
+    skips "a newer red run" 's/latest = max\(runs/latest = min(runs/'
+}
+
+# A status names a commit; the PR is the one open bot PR whose head it is.
+test_a_status_with_no_matching_pr_skips_cleanly() {
+  local d jq_pr
+  for jq_pr in '.state = "closed"' '.head.sha = "2222222222222222222222222222222222222222"' \
+      '.head.repo.full_name = "mallory/tbd"' '.head.ref = "feature/x"'; do
+    d="$(pworld "$jq_pr")"
+    assert_eq "no PR ($jq_pr): exit 0" "0" "$(PMODE=status promote "$d")"
+    assert_eq "no PR ($jq_pr): stays a draft" "no" "$(promoted "$d")"
+    assert_contains "no PR ($jq_pr): says why" "$(cat "$d/out")" "SKIP no one open flakefix/issue-<N> PR"
+  done
+  d="$(pworld)"
+  jq '[.[0], (.[0] | .number = 78 | .head.ref = "flakefix/issue-11")]' "$d/pulls.json" > "$d/p2" && mv "$d/p2" "$d/pulls.json"
+  assert_eq "two PRs at the head: exit 0" "0" "$(PMODE=status promote "$d")"
+  assert_eq "two PRs at the head: stays a draft" "no" "$(promoted "$d")"
+}
+
+test_the_status_trigger_takes_no_run_facts() {
+  local d rc=0; d="$(pworld)"
+  (cd "$d" && GH_TOKEN=job-token APP_TOKEN=app-token FLAKE_GH_CMD="$d/gh" \
+    bash "$PR_SH" promote --repo "$REPO" --sha "$PSHA" --from-status --branch "$PBRANCH") > "$d/out" 2>&1 || rc=$?
+  assert_eq "--from-status with --branch exits 2" "2" "$rc"
+  assert_eq "and stays a draft" "no" "$(promoted "$d")"
+  d="$(mktmpd)"
+  echo '{"trigger": "manual"}' > "$d/f.json"
+  rc=0; FLAKE_GH_CMD=/nonexistent bash "$PR_SH" promote-decide --facts "$d/f.json" > /dev/null 2>&1 || rc=$?
+  assert_eq "an unknown trigger exits 2" "2" "$rc"
+}
+
+# A human who returns the PR to draft holds it; a later Test re-run at the
+# same head, or a status, must not promote it again.
+test_a_human_hold_is_never_promoted_over() {
+  local mode
+  for mode in test-run status; do
+    PW_DRAFTED='[{actor: "alice", actor_type: "User", created_at: "2026-10-08T08:00:00Z"}]' PMODE="$mode" \
+      skips "a human's return to draft ($mode)" 's/        if held:/        if False:/'
+  done
+}
+
+test_the_bots_own_return_to_draft_is_not_a_hold() {
+  local d mutant drafted
+  drafted="[{actor: \"$BOT\", actor_type: \"Bot\", created_at: \"2026-10-08T08:00:00Z\"}]"
+  d="$(PW_DRAFTED="$drafted" pworld)"
+  promote "$d" > /dev/null
+  assert_eq "promote's own undo does not hold the PR" "yes" "$(promoted "$d")"
+  mutant="$(mutant_of 's/ if not fl.trusted_author\(d\["actor"\], d\["actor_type"\]\)\]/]/' "$PR_PY")"
+  d="$(PW_DRAFTED="$drafted" pworld)"
+  promote "$d" "$mutant" > /dev/null
+  assert_eq "mutation: counting the bot's undo as a hold leaves it a draft" "no" "$(promoted "$d")"
+}
+
 # --- the promote job's structure ----------------------------------------------
 
 promote_gated() {
@@ -1336,10 +1440,13 @@ promote_gated() {
       "github.event.workflow_run.name == 'Test'" "startsWith(github.event.workflow_run.path, '.github/workflows/test.yml')" \
       "github.event.workflow_run.event == 'pull_request'" "github.event.workflow_run.conclusion == 'success'" \
       "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
-      "github.event.workflow_run.head_repository.full_name == github.repository"; do
+      "github.event.workflow_run.head_repository.full_name == github.repository" \
+      "github.event_name == 'status'" "github.event.context == 'flakefix/stress'" "github.event.state == 'success'" \
+      "contains(toJSON(github.event.branches.*.name), '\"flakefix/issue-')"; do
     grep -qF "$c" <<< "$job" || return 1
   done
-  grep -q '^    workflows: \[Nightly, Test\]$' "$1" && grep -qF "    branches: [main, 'flakefix/issue-*']" "$1"
+  grep -q '^    workflows: \[Nightly, Test\]$' "$1" && grep -qF "    branches: [main, 'flakefix/issue-*']" "$1" &&
+    grep -q '^  status:$' "$1"
 }
 test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
   check "promote's if names the flag, the workflow, the PR event, the prefix and the repository" promote_gated \
@@ -1350,6 +1457,22 @@ test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: an unflagged promote passes"; FAIL=1; else echo "ok   - mutation: an unflagged promote fails"; fi
   c="$(mutated 'workflows: [Nightly, Test]' 'workflows: [Nightly]')"
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: no Test trigger passes"; FAIL=1; else echo "ok   - mutation: no Test trigger fails"; fi
+  c="$(mutated $'\n  status:\n' $'\n')"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: no status trigger passes"; FAIL=1; else echo "ok   - mutation: no status trigger fails"; fi
+  c="$(mutated "        github.event.context == 'flakefix/stress' &&" "")"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: any status context passes"; FAIL=1; else echo "ok   - mutation: any status context fails"; fi
+}
+
+# The status trigger runs the same script, through env, with --from-status.
+promote_status_path() {
+  local s; s="$(step "$1" promote "Promote if verified")"
+  grep -qF 'STATUS_SHA: ${{ github.event.sha }}' <<< "$s" &&
+    grep -qF 'promote --repo "$GITHUB_REPOSITORY" --sha "$STATUS_SHA" --from-status' <<< "$s" &&
+    grep -qF 'if [ "$TRIGGER" = status ]; then' <<< "$s"
+}
+test_the_status_trigger_runs_promote_from_the_status() {
+  check "a status runs promote --from-status on its commit" promote_status_path \
+    '--sha "$STATUS_SHA" --from-status' '--sha "$STATUS_SHA"'
 }
 
 # No `run:` block in the file names the branch (or any workflow_run text) as an
@@ -1388,7 +1511,7 @@ promote_tokens() {
 }
 test_promote_reads_with_the_job_token_and_writes_with_the_app() {
   check "promote's job token only reads, and the App's login is checked" promote_tokens \
-    $'      pull-requests: read\n      statuses: read\n    steps:' $'      pull-requests: write\n      statuses: read\n    steps:'
+    $'      pull-requests: read\n      statuses: read\n      actions: read' $'      pull-requests: write\n      statuses: read\n      actions: read'
 }
 
 # The App token promote mints carries only the scopes it writes with.

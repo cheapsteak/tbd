@@ -107,7 +107,8 @@ jobs:
   a model. Mints the App token and runs the PR driver's open step: the push,
   the draft PR, the verdict status, and every issue comment an attempt makes.
 - **`promote`** (ubuntu) – runs when a `test.yml` run completes
-  (`workflow_run`). Runs the PR driver's promote step for `flakefix/*` branches.
+  (`workflow_run`) and when the bot sets `flakefix/stress` = `success`
+  (`status`). Runs the PR driver's promote step for `flakefix/*` branches.
 
 The workflow's `workflow_dispatch` takes a required `job` input, a choice of
 `ledger` or `fix`, and an optional `issue` number that only `fix` reads. Each
@@ -1000,26 +1001,54 @@ Transitions, each owned by the PR driver:
   `failure`, whatever its stress result, with a status description naming the
   files, and its PR body says a human must judge the change. Either way the
   draft stays open for a human to read, finish, or close.
-- **Promote.** When `test.yml` completes on a `flakefix/*` branch, the
-  `promote` job marks the PR ready for review only if all of these hold for the
-  run's head SHA: the run is the PR's own (`pull_request`) run and concluded
-  `success`, the SHA carries `flakefix/stress` = `success` (the newest such
-  status the bot set on it), and the SHA is still the PR's head. A human
-  push to the branch moves the head to an unverified SHA, so the bot never
-  promotes over a human's work. The PR must also still be the bot's open draft
-  from this repository, and none of its changed files, read from GitHub and
-  matched against `main`'s protected list (§6.4), may be protected – a check
-  independent of the one the verifier made. A weak-evidence PR is promoted
-  like any other (§6.5); if it lacks the `flakefix-weak-evidence` label,
-  because `publish` died before adding it, `promote` adds it first. GitHub's
-  ready takes no expected head, so `promote` reads the head again after it;
-  if a push landed in between, it returns the PR to draft and goes red.
-  Promotion has one trigger, a `test.yml` completion: a stress status that
-  lands after the PR's run completed (a re-run `publish`, say) promotes
-  nothing until a human re-runs `test.yml`, and the PR stays a draft, which
-  is the safe side. Promotion uses the App token, because a
-  `ready_for_review` event raised by `GITHUB_TOKEN` would not start
-  `claude-review`.
+- **Promote.** Promotion needs two facts that arrive in either order: the
+  PR's own `test.yml` run passing, and the bot's `flakefix/stress` status. The
+  `promote` job therefore has two triggers, and whichever lands last
+  promotes; the earlier one finds its partner missing and skips:
+  - **A `test.yml` completion** (`workflow_run`) on a `flakefix/issue-<N>`
+    branch of this repository, from a `pull_request` run that concluded
+    `success`. The usual order: `publish` sets the status seconds after
+    opening the PR, long before its CI finishes.
+  - **A `flakefix/stress` = `success` status** (`status`) on a commit one of
+    whose branches is `flakefix/issue-<N>`. This covers a status that lands
+    after the PR's run completed – a re-run `publish`, say. `publish` sets the
+    status with the App token, which is what lets it start a workflow at
+    all; a status set with `GITHUB_TOKEN` would start none. A status names a
+    commit, not a PR, so `promote` finds the one open PR from this
+    repository on a `flakefix/issue-<N>` branch whose head is that commit,
+    and skips when there is none, or more than one. GitHub offers no filter
+    on `status`, so every commit status in the repository starts a run of
+    the workflow; for any other context, every job is skipped without a
+    runner.
+
+  Either way, `promote` marks the PR ready for review only if all of these
+  hold for the head SHA: the newest of the PR's own (`pull_request`)
+  `test.yml` runs on that SHA, on its branch and from this repository, has
+  completed with `success`; the SHA carries `flakefix/stress` = `success`
+  (the newest such status the bot set on it); and the SHA is still the PR's
+  head. A human push to the branch moves the head to an unverified SHA, so
+  the bot never promotes over a human's work. The PR must also still be the
+  bot's open draft from this repository, and none of its changed files, read
+  from GitHub and matched against `main`'s protected list (§6.4), may be
+  protected – a check independent of the one the verifier made.
+
+  **A human's return to draft is a hold.** A human who converts the PR back
+  to draft is holding it, and the bot never overrides that: `promote` reads
+  the PR's timeline and skips when any `convert_to_draft` event was made by
+  anyone but the bot. Without this, a later `test.yml` re-run at the same
+  head would promote it again. The hold lasts as long as the PR is a draft;
+  a human releases it by marking the PR ready, after which the bot has
+  nothing left to do. The signal is the gesture a human already makes, so
+  there is no label or command to learn; the bot's own returns to draft
+  (the undo below) are told apart by their author, `tbd-flake-fixer[bot]`.
+
+  A weak-evidence PR is promoted like any other (§6.5); if it lacks the
+  `flakefix-weak-evidence` label, because `publish` died before adding it,
+  `promote` adds it first. GitHub's ready takes no expected head, so
+  `promote` reads the head again after it; if a push landed in between, it
+  returns the PR to draft and goes red. Promotion uses the App token,
+  because a `ready_for_review` event raised by `GITHUB_TOKEN` would not
+  start `claude-review`.
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so
   the gate judges the PR once it is ready, like any other.
 - **Merge or close.** A human does either. `Fixes #N` closes the issue on
@@ -1374,8 +1403,17 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   job token says so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
   back to the job token when the App token is missing, and grants
   `issues: write` to no other job.
-- **`flake-pr.test.sh`** – promotion's conditions (§7), each failing alone; a
-  head that moved after verification; the attempt entry `publish` writes for
+- **`flake-pr.test.sh`** – promotion's conditions (§7), each failing alone,
+  under both triggers; a head that moved after verification; a status that
+  lands after the PR's Test run (promoted) and one that lands while the run
+  is still going (skipped, under either trigger); a newer red Test run over
+  an older green one; a Test run that is not the PR's own – a `push` run,
+  another branch's, a fork's, another workflow's – each not counted; a
+  status whose commit heads no open bot PR (closed, another head, a fork,
+  another branch name) or two of them, each skipped cleanly; a human's
+  return to draft, which holds the PR under either trigger, and the bot's
+  own, which does not; the job's `if:` naming both triggers and the
+  status's context and state; the attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists, and a failed
   session with no commit packaged as `aborted` marked `session_failed`,
   never as `no-diff`; a weak-evidence
