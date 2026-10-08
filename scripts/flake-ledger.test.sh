@@ -1033,18 +1033,27 @@ test_apply_keeps_going_past_a_failed_issue_write() {
 }
 
 test_a_rate_limit_or_bad_token_stops_the_issue_writes() {
-  local d out status mutant
-  for status in 401 403 429; do
+  local d out err mutant
+  for err in "gh: Bad credentials (HTTP 401)" "gh: API rate limit exceeded (HTTP 429)" "gh: You have exceeded a secondary rate limit (HTTP 403)"; do
     d="$(mktmpd)"
-    out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "gh: error (HTTP $status)")"
-    assert_eq "HTTP $status: exit 2" "2" "$(cat "$d/rc")"
-    assert_lacks "HTTP $status: no write after it" "$(cat "$d/log")" "comments/5 "
-    assert_contains "HTTP $status: the rest are listed as not tried" "$out" "\`c/d()\`: not tried after HTTP $status"
+    out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "$err")"
+    assert_eq "[$err]: exit 2" "2" "$(cat "$d/rc")"
+    assert_lacks "[$err]: no write after it" "$(cat "$d/log")" "comments/5 "
+    assert_contains "[$err]: the rest are listed as not tried" "$out" "**Issue writes not tried: 1**"
+    assert_lacks "[$err]: and not as failed" "$out" "Issue writes that failed: 2"
   done
   d="$(mktmpd)"
-  mutant="$(mutant_of 's/^STOP_STATUSES = \(401, 403, 429\)$/STOP_STATUSES = ()/' "$LEDGER")"
-  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: error (HTTP 403)" > /dev/null
+  out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "gh: Unable to create comment because issue is locked (HTTP 403)")"
+  assert_contains "a 403 that is no rate limit concerns that issue alone" "$(cat "$d/log")" "comments/5 "
+  assert_contains "and says every other write was tried" "$out" "Every other issue write was tried."
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^STOP_STATUSES = \(401, 429\)$/STOP_STATUSES = ()/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: API rate limit exceeded (HTTP 429)" > /dev/null
   assert_contains "mutation: writing on through a rate limit" "$(cat "$d/log")" "comments/5 "
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/ or \(error.status == 403 and error.rate_limited\)$//' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: You have exceeded a secondary rate limit (HTTP 403)" > /dev/null
+  assert_contains "mutation: writing on through a secondary rate limit" "$(cat "$d/log")" "comments/5 "
 }
 
 test_a_failed_write_after_a_create_names_the_new_issue() {
@@ -1198,16 +1207,6 @@ test_an_issue_without_the_watchlist_history_is_seeded_and_the_entry_kept() {
   assert_eq "and the entry stays until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
   mutant="$(mutant_of 's/^    return \{f.key for f in absorbed.failures\} == .*$/    return True/' "$LEDGER")"
   assert_eq "mutation: trusting any ledger drops the entry before its failure is on the issue" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
-  # An entry folded down to counts, against a ledger without those counts.
-  body="$(mktmpd)/ledger.md"; local folded; folded="$(mktmpd)/watch.md"
-  build ledger-body "$body" "{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}"
-  build watchlist-body "$folded" "[{\"test_id\": \"$HOLDER\", \"failures\": [], \"folded\": [{\"occurrence\": \"branch:a\", \"episode\": 0, \"pre_fix\": false, \"count\": 5, \"first\": \"2026-09-01T11:00:00Z\", \"last\": \"2026-09-19T11:00:00Z\"}]}]"
-  w="$(newwork)"
-  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$folded"
-  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "971|$BOT|Bot|$body"
-  assert_eq "a ledger lacking the entry's folded counts does not take it off" "1" "$(analyze "$w" | jq '.watchlist.tests')"
-  mutant="$(mutant_of 's/ and fl.failure_count\(ledger\) >= fl.failure_count\(watched\)$//' "$LEDGER")"
-  assert_eq "mutation: comparing keys alone drops the folded history" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
 }
 
 test_a_promoted_test_whose_issue_was_never_created_is_retried_without_a_new_failure() {
@@ -1223,6 +1222,38 @@ test_a_promoted_test_whose_issue_was_never_created_is_retried_without_a_new_fail
     "$(jq -r '"\(.actions[0].create.title) \(.watchlist.tests)"' <<< "$out")"
   mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(mapping\) \| bound$/    planned = set(by_test) | set(mapping)/' "$LEDGER")"
   assert_eq "mutation: planning only tests with new failures strands it" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
+  # fetch searches for its issue first, though the test did not fail this run.
+  local d entry
+  entry="$(mktmpd)/watch.md"
+  build watchlist-body "$entry" '[{"test_id": "TBDSharedTests.Q/q()", "failures": [{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "night:2026-09-20", "at": "2026-09-20T11:00:00Z", "source": "nightly"}, {"key": "2:1:x", "run_id": 2, "attempt": 1, "occurrence": "branch:x", "at": "2026-09-21T11:00:00Z", "source": "ci-xunit"}]}]'
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$entry")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+  ledger_run "$d" > /dev/null
+  assert_contains "fetch searches for the qualifying entry's issue" "$(grep search/issues "$d/log")" "TBDSharedTests.Q"
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$entry")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+  mutant="$(mutant_of 's/^    for test in sorted\(\(set\(by_test\) \| qualified\) - set\(mapping\)\):$/    for test in sorted(set(by_test) - set(mapping)):/' "$LEDGER")"
+  LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null
+  assert_lacks "mutation: searching only tests that failed this run could create a duplicate" "$(grep search/issues "$d/log")" "TBDSharedTests.Q"
+}
+
+test_an_entry_whose_trait_issue_serves_it_alone_is_not_aged() {
+  local w out body mutant
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" '[{"test_id": "TBDSharedTests.OtherTests/flaky()", "failures": [{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "branch:x", "at": "2026-08-20T11:00:00Z", "source": "ci-retry", "file": "Tests/TBDSharedTests/OtherTests.swift", "line": 3}]}]'
+  w="$(newwork)"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
+  build issue "$w" --number 600 --title "OtherTests.flaky hangs under load" --label bug
+  out="$(analyze "$w")"
+  assert_eq "kept, though 49 days quiet: its history is bound for #600" "1 0" "$(jq -r '"\(.watchlist.tests) \(.notes.aged | length)"' <<< "$out")"
+  assert_contains "and #600 gets it" "$(jq -r '.actions[] | select(.issue == 600) | .comment_body' <<< "$out")" '"key":"1:1:x"'
+  mutant="$(mutant_of 's/^        if test in mapping or fl.qualifies\(state\) or adopted:$/        if test in mapping or fl.qualifies(state):/' "$LEDGER")"
+  assert_eq "mutation: aging it drops the history before #600 holds it" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
 }
 
 test_an_existing_issue_below_the_threshold_keeps_recording_there() {
@@ -1722,7 +1753,7 @@ test_a_test_whose_trait_issue_is_gone_gets_its_own_issue() {
       "$(jq -r '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600"))"][0] + "|" + ([.tests[].test_id | select(. != "TBDSharedTests.OtherTests/flaky()")] | join(","))' <<< "$out")"
     assert_contains "HTTP $status: the number is listed" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "#600 (HTTP $status): a failing test whose trait names it gets an issue of its own"
   done
-  mutant="$(mutant_of 's/^        if trait is not None and trait in ctx.gone_issues:$/        if False:/' "$LEDGER")"
+  mutant="$(mutant_of 's/ if trait is None or trait in ctx.gone_issues else trait$/ if trait is None else trait/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_contains "mutation: without the rule the new issue links a number that does not exist" \
     "$(jq -r '.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | .create.body' <<< "$out")" "#600"

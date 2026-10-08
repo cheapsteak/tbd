@@ -123,9 +123,11 @@ class GhError(Exception):
     """A failed `gh` call. `status` is the HTTP status `gh` reported on stderr
     (`gh: Not Found (HTTP 404)`), or None when it reported none."""
 
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, rate_limited: bool = False):
         super().__init__(message)
         self.status = status
+        # stderr named a rate limit: a 403 that is one, not a per-issue refusal.
+        self.rate_limited = rate_limited
 
 
 # The answers that say a thing does not exist, as opposed to "could not ask".
@@ -133,8 +135,14 @@ class GhError(Exception):
 ISSUE_GONE_STATUSES = (404, 410)  # 410: the issue was deleted
 COMPARE_GONE_STATUSES = (404,)  # a commit GitHub no longer has
 # A write answered with one of these fails every write after it: a token that
-# is bad or expired (401), or a rate limit (403 secondary, 429). `apply` stops.
-STOP_STATUSES = (401, 403, 429)
+# is bad or expired (401), or a rate limit (429, or a 403 whose message names a
+# rate limit, as GitHub's secondary limit does). `apply` stops. Any other 403 –
+# a locked issue, say – concerns that issue alone.
+STOP_STATUSES = (401, 429)
+
+
+def stops_writes(error: GhError) -> bool:
+    return error.status in STOP_STATUSES or (error.status == 403 and error.rate_limited)
 
 
 class AnalysisError(Exception):
@@ -435,13 +443,14 @@ def _absorb(keep: fl.State, other: fl.State) -> fl.State:
     return merged
 
 
-def _holds(ledger: fl.State, absorbed: fl.State, watched: fl.State) -> bool:
+def _holds(ledger: fl.State, absorbed: fl.State) -> bool:
     """Whether an issue's ledger, as read, already holds the test's watchlist
     entry, so dropping the entry loses nothing: `_absorb(ledger, watched)`
-    (`absorbed`) adds no failure, and the ledger counts at least as many
-    failures as the entry, folded counts included, so an entry folded down to
-    counts is not taken as held by a ledger that lacks them."""
-    return {f.key for f in absorbed.failures} == {f.key for f in ledger.failures} and fl.failure_count(ledger) >= fl.failure_count(watched)
+    (`absorbed`) adds no failure. Folded counts are not compared: the only
+    ledger a watched test gets is seeded from its entry, folded counts and
+    all, and the entry is degraded to a smaller budget than the ledger, so
+    the ledger never folds what the entry holds unfolded."""
+    return {f.key for f in absorbed.failures} == {f.key for f in ledger.failures}
 
 
 def _merge_entries(first: fl.State, second: fl.State) -> fl.State:
@@ -539,6 +548,15 @@ def read_targets(work: Path) -> dict[str, int]:
         if len(parts) == 2 and parts[1].isdigit():
             targets[parts[0]] = int(parts[1])
     return targets
+
+
+def adoptable_trait(test: str, ctx: "Context") -> int | None:
+    """The `.flaky(issue:)` number on `test`'s trait, unless GitHub said it
+    does not exist: nothing to adopt or link then, and the test gets an issue
+    of its own. A mistyped number then shows up as a new public issue beside
+    the real one, where skipping the test would hide it."""
+    trait = trait_issue_for(test, ctx.inventory, ctx.files)
+    return None if trait is None or trait in ctx.gone_issues else trait
 
 
 def trait_issue_for(test: str, inventory: list[tuple[str, str, int]], files: dict[str, tuple[str, int | None]]) -> int | None:
@@ -738,12 +756,7 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     add_label = False
     links: list[int] = []
     if view is None:
-        trait = trait_issue_for(test, ctx.inventory, ctx.files)
-        if trait is not None and trait in ctx.gone_issues:
-            # Nothing to adopt or link: the test gets an issue of its own. A
-            # mistyped number then shows up as a new public issue beside the
-            # real one, where skipping the test would hide it.
-            trait = None
+        trait = adoptable_trait(test, ctx)
         if trait is not None and trait in ctx.issues and ctx.issues[trait].unreadable:
             # It may hold this test's own history; a second issue would split it.
             notes.unreadable.append(f"`{test}`: its trait's issue #{trait} has an unparsable bot comment; skipped")
@@ -759,7 +772,7 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
             # A test promoted off the watchlist: its issue holds this history,
             # or will once this run's write lands (below).
             state = _absorb(view.ledger, watched)
-            held = _holds(view.ledger, state, watched)
+            held = _holds(view.ledger, state)
     elif watched is not None:
         # The watchlist holds the test's history: it seeds a new issue, or
         # an issue found without a ledger comment yet (one a run created and
@@ -930,8 +943,8 @@ def bound_for_an_issue(entries: dict[str, fl.State], mapping: dict[str, int], ct
     be created), and one whose `.flaky(issue:)` issue serves it alone."""
     bound = set()
     for test, state in entries.items():
-        trait = trait_issue_for(test, ctx.inventory, ctx.files)
-        adopted = trait is not None and trait not in ctx.gone_issues and issue_serves_test_alone(trait, test, ctx.inventory, ctx.targets, ctx.issues)
+        trait = adoptable_trait(test, ctx)
+        adopted = trait is not None and issue_serves_test_alone(trait, test, ctx.inventory, ctx.targets, ctx.issues)
         if test in mapping or fl.qualifies(state) or adopted:
             bound.add(test)
     return bound
@@ -1092,7 +1105,7 @@ def gh(*args: str, input: bytes | None = None, write: bool = False) -> bytes:
         # `gh api` ends its error line with `(HTTP <status>)`. The status is
         # the one thing read from stderr, to tell "does not exist" apart.
         found = HTTP_STATUS.findall(err)
-        raise GhError(f"gh {' '.join(args[:4])} exited {proc.returncode}", int(found[-1]) if found else None)
+        raise GhError(f"gh {' '.join(args[:4])} exited {proc.returncode}", int(found[-1]) if found else None, "rate limit" in err.lower())
     return proc.stdout
 
 
@@ -1355,9 +1368,11 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     by_test, _ = collect_failures(work, repo, now, notes, read_targets(work))
     entries = load_watchlist(watchlist, Notes()).entries
     mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test) | set(entries), Notes())
-    # As `analyze` ages and plans them: an aged-out entry starts afresh, and
-    # an entry that qualifies is planned, new failure or not, so its issue is
-    # searched for before it is created again.
+    # Close to how `analyze` ages and plans them: an aged-out entry starts
+    # afresh, and an entry that qualifies is planned, new failure or not, so
+    # its issue is searched for before it is created again. `analyze` also
+    # keeps an entry whose trait issue serves it alone, which this cannot
+    # tell without the test's files; aging it here only adds a search.
     qualified = {t for t, s in entries.items() if fl.qualifies(s)}
     entries = age_out(entries, set(mapping) | qualified, now, Notes())
     for test in sorted((set(by_test) | qualified) - set(mapping)):
@@ -1475,10 +1490,11 @@ def _pause() -> None:
         time.sleep(WRITE_PAUSE_S)
 
 
-def apply(plan: dict, repo: str) -> list[str]:
+def apply(plan: dict, repo: str) -> tuple[list[str], list[str]]:
     """The watchlist's writes first, then each action: one issue's writes –
     the issue, its label, a reopen, then the ledger comment. Returns the
-    actions that failed, each described; empty when every write landed.
+    actions that failed and those not tried, each described; both empty when
+    every write landed.
 
     The watchlist goes first and fails closed: a failed label or watchlist
     write raises before any issue is touched, because the watchlist is the
@@ -1517,21 +1533,23 @@ def apply(plan: dict, repo: str) -> list[str]:
         else:
             gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": write["body"]})
         _pause()
-    failed = []
+    failed, untried = [], []
     for i, action in enumerate(actions):
         written = {"number": action["issue"]}
         try:
             _apply_action(action, repo, written)
         except (GhError, KeyError, TypeError, ValueError) as error:
-            where = f"#{written['number']}" if written["number"] else "a new issue, not created"
+            # A create that errored may still have made the issue; the next
+            # run finds it by title.
+            where = f"#{written['number']}" if written["number"] else "a new issue; no number came back"
             failed.append(f"`{action['test_id']}` ({where}): {error}")
-            if isinstance(error, GhError) and error.status in STOP_STATUSES:
+            if isinstance(error, GhError) and stops_writes(error):
                 # A bad token or a rate limit fails every write after it, and
                 # writing on through a rate limit prolongs it.
-                failed += [f"`{a['test_id']}`: not tried after HTTP {error.status}" for a in actions[i + 1 :]]
+                untried = [f"`{a['test_id']}`" for a in actions[i + 1 :]]
                 break
         _pause()
-    return failed
+    return failed, untried
 
 
 def _apply_action(action: dict, repo: str, written: dict) -> None:
@@ -1550,9 +1568,15 @@ def _apply_action(action: dict, repo: str, written: dict) -> None:
         gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": action["comment_body"]})
 
 
-def failed_writes_report(failed: list[str]) -> str:
-    head = f"**Issue writes that failed: {len(failed)}.** Every other write was tried; the run ends red, and the next run retries these."
-    return "\n".join(["", head] + [f"- {f}" for f in failed]) + "\n"
+def failed_writes_report(failed: list[str], untried: list[str]) -> str:
+    lines = ["", f"**Issue writes that failed: {len(failed)}.** The run ends red, and the next run retries these."]
+    lines += [f"- {f}" for f in failed]
+    if untried:
+        lines += ["", f"**Issue writes not tried: {len(untried)}**, after a bad token or a rate limit stopped the run:"]
+        lines += [f"- {t}" for t in untried]
+    else:
+        lines += ["", "Every other issue write was tried."]
+    return "\n".join(lines) + "\n"
 
 
 def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: int, days: int, run_attempt: int = 1) -> str:
@@ -1679,10 +1703,10 @@ def _summarize(text: str) -> None:
 def _finish_apply(plan: dict, repo: str) -> int:
     """`apply`, then the failed issue writes, if any, listed in the summary and
     the log, and the run red."""
-    failed = apply(plan, repo)
+    failed, untried = apply(plan, repo)
     if not failed:
         return 0
-    text = failed_writes_report(failed)
+    text = failed_writes_report(failed, untried)
     _summarize(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         sys.stderr.write(text)
