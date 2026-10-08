@@ -296,6 +296,10 @@ FOLD_KEEP_KEYS_DAYS = 8
 # this budget, which leaves room for the watchlist comment's own text, so any
 # single entry fits in a comment by itself.
 WATCHLIST_ENTRY_CHARS = MAX_COMMENT_CHARS - 4000
+# Spec §4.4: a watchlist entry whose newest failure – a folded count's latest
+# included – is this many days old leaves the watchlist. A test that fails
+# again later starts a fresh entry.
+WATCHLIST_AGE_OUT_DAYS = 30
 # Each degrading step works on this fraction of the failures at a time, so a
 # large state renders in a bounded number of passes rather than one per failure.
 DEGRADE_BATCH_FRACTION = 0.1
@@ -375,6 +379,13 @@ def distinct_occurrences(state: State) -> set[str]:
     return {f.occurrence for f in current_failures(state)} | {
         f.occurrence for f in _current_folded(state)
     }
+
+
+def newest_failure_at(state: State) -> str:
+    """The latest failure time a state holds, folded counts included: folding
+    keeps each count's latest time (`Folded.last`), so an entry folded down to
+    counts alone still ages from its real newest failure. "" when it holds none."""
+    return max([f.at for f in state.failures] + [f.last for f in state.folded], default="")
 
 
 def failure_count(state: State) -> int:

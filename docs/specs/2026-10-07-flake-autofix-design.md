@@ -282,7 +282,9 @@ A test's own issue has three parts:
 **The watchlist** is one issue, titled `Flake watchlist` and labelled
 `flake-watchlist` – its own label, never `flaky`, so neither the per-test
 lookup below nor the picker (§5) ever reads it as a test's issue. It holds every
-test that has a recorded failure, no issue of its own, and does not qualify.
+test that has failed in the last 30 days, has no issue of its own, and does not
+qualify, and, until a run confirms its history on its new issue, a test that
+just qualified (below).
 The ledger finds it by label and authorship: the oldest issue under the label
 that the bot itself opened, open or closed. An issue under the label opened by
 anyone else is not the watchlist, and the summary lists it. When no bot-opened
@@ -319,24 +321,44 @@ under the same 60,000 it keeps a ledger comment under:
   watchlist entry into an issue's ledger.
 - **Reuse** – a comment left empty is edited to say so and reused, never
   deleted, and new tests fill the first comment with room, so emptied comments
-  take new entries before any new comment is opened. Entries are not aged
-  out: a test leaves the watchlist only by qualifying, so the watchlist grows
-  with every test ID that has ever failed once, a renamed or deleted test's
-  included.
+  take new entries before any new comment is opened.
 - **Trust** – only the bot's own comments are state, as for ledger comments
-  (below). A bot comment that does not parse may hold any test's history, so,
-  as with an unparsable ledger comment, the run leaves it alone: it writes no
-  watchlist comment and plans nothing for a test without an issue of its own,
-  and the summary lists the comment. Tests with issues are recorded as usual.
+  (below). A bot comment that does not parse – a hand edit, say – is skipped:
+  the run reads the watchlist from the bot's other comments, lists the broken
+  one in the summary, and never writes it, so it stays exactly as it was for a
+  human to inspect, fix, or delete. Entries go to the bot's readable comments
+  and, past those, to new ones. A test whose history only the broken comment
+  held starts a fresh entry when it next fails, and a test with an issue of its
+  own records there as usual. One hand edit therefore costs the history that
+  comment held, never the run: holding the whole watchlist until a human
+  repaired the comment would stop every sub-threshold test from being
+  recorded meanwhile, while what the skip loses is at most one place's history
+  per test, below the threshold by definition. If a human repairs the comment,
+  the next read finds a test in two comments and merges them, as for a run
+  that died midway (above).
+
+**Aging out.** An entry whose newest failure is 30 days old leaves the
+watchlist (`WATCHLIST_AGE_OUT_DAYS` in `scripts/flake_lib.py`), and the
+summary lists it. The newest failure counts folded ones: folding keeps each
+count's latest time, so an entry degraded to counts alone ages from its real
+last failure. A test that fails after its entry aged out starts a fresh entry,
+with no memory of the old one; a flake that quiet is a fresh observation, and
+without aging the watchlist would grow with every test ID that ever failed
+once, renamed and deleted tests included. An entry whose test already has an
+issue of its own is not aged: it is waiting to be confirmed on that issue
+(below).
 
 **Leaving the watchlist.** When a watchlisted test fails in a second distinct
 place it qualifies, and the ledger opens its issue, seeded with the full
-history from its watchlist entry, then takes it off the watchlist. The issue
-and its ledger comment are written before any watchlist comment, so a run
-that dies between the two leaves the test on both; the next run finds the
-issue (by its `flaky` label, or by title), merges the watchlist entry into it
-by merge key, and drops the entry. Nothing else takes a test off the
-watchlist.
+history from its watchlist entry. The ledger writes the watchlist before any
+issue (§8), so in that run the test stays on the watchlist, its entry updated
+with the run's failures. A later run that reads the issue's ledger comment
+already holding every failure the entry holds – merged by merge key, as two
+copies of an entry are – drops the entry. A test leaves the watchlist only once
+its history is on its own issue: if the issue's create or comment write fails,
+the entry still holds everything, and the next run finds the issue (by its
+`flaky` label, or by title) or creates it again, seeded from the entry. Aging
+out is the only other way off the watchlist.
 
 The exact-title search (step 1 below) runs for a test's first failure and,
 once it is on the watchlist, only in a run where its recorded and new
@@ -482,8 +504,9 @@ The ledger posts nothing besides its one comment per issue, the reopen
 comment above, and the watchlist's comments. A new failure updates the ledger
 comment; it never adds a second one.
 
-The ledger paces its writes at one issue's writes, or one watchlist comment,
-every three seconds, under GitHub's limit on content creation.
+The ledger writes the watchlist first, then each test's issue, and paces its
+writes at one issue's writes, or one watchlist comment, every three seconds,
+under GitHub's limit on content creation. §8 says what a failed write does.
 
 ### 4.5 Report-only mode
 
@@ -492,7 +515,11 @@ the job summary instead of to issues. That lets its counts be checked against
 the issues humans have filed before it writes anything public. The summary
 leads with two counts – the per-test issues the run would open, and the tests
 on the watchlist – and then lists each test with where its failures go: its
-issue, a new issue, or the watchlist.
+issue, a new issue, or the watchlist, and for a test promoted this run, that
+it stays on the watchlist until a run reads its history on the issue. It also
+lists the entries aged off the watchlist and any watchlist comment skipped as
+unparsable. In write mode, an issue write that failed is listed after the
+plan (§8).
 
 Report-only mode mints no App token and writes no flake issue, but a red
 `ledger` run is still reported: the failure note to the tracking issue (§8)
@@ -1152,8 +1179,16 @@ Transitions, each owned by the PR driver:
 
 ## 8. Failure handling
 
-- **The ledger cannot read or write GitHub.** The ledger fails closed: it exits
-  non-zero and writes nothing more that run. Two answers are definite rather
+- **The ledger cannot read or write GitHub.** A failed read fails closed: the
+  ledger exits non-zero and writes nothing that run. So does a failed label or
+  watchlist write, which comes before any issue write, because the watchlist is
+  the only record of a sub-threshold test's history. A failed write to one
+  test's issue does not stop the others: the ledger lists it in the summary,
+  goes on to the next issue, and exits non-zero once every write was tried, so
+  one bad issue neither hides behind a green run nor holds back every test
+  after it. A test promoted off the watchlist is still on it until a later run
+  reads its history on the issue (§4.4), so a failed issue write loses
+  nothing. Two answers are definite rather
   than missing, and do not fail the run: GitHub saying that an issue a
   `.flaky(issue:)` trait names does not exist (404, or 410 for a deleted
   issue), and saying that a failing run's head commit does not exist. A test
@@ -1165,8 +1200,8 @@ Transitions, each owned by the PR driver:
   unrecorded, listed in the summary. If the fix commit is gone, every later
   failure of the test would be unplaceable, so the run fails closed. It never posts a partial ledger
   comment and never comments about its own failure on a flake issue. Writes are
-  per issue and idempotent, so a run that dies midway leaves earlier issues
-  correct and the next run converges. The job going red is the signal; on the
+  per issue and idempotent, so a run that dies midway, or skips a failed
+  issue, leaves the other issues correct and the next run converges. The job going red is the signal; on the
   first red run after a green one the job posts one comment to the nightly
   tracking issue, #519 (`TRACKING_ISSUE` in `nightly.yml`), and nothing on
   later consecutive reds. "After a green one" comes from GitHub, not from
@@ -1379,7 +1414,10 @@ names who reclaims its orphans:
   bot's authorship before any create, created once, and reused for every
   sub-threshold test. Its comments are edited in place; one left empty is
   reused rather than deleted, so their number is the most the watchlist has
-  ever needed (§4.4).
+  ever needed, and entries age out after 30 days without a failure, so that
+  most is bounded by a month of first-time flakes, not by every test ID that
+  ever failed (§4.4). A bot comment that does not parse is left in place for a
+  human, never deleted; it stays one comment.
 
 Four more things the bot creates need no reclaimer, each for a stated reason:
 
@@ -1457,9 +1495,17 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   expired or never-uploaded artifacts, each listed in the summary. The
   watchlist: a test below the threshold goes on the watchlist and gets no
   issue; a second place opens its issue seeded with the watchlist's history
-  and takes it off the watchlist, in write mode writing the issue before the
-  watchlist; an issue found after a run died between the two is seeded from
-  the watchlist; an existing per-test issue below the threshold keeps
+  and keeps the entry, updated, that run, in write mode writing the watchlist
+  before the issue, and the next run, reading the issue's ledger comment
+  holding that history, drops the entry; an issue found without its ledger
+  comment, and one whose ledger comment lacks a watched failure, each seeded
+  from the watchlist with the entry kept; a failed issue write listed while
+  the next issue is still written, ending the run red, and a failed watchlist
+  write stopping the run before any issue; an entry with no failure in 30
+  days aged out against an injected now and listed, one folded to counts
+  aging from its latest folded failure, one whose test has an issue not aged,
+  and an aged-out test that fails again starting a fresh entry; folding
+  keeping a count's latest failure time; an existing per-test issue below the threshold keeps
   recording there; a forged watchlist comment and a watchlist issue opened by
   someone else, each ignored and listed; a missing watchlist created once and
   not again; two watchlists, the oldest used and both listed; the report's
@@ -1468,8 +1514,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   touching only the last comment, and a test moved by an overflow written to
   its new comment before its old one; a test left in two comments, kept in
   the later; a new test filling an emptied comment first; an unparsable
-  watchlist comment, which leaves the watchlist and every test without an
-  issue alone; a watchlist whose label was removed, found by title and
+  watchlist comment, skipped, listed, and never written, with a test it may
+  have held starting a fresh entry in a readable or new comment and a test
+  with an issue still recorded there; a watchlist whose label was removed, found by title and
   relabelled; and a watched test title-searched only when it may qualify.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome

@@ -993,20 +993,51 @@ test_an_api_error_leaves_the_ledger_unwritten() {
   assert_eq "mutation: swallowing gh errors exits 0" "0" "$rc"
 }
 
-test_apply_stops_at_the_first_failed_write() {
-  local d plan rc=0
-  d="$(mktmpd)"
-  jq -n '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"},{match: "issues/970/comments", exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
-  stub_gh "$d"
-  plan="$d/plan.json"
-  jq -n '{actions: [
+# Two issue actions after one watchlist comment edit; the first action's
+# comment write fails.
+APPLY_PLAN='{actions: [
     {test_id: "a/b()", issue: 970, create: null, add_label: true, reopen: false, reopen_body: null, comment_id: null, comment_body: "x", qualifies: false},
-    {test_id: "c/d()", issue: 971, create: null, add_label: false, reopen: false, reopen_body: null, comment_id: 5, comment_body: "y", qualifies: false}]}' > "$plan"
-  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$LEDGER" apply --plan "$plan" --repo "$REPO" > /dev/null 2>&1 || rc=$?
-  assert_eq "exit 2" "2" "$rc"
-  assert_lacks "the second issue is untouched" "$(cat "$d/log")" "comments/5"
+    {test_id: "c/d()", issue: 971, create: null, add_label: false, reopen: false, reopen_body: null, comment_id: 5, comment_body: "y", qualifies: false}],
+  watchlist: {issue: 900, create: null, add_label: false, writes: [{index: 0, comment_id: 901, body: "w", tests: 1}]}}'
+
+# apply_with DIR FAILING_ROUTE [LEDGER] -> apply's stdout+stderr; DIR/rc holds its exit code.
+apply_with() {
+  local d="$1" failing="$2" script="${3:-$LEDGER}" rc=0
+  jq -n --arg failing "$failing" '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: $failing, exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
+  stub_gh "$d"
+  jq -n "$APPLY_PLAN" > "$d/plan.json"
+  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$script" apply --plan "$d/plan.json" --repo "$REPO" 2>&1 || rc=$?
+  echo "$rc" > "$d/rc"
+}
+
+test_apply_keeps_going_past_a_failed_issue_write() {
+  local d out mutant
+  d="$(mktmpd)"
+  out="$(apply_with "$d" "issues/970/comments")"
+  assert_eq "exit 2 once every write was tried" "2" "$(cat "$d/rc")"
+  assert_contains "the issue after the failed one is still written" "$(cat "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/comments/5 "
+  assert_contains "the failed one is listed" "$out" "**Issue writes that failed: 1.**"
+  assert_contains "by its test" "$out" '`a/b()` (#970)'
   assert_lacks "an existing label is not created again" "$(cat "$d/log")" "-X POST repos/cheapsteak/tbd/labels "
   assert_contains "but the issue gets it" "$(cat "$d/log")" "-X POST repos/cheapsteak/tbd/issues/970/labels"
+  assert_eq "the watchlist is written before any issue" "issues/comments/901" \
+    "$(writes_in "$d/log" | grep -v '/labels ' | head -1 | grep -oE 'issues/comments/[0-9]+')"
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^            failed.append\(f"`\{action\[.test_id.\]\}` \(\{where\}\): \{error\}"\)$/            raise/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" > /dev/null
+  assert_lacks "mutation: stopping at the first failure leaves the next issue unwritten" "$(cat "$d/log")" "comments/5 "
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^    if not failed:$/    if True:/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" > /dev/null
+  assert_eq "mutation: ignoring the failures ends the run green" "0" "$(cat "$d/rc")"
+}
+
+test_a_failed_watchlist_write_stops_the_run_before_any_issue() {
+  local d
+  d="$(mktmpd)"
+  apply_with "$d" "issues/comments/901" > /dev/null
+  assert_eq "exit 2" "2" "$(cat "$d/rc")"
+  assert_eq "no issue write after it" "" "$(writes_in "$d/log" | grep -E 'issues/(970|comments/5)')"
 }
 
 test_fetch_maps_compare_status_to_ancestry() {
@@ -1071,8 +1102,8 @@ test_a_test_below_the_threshold_goes_on_the_watchlist_only() {
   assert_eq "mutation: without the watchlist the first failure opens an issue" "Flaky test: $HOLDER" "$(jq -r '.actions[0].create.title' <<< "$out")"
 }
 
-test_a_second_place_opens_the_issue_with_the_watchlist_history_and_drops_the_entry() {
-  local w out mutant d writes
+test_a_second_place_opens_the_issue_and_keeps_the_entry_until_the_issue_holds_it() {
+  local w out mutant d writes body watchbody w2
   w="$(newwork)"
   watched "$w" "$HOLDER"
   erased_run "$w" 3002 sidebar
@@ -1080,12 +1111,27 @@ test_a_second_place_opens_the_issue_with_the_watchlist_history_and_drops_the_ent
   assert_eq "a new issue for the test, now qualified" "Flaky test: $HOLDER true" "$(jq -r '.actions[0] | "\(.create.title) \(.qualifies)"' <<< "$out")"
   assert_contains "its ledger holds the watchlist's old failure" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"1:1:x"'
   assert_contains "and the new one" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"3002:1:xunit-app-swift-testing.xml"'
-  assert_eq "the watchlist comment is edited, and holds no test" "901 0 0" "$(jq -r '"\(.watchlist.writes[0].comment_id) \(.watchlist.writes[0].tests) \(.watchlist.tests)"' <<< "$out")"
-  assert_lacks "the test is gone from it" "$(watch_body "$out")" "$HOLDER"
+  assert_eq "the watchlist keeps the test this run, updated" "901 1 1" "$(jq -r '"\(.watchlist.writes[0].comment_id) \(.watchlist.writes[0].tests) \(.watchlist.tests)"' <<< "$out")"
+  assert_contains "with the new failure too" "$(watch_body "$out")" '"key":"3002:1:xunit-app-swift-testing.xml"'
+  assert_eq "the summary says it leaves next run" "true" "$(jq -r '.tests[0].leaves_watchlist_next_run' <<< "$out")"
   mutant="$(mutant_of 's/^        state = replace\(watched, links=watched.links or links\)$/        state = fl.State(test_id=test, links=links)/' "$LEDGER")"
-  out="$(analyze "$w" "$mutant")"
-  assert_eq "mutation: without the watchlist's history the second place is missed" "0" "$(jq '.actions | length' <<< "$out")"
-  # Write mode: the issue, with its history, before the watchlist drops it.
+  assert_eq "mutation: without the watchlist's history the second place is missed" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
+  mutant="$(mutant_of 's/^    pending = watched is not None and not .*$/    pending = False/' "$LEDGER")"
+  assert_eq "mutation: dropping the entry on promotion empties the watchlist before the issue exists" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+  # The next run reads the issue with that history in its ledger comment, and
+  # only then takes the test off the watchlist.
+  body="$(mktmpd)/ledger.md"; jq -r '.actions[0].comment_body' <<< "$out" > "$body"
+  watchbody="$(mktmpd)/watch.md"; watch_body "$out" > "$watchbody"
+  w2="$(newwork)"
+  erased_run "$w2" 3002 sidebar
+  build issue "$w2" --number 1000 --title "Flaky test: $HOLDER" --label flaky --comment "1001|$BOT|Bot|$body"
+  build watchlist "$w2" --number 900 --comment "901|$BOT|Bot|$watchbody"
+  out="$(analyze "$w2")"
+  assert_eq "next run: the issue holds the history, so the entry goes, and the issue needs no write" "0 901 0 0" \
+    "$(jq -r '"\(.watchlist.tests) \(.watchlist.writes[0].comment_id) \(.watchlist.writes[0].tests) \(.actions | length)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    pending = watched is not None and not .*$/    pending = watched is not None/' "$LEDGER")"
+  assert_eq "mutation: never confirming keeps the test on the watchlist for good" "1" "$(analyze "$w2" "$mutant" | jq '.watchlist.tests')"
+  # Write mode: the watchlist, still holding the test, before its new issue.
   local entry; entry="$(mktmpd)/watch.md"
   build watchlist-body "$entry" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}]"
   d="$(mktmpd)"
@@ -1096,24 +1142,35 @@ test_a_second_place_opens_the_issue_with_the_watchlist_history_and_drops_the_ent
     {match: "actions/runs/2900/artifacts", out: ""}]')"
   FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null
   writes="$(writes_in "$d/log")"
-  assert_eq "label, the test's issue and its ledger, then the watchlist edit" \
+  assert_eq "label, the watchlist edit, then the test's issue and its ledger" \
     "app-token api -X POST repos/cheapsteak/tbd/labels --input -
+app-token api -X PATCH repos/cheapsteak/tbd/issues/comments/901 --input -
 app-token api -X POST repos/cheapsteak/tbd/issues --input -
-app-token api -X POST repos/cheapsteak/tbd/issues/1000/comments --input -
-app-token api -X PATCH repos/cheapsteak/tbd/issues/comments/901 --input -" "$writes"
+app-token api -X POST repos/cheapsteak/tbd/issues/1000/comments --input -" "$writes"
   assert_contains "the issue's ledger carries the old failure" "$(cat "$d/log")" '\"key\":\"1:1:x\"'
 }
 
-test_an_issue_found_after_a_died_run_is_seeded_from_the_watchlist() {
-  local w out
-  # A run created the issue, then died before its ledger comment and before
-  # taking the test off the watchlist.
+test_an_issue_without_the_watchlist_history_is_seeded_and_the_entry_kept() {
+  local w out body mutant
+  # A run created the issue, then its ledger comment write failed: the issue
+  # is found with no ledger comment.
   w="$(newwork)"
   watched "$w" "$HOLDER"
   build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky
   out="$(analyze "$w")"
   assert_contains "the found issue gets the watchlist's history" "$(jq -r '.actions[] | select(.issue == 970) | .comment_body' <<< "$out")" '"key":"1:1:x"'
-  assert_eq "and the watchlist drops the test" "0" "$(jq '.watchlist.tests' <<< "$out")"
+  assert_eq "and the test stays on the watchlist until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
+  # Its ledger comment exists but lacks a failure the watchlist holds.
+  body="$(mktmpd)/ledger.md"
+  build ledger-body "$body" "{\"test_id\": \"$HOLDER\", \"failures\": [{\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-09-21T11:00:00Z\", \"source\": \"ci-xunit\"}]}"
+  w="$(newwork)"
+  watched "$w" "$HOLDER"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "971|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_contains "a ledger missing a watched failure gets it" "$(jq -r '.actions[] | select(.issue == 970) | .comment_body' <<< "$out")" '"key":"1:1:x"'
+  assert_eq "and the entry stays until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
+  mutant="$(mutant_of 's/^    return \{f.key for f in _absorb\(ledger, watched\).failures\} == .*$/    return True/' "$LEDGER")"
+  assert_eq "mutation: trusting any ledger drops the entry before its failure is on the issue" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
 }
 
 test_an_existing_issue_below_the_threshold_keeps_recording_there() {
@@ -1228,8 +1285,8 @@ print(fl.failure_count(m._merge_entries(folded, whole)), fl.failure_count(m._mer
   assert_eq "mutation: merging by key alone re-adds folded failures" "1" "$(python3 -c "$script" "$mutant" | awk '{print ($1 > 11)}')"
 }
 
-test_an_unreadable_watchlist_comment_leaves_unissued_tests_alone() {
-  local w out broken mutant
+test_an_unreadable_watchlist_comment_is_skipped_and_left_for_a_human() {
+  local w out broken quiet mutant rc=0
   w="$(newwork)"
   erased_run "$w" 3011 sidebar
   build issue "$w" --number 970 --title "Flaky test: TBDSharedTests.OtherTests/other()" --label flaky
@@ -1238,11 +1295,80 @@ test_an_unreadable_watchlist_comment_leaves_unissued_tests_alone() {
   printf '%s\nhand-edited\n<!-- flake-watchlist-state\n{not json\nflake-watchlist-state -->\n' '<!-- flake-watchlist v1 -->' > "$broken"
   build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$broken"
   out="$(analyze "$w")"
-  assert_eq "the test without an issue is not planned, and the watchlist not written" "TBDSharedTests.OtherTests/other() 0" "$(jq -r '"\([.tests[].test_id] | join(",")) \(.watchlist.writes | length)"' <<< "$out")"
   assert_contains "listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 901"
-  mutant="$(mutant_of 's/^        if test not in mapping and watch.unreadable:$/        if False:/' "$LEDGER")"
+  assert_eq "the test without an issue starts a fresh entry, holding only this run's failure" "true 1" \
+    "$(jq -r --arg t "$HOLDER" '.tests[] | select(.test_id == $t) | "\(.watch) \(.failures)"' <<< "$out")"
+  assert_eq "written to a new comment on #900; the broken one is never edited" "900 null null 1" \
+    "$(jq -r '"\(.watchlist.issue) \(.watchlist.create) \([.watchlist.writes[].comment_id | tostring] | join(",")) \(.watchlist.tests)"' <<< "$out")"
+  assert_eq "a test with an issue is still recorded there" "970" "$(jq -r '.actions[].issue' <<< "$out")"
+  # A readable bot comment beside the broken one takes the new entry.
+  quiet="$(mktmpd)/quiet.md"
+  build watchlist-body "$quiet" "[{\"test_id\": \"TBDSharedTests.Quiet/f()\", \"failures\": [$OLD_NIGHT]}]"
+  w="$(newwork)"
+  erased_run "$w" 3011 sidebar
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$broken" --comment "902|$BOT|Bot|$quiet"
+  out="$(analyze "$w")"
+  assert_eq "the readable comment, never the broken one" "902 2" "$(jq -r '"\([.watchlist.writes[].comment_id] | join(",")) \(.watchlist.tests)"' <<< "$out")"
+  mutant="$(mutant_of 's/^        if states is None:$/        if False:/' "$LEDGER")"
+  analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without skipping it the whole run fails" "2" "$rc"
+}
+
+# aging_work [NOW] -> a work dir whose watchlist holds five tests: Old (last
+# failed 2026-09-01), Recent (2026-09-20), Folded (counts only, latest
+# 2026-09-20), HOLDER (2026-09-01, failing again on a branch this week), and
+# Pending (2026-09-01, with an issue found without its ledger comment).
+aging_work() {
+  local w body
+  w="$(newwork --now "${1:-2026-10-08T00:00:00Z}")"
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "$(jq -n --arg holder "$HOLDER" '
+    def f(at; occ): [{key: ("k" + at), run_id: 1, attempt: 1, occurrence: occ, at: at, source: "nightly"}];
+    [{test_id: "TBDSharedTests.Old/f()", failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")},
+     {test_id: "TBDSharedTests.Recent/f()", failures: f("2026-09-20T11:00:00Z"; "night:2026-09-20")},
+     {test_id: "TBDSharedTests.Folded/f()", failures: [], folded: [{occurrence: "branch:a", episode: 0, pre_fix: false, count: 5, first: "2026-08-01T11:00:00Z", last: "2026-09-20T11:00:00Z"}]},
+     {test_id: $holder, failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")},
+     {test_id: "TBDSharedTests.Pending/f()", failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")}]')"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  build issue "$w" --number 975 --title "Flaky test: TBDSharedTests.Pending/f()" --label flaky
+  erased_run "$w" 3021 sidebar
+  printf '%s' "$w"
+}
+
+# The watchlist's tests after analyze, in order.
+watched_tests() { jq -r '[.watchlist.writes[].body | capture("flake-watchlist-state\n(?<j>.*)\nflake-watchlist-state"; "s").j | fromjson | .tests[].test_id] | join(",")' <<< "$1"; }
+
+test_a_watchlist_entry_with_no_failure_in_thirty_days_ages_out() {
+  local w out mutant
+  w="$(aging_work)"
+  out="$(analyze "$w")"
+  assert_eq "Old goes; Recent, Folded, the fresh HOLDER, and Pending stay" \
+    "TBDSharedTests.Folded/f(),$HOLDER,TBDSharedTests.Pending/f(),TBDSharedTests.Recent/f()" "$(watched_tests "$out")"
+  assert_contains "the aged test is listed" "$(jq -r '.notes.aged[]' <<< "$out")" "\`TBDSharedTests.Old/f()\`: no failure since 2026-09-01T11:00:00Z"
+  assert_eq "a test failing again after aging out starts fresh: one failure, on the watchlist, no issue" "true 1 null" \
+    "$(jq -r --arg t "$HOLDER" '(.tests[] | select(.test_id == $t) | "\(.watch) \(.failures)") + " " + ([.actions[] | select(.test_id == $t)][0].issue | tostring)' <<< "$out")"
+  assert_contains "the report has the section" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "**Aged off the watchlist (no failure in 30 days):**"
+  out="$(analyze "$(aging_work 2026-10-25T00:00:00Z)")"
+  assert_eq "a later now ages Recent and Folded too; Pending, waiting on its issue, stays" "TBDSharedTests.Pending/f()" "$(watched_tests "$out")"
+  mutant="$(mutant_of 's/^WATCHLIST_AGE_OUT_DAYS = 30$/WATCHLIST_AGE_OUT_DAYS = 3000/' "$LIB")"
   out="$(analyze "$w" "$mutant")"
-  assert_contains "mutation: without the guard the test starts a fresh entry" "$(jq -r '[.tests[].test_id] | join(",")' <<< "$out")" "$HOLDER"
+  assert_eq "mutation: without aging HOLDER's old night and new branch qualify it for an issue" "Flaky test: $HOLDER" "$(jq -r --arg t "$HOLDER" '.actions[] | select(.test_id == $t) | .create.title' <<< "$out")"
+  mutant="$(mutant_of 's/ \+ \[f.last for f in state.folded\], default=""\)$/, default="")/' "$LIB")"
+  assert_lacks "mutation: ignoring folded counts ages an entry folded down to counts" "$(watched_tests "$(analyze "$w" "$mutant")")" "Folded"
+  mutant="$(mutant_of 's/^        if test not in mapping and \(not newest/        if (not newest/' "$LEDGER")"
+  assert_lacks "mutation: aging a test that has an issue drops its unconfirmed history" "$(watched_tests "$(analyze "$w" "$mutant")")" "Pending"
+}
+
+test_folding_keeps_the_newest_failure_time() {
+  local script mutant
+  script='
+fs = [m.Failure(key=f"{d}:1:x", run_id=d, attempt=1, occurrence="branch:a", at=f"2026-09-{d:02d}T11:00:00Z", source="ci-xunit") for d in (1, 9, 20, 5)]
+folded = m._fold(m.State(test_id="T/t()", failures=fs), 4)
+print(len(folded.failures), m.newest_failure_at(folded))
+'
+  assert_eq "every failure folded; the newest time survives" "0 2026-09-20T11:00:00Z" "$(py <<< "$script")"
+  mutant="$(mutant_of 's/last=max\(f.last, failure.at\)\)/last=f.last)/' "$LIB")"
+  assert_eq "mutation: a count that keeps its first time ages early" "0 2026-09-01T11:00:00Z" "$(py "$mutant" <<< "$script")"
 }
 
 test_a_new_test_fills_an_emptied_comment_first() {
