@@ -423,6 +423,20 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Delete a row and return what it held, in one write transaction — nil
+    /// when there was no row. The rollback of a failed creation saves the
+    /// row's parked first message from the returned value, and the single
+    /// transaction is what makes that safe against a concurrent park: a
+    /// `setPendingPrompt` either commits before this (and its text is in the
+    /// returned row) or after (and finds no row, which it reports).
+    public func deleteReturning(id: UUID) async throws -> Worktree? {
+        try await writer.write { db in
+            guard let record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return nil }
+            _ = try WorktreeRecord.deleteOne(db, key: id.uuidString)
+            return record.toModel()
+        }
+    }
+
     /// NULL out `parentWorktreeID` for rows whose parent is either missing or
     /// archived. Both cases would leave the child unreachable in the sidebar:
     /// 1. **Missing parent** — deleted out-of-band (manual sqlite edit / future
@@ -1407,12 +1421,19 @@ public struct WorktreeStore: Sendable {
     /// Park a prompt for this worktree's primary agent, replacing whatever was
     /// parked before — the feature holds one prompt per worktree, not a queue.
     /// `text: nil` unparks without delivering.
-    public func setPendingPrompt(worktreeID: UUID, text: String?, submit: Bool) async throws {
+    ///
+    /// Returns whether a row was written. False means the row no longer
+    /// exists — a failed creation's rollback can delete it between a caller's
+    /// existence check and this write — and a park that ignored it would
+    /// report success for text stored nowhere.
+    @discardableResult
+    public func setPendingPrompt(worktreeID: UUID, text: String?, submit: Bool) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE worktree SET pending_prompt = ?, pending_prompt_submit = ? WHERE id = ?",
                 arguments: [text, submit, worktreeID.uuidString]
             )
+            return db.changesCount > 0
         }
     }
 

@@ -125,6 +125,14 @@ extension AppState {
                 // been created, and threw their typed prompt away with the row
                 // still there to receive it.
                 promptTarget?.resolve(.created(wt.id))
+                // The row exists, but `git worktree add` has not run yet; its
+                // failure arrives later as a delta keyed by this ID. Only a
+                // composer still on screen or queued can lose a draft to it.
+                if let promptTarget,
+                   queuedPromptTarget === promptTarget
+                    || queuedPromptBacklog.contains(where: { $0 === promptTarget }) {
+                    composerTargetsByWorktreeID[wt.id] = promptTarget
+                }
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
                 // flight. A nil result means neither the placeholder nor a
@@ -216,6 +224,11 @@ extension AppState {
     /// and puts the target back at the head of the queue rather than presenting
     /// over whatever arrived.
     func advanceQueuedPromptBacklog() {
+        // A creation that failed while its modal waited in the queue has
+        // nothing to compose for, and its modal was never on screen, so no
+        // draft exists to save. Presenting it would only flash a sheet that
+        // closes itself on appearing.
+        queuedPromptBacklog.removeAll { $0.hasFailed }
         guard promptSheetSlotIsFree, !queuedPromptBacklog.isEmpty else { return }
         let next = queuedPromptBacklog.removeFirst()
         Task { @MainActor in
@@ -235,52 +248,112 @@ extension AppState {
     /// same outcome as dismissing the sheet.
     ///
     /// **Nothing that fails here may swallow what the operator wrote.** The
-    /// modal is gone by the time any of these answers arrives, and there is no
-    /// draft store behind it — an alert alone would leave a message that exists
-    /// nowhere. So every path that ends without the text parked puts it on the
-    /// pasteboard first and says so, which is the same recovery the read-back's
-    /// Copy offers for text that was parked and cannot be delivered.
+    /// modal is gone by the time any of these answers arrives, so an alert
+    /// alone would leave a message that exists nowhere. Every path that ends
+    /// without the text parked hands it to `keepUnqueuedFirstMessage`, which
+    /// writes it to a file (the pasteboard only if that write fails). Text
+    /// that WAS parked and then lost to a failed creation is the daemon's to
+    /// save: its rollback reads and deletes the row in one transaction, writes
+    /// the file and names it in the failure delta. A park that races that
+    /// rollback either commits first, and is in what the daemon saves, or
+    /// finds no row and is refused — landing in the refusal branch here.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
+        // Blankness is judged on a trimmed copy and the trimmed text is what
+        // parks, as before; a hand-back saves what the operator wrote,
+        // indentation included.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // A submitted composer hands nothing off on failure, so it must stop
+        // looking like one that will raise the failure alert itself.
+        withdrawComposer(target)
         Task {
             switch await target.awaitResolution() {
             case .failed:
                 // There is no row to park against. Say so rather than dropping
-                // the prompt silently; the text is still on screen behind the
-                // alert only if the sheet is up, so name what happened.
+                // the prompt silently.
                 logger.error("Queued prompt not sent: worktree creation failed")
                 keepUnqueuedFirstMessage(
-                    trimmed,
+                    text, repoID: target.repoID, worktreeName: target.worktreeName,
                     "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
                 do {
                     let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
                     if case .refused(let reason) = result {
                         keepUnqueuedFirstMessage(
-                            trimmed, "First message was not queued: \(reason)")
+                            text, repoID: target.repoID, worktreeName: target.worktreeName,
+                            "First message was not queued: \(reason)")
                     }
                 } catch {
                     logger.error("Failed to queue prompt: \(error, privacy: .public)")
                     keepUnqueuedFirstMessage(
-                        trimmed,
+                        text, repoID: target.repoID, worktreeName: target.worktreeName,
                         "Failed to queue your first message: \(error.localizedDescription)")
                 }
             }
         }
     }
 
-    /// Hand a composed first message back to the operator after it failed to
-    /// park, and tell them where it went.
+    /// Stop treating `target`'s composer as one that will raise a creation
+    /// failure's alert itself. Called as the sheet starts to close — Cancel,
+    /// Escape, submit — before `dismiss()` lands, so an entry in
+    /// `composerTargetsByWorktreeID` always means "open and staying open" and
+    /// a failure delta in that window raises its own alert.
+    func withdrawComposer(_ target: QueuedPromptTarget) {
+        composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== target }
+    }
+
+    /// Save the draft of a modal that was still open, unsent, when its
+    /// creation failed. Called by `QueuedPromptModal` as it closes itself.
     ///
-    /// The pasteboard because it is the one place text can be put that survives
-    /// the alert, needs no new surface, and is where they would paste from
-    /// anyway. `reason` is a sentence — the alert appends where the text is, so
-    /// the two facts arrive together and neither can be shown without the
-    /// other.
-    private func keepUnqueuedFirstMessage(_ text: String, _ reason: String) {
-        pasteboardWriter(text)
-        showAlert("\(reason) It has been copied to your clipboard.", isError: true)
+    /// Runs on the next main-actor turn, so the alert is raised after the
+    /// sheet has gone rather than over it. A failure that came by delta
+    /// raised no alert of its own for an open composer, so this one always
+    /// raises one: the failure plus where the draft went, or the failure alone
+    /// for a blank draft. A blank draft whose creation failed before the row
+    /// existed raises nothing, as before.
+    func keepUnsentDraftAfterFailedCreation(_ target: QueuedPromptTarget, draft: String) {
+        // Judged blank on a trimmed copy; saved as typed, so a leading
+        // indent (a code block, say) survives.
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lateFailure = target.failureAfterCreate
+        Task { @MainActor in
+            guard !trimmed.isEmpty else {
+                if let lateFailure { showAlert(lateFailure, isError: true) }
+                return
+            }
+            logger.error("Unsent first message kept: worktree creation failed")
+            keepUnqueuedFirstMessage(
+                draft, repoID: target.repoID, worktreeName: target.worktreeName,
+                lateFailure.map { "\($0) Your first message was not sent." }
+                    ?? "Worktree creation failed — your first message was not sent.")
+        }
+    }
+
+    /// Hand a composed first message back to the operator after it failed to
+    /// reach its worktree, and tell them where it went.
+    ///
+    /// The file is the store (`UnsentPromptFile`): it survives the alert, the
+    /// next copy, and a restart, and the alert names it with Copy Path and
+    /// Reveal in Finder. The pasteboard is the fallback only when the file
+    /// cannot be written, and the alert then says so rather than naming a file
+    /// that does not exist. `reason` is a sentence — the alert appends where
+    /// the text is, so the two facts arrive together and neither can be shown
+    /// without the other.
+    private func keepUnqueuedFirstMessage(
+        _ text: String, repoID: UUID, worktreeName: String, _ reason: String
+    ) {
+        do {
+            let path = try unsentPromptWriter(repoID, worktreeName, text)
+            let shown = (path as NSString).abbreviatingWithTildeInPath
+            showAlert("\(reason) It was saved to \(shown).", isError: true, revealPath: path)
+        } catch {
+            logger.error("Could not save unsent first message: \(error.localizedDescription, privacy: .public)")
+            pasteboardWriter(text)
+            showAlert(
+                "\(reason) It could not be saved to a file (\(error.localizedDescription)), "
+                    + "so it has been copied to your clipboard instead.",
+                isError: true)
+        }
     }
 
     /// Close whichever prompt sheet is on screen — the write half of the single
