@@ -74,6 +74,8 @@ XUNIT_ARTIFACT = "xunit-results"
 RETRY_ARTIFACT = "retry-metrics"
 NIGHTLY_ARTIFACT = "nightly-xunit"
 LEDGER_JOB = "ledger"
+# GitHub returns at most this many runs for a filtered workflow-run listing.
+RUN_LISTING_CAP = 1000
 
 # Runs on the bot's own branches describe its candidate, not the suite.
 FLAKEFIX_PREFIX = "flakefix/"
@@ -187,7 +189,6 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
     each test's source file from its retry-metrics records (any outcome), which
     is how an inventory row is matched to a test (spec §4.4)."""
     starts = {a["attempt"]: a["started_at"] for a in run["attempts"]}
-    erased = rerun_erased(run)
     found: list[tuple[str, fl.Failure]] = []
     for artifact in needed_artifacts(run):
         attempt = attempt_for_artifact(run["attempts"], artifact["created_at"])
@@ -224,8 +225,8 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
                         ),
                     ))
             continue
-        if artifact["name"] == XUNIT_ARTIFACT and not (erased and attempt == 1):
-            continue
+        # `needed_artifacts` already limited xunit-results to attempt 1 of a
+        # rerun-erased run.
         source = "nightly" if run["workflow"] == "nightly" else "ci-xunit"
         for path in fl.xunit_files(directory):
             relative = path.relative_to(directory).as_posix()
@@ -477,32 +478,41 @@ def add_fixes(state: fl.State, candidates: list[dict]) -> fl.State:
 
 
 def classify(state: fl.State, new: list[fl.Failure], ctx: Context) -> tuple[fl.State, list[tuple[fl.Failure, dict]]]:
-    """Place each new failure in an episode (spec §4.4). A failure later than a
-    fix of the current episode is a recurrence when its commit contains the fix
-    – a new episode starts – and `pre-fix` otherwise: recorded, never counted."""
-    known = {f.key for f in state.failures}
+    """Place each new failure in an episode (spec §4.4), by the latest fix that
+    landed before it, whatever episode that fix belongs to:
+
+    - no fix before it – episode 1 (index 0), the time before any fix;
+    - a commit without that fix – `pre-fix`: recorded, never counted;
+    - a commit with the current episode's fix – a recurrence: a new episode;
+    - a commit with an older episode's fix – the episode that fix's
+      recurrence started. A run read late, after a recurrence already bumped
+      the episode, lands where it happened instead of inflating the new one.
+    """
+    known = {f.key for f in state.failures} | {k for k, _ in state.folded_keys}
     recurrences = []
     placed = []
     for failure in sorted((f for f in new if f.key not in known), key=lambda f: (f.at, f.key)):
         moment = parse_time(failure.at)
-        prior = [fix for fix in state.fixes if fix["episode"] == state.episode and parse_time(fix["at"]) < moment]
-        if prior:
-            fix = max(prior, key=lambda f: parse_time(f["at"]))
-            pair = f"{fix['sha']}..{failure.head_sha}"
-            contains = ctx.ancestry.get(pair)
-            if contains is None:
-                if not ctx.collect_missing:
-                    raise AnalysisError(f"no ancestry fetched for {pair}")
-                ctx.missing.add(pair)
-                contains = False
-            if contains:
-                state = replace(state, episode=state.episode + 1)
-                failure = replace(failure, episode=state.episode)
-                recurrences.append((failure, fix))
-            else:
-                failure = replace(failure, episode=state.episode, pre_fix=True)
-        else:
+        prior = [fix for fix in state.fixes if parse_time(fix["at"]) < moment]
+        if not prior:
+            placed.append(replace(failure, episode=0))
+            continue
+        fix = max(prior, key=lambda f: parse_time(f["at"]))
+        pair = f"{fix['sha']}..{failure.head_sha}"
+        contains = ctx.ancestry.get(pair)
+        if contains is None:
+            if not ctx.collect_missing:
+                raise AnalysisError(f"no ancestry fetched for {pair}")
+            ctx.missing.add(pair)
+            contains = False
+        if not contains:
+            failure = replace(failure, episode=fix["episode"], pre_fix=True)
+        elif fix["episode"] == state.episode:
+            state = replace(state, episode=state.episode + 1)
             failure = replace(failure, episode=state.episode)
+            recurrences.append((failure, fix))
+        else:
+            failure = replace(failure, episode=fix["episode"] + 1)
         placed.append(failure)
     merged, _ = fl.merge(state, placed)
     return merged, recurrences
@@ -539,13 +549,17 @@ def _same_body(rendered: str, existing: str | None) -> bool:
     return rendered.replace("\r\n", "\n").rstrip() == existing.replace("\r\n", "\n").rstrip()
 
 
-def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ctx: Context, notes: Notes) -> tuple[dict | None, dict]:
+def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ctx: Context, notes: Notes) -> tuple[dict | None, dict | None]:
     view = ctx.issues.get(issue_number) if issue_number is not None else None
     create = None
     add_label = False
     links: list[int] = []
     if view is None:
         trait = trait_issue_for(test, ctx.inventory, ctx.files)
+        if trait is not None and trait in ctx.issues and ctx.issues[trait].unreadable:
+            # It may hold this test's own history; a second issue would split it.
+            notes.unreadable.append(f"`{test}`: its trait's issue #{trait} has an unparsable bot comment; skipped")
+            return None, None
         if trait is not None and issue_serves_test_alone(trait, test, ctx.inventory, ctx.targets, ctx.issues):
             view = ctx.issues[trait]
         elif trait is not None:
@@ -631,6 +645,8 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
         if test in mapping and issues[mapping[test]].unreadable:
             continue
         action, summary = plan_for_test(test, mapping.get(test), by_test.get(test, []), ctx, notes)
+        if summary is None:
+            continue
         tests.append(summary)
         if action is not None:
             actions.append(action)
@@ -865,7 +881,12 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     since = (now - timedelta(days=max(TEST_RUN_WINDOW_DAYS, NIGHTLY_RUN_WINDOW_DAYS))).date().isoformat()
     runs = []
     for workflow, file in (("test", TEST_WORKFLOW), ("nightly", NIGHTLY_WORKFLOW)):
-        for raw in gh_lines("api", "--paginate", f"repos/{repo}/actions/workflows/{file}/runs?created=>={since}&status=completed&per_page=100", "--jq", ".workflow_runs[]"):
+        listed = gh_lines("api", "--paginate", f"repos/{repo}/actions/workflows/{file}/runs?created=>={since}&status=completed&per_page=100", "--jq", ".workflow_runs[]")
+        # A filtered run listing stops at 1,000 results without saying so. A
+        # window that full would be read short, so fail closed instead.
+        if len(listed) >= RUN_LISTING_CAP:
+            raise GhError(f"{file}: {len(listed)} runs in the window reaches GitHub's listing cap; the window would be read short")
+        for raw in listed:
             run = _normalize_run(raw, workflow)
             # Fork and flakefix/* runs are excluded before any further read.
             if not eligible_run(run, repo) or not in_window(run, now):
@@ -891,8 +912,14 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     # Issues outside the label that the lookup may need: each issue a trait
     # names, and an exact-title match for each failing test not yet mapped.
     for _, _, number in read_inventory(work):
-        if number not in issues:
-            issues[number] = _fetch_issue(repo, gh_json("api", f"repos/{repo}/issues/{number}"))
+        if number in issues:
+            continue
+        raw = gh_json("api", f"repos/{repo}/issues/{number}")
+        # A trait naming a pull request names no issue to adopt; the test then
+        # gets its own issue linking the number. (An issue that does not exist
+        # fails the read, closed, like any other.)
+        if raw.get("pull_request") is None:
+            issues[number] = _fetch_issue(repo, raw)
     notes = Notes()
     by_test, _ = collect_failures(work, repo, now, notes, read_targets(work))
     mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test), Notes())

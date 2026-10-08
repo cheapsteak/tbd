@@ -699,7 +699,7 @@ test_a_post_merge_failure_without_the_fix_is_pre_fix() {
   out="$(analyze "$w")"
   assert_eq "still episode 1, and the second place does not qualify it" "0 false" "$(jq -r '.tests[0] | "\(.episode) \(.qualifies)"' <<< "$out")"
   assert_contains "recorded as pre-fix" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"pre_fix":true'
-  mutant="$(mutant_of 's/^            if contains:$/            if True:/' "$LEDGER")"
+  mutant="$(mutant_of 's/^        if not contains:$/        if False:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_eq "mutation: a commit without the fix read as a recurrence" "1" "$(jq -r '.tests[0].episode' <<< "$out")"
 }
@@ -762,6 +762,43 @@ test_an_issue_closed_by_a_commit_reopens_on_a_failure_containing_it_and_not_befo
     --fix "c0ffee@2026-10-07T12:00:00Z"
   out="$(analyze "$w")"
   assert_eq "a failure before the fix landed needs no ancestry and changes nothing" "false 0" "$(jq -r '"\(.actions[0].reopen) \(.tests[0].episode)"' <<< "$out")"
+}
+
+test_a_run_read_after_a_recurrence_lands_in_the_episode_it_happened_in() {
+  local w out ledger mutant
+  w="$(newwork)"
+  ledger="$(mktmpd)/ledger.md"
+  # Fix ffff landed 2026-10-06T12:00; a failure containing it already began episode 2.
+  build ledger-body "$ledger" "{\"test_id\": \"$HOLDER\", \"episode\": 1,
+    \"fixes\": [{\"sha\": \"ffff\", \"at\": \"2026-10-06T12:00:00Z\", \"episode\": 0, \"pr\": 960}],
+    \"failures\": [{\"key\": \"9:1:x\", \"run_id\": 9, \"attempt\": 1, \"occurrence\": \"branch:after\", \"at\": \"2026-10-07T11:00:00Z\", \"source\": \"ci-xunit\", \"episode\": 1}]}"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "96|$BOT|Bot|$ledger"
+  # Run 1501 started 2026-10-06T19:16, after the fix, on a commit without it.
+  erased_run "$w" 1501 stale --sha dddd
+  build set "$w" ancestry.json '{"ffff..dddd": false}'
+  out="$(analyze "$w")"
+  assert_eq "pre-fix, in the fix's episode, and episode 2 still holds one failure" "0 true 1" \
+    "$(jq -r '.actions[0].comment_body' <<< "$out" | sed -n '/flake-ledger-state$/,$p' | sed -n 2p | jq -r '[.failures[] | select(.run_id == 1501)][0] | "\(.episode // 0) \(.pre_fix)"') $(jq -r '.actions[0].comment_body' <<< "$out" | sed -n '/flake-ledger-state$/,$p' | sed -n 2p | jq '[.failures[] | select(.episode == 1 and (.pre_fix | not))] | length')"
+  # The mutant restores the old rule: only the current episode's fixes, and a
+  # failure with none before it joins the current episode.
+  mutant="$(mutant_of 's/^        prior = \[fix for fix in state.fixes if parse_time\(fix\["at"\]\) < moment\]$/        prior = [fix for fix in state.fixes if fix["episode"] == state.episode and parse_time(fix["at"]) < moment]/; s/^            placed.append\(replace\(failure, episode=0\)\)$/            placed.append(replace(failure, episode=state.episode))/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: considering only the current episode's fixes counts the late run in episode 2" "2" \
+    "$(jq -r '.actions[0].comment_body' <<< "$out" | sed -n '/flake-ledger-state$/,$p' | sed -n 2p | jq '[.failures[] | select(.episode == 1 and (.pre_fix | not))] | length')"
+}
+
+test_a_trait_issue_with_an_unparsable_bot_comment_is_not_split() {
+  local w out body
+  w="$(newwork)"
+  build run "$w" --id 1502 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "15021|retry-metrics|2026-10-06T10:20:00Z"
+  build retry "$w/artifacts/15021/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
+  printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
+  body="$(mktmpd)/broken.md"
+  printf '%s\n<!-- flake-ledger-state\n{oops\nflake-ledger-state -->\n' '<!-- flake-ledger v1 -->' > "$body"
+  build issue "$w" --number 600 --title "OtherTests.flaky hangs" --label flaky --comment "97|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_eq "no new issue that would split its history" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_contains "listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#600"
 }
 
 test_processing_the_same_runs_twice_changes_nothing() {
@@ -1055,7 +1092,8 @@ test_ledger_writes_only_when_its_flag_is_true() {
   assert_eq "exactly one --write" "1" "$(grep -c -- '--write' <<< "$block")"
   assert_contains "the App token is minted only under it" "$(step_block "$WORKFLOW" "Mint the tbd-flake-fixer App token")" "if: vars.FLAKE_LEDGER_ENABLED == 'true'"
   assert_contains "and its slug is checked against the trusted login" "$(step_block "$WORKFLOW" "Check the App token's bot login")" 'scripts/flake_lib.py bot-login'
-  assert_contains "the tracking comment needs the flag and the token" "$(step_block "$WORKFLOW" "Report the first red")" "if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true'"
+  assert_contains "the tracking comment needs the flag and a token whose login checked out" "$(step_block "$WORKFLOW" "Report the first red")" "if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.bot-login.outcome == 'success'"
+  assert_contains "the reclaimer cannot stop the ledger" "$(step_block "$WORKFLOW" "Reclaim flakefix/")" "continue-on-error: true"
 }
 
 test_the_reclaimer_runs_only_under_the_fixer_flag() {

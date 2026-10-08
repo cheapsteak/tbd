@@ -96,6 +96,7 @@ jobs:
           private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
 
       - name: Check the App token's bot login
+        id: bot-login
         if: vars.FLAKE_LEDGER_ENABLED == 'true'
         env:
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
@@ -121,9 +122,11 @@ jobs:
 
       # §8: one comment on the tracking issue for the first red run after a
       # green one. It needs the App token, so report-only mode, which mints
-      # none, stays silent in public; the red run is its signal.
+      # none, stays silent in public; the red run is its signal. It also needs
+      # the login check to have passed: a token from the wrong App must write
+      # nothing at all.
       - name: Report the first red ledger run after a green one
-        if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.app-token.outputs.token != ''
+        if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.bot-login.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           FLAKE_WRITE_TOKEN: ${{ steps.app-token.outputs.token }}
