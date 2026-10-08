@@ -1,0 +1,136 @@
+name: Flake fixer
+
+# docs/specs/2026-10-07-flake-autofix-design.md. The spec's four jobs share this
+# one file (§3); this file holds the first of them, `ledger`, which reads
+# per-test results from the nightly and from rerun-erased CI runs and keeps one
+# issue per flaky test (§4). `fix`, `publish` and `promote` join it later.
+#
+# OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
+# 'true', the ledger runs report-only: it computes everything, writes it to the
+# job summary, and makes no write call to GitHub (§4.5). Report-only needs no
+# App token. With FLAKE_FIXER_ENABLED 'true' the job first reclaims orphaned
+# flakefix/* branches (§11).
+#
+# ONLY THE BOT'S OWN COMMENTS ARE STATE (§4.4). Every issue write uses the
+# tbd-flake-fixer App's token, so its comments are authored by
+# `tbd-flake-fixer[bot]`, and the step after minting checks that the App's slug
+# names exactly the login the readers trust (`flake_lib.BOT_LOGIN`).
+#
+# `workflow_run` fires only from this file as it exists on `main`, so nothing
+# here runs before merge.
+
+on:
+  workflow_run:
+    workflows: [Nightly]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which job to run'
+        type: choice
+        required: true
+        options: [ledger, fix]
+      issue:
+        description: 'fix only: the issue number to attempt (optional)'
+        type: string
+        required: false
+
+permissions: {}
+
+# No workflow-level concurrency: each job carries its own group, so a run
+# started by one trigger never queues behind another job's.
+
+jobs:
+  ledger:
+    name: ledger
+    if: >-
+      github.repository == 'cheapsteak/tbd' &&
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Nightly') ||
+       (github.event_name == 'workflow_dispatch' && inputs.job == 'ledger'))
+    runs-on: ubuntu-latest
+    # Reads a week of runs and their artifacts, then one write per changed
+    # issue; minutes, not tens of them.
+    timeout-minutes: 30
+    # Two ledger runs must not race to create the same issue (§11).
+    concurrency:
+      group: flake-ledger-state
+      cancel-in-progress: false
+    # The job token reads; issue writes use the App token. `contents: write`
+    # is for the flakefix/* reclaimer's ref deletions alone.
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+      actions: read
+    env:
+      TRACKING_ISSUE: '519'
+      LEDGER_ENABLED: ${{ vars.FLAKE_LEDGER_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Reclaim flakefix/* branches no open PR uses
+        if: vars.FLAKE_FIXER_ENABLED == 'true'
+        # A sweep that keeps or fails to delete a ref exits non-zero; that is
+        # the reclaimer's business and must not stop the ledger behind it. Its
+        # step stays red in the run for a human to read.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The sweep deletes with `git push`, and the checkout persisted no
+          # credential. Grant one for this step only.
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader || true' EXIT
+          bash scripts/sweep-preflight-refs.sh --namespace flakefix/ --min-age-seconds 86400 --apply
+
+      - name: Mint the tbd-flake-fixer App token
+        id: app-token
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+
+      - name: Check the App token's bot login
+        id: bot-login
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          expected="$(python3 scripts/flake_lib.py bot-login)"
+          if [ "${APP_SLUG}[bot]" != "$expected" ]; then
+            echo "::error::the App token belongs to '${APP_SLUG}[bot]', but the ledger's readers trust only '$expected' (scripts/flake_lib.py BOT_LOGIN)"
+            exit 1
+          fi
+
+      - name: Ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLAKE_WRITE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$LEDGER_ENABLED" = "true" ]; then
+            python3 scripts/flake-ledger.py run --repo "$GITHUB_REPOSITORY" --work-dir "$RUNNER_TEMP/flake-ledger" --write
+          else
+            python3 scripts/flake-ledger.py run --repo "$GITHUB_REPOSITORY" --work-dir "$RUNNER_TEMP/flake-ledger"
+          fi
+
+      # §8: one comment on the tracking issue for the first red run after a
+      # green one. It needs the App token, so report-only mode, which mints
+      # none, stays silent in public; the red run is its signal. It also needs
+      # the login check to have passed: a token from the wrong App must write
+      # nothing at all.
+      - name: Report the first red ledger run after a green one
+        if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.bot-login.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLAKE_WRITE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/flake-ledger.py report-red-run --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE"
