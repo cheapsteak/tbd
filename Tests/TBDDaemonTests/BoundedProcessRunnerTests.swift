@@ -651,13 +651,20 @@ struct BoundedProcessRunnerTests {
         kill(pid, 0) == 0 || errno != ESRCH
     }
 
-    /// Expects every recorded descriptor to be closed already, then waits for
-    /// the probed `Process` to deallocate. The descriptors are checked at once
-    /// because the runner closes each end before it resumes the caller; were
-    /// any left to the `Process`'s deallocation, the wait below would pass by
-    /// releasing them late. The `Process` is polled because the deadline's
-    /// clock armer is a cancelled `Task` that drops its capture only once it
-    /// next runs.
+    /// Expects every descriptor the runner closes synchronously to be closed
+    /// already, then waits for the probed `Process` to deallocate and every
+    /// recorded descriptor to be released.
+    ///
+    /// The write ends and stdin's read end are checked at once because the
+    /// runner closes them before it resumes the caller; were any left to the
+    /// `Process`'s deallocation, the wait below would pass by releasing them
+    /// late. The stdout and stderr read ends are left to the wait: each had a
+    /// `readabilityHandler`, and Foundation defers the `close(2)` of such a
+    /// handle to its dispatch source's cancellation handler, which runs
+    /// asynchronously after `close()` returns — measured on Darwin 25, 199 of
+    /// 200 such handles were still open straight after `close()` and none 20 ms
+    /// later. The `Process` is polled because the deadline's clock armer is a
+    /// cancelled `Task` that drops its capture only once it next runs.
     private static func expectReleased(
         _ probe: SpawnProbe, sourceLocation: SourceLocation = #_sourceLocation
     ) async {
@@ -666,17 +673,18 @@ struct BoundedProcessRunnerTests {
                 sourceLocation: sourceLocation)
         #expect(probe.descriptorCount >= 2, "the hook recorded no pipe descriptors",
                 sourceLocation: sourceLocation)
-        // Every pipe end is closed before the call resumes its caller, so the
-        // descriptors must already be gone; only the `Process` may linger.
-        let heldOnReturn = probe.heldDescriptors
+        // These ends are closed before the call resumes its caller, so they
+        // must already be gone; only the `Process` and the drained read ends,
+        // whose close Foundation defers, may linger.
+        let heldOnReturn = probe.heldDescriptors(closedOnReturnOnly: true)
         #expect(heldOnReturn.isEmpty, "a failed spawn returned still holding \(heldOnReturn)",
                 sourceLocation: sourceLocation)
         let outcome = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
-        ) { probe.processIsGone && probe.heldDescriptors.isEmpty }
+        ) { probe.processIsGone && probe.heldDescriptors().isEmpty }
         if outcome == .timedOut {
             let alive = !probe.processIsGone
-            let held = probe.heldDescriptors
+            let held = probe.heldDescriptors()
             Issue.record(
                 "failed spawn outlived the call: process alive=\(alive), still-open descriptors=\(held)",
                 sourceLocation: sourceLocation)
@@ -711,6 +719,10 @@ struct BoundedProcessRunnerTests {
 private final class SpawnProbe: @unchecked Sendable {
     private struct Descriptor {
         let role: String
+        /// Whether the runner closes this end before it resumes the caller.
+        /// False for a read end it drained with a `readabilityHandler`, whose
+        /// close Foundation completes asynchronously (see `expectReleased`).
+        let closedOnReturn: Bool
         let fd: Int32
         let device: dev_t
         let inode: ino_t
@@ -729,14 +741,15 @@ private final class SpawnProbe: @unchecked Sendable {
             var found: [Descriptor] = []
             var newPins: [Int32] = []
             var failures: [String] = []
-            func watch(_ role: String, _ handle: FileHandle) {
+            func watch(_ role: String, _ handle: FileHandle, closedOnReturn: Bool = true) {
                 var info = stat()
                 guard fstat(handle.fileDescriptor, &info) == 0 else {
                     failures.append("\(role): fstat errno \(errno)")
                     return
                 }
                 found.append(Descriptor(
-                    role: role, fd: handle.fileDescriptor, device: info.st_dev, inode: info.st_ino))
+                    role: role, closedOnReturn: closedOnReturn, fd: handle.fileDescriptor,
+                    device: info.st_dev, inode: info.st_ino))
             }
             let pipes: [(String, Any?)] = [
                 ("stdout", process.standardOutput),
@@ -752,9 +765,10 @@ private final class SpawnProbe: @unchecked Sendable {
                 newPins.append(pin)
                 // A failed spawn leaves the runner owning both ends of every
                 // pipe: the child never received its end, and the snapshot
-                // closes the stdout and stderr read ends.
+                // closes the stdout and stderr read ends — the two it drained,
+                // so their close completes only after the call returns.
                 watch("\(name) write end", pipe.fileHandleForWriting)
-                watch("\(name) read end", pipe.fileHandleForReading)
+                watch("\(name) read end", pipe.fileHandleForReading, closedOnReturn: name == "stdin")
             }
             lock.withLock {
                 self.process = process
@@ -771,13 +785,15 @@ private final class SpawnProbe: @unchecked Sendable {
     /// were watched.
     var failures: [String] { lock.withLock { pinFailures } }
 
-    /// Recorded descriptors the runner still holds, as "role (fd N)". Sound
-    /// only while the pins are open, so call it before `closeDuplicates()`.
-    var heldDescriptors: [String] {
+    /// Recorded descriptors the runner still holds, as "role (fd N)", limited
+    /// to those it closes before returning when `closedOnReturnOnly` is set.
+    /// Sound only while the pins are open, so call it before `closeDuplicates()`.
+    func heldDescriptors(closedOnReturnOnly: Bool = false) -> [String] {
         lock.withLock {
             // Unpinned, a match proves nothing: fail closed rather than pass.
             guard !pins.isEmpty || descriptors.isEmpty else { return ["probe read after its pins closed"] }
             return descriptors.filter { recorded in
+                if closedOnReturnOnly && !recorded.closedOnReturn { return false }
                 var info = stat()
                 guard fstat(recorded.fd, &info) == 0 else { return false }
                 return info.st_dev == recorded.device && info.st_ino == recorded.inode
