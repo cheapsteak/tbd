@@ -78,6 +78,9 @@ public actor OrphanGC {
     /// disagree on where a session's directory is. The process environment in
     /// production; tests pass a temp `TBD_HOME`.
     private let remoteTranscriptsEnvironment: [String: String]
+    /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
+    /// production; tests pass a temp directory.
+    private let unsentPromptsReposBase: URL
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -173,6 +176,7 @@ public actor OrphanGC {
         streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
+        reposBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -235,6 +239,7 @@ public actor OrphanGC {
         self.hangStackCollector = HangStackCollector(base: resolvedHangStackBase)
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
+        self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -261,6 +266,9 @@ public actor OrphanGC {
         // They are still added to the returned total so `tbd gc sweep` reports
         // honestly.
         var hangStacksReaped = 0
+        // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
+        // `ReapRecord`.
+        var unsentPromptsReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -360,6 +368,8 @@ public actor OrphanGC {
 
         await reclaimAttachments(dryRun: dryRun, planned: &planned, reaped: &reaped)
 
+        reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
+
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
         )
@@ -371,7 +381,71 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+    }
+
+    // MARK: - Unsent first messages
+
+    /// How long an unsent first message is kept before the sweep reclaims it.
+    static let unsentPromptRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Reclaims files under `~/tbd/repos/<repoID>/unsent-prompts/` older than
+    /// `unsentPromptRetention` by modification date — the named reconciler for
+    /// the first messages the app writes there when a worktree creation fails
+    /// with a message composed for it.
+    ///
+    /// Under `gcEnabled` alone, with no flag of its own: each file is a copy
+    /// the operator was told about (alert, path, pasteboard) when it was
+    /// written, and a month is long enough to have acted on it. `dryRun` plans
+    /// without touching disk, as everywhere in `sweep`.
+    ///
+    /// Only regular files directly inside an `unsent-prompts` directory are
+    /// candidates; anything else there is left alone, and an unreadable date
+    /// keeps. Repo directories are walked whether or not a repo row still
+    /// exists, since a removed repo's drafts age out the same way.
+    ///
+    /// No `ReapRecord`: there is no worktree to key one by.
+    private func reclaimUnsentPrompts(dryRun: Bool, planned: inout [String], reaped: inout Int) {
+        let fm = FileManager.default
+        guard let repoDirs = try? fm.contentsOfDirectory(atPath: unsentPromptsReposBase.path) else {
+            return
+        }
+        let asOf = now()
+        for repoDir in repoDirs.sorted() where !repoDir.hasPrefix(".") {
+            let dir = unsentPromptsReposBase
+                .appendingPathComponent(repoDir)
+                .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+            guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            for name in names.sorted() {
+                let path = dir.appendingPathComponent(name).path
+                guard let attributes = try? fm.attributesOfItem(atPath: path),
+                      attributes[.type] as? FileAttributeType == .typeRegular
+                else { continue }
+                guard let modified = attributes[.modificationDate] as? Date else {
+                    planned.append("KEEP unknown-age \(path)")
+                    continue
+                }
+                guard asOf.timeIntervalSince(modified) >= Self.unsentPromptRetention else {
+                    planned.append("KEEP retention \(path)")
+                    continue
+                }
+                planned.append("REAP unsent-prompt \(path)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                do {
+                    try fm.removeItem(atPath: path)
+                    reaped += 1
+                    logger.info("gc: reclaimed unsent first message \(path, privacy: .public)")
+                } catch {
+                    planned.append("KEEP remove-failed \(path)")
+                    logger.warning("""
+                    gc: could not remove \(path, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                }
+            }
+        }
     }
 
     /// Reclaims hang-stack diagnostic files under

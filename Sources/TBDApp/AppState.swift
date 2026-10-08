@@ -1687,8 +1687,14 @@ final class AppState {
     @ObservationIgnored var terminalRecoveryBudget = TerminalRecoveryBudget()
 
     // Alert state for user feedback
-    var alertMessage: String? = nil
+    var alertMessage: String? = nil {
+        didSet { if alertMessage == nil { alertRevealPath = nil } }
+    }
     var alertIsError: Bool = false
+    /// A file the current alert is about. When set, the alert offers Copy
+    /// Path and Reveal in Finder beside OK. Cleared whenever the alert is, so
+    /// a later plain alert can never inherit buttons for an earlier file.
+    var alertRevealPath: String? = nil
 
     private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
     private(set) var savedTmuxExecutablePath: String?
@@ -1986,6 +1992,19 @@ final class AppState {
     /// A `nil` text unparks — the daemon clears the column and disarms any
     /// wait — which is how the composer's Discard reaches the store without a
     /// verb of its own.
+    /// Where a first message that never reached its worktree is written —
+    /// `UnsentPromptFile` under `~/tbd/repos/<repoID>/unsent-prompts/`.
+    /// Returns the path written. Injectable so tests never write under the
+    /// process-global `TBD_HOME`, and can make the write fail.
+    @ObservationIgnored lazy var unsentPromptWriter:
+        @MainActor (_ repoID: UUID, _ worktreeName: String, _ text: String) throws -> String =
+            { repoID, worktreeName, text in
+                try UnsentPromptFile.write(
+                    text: text,
+                    worktreeName: worktreeName,
+                    directory: TBDConstants.unsentPromptsDir(repoID: repoID),
+                    date: Date())
+            }
     @ObservationIgnored lazy var pendingPromptSetter:
         @MainActor (UUID, String?, Bool) async throws -> WorktreeSetPendingPromptResult =
             { [daemonClient] worktreeID, text, submit in

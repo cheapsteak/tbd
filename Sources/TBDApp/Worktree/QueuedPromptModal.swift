@@ -132,12 +132,24 @@ enum QueuedPromptComposer {
 /// Escape parks nothing: the worktree is already being created and keeps
 /// running with an idle agent, exactly as before the feature existed. Follows
 /// the sheet convention of `ScratchInstructionsView`.
+///
+/// If creation fails while the sheet is still up, the sheet closes itself:
+/// there is no worktree left to compose for. Any unsent text goes to
+/// `AppState.keepUnsentDraftAfterFailedCreation` first, which writes it to a
+/// file and raises the alert naming it — closing rather than staying open
+/// with a note, because the alert is the one surface that says where the
+/// text went, and it would otherwise sit behind a sheet that can no longer
+/// do anything.
 struct QueuedPromptModal: View {
     @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var target: QueuedPromptTarget
 
     @State private var draft: String = ""
+    /// Set once the text has gone to `submitQueuedPrompt`, which owns every
+    /// failure from then on. Without it a failure landing between submit and
+    /// the sheet's teardown would save the same message twice.
+    @State private var submitted = false
 
     /// Remembered across composers, and written the moment the box is ticked —
     /// including when the sheet is then dismissed with Escape. That is what the
@@ -196,10 +208,21 @@ struct QueuedPromptModal: View {
         }
         .padding(20)
         .frame(width: 480)
+        // `.task` rather than `.onChange(of: target.resolution)`: a modal
+        // presented after its creation already resolved sees no change, and
+        // must still close. Cancelled when the sheet goes away, so a submit or
+        // Cancel that closed it first hands nothing over twice.
+        .task {
+            guard await target.awaitResolution() == .failed,
+                  !Task.isCancelled, !submitted else { return }
+            appState.keepUnsentDraftAfterFailedCreation(target, draft: draft)
+            dismiss()
+        }
     }
 
     private func submit(_ text: String) {
         guard !isBlank(text) else { return }
+        submitted = true
         appState.submitQueuedPrompt(target, text: text, submit: sendImmediately)
         dismiss()
     }

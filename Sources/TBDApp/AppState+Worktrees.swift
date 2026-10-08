@@ -216,6 +216,11 @@ extension AppState {
     /// and puts the target back at the head of the queue rather than presenting
     /// over whatever arrived.
     func advanceQueuedPromptBacklog() {
+        // A creation that failed while its modal waited in the queue has
+        // nothing to compose for, and its modal was never on screen, so no
+        // draft exists to save. Presenting it would only flash a sheet that
+        // closes itself on appearing.
+        queuedPromptBacklog.removeAll { $0.resolution == .failed }
         guard promptSheetSlotIsFree, !queuedPromptBacklog.isEmpty else { return }
         let next = queuedPromptBacklog.removeFirst()
         Task { @MainActor in
@@ -235,11 +240,10 @@ extension AppState {
     /// same outcome as dismissing the sheet.
     ///
     /// **Nothing that fails here may swallow what the operator wrote.** The
-    /// modal is gone by the time any of these answers arrives, and there is no
-    /// draft store behind it — an alert alone would leave a message that exists
-    /// nowhere. So every path that ends without the text parked puts it on the
-    /// pasteboard first and says so, which is the same recovery the read-back's
-    /// Copy offers for text that was parked and cannot be delivered.
+    /// modal is gone by the time any of these answers arrives, so an alert
+    /// alone would leave a message that exists nowhere. Every path that ends
+    /// without the text parked hands it to `keepUnqueuedFirstMessage`, which
+    /// writes it to a file and puts it on the pasteboard.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -251,36 +255,62 @@ extension AppState {
                 // alert only if the sheet is up, so name what happened.
                 logger.error("Queued prompt not sent: worktree creation failed")
                 keepUnqueuedFirstMessage(
-                    trimmed,
+                    trimmed, for: target,
                     "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
                 do {
                     let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
                     if case .refused(let reason) = result {
                         keepUnqueuedFirstMessage(
-                            trimmed, "First message was not queued: \(reason)")
+                            trimmed, for: target, "First message was not queued: \(reason)")
                     }
                 } catch {
                     logger.error("Failed to queue prompt: \(error, privacy: .public)")
                     keepUnqueuedFirstMessage(
-                        trimmed,
+                        trimmed, for: target,
                         "Failed to queue your first message: \(error.localizedDescription)")
                 }
             }
         }
     }
 
+    /// Save the draft of a modal that was still open, unsent, when its
+    /// creation failed. Called by `QueuedPromptModal` as it closes itself on
+    /// `.failed`. A blank draft has nothing to keep and raises no alert.
+    func keepUnsentDraftAfterFailedCreation(_ target: QueuedPromptTarget, draft: String) {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        logger.error("Unsent first message kept: worktree creation failed")
+        keepUnqueuedFirstMessage(
+            trimmed, for: target,
+            "Worktree creation failed — your first message was not sent.")
+    }
+
     /// Hand a composed first message back to the operator after it failed to
-    /// park, and tell them where it went.
+    /// reach its worktree, and tell them where it went.
     ///
-    /// The pasteboard because it is the one place text can be put that survives
-    /// the alert, needs no new surface, and is where they would paste from
-    /// anyway. `reason` is a sentence — the alert appends where the text is, so
-    /// the two facts arrive together and neither can be shown without the
-    /// other.
-    private func keepUnqueuedFirstMessage(_ text: String, _ reason: String) {
+    /// The file is the store (`UnsentPromptFile`): it survives the alert, the
+    /// next copy, and a restart. The pasteboard copy rides along because it is
+    /// where the operator would paste from anyway. If the file cannot be
+    /// written the pasteboard is all that is left, and the alert says so
+    /// rather than naming a file that does not exist. `reason` is a sentence —
+    /// the alert appends where the text is, so the two facts arrive together
+    /// and neither can be shown without the other.
+    private func keepUnqueuedFirstMessage(_ text: String, for target: QueuedPromptTarget, _ reason: String) {
         pasteboardWriter(text)
-        showAlert("\(reason) It has been copied to your clipboard.", isError: true)
+        do {
+            let path = try unsentPromptWriter(target.repoID, target.worktreeName, text)
+            let shown = (path as NSString).abbreviatingWithTildeInPath
+            showAlert(
+                "\(reason) It was saved to \(shown) and copied to your clipboard.",
+                isError: true, revealPath: path)
+        } catch {
+            logger.error("Could not save unsent first message: \(error.localizedDescription, privacy: .public)")
+            showAlert(
+                "\(reason) It could not be saved to a file (\(error.localizedDescription)), "
+                    + "so it has been copied to your clipboard only.",
+                isError: true)
+        }
     }
 
     /// Close whichever prompt sheet is on screen — the write half of the single

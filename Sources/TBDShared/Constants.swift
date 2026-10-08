@@ -195,6 +195,25 @@ public enum TBDConstants {
         notesPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Name of the per-repo directory holding first messages that never
+    /// reached a worktree. Shared by the app, which writes into it, and
+    /// `OrphanGC`, which reclaims what ages out of it.
+    public static let unsentPromptsDirName = "unsent-prompts"
+
+    /// Directory holding a repo's unsent first messages:
+    /// `~/tbd/repos/<repoID>/unsent-prompts/`. The app writes one file here
+    /// when a worktree creation fails with a first message the operator
+    /// composed for it; `OrphanGC` reclaims files older than 30 days.
+    /// Honors TBD_HOME.
+    public static func unsentPromptsDir(repoID: UUID, environment: [String: String]) -> URL {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(unsentPromptsDirName, isDirectory: true)
+    }
+    public static func unsentPromptsDir(repoID: UUID) -> URL {
+        unsentPromptsDir(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Path to a repo's Claude settings overlay fragment file:
     /// `~/tbd/repos/<repoID>/claude-settings.json`. A user-authored JSON
     /// object deep-merged into TBD's `--settings` overlay at Claude spawn

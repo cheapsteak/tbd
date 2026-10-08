@@ -48,7 +48,15 @@ struct QueuedPromptOnCreateTests {
         /// Everything written to the pasteboard. Stubbed on every state this
         /// suite builds, so no test can reach the developer's real one.
         var copied: [String] = []
+        /// Every unsent first message handed to the file writer. Stubbed on
+        /// every state this suite builds, so no test writes under `TBD_HOME`.
+        var saved: [(repoID: UUID, worktreeName: String, text: String)] = []
+        /// Makes the file write fail, to drive the clipboard-only fallback.
+        var saveError: Error?
     }
+
+    /// The path the stub writer reports, so assertions can name it.
+    static let savedPath = "/tmp/fake-home/repos/r/unsent-prompts/20260101-000000-x.md"
 
     private struct StubError: Error {}
 
@@ -114,6 +122,11 @@ struct QueuedPromptOnCreateTests {
             harness.flagWrites.append(enabled)
         }
         state.pasteboardWriter = { @MainActor text in harness.copied.append(text) }
+        state.unsentPromptWriter = { @MainActor repoID, worktreeName, text in
+            if let saveError = harness.saveError { throw saveError }
+            harness.saved.append((repoID, worktreeName, text))
+            return Self.savedPath
+        }
     }
 
     // MARK: - The gate, both branches
@@ -387,6 +400,150 @@ struct QueuedPromptOnCreateTests {
             #expect(harness.copied == ["the socket died"])
             #expect(state.alertMessage?.contains("copied to your clipboard") == true)
             #expect(state.alertIsError)
+        }
+    }
+
+    // MARK: - Unsent first messages are written to a file
+
+    @Test("A submitted message whose creation failed is saved to a file the alert names")
+    func creationFailureSavesTheSubmittedMessage() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            harness.createError = StubError()
+            arm(state, harness, created: daemonWorktree(repoID: repoID))
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+
+            state.createWorktree(repoID: repoID)
+            let target = try #require(state.queuedPromptTarget)
+            state.submitQueuedPrompt(target, text: "  keep me  ", submit: true)
+
+            await waitUntil("alert") { state.alertMessage != nil }
+            #expect(harness.saved.count == 1)
+            #expect(harness.saved.first?.repoID == repoID)
+            #expect(harness.saved.first?.worktreeName == target.worktreeName)
+            #expect(harness.saved.first?.text == "keep me")
+            #expect(state.alertRevealPath == Self.savedPath)
+            #expect(state.alertMessage?.contains(Self.savedPath) == true)
+            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
+            #expect(harness.copied == ["keep me"])
+        }
+    }
+
+    @Test("A refusal also saves the message to a file")
+    func refusalSavesTheMessage() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            harness.parkResult = .refused(reason: "nope")
+            arm(state, harness, created: daemonWorktree(repoID: repoID))
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+
+            state.createWorktree(repoID: repoID)
+            let target = try #require(state.queuedPromptTarget)
+            state.submitQueuedPrompt(target, text: "refused text", submit: false)
+
+            await waitUntil("alert") { state.alertMessage != nil }
+            #expect(harness.saved.map(\.text) == ["refused text"])
+            #expect(state.alertRevealPath == Self.savedPath)
+        }
+    }
+
+    @Test("A file write that fails falls back to the clipboard and says so")
+    func failedFileWriteFallsBackToClipboardOnly() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            harness.createError = StubError()
+            harness.saveError = StubError()
+            arm(state, harness, created: daemonWorktree(repoID: repoID))
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+
+            state.createWorktree(repoID: repoID)
+            let target = try #require(state.queuedPromptTarget)
+            state.submitQueuedPrompt(target, text: "clipboard only", submit: true)
+
+            await waitUntil("alert") { state.alertMessage != nil }
+            #expect(harness.saved.isEmpty)
+            #expect(harness.copied == ["clipboard only"])
+            #expect(state.alertRevealPath == nil)
+            #expect(state.alertMessage?.contains("could not be saved to a file") == true)
+            #expect(state.alertMessage?.contains("clipboard only") == true)
+            #expect(state.alertIsError)
+        }
+    }
+
+    @Test("An unsent draft in the open modal is saved when creation fails")
+    func unsentDraftIsSavedOnFailure() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            arm(state, harness, created: daemonWorktree(repoID: repoID))
+            let target = QueuedPromptTarget(
+                placeholderID: UUID(), repoID: repoID, worktreeName: "brave-otter")
+            target.resolve(.failed)
+
+            state.keepUnsentDraftAfterFailedCreation(target, draft: "\n half-typed thought \n")
+
+            #expect(harness.saved.count == 1)
+            #expect(harness.saved.first?.repoID == repoID)
+            #expect(harness.saved.first?.worktreeName == "brave-otter")
+            #expect(harness.saved.first?.text == "half-typed thought")
+            #expect(harness.copied == ["half-typed thought"])
+            #expect(state.alertRevealPath == Self.savedPath)
+            #expect(state.alertMessage?.contains("Worktree creation failed") == true)
+            #expect(state.alertIsError)
+        }
+    }
+
+    @Test("A blank draft in the open modal saves nothing and raises no alert")
+    func blankUnsentDraftSavesNothing() async {
+        await withAppState { state in
+            let harness = Harness()
+            arm(state, harness, created: daemonWorktree(repoID: UUID()))
+            let target = QueuedPromptTarget(
+                placeholderID: UUID(), repoID: UUID(), worktreeName: "brave-otter")
+            target.resolve(.failed)
+
+            state.keepUnsentDraftAfterFailedCreation(target, draft: "  \n\t ")
+
+            #expect(harness.saved.isEmpty)
+            #expect(harness.copied.isEmpty)
+            #expect(state.alertMessage == nil)
+        }
+    }
+
+    @Test("Closing an alert clears its file, and a plain alert carries none")
+    func alertRevealPathDoesNotOutliveItsAlert() async {
+        await withAppState { state in
+            state.showAlert("saved", isError: true, revealPath: "/tmp/x.md")
+            #expect(state.alertRevealPath == "/tmp/x.md")
+
+            state.alertMessage = nil
+            #expect(state.alertRevealPath == nil)
+
+            state.showAlert("saved", isError: true, revealPath: "/tmp/x.md")
+            state.showAlert("something else")
+            #expect(state.alertRevealPath == nil)
+        }
+    }
+
+    @Test("A queued modal whose creation already failed is never presented")
+    func failedTargetsAreDroppedFromTheBacklog() async {
+        await withAppState { state in
+            let open = QueuedPromptTarget(placeholderID: UUID(), repoID: UUID(), worktreeName: "a")
+            let failed = QueuedPromptTarget(placeholderID: UUID(), repoID: UUID(), worktreeName: "b")
+            let pending = QueuedPromptTarget(placeholderID: UUID(), repoID: UUID(), worktreeName: "c")
+            state.presentQueuedPrompt(open)
+            state.presentQueuedPrompt(failed)
+            state.presentQueuedPrompt(pending)
+            failed.resolve(.failed)
+
+            state.dismissPresentedPromptSheet()
+            await waitUntil("next modal") { state.queuedPromptTarget != nil }
+
+            #expect(state.queuedPromptTarget === pending)
+            #expect(state.queuedPromptBacklog.isEmpty)
         }
     }
 

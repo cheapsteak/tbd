@@ -438,6 +438,18 @@ struct ContentView: View {
                 set: { if !$0 { appState.alertMessage = nil } }
             )
         ) {
+            // Read once: every button below closes the alert, which clears
+            // the path, so each action must use this captured copy.
+            if let path = appState.alertRevealPath {
+                Button("Copy Path") {
+                    appState.pasteboardWriter(path)
+                    appState.alertMessage = nil
+                }
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                    appState.alertMessage = nil
+                }
+            }
             Button("OK") { appState.alertMessage = nil }
         } message: {
             Text(appState.alertMessage ?? "")
