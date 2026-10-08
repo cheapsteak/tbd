@@ -21,6 +21,11 @@ here is a pure function of files on disk.
     quarantined --test ID --inventory F --root DIR
         prints yes, no, or ambiguous (exit 2), from the quarantine audit's
         inventory.
+    tree-digest DIR
+        prints one SHA-256 over every entry under DIR: its relative path, its
+        type and permission bits, a regular file's contents, a symlink's
+        target. Two trees with equal digests hold the same bytes at the same
+        paths. Exit 2 when an entry cannot be read.
 
 The stress loop's outputs, per iteration i of its one target T, are
 D/results.tsv (one row per iteration), D/xunit/T-i.xml plus
@@ -31,11 +36,15 @@ D/xunit/T-i-swift-testing.xml, D/metrics/T-i.jsonl and D/logs/T-i.log
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -415,6 +424,54 @@ def quarantined(test: str, inventory: Path, root: Path) -> str:
     return "ambiguous"
 
 
+# --- tree digest (spec §6.4) ---------------------------------------------------------------
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb", buffering=0) as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def tree_digest(root: Path) -> str:
+    """One SHA-256 over every entry under ROOT, never following a symlink.
+
+    Each entry contributes its relative path, its type and permission bits,
+    and its content: a regular file's SHA-256, a symlink's target. The files
+    are hashed in parallel (hashlib releases the GIL); the order they are fed
+    to the outer hash is the sorted path order, so the digest is stable.
+    """
+    entries: list[tuple[bytes, int, bytes]] = []  # (relative path, mode, full path)
+    top = os.fsencode(root)
+    for dirpath, dirnames, filenames in os.walk(top, followlinks=False, onerror=_raise):
+        dirnames.sort()
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            entries.append((os.path.relpath(full, top), os.lstat(full).st_mode, full))
+    entries.sort()
+    files = [e[2] for e in entries if stat.S_ISREG(e[1])]
+    with ThreadPoolExecutor(max_workers=max(4, 2 * (os.cpu_count() or 1))) as pool:
+        sums = dict(zip(files, pool.map(_file_sha256, files)))
+    outer = hashlib.sha256()
+    for rel, mode, full in entries:
+        if stat.S_ISREG(mode):
+            body = sums[full].encode()
+        elif stat.S_ISLNK(mode):
+            body = os.readlink(full)
+        else:
+            body = b""
+        # Length-prefixed fields: no path or target can imitate a boundary.
+        for part in (rel, b"%o" % mode, body):
+            outer.update(b"%d:" % len(part) + part)
+    return outer.hexdigest()
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
 # --- CLI ----------------------------------------------------------------------------------
 
 
@@ -447,6 +504,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--test", required=True)
     p.add_argument("--inventory", type=Path, required=True)
     p.add_argument("--root", type=Path, required=True)
+    p = sub.add_parser("tree-digest")
+    p.add_argument("dir", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "choose-scope":
@@ -466,6 +525,12 @@ def main(argv: list[str]) -> int:
             return 0
         if args.command == "judge":
             return run_judge(args)
+        if args.command == "tree-digest":
+            if not args.dir.is_dir() or args.dir.is_symlink():
+                print(f"flake-verify: {args.dir} is not a directory", file=sys.stderr)
+                return 2
+            print(tree_digest(args.dir))
+            return 0
         answer = quarantined(args.test, args.inventory, args.root)
         print(answer)
         return 2 if answer == "ambiguous" else 0

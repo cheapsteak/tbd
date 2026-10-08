@@ -614,18 +614,18 @@ test_the_session_tool_list_has_no_network_tools() { check "no network tool is al
 # copy an End session step makes of it ($own), never from the session tree.
 verifier_from_copy() {
   local calls
-  calls="$(job_block "$1" fix | grep -E 'flake-verify\.sh|flake-pick\.py' | grep -vE '^\s*#')"
-  [[ -n "$calls" ]] && ! grep -vE '"\$(VS|own)/scripts/flake-(verify\.sh|pick\.py)"' <<< "$calls" | grep -q .
+  calls="$(job_block "$1" fix | grep -E 'flake-verify\.(sh|py)|flake-pick\.py' | grep -vE '^\s*#')"
+  [[ -n "$calls" ]] && ! grep -vE '"\$(VS|own/vs)/scripts/flake-(verify\.(sh|py)|pick\.py)"' <<< "$calls" | grep -q .
 }
 test_every_verifier_call_runs_from_the_pre_session_copy() { check "every verifier call uses \$VS" verifier_from_copy 'bash "$VS/scripts/flake-verify.sh" apply-candidate' 'bash scripts/flake-verify.sh apply-candidate'; }
 
 verify_in_tree() {
   local s
   for s in "Build the verification tree" "Pre-fix baseline" "Stress try 1" "Stress try 2"; do
-    step "$1" fix "$s" | grep -q 'working-directory: ${{ env.VT }}' || return 1
+    step "$1" fix "$s" | grep -q 'working-directory: ${{ runner.temp }}/flakefix-verify$' || return 1
   done
 }
-test_every_test_running_verifier_step_runs_in_the_verification_tree() { check "builds, baseline and stress run in the verification tree" verify_in_tree 'working-directory: ${{ env.VT }}' 'working-directory: .'; }
+test_every_test_running_verifier_step_runs_in_the_verification_tree() { check "builds, baseline and stress run in the verification tree" verify_in_tree 'working-directory: ${{ runner.temp }}/flakefix-verify' 'working-directory: ${{ env.VT }}'; }
 
 applied_first() {
   local s block
@@ -638,17 +638,19 @@ test_the_candidate_is_applied_before_it_is_stressed() { check "apply-candidate p
 
 
 # Each End session step: the private copy is fingerprinted, the snapshot copied
-# and hash-checked, the kill run from the copy, then planted results removed.
+# and hash-checked, the kill run from the copy, the verification tree's digest
+# checked once nothing of the session is left, then planted results removed.
 end_step_ok() {
   local block
   block="$(step "$1" fix "End session $2")"
   awk -v snap="cp \"\$T/procs-before-$2\" \"\$own/procs-before\"" '
     index($0, snap) {c=NR}
-    /\[ "\$\(fingerprint "\$own"\)" = "\$VS_SUM" \]/ {f=NR}
+    /\[ "\$\(fingerprint "\$own\/vs"\)" = "\$VS_SUM" \]/ {f=NR}
     /SNAP_SUM/ {h=NR}
-    /bash "\$own\/scripts\/flake-verify.sh" end-session-processes --before "\$own\/procs-before"/ {k=NR}
+    /bash "\$own\/vs\/scripts\/flake-verify.sh" end-session-processes --before "\$own\/procs-before"/ {k=NR}
+    /tree-digest "\$VT"\)" = "\$VT_SUM" \]/ {t=NR}
     /rm -rf "\$T\/verify/ {r=NR}
-    END {exit !(c && f && h && k && r && c < k && f < k && h < k && k < r)}' <<< "$block"
+    END {exit !(c && f && h && k && t && r && c < k && f < k && h < k && k < t && t < r)}' <<< "$block"
 }
 ended_before_verify() {
   local job
@@ -682,8 +684,8 @@ pick_persisted_early() {
     step "$1" fix "Persist the pick" | grep -q 'name: flakefix-pick$'
 }
 test_the_pick_is_persisted_before_anything_slow() { check "the pick is uploaded right after picking" pick_persisted_early 'name: flakefix-pick
-          path: ${{ env.T }}' 'name: other
-          path: ${{ env.T }}'; }
+          path: ${{ runner.temp }}' 'name: other
+          path: ${{ runner.temp }}'; }
 
 
 # The fingerprint function, as written in the step that takes the sum.
@@ -734,6 +736,197 @@ test_measured_records_are_restored_without_following_links() { check "records ar
 
 bot_login_checked() { step "$1" publish "Check the App token's bot login" | grep -q 'scripts/flake_lib.py check-app-slug'; }
 test_publish_checks_the_app_login() { check "publish checks the App's login" bot_login_checked 'scripts/flake_lib.py check-app-slug' 'echo x' all; }
+
+
+# ============================================================================
+# flake-fixer.yml: the End session steps, run (not read) against a fake attempt
+# ============================================================================
+
+# step_script FILE NAME: the `run:` body of the fix job's step NAME, with
+# `${{ runner.temp }}` left for the caller to substitute.
+step_script() { step "$1" fix "$2" | awk '/^        run: \|$/{p=1; next} p && /^      - /{exit} p' | sed -E 's/^ {10}//'; }
+# step_shell FILE NAME: the step's `shell:`, its {0} left in place.
+step_shell() { step "$1" fix "$2" | sed -n 's/^        shell: //p'; }
+
+# The failing verdict try 1 measured, and the passing one a session plants.
+VERDICT_FAIL='{"verdict": "fail", "weak": false}'
+VERDICT_PASS='{"verdict": "pass", "weak": false}'
+
+# end_world I: a fake attempt as session I left it, under a fresh runner.temp,
+# whose path it prints. The sums taken before the session are in RT/sums.
+end_world() {
+  local i="$1" rt ws t vs vt
+  rt="$(mktmpd)"; ws="$rt/ws"; t="$rt/flakefix"; vs="$rt/flakefix-verifier-scripts"; vt="$rt/flakefix-verify"
+  mkdir -p "$t/pick" "$vs/scripts" "$vt/.git" "$vt/.build/debug" "$rt/tmp" "$rt/bin"
+  cp "$HERE/flake-verify.sh" "$HERE/flake-verify.py" "$HERE/flake_lib.py" "$vs/scripts/"
+  echo '[core]' > "$vt/.git/config"; echo built > "$vt/.build/debug/TBDTests"
+  # One process, already in the snapshot: the kill has nothing to end.
+  printf '#!/bin/sh\nprintf "1\\t0\\tSs\\tThu Jan  1 00:00:00 2026\\n"\n' > "$rt/bin/ps-stub"; chmod +x "$rt/bin/ps-stub"
+  printf '1\tThu Jan  1 00:00:00 2026\n' > "$t/procs-before-$i"
+  git init -q "$ws"
+  git -C "$ws" commit -q --allow-empty -m base
+  git -C "$ws" rev-parse HEAD > "$rt/base"
+  echo fix > "$ws/f"; git -C "$ws" add f; git -C "$ws" commit -q -m try1
+  git -C "$ws" rev-parse HEAD > "$rt/try1_head"
+  mkdir "$t/verify-1"
+  echo "$VERDICT_FAIL" > "$t/verify-1/verdict.json"; echo "fail" > "$t/verify-1/verdict.md"
+  {
+    echo "VS_SUM=$(bash -c "$(fingerprint_fn "$WORKFLOW")"'; fingerprint "$1"' _ "$vs")"
+    echo "VT_SUM=$(python3 -B "$HERE/flake-verify.py" tree-digest "$vt")"
+    echo "TRY1_VERIFY_SUM=$(python3 -B "$HERE/flake-verify.py" tree-digest "$t/verify-1")"
+    echo "SNAP_SUM=$(shasum -a 256 < "$t/procs-before-$i" | cut -d' ' -f1)"
+  } > "$rt/sums"
+  printf '%s' "$rt"
+}
+
+# end_run FILE I RT [VAR=VALUE...]: run FILE's "End session I" step in RT's
+# world, under the step's own shell, with its `env:` set as the runner sets it
+# and each VAR=VALUE added the way a session's $GITHUB_ENV would add it.
+# Prints the exit code.
+end_run() {
+  local wf="$1" i="$2" rt="$3" t script shell clean rc=0
+  shift 3
+  t="$rt/flakefix"; script="$rt/step-$i.sh"
+  step_script "$wf" "End session $i" | sed "s|\${{ runner.temp }}|$rt|g" > "$script"
+  shell="$(step_shell "$wf" "End session $i")"
+  [[ -n "$shell" ]] || shell='bash --noprofile --norc -eo pipefail {0}'
+  # What "Record the verifier's environment" would have recorded.
+  clean="$(printf '%s\0' "PATH=$PATH" "HOME=$HOME" "TMPDIR=$rt/tmp" "T=$t" \
+    "VS=$rt/flakefix-verifier-scripts" "VT=$rt/flakefix-verify" "FLAKEFIX_NOTES=$t/flakefix-notes.md" \
+    "FLAKE_VERIFY_PS=$rt/bin/ps-stub" "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
+    "GIT_CEILING_DIRECTORIES=$SCRATCH" | base64 | tr -d '\n')"
+  : > "$rt/out"; : > "$rt/summary"
+  # shellcheck disable=SC2046,SC2086 # the sums and the step's shell are word lists on purpose
+  (cd "$rt/ws" && env $(cat "$rt/sums") "$@" CLEAN_ENV="$clean" \
+    TRY1_HEAD="$(cat "$rt/try1_head")" BASE="$(cat "$rt/base")" SCOPE=test BASELINE_F=3 BASELINE_V=20 \
+    BASELINE_MD='baseline' QUARANTINED=no PLAN='{"n": 45}' \
+    GITHUB_OUTPUT="$rt/out" GITHUB_STEP_SUMMARY="$rt/summary" \
+    ${shell/\{0\}/$script} > "$rt/log" 2>&1) || rc=$?
+  echo "$rc"
+}
+
+# Whether the step left a passing verdict where publish reads it.
+trusted_pass() { [[ "$(jq -r .verdict "$1/flakefix/verify/verdict.json" 2>/dev/null)" == pass && ! -f "$1/flakefix/abort_reason" ]]; }
+exists() { if [[ -e "$1" ]]; then echo yes; else echo no; fi; }
+
+test_an_unchanged_try_2_inherits_try_1s_verdict_as_measured() {
+  local rt rc
+  rt="$(end_world 2)"
+  rc="$(end_run "$WORKFLOW" 2 "$rt")"
+  assert_eq "the step succeeds" "0" "$rc"
+  [[ "$rc" == 0 ]] || sed 's/^/       /' "$rt/log" | tail -20
+  assert_eq "try 1's verdict stands" "fail" "$(jq -r .verdict "$rt/flakefix/verify/verdict.json")"
+  assert_contains "and is not stressed again" "$(cat "$rt/out")" "commits=0"
+  assert_eq "nothing aborted" "no" "$(exists "$rt/flakefix/abort_reason")"
+  assert_eq "try 1's copy is gone" "no" "$(exists "$rt/flakefix/verify-1")"
+}
+
+# Session 2 makes no commit and rewrites try 1's verdict to a pass.
+planted_verdict_refused() {
+  local rt rc
+  rt="$(end_world 2)"
+  echo "$VERDICT_PASS" > "$rt/flakefix/verify-1/verdict.json"
+  rc="$(end_run "$1" 2 "$rt")"
+  [[ "$rc" != 0 ]] && ! trusted_pass "$rt" && grep -q "Try 1's verifier output changed" "$rt/flakefix/abort_reason"
+}
+test_a_verdict_planted_during_session_2_is_not_trusted() {
+  check "a pass planted in try 1's output aborts the attempt" planted_verdict_refused \
+    '[ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$T/verify-1")" = "$TRY1_VERIFY_SUM" ]' 'true'
+}
+
+test_a_changed_try_2_drops_try_1s_output() {
+  local rt rc
+  rt="$(end_world 2)"
+  echo more > "$rt/ws/g"; git -C "$rt/ws" add g; git -C "$rt/ws" commit -q -m try2
+  rc="$(end_run "$WORKFLOW" 2 "$rt")"
+  assert_eq "the step succeeds" "0" "$rc"
+  assert_contains "the new commits are counted" "$(cat "$rt/out")" "commits=2"
+  assert_eq "try 1's output is not left to be uploaded" "no" "$(exists "$rt/flakefix/verify-1")"
+  assert_eq "and no verdict waits for try 2's stress" "no" "$(exists "$rt/flakefix/verify")"
+}
+
+# The session edits the verification tree's .git/config, or its .build.
+tree_tamper_refused() {
+  local rt rc i
+  for i in 1 2; do
+    rt="$(end_world "$i")"
+    printf '[core]\n\tfsmonitor = /tmp/evil\n' > "$rt/flakefix-verify/.git/config"
+    rc="$(end_run "$1" "$i" "$rt")"
+    [[ "$rc" != 0 ]] && grep -q "verification tree changed during session $i" "$rt/flakefix/abort_reason" || return 1
+    rt="$(end_world "$i")"
+    echo forged > "$rt/flakefix-verify/.build/debug/TBDTests"
+    rc="$(end_run "$1" "$i" "$rt")"
+    [[ "$rc" != 0 ]] && grep -q "verification tree changed during session $i" "$rt/flakefix/abort_reason" || return 1
+  done
+}
+test_a_tampered_verification_tree_aborts_the_attempt() {
+  check "an edit to the verification tree's .git or .build aborts" tree_tamper_refused \
+    'tree-digest "$VT")" = "$VT_SUM" ]' 'tree-digest "$VT")" = "$VT_SUM" ] || true' all
+  local rt
+  rt="$(end_world 1)"
+  assert_eq "an untouched tree passes the check" "0" "$(end_run "$WORKFLOW" 1 "$rt")"
+}
+
+# What a session can append to $GITHUB_ENV and $GITHUB_PATH: BASH_ENV, which
+# bash runs before the script; a PATH entry ahead of git and python3; a T
+# holding a passing verdict; a variable the record does not name (GIT_DIR).
+injected_env_ignored() {
+  local rt rc evil
+  rt="$(end_world 2)"; evil="$rt/evil"; mkdir -p "$evil"
+  printf 'touch %q\n' "$rt/bash-env-ran" > "$evil/bash_env"
+  printf '#!/bin/sh\ntouch %q\nexit 1\n' "$rt/shadow-ran" > "$evil/git"; cp "$evil/git" "$evil/python3"; chmod +x "$evil/git" "$evil/python3"
+  echo "$VERDICT_PASS" > "$evil/verdict.json"
+  rc="$(end_run "$1" 2 "$rt" BASH_ENV="$evil/bash_env" PATH="$evil:$PATH" T="$evil" GIT_DIR="$evil")"
+  [[ "$rc" == 0 && ! -e "$rt/bash-env-ran" && ! -e "$rt/shadow-ran" ]] &&
+    [[ "$(jq -r .verdict "$rt/flakefix/verify/verdict.json")" == fail ]]
+}
+test_an_injected_environment_does_not_reach_the_step() {
+  check "BASH_ENV is not read (bash -p)" injected_env_ignored \
+    'shell: /bin/bash --noprofile --norc -p -eo pipefail {0}' 'shell: /bin/bash --noprofile --norc -eo pipefail {0}' all
+  check "a variable the record does not name is unset" injected_env_ignored \
+    'for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done' 'true' all
+  check "the record replaces PATH and T" injected_env_ignored \
+    'while IFS= read -r -d' 'true || while IFS= read -r -d' all
+}
+
+# Every `run:` step after session 1 starts the same way: bash -p, then the
+# record restored over the environment it was handed, in the same three lines
+# as "End session 1".
+post_session_steps_scrubbed() {
+  local job names name script pre n=0
+  job="$(job_block "$1" fix)"
+  pre="$(step_script "$1" "End session 1" | sed -n 2,4p)"
+  grep -qF 'restore="$CLEAN_ENV"' <<< "$pre" && grep -qF 'unset "$v"' <<< "$pre" && grep -qF '/usr/bin/base64 -d' <<< "$pre" || return 1
+  names="$(awk '/name: Fixer session 1/{p=1} p && /^      - name: /{sub(/^      - name: /, ""); print}' <<< "$job")"
+  while IFS= read -r name; do
+    script="$(step_script "$1" "$name")"
+    [[ -n "$script" ]] || continue  # a `uses:` step
+    n=$((n + 1))
+    [[ "$(step_shell "$1" "$name")" == '/bin/bash --noprofile --norc -p -eo pipefail {0}' ]] || { echo "  [$name] has no bash -p shell" >&2; return 1; }
+    [[ "$name" == "Package the attempt" ]] && continue
+    [[ "$(sed -n 2,4p <<< "$script")" == "$pre" ]] || { echo "  [$name] does not restore the record first" >&2; return 1; }
+    step "$1" fix "$name" | grep -qF 'CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}' || return 1
+  done <<< "$names"
+  [[ "$n" -ge 10 ]] && ! awk '/name: Fixer session 1/{p=1} p' <<< "$job" | grep -qF '${{ env.'
+}
+test_every_step_after_session_1_runs_in_the_recorded_environment() {
+  check "every run: step after session 1 restores the record" post_session_steps_scrubbed \
+    '        id: v2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}' '        id: v2
+        shell: bash'
+  check "and no later path comes from the env context" post_session_steps_scrubbed \
+    'path: ${{ runner.temp }}/flakefix/
+' 'path: ${{ env.T }}/
+'
+}
+
+test_the_package_step_scrubs_without_a_record() {
+  local script
+  script="$(step_script "$WORKFLOW" "Package the attempt")"
+  assert_contains "it unsets what it was handed" "$script" 'for v in $(compgen -e); do case "$keep"'
+  assert_contains "fixes PATH to the system's" "$script" 'export PATH=/usr/bin:/bin'
+  assert_contains "and takes T from the runner" "$script" "T='\${{ runner.temp }}/flakefix'"
+}
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
   echo "== $t"

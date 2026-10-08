@@ -688,6 +688,64 @@ test_a_survivor_aborts_the_attempt() {
   assert_eq "mutation: without the re-check it reports success" "0" "$(end_session "$d" "$mutant" 'kill() { :; }')"
 }
 
+
+# ============================================================================
+# tree-digest (spec §6.4): the verification tree and try 1's output
+# ============================================================================
+
+digest() { python3 -B "$VPY" tree-digest "$1"; }
+
+test_the_tree_digest_sees_every_kind_of_change() {
+  local d a
+  d="$(mktmpd)"; mkdir -p "$d/.git" "$d/.build/debug"
+  echo '[core]' > "$d/.git/config"; echo built > "$d/.build/debug/T"; ln -s debug "$d/.build/current"
+  a="$(digest "$d")"
+  assert_eq "stable" "$a" "$(digest "$d")"
+  assert_eq "a copy digests the same" "$a" "$(e="$(mktmpd)"; cp -R "$d/." "$e/"; digest "$e")"
+  touch -t 200001010000 "$d/.build/debug/T"
+  assert_eq "a timestamp alone does not change it" "$a" "$(digest "$d")"
+  echo forged > "$d/.build/debug/T"
+  assert_lacks "a content edit changes it" "$(digest "$d")" "$a"
+  echo built > "$d/.build/debug/T"; assert_eq "and reverting it restores it" "$a" "$(digest "$d")"
+  chmod +x "$d/.build/debug/T"
+  assert_lacks "a mode change changes it" "$(digest "$d")" "$a"
+  chmod -x "$d/.build/debug/T"
+  rm "$d/.build/current"; ln -s release "$d/.build/current"
+  assert_lacks "a retargeted symlink changes it" "$(digest "$d")" "$a"
+  rm "$d/.build/current"; ln -s debug "$d/.build/current"; assert_eq "restored" "$a" "$(digest "$d")"
+  : > "$d/.git/hooks-planted"
+  assert_lacks "a new empty file changes it" "$(digest "$d")" "$a"
+  rm "$d/.git/hooks-planted"; mkdir "$d/.git/hooks"
+  assert_lacks "and so does a new empty directory" "$(digest "$d")" "$a"
+  rmdir "$d/.git/hooks"; mv "$d/.build/debug/T" "$d/.build/debug/U"
+  assert_lacks "and a rename" "$(digest "$d")" "$a"
+}
+
+test_the_tree_digest_does_not_follow_a_symlinked_root_or_entry() {
+  local d e rc=0
+  d="$(mktmpd)"; e="$(mktmpd)"; echo x > "$e/f"
+  ln -s "$e" "$d/link"
+  rc=0; digest "$d/link" > /dev/null 2>&1 || rc=$?
+  assert_eq "a symlinked root is refused" "2" "$rc"
+  local a; a="$(digest "$d")"
+  echo y > "$e/f"
+  assert_eq "a symlinked directory is hashed as a link, not walked" "$a" "$(digest "$d")"
+  rc=0; digest "$d/missing" > /dev/null 2>&1 || rc=$?
+  assert_eq "a missing directory is refused" "2" "$rc"
+}
+
+test_the_verifier_runs_python_isolated() {
+  local d out
+  d="$(mktmpd)"; mkdir "$d/site"
+  # A module that would shadow the standard library's json from PYTHONPATH.
+  printf 'raise SystemExit("planted json imported")\n' > "$d/site/json.py"
+  out="$(PYTHONPATH="$d/site" bash "$VERIFY" plan-iterations --scope pass --baseline-dir "$d" --out "$d/plan.json" 2>&1)"
+  assert_lacks "PYTHONPATH does not reach the verifier's Python" "$out" "planted json imported"
+  local m; m="$(mutant_of 's/python3 -I -S -B /python3 /' "$VERIFY")"
+  out="$(PYTHONPATH="$d/site" bash "$m/flake-verify.sh" plan-iterations --scope pass --baseline-dir "$d" --out "$d/plan2.json" 2>&1)"
+  assert_contains "mutation: without -I it does" "$out" "planted json imported"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
   echo "== $t"
   "$t"

@@ -99,7 +99,10 @@ RUNNER_CHAIN=(swift-safe remote-verify.sh tbd-home-fingerprint.sh test.sh)
 
 die() { echo "flake-verify: $*" >&2; exit 2; }
 
-py() { python3 "$SCRIPT_DIR/flake-verify.py" "$@"; }
+# -I: no PYTHON* variable, user site or current directory reaches the
+# verdict; -S: no site-packages .pth or sitecustomize; -B: no .pyc written
+# into the fingerprinted verifier copy.
+py() { python3 -I -S -B "$SCRIPT_DIR/flake-verify.py" "$@"; }
 
 toplevel() { git rev-parse --show-toplevel 2>/dev/null || die "not in a git tree: $(pwd)"; }
 

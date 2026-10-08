@@ -256,7 +256,10 @@ jobs:
       # $RUNNER_TEMP, outside the workspace, which the session is never pointed
       # at. Main's scripts are copied out of it now, before any session runs:
       # every verifier call below runs from that copy ($VS), never from the
-      # candidate (§6.4).
+      # candidate (§6.4). The paths go into $GITHUB_ENV for the steps before
+      # session 1; every step after it takes them from the environment
+      # recorded before the session ("Record the verifier's environment"), and
+      # every `with:` or `working-directory:` names them from `runner.temp`.
       - name: Lay out the attempt, the verification tree, and the verifier copy
         id: layout
         run: |
@@ -315,7 +318,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: flakefix-pick
-          path: ${{ env.T }}/pick/
+          path: ${{ runner.temp }}/flakefix/pick/
           retention-days: 7
 
       - name: Restore source mtimes from git commit times
@@ -359,7 +362,7 @@ jobs:
       - name: Build the verification tree (cold)
         if: steps.pick.outputs.attempted == 'true'
         timeout-minutes: 22
-        working-directory: ${{ env.VT }}
+        working-directory: ${{ runner.temp }}/flakefix-verify
         run: '"$VS/scripts/swift-safe" build --build-tests'
 
       # §6.3: 20 test-alone iterations on main, which choose the scope and size
@@ -369,7 +372,7 @@ jobs:
         id: baseline
         if: steps.pick.outputs.attempted == 'true'
         timeout-minutes: 10
-        working-directory: ${{ env.VT }}
+        working-directory: ${{ runner.temp }}/flakefix-verify
         env:
           TEST_ID: ${{ steps.pick.outputs.test_id }}
         run: |
@@ -407,19 +410,46 @@ jobs:
           git config user.name "tbd-flake-fixer[bot]"
           git config user.email "tbd-flake-fixer[bot]@users.noreply.github.com"
 
-      # The verifier copy's fingerprint, held in a step output the session
-      # cannot rewrite: every path in it (so a planted file or symlink shows,
-      # such as a json.py Python would import ahead of the standard library),
-      # every regular file's contents, and every symlink's target. The
-      # function is written out in each step that uses it, never taken from
-      # the environment, which a session can extend through $GITHUB_ENV.
-      - name: Fingerprint the verifier copy
+      # Two sums, held in step outputs the session cannot rewrite. The verifier
+      # copy's fingerprint: every path in it (so a planted file or symlink
+      # shows, such as a json.py Python would import ahead of the standard
+      # library), every regular file's contents, and every symlink's target.
+      # The function is written out in each step that uses it, never taken
+      # from the environment. And the verification tree's digest – its
+      # checkout, its .git, and its warm .build – which the verifier executes
+      # and which therefore must be the tree the baseline ran in (§6.4).
+      - name: Fingerprint the verifier copy and the verification tree
         if: steps.pick.outputs.attempted == 'true'
         id: vsfp
         run: |
           set -euo pipefail
           fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
           echo "sum=$(fingerprint "$VS")" >> "$GITHUB_OUTPUT"
+          vt="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$VT")"
+          echo "vt=$vt" >> "$GITHUB_OUTPUT"
+
+      # The environment every step after session 1 runs in, recorded while
+      # nothing a session wrote can be in it. A session can append to
+      # $GITHUB_ENV and $GITHUB_PATH, and the runner hands both to every later
+      # step: PYTHONPATH, BASH_ENV, DYLD_*, a PATH entry ahead of git or
+      # python3, new values for T, VT and VS. So every later `run:` step runs
+      # under `bash -p`, which reads no BASH_ENV or ENV and imports no
+      # function, and begins by unsetting every variable except the ones its
+      # own `env:` sets and exporting this record in their place (§6.4).
+      - name: Record the verifier's environment
+        if: steps.pick.outputs.attempted == 'true'
+        id: cleanenv
+        run: |
+          set -euo pipefail
+          # NAME=VALUE entries, NUL-separated, then base64 for a one-line
+          # output. Left out: the per-step file-command paths (each step gets
+          # its own) and the variables bash acts on as it starts.
+          rec="$(for v in $(compgen -e); do
+            case "$v" in GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_) ;;
+              *) printf '%s=%s\0' "$v" "${!v}" ;; esac
+          done | base64 | tr -d '\n')"
+          [ -n "$rec" ]
+          echo "env=$rec" >> "$GITHUB_OUTPUT"
 
       # ── Try 1 (§6.6) ─────────────────────────────────────────────────────────
       - name: Snapshot processes before session 1
@@ -458,11 +488,18 @@ jobs:
             --max-turns 300
             --allowedTools "Bash(scripts/test.sh:*),Bash(scripts/swift-safe:*),Bash(bash scripts/nightly-flake-stress.sh:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git grep:*),Bash(git add:*),Bash(git commit:*),Bash(git restore:*),Bash(git rev-parse:*),Read,Write,Edit,Glob,Grep"
 
+      # From here on every `run:` step starts with the same four lines: its own
+      # `env:` names in `keep`, then the recorded environment restored in place
+      # of whatever the runner handed it (see "Record the verifier's
+      # environment"). T, VT, VS and FLAKEFIX_NOTES come from that record.
       - name: End session 1, bundle its commits
         if: steps.pick.outputs.attempted == 'true'
         id: c1
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          VT_SUM: ${{ steps.vsfp.outputs.vt }}
           SNAP_SUM: ${{ steps.snap1.outputs.sum }}
           BASE: ${{ steps.layout.outputs.base }}
           SCOPE: ${{ steps.baseline.outputs.scope }}
@@ -472,8 +509,13 @@ jobs:
           QUARANTINED: ${{ steps.baseline.outputs.quarantined }}
           PLAN: ${{ steps.baseline.outputs.plan }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM SNAP_SUM BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 1"; exit 1; fi
           # Only this step decides an abort; a leftover file is the session's.
           rm -f "$T/abort_reason"
           rc=0
@@ -483,20 +525,24 @@ jobs:
           # sum taken before the session; the shared copy is checked again
           # once nothing of the session is left to change it back.
           own="$(mktemp -d)"
-          cp -R "$VS/." "$own/" || abort "Cannot copy the verifier."
+          mkdir "$own/vs" || abort "Cannot copy the verifier."
+          cp -R "$VS/." "$own/vs/" || abort "Cannot copy the verifier."
           cp "$T/procs-before-1" "$own/procs-before" || abort "Cannot copy the process snapshot."
-          [ "$(fingerprint "$own")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
+          [ "$(fingerprint "$own/vs")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
           [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
           [ "$(shasum -a 256 < "$own/procs-before" | cut -d' ' -f1)" = "$SNAP_SUM" ] \
             || abort "The process snapshot changed during session 1."
-          bash "$own/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
+          bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 1 started survived SIGKILL (exit $rc); nothing is verified with one alive."
+          # The verification tree – checkout, .git, .build – must be the one
+          # the baseline ran in: the verifier runs its git and its build.
+          [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$VT")" = "$VT_SUM" ] \
+            || abort "The verification tree changed during session 1."
           # Results the session could have planted: only the verifier writes these.
           rm -rf "$T/verify" "$T/verify-1"
           # The session could reach these files; put back what was measured.
           # Each is removed first, so a symlink the session left cannot carry
           # the write somewhere else, such as into the verifier copy.
-          if [ -L "$T" ] || [ -L "$T/pick" ]; then abort "The attempt directory was replaced by a symlink during session 1."; fi
           rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
           mkdir "$T/baseline" || abort "Cannot reset the measured records."
           printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
@@ -523,10 +569,16 @@ jobs:
         # The allotment R (§9): an overrun ends the run, and the judge fails
         # it as truncated.
         timeout-minutes: 24
-        working-directory: ${{ env.VT }}
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           TEST_ID: ${{ steps.pick.outputs.test_id }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
@@ -550,9 +602,15 @@ jobs:
       - name: Judge try 1
         if: steps.pick.outputs.attempted == 'true' && steps.c1.outputs.commits != '0'
         id: v1
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           TEST_ID: ${{ steps.pick.outputs.test_id }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           rc=0
           # The candidate's own quarantine answer. Anything but yes or no
@@ -572,11 +630,27 @@ jobs:
       # candidate. An `ineligible` one (a protected file touched) would not
       # change on a retry, and a harness failure measured nothing. Same scope,
       # same N.
+      #
+      # Session 2 can reach every file try 1 left, so this step takes two
+      # digests into step outputs before it starts: try 1's verifier output,
+      # which an unchanged try 2 inherits as its verdict, and the verification
+      # tree as try 1 left it. "End session 2" checks both before using either.
       - name: Prepare try 2
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        id: prep2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -euo pipefail
           mv "$T/verify" "$T/verify-1"
+          verify1="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$T/verify-1")"
+          vt="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$VT")"
+          { echo "verify1=$verify1"; echo "vt=$vt"; } >> "$GITHUB_OUTPUT"
           {
             echo "The verifier failed your first try. Its findings, then your notes from that try:"
             echo
@@ -590,7 +664,14 @@ jobs:
       - name: Snapshot processes before session 2
         id: snap2
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -euo pipefail
           bash "$VS/scripts/flake-verify.sh" snapshot-processes --out "$T/procs-before-2"
           echo "sum=$(shasum -a 256 < "$T/procs-before-2" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -598,7 +679,14 @@ jobs:
       - name: Compose the session 2 prompt
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
         id: prompt2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -euo pipefail
           python3 "$VS/scripts/flake-pick.py" compose-prompt --template "$VS/.github/flake-fixer/session-prompt.md" \
             --brief "$T/pick/brief.md" --baseline "$T/baseline/baseline.md" --notes-path "$FLAKEFIX_NOTES" \
@@ -622,8 +710,12 @@ jobs:
       - name: End session 2, bundle its commits
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
         id: c2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          VT_SUM: ${{ steps.prep2.outputs.vt }}
+          TRY1_VERIFY_SUM: ${{ steps.prep2.outputs.verify1 }}
           SNAP_SUM: ${{ steps.snap2.outputs.sum }}
           TRY1_HEAD: ${{ steps.c1.outputs.head }}
           BASE: ${{ steps.layout.outputs.base }}
@@ -634,8 +726,13 @@ jobs:
           QUARANTINED: ${{ steps.baseline.outputs.quarantined }}
           PLAN: ${{ steps.baseline.outputs.plan }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM TRY1_VERIFY_SUM SNAP_SUM TRY1_HEAD BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 2"; exit 1; fi
           # Only this step decides an abort; a leftover file is the session's.
           rm -f "$T/abort_reason"
           rc=0
@@ -645,20 +742,22 @@ jobs:
           # sum taken before the session; the shared copy is checked again
           # once nothing of the session is left to change it back.
           own="$(mktemp -d)"
-          cp -R "$VS/." "$own/" || abort "Cannot copy the verifier."
+          mkdir "$own/vs" || abort "Cannot copy the verifier."
+          cp -R "$VS/." "$own/vs/" || abort "Cannot copy the verifier."
           cp "$T/procs-before-2" "$own/procs-before" || abort "Cannot copy the process snapshot."
-          [ "$(fingerprint "$own")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
+          [ "$(fingerprint "$own/vs")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
           [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
           [ "$(shasum -a 256 < "$own/procs-before" | cut -d' ' -f1)" = "$SNAP_SUM" ] \
             || abort "The process snapshot changed during session 2."
-          bash "$own/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
+          bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 2 started survived SIGKILL (exit $rc); nothing is verified with one alive."
+          [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$VT")" = "$VT_SUM" ] \
+            || abort "The verification tree changed during session 2."
           # Results the session could have planted: only the verifier writes these.
           rm -rf "$T/verify"
           # The session could reach these files; put back what was measured.
           # Each is removed first, so a symlink the session left cannot carry
           # the write somewhere else, such as into the verifier copy.
-          if [ -L "$T" ] || [ -L "$T/pick" ]; then abort "The attempt directory was replaced by a symlink during session 2."; fi
           rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
           mkdir "$T/baseline" || abort "Cannot reset the measured records."
           printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
@@ -676,7 +775,11 @@ jobs:
           if [ "$(git rev-parse HEAD)" = "$TRY1_HEAD" ]; then
             # Session 2 changed nothing: the candidate is try 1's, and so is
             # its verdict. Stressing it again could only let a chance pass
-            # overwrite a failure already observed.
+            # overwrite a failure already observed. Session 2 could reach try
+            # 1's output, so it is used only if it is byte for byte what
+            # "Prepare try 2" digested before the session started.
+            [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$T/verify-1")" = "$TRY1_VERIFY_SUM" ] \
+              || abort "Try 1's verifier output changed during session 2."
             mv "$T/verify-1" "$T/verify" || abort "Cannot restore try 1's verdict."
             echo "commits=0" >> "$GITHUB_OUTPUT"
             echo "Session 2 made no new commit; try 1's verdict stands." >> "$GITHUB_STEP_SUMMARY"
@@ -684,6 +787,8 @@ jobs:
             echo "commits=$n" >> "$GITHUB_OUTPUT"
             echo "After session 2 the branch holds $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
           fi
+          # Nothing reads try 1's output from here on; none of it is uploaded.
+          rm -rf "$T/verify-1"
 
       - name: Stress try 2 (verification tree)
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
@@ -691,10 +796,16 @@ jobs:
         # The allotment R (§9): an overrun ends the run, and the judge fails
         # it as truncated.
         timeout-minutes: 24
-        working-directory: ${{ env.VT }}
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           TEST_ID: ${{ steps.pick.outputs.test_id }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
@@ -718,9 +829,15 @@ jobs:
       - name: Judge try 2
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
         id: v2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
           TEST_ID: ${{ steps.pick.outputs.test_id }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) export "$kv" ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
           set -uo pipefail
           rc=0
           # The candidate's own quarantine answer. Anything but yes or no
@@ -735,14 +852,22 @@ jobs:
           cat "$T/verify/verdict.md" >> "$GITHUB_STEP_SUMMARY"
 
       # Data only: the bundle, notes, baseline, plan and verdict. The verifier
-      # copy lives outside $T and is not uploaded.
+      # copy lives outside $T and is not uploaded. This step runs after any
+      # outcome, including one where the environment was never recorded, so
+      # it restores no record: it needs only the system's own tools and the
+      # runner's own path.
       - name: Package the attempt
         if: always() && steps.pick.outputs.attempted == 'true'
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
           C1: ${{ steps.c1.outcome }}
           TRY2: ${{ steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' }}
           C2: ${{ steps.c2.outcome }}
         run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY C1 TRY2 C2 "; IFS=$' \t\n'
+          for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done
+          export PATH=/usr/bin:/bin
+          T='${{ runner.temp }}/flakefix'
           set -uo pipefail
           if [ -f "$T/abort_reason" ]; then
             echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
@@ -761,12 +886,14 @@ jobs:
           fi
           echo "Outcome: $(cat "$T/outcome")" >> "$GITHUB_STEP_SUMMARY"
 
+      # The path is the runner's own, never $T from the environment, which a
+      # session can rewrite through $GITHUB_ENV.
       - name: Upload the candidate
         if: always() && steps.pick.outputs.attempted == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: flakefix-candidate
-          path: ${{ env.T }}/
+          path: ${{ runner.temp }}/flakefix/
           if-no-files-found: ignore
           retention-days: 7  # spec §11
 
