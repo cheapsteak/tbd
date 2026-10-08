@@ -15,6 +15,7 @@ in one place:
   and like it, it treats a truncated file as an error rather than a clean one.
 - **The ledger comment's state** (spec §4.3, §4.4): failures, occurrence keys,
   episodes, the threshold, and the comment's rendered form and its JSON block.
+  The watchlist's comments hold the same state, one entry per test.
 - **Comment trust** (spec §4.4). A comment is state only when it carries the
   sentinel AND its author is the bot's App account, `BOT_LOGIN` with user type
   `Bot`. GitHub reserves the `[bot]` suffix for Apps, so nobody else can author
@@ -66,6 +67,11 @@ EXCLUDED_TEST_ID = "TBDDaemonTests.FlakyQuarantineSelfTests/retriesUntilPass()"
 
 TITLE_PREFIX = "Flaky test: "
 FLAKY_LABEL = "flaky"
+# The one issue that holds every test below the threshold that has no issue of
+# its own (spec §4.4). Its own label, so nothing that lists `flaky` issues –
+# the ledger's per-test lookup, the picker – ever reads it as a test's issue.
+WATCHLIST_LABEL = "flake-watchlist"
+WATCHLIST_TITLE = "Flake watchlist"
 
 
 def trusted_author(login: str | None, user_type: str | None) -> bool:
@@ -270,6 +276,8 @@ SENTINEL = "<!-- flake-ledger v1 -->"
 STATE_BEGIN, STATE_END = "<!-- flake-ledger-state", "flake-ledger-state -->"
 ATTEMPTS_SENTINEL = "<!-- flakefix-attempts v1 -->"
 ATTEMPTS_BEGIN, ATTEMPTS_END = "<!-- flakefix-attempts-state", "flakefix-attempts-state -->"
+WATCHLIST_SENTINEL = "<!-- flake-watchlist v1 -->"
+WATCHLIST_BEGIN, WATCHLIST_END = "<!-- flake-watchlist-state", "flake-watchlist-state -->"
 
 # GitHub refuses a comment body over 65,536 characters; keep headroom.
 MAX_COMMENT_CHARS = 60000
@@ -284,6 +292,10 @@ HUMAN_FAILURE_ROWS = 200
 # artifact read window (7 days, spec §4.4), so its merge key is kept beside the
 # counts until it ages out, and rereading its run adds nothing.
 FOLD_KEEP_KEYS_DAYS = 8
+# One test's entry on the watchlist is degraded, as a ledger comment is, to fit
+# this budget, which leaves room for the watchlist comment's own text, so any
+# single entry fits in a comment by itself.
+WATCHLIST_ENTRY_CHARS = MAX_COMMENT_CHARS - 4000
 # Each degrading step works on this fraction of the failures at a time, so a
 # large state renders in a bounded number of passes rather than one per failure.
 DEGRADE_BATCH_FRACTION = 0.1
@@ -563,17 +575,17 @@ def _days_between(a: str, b: str) -> int:
     return (date.fromisoformat(b) - date.fromisoformat(a)).days
 
 
-def render_comment(state: State, repo: str) -> str:
-    """The ledger comment: a human part, then the state as JSON inside an HTML
-    comment. Kept under `MAX_COMMENT_CHARS` by, in order: blanking signatures
-    oldest first, showing fewer rows in the human list, and folding the oldest
-    failures into per-place counts, each step in batches. Only the merge keys
-    of folded failures inside the read window are kept, so the body fits unless
-    roughly a thousand failures land within one window."""
+def fit(state: State, repo: str, limit: int = MAX_COMMENT_CHARS) -> tuple[State, str]:
+    """The state as a ledger comment renders it, and that comment, kept under
+    `limit` by, in order: blanking signatures oldest first, showing fewer rows
+    in the human list, and folding the oldest failures into per-place counts,
+    each step in batches. Only the merge keys of folded failures inside the
+    read window are kept, so the body fits unless roughly a thousand failures
+    land within one window."""
     rows = HUMAN_FAILURE_ROWS
     body = _render(state, repo, rows)
-    if len(body) <= MAX_COMMENT_CHARS:
-        return body
+    if len(body) <= limit:
+        return state, body
     ordered = sorted(state.failures, key=_failure_order)
     signed = [i for i, f in enumerate(ordered) if f.signature]
     step = _batch(len(ordered))
@@ -582,17 +594,23 @@ def render_comment(state: State, repo: str) -> str:
             ordered[i] = replace(ordered[i], signature="")
         state = replace(state, failures=list(ordered))
         body = _render(state, repo, rows)
-        if len(body) <= MAX_COMMENT_CHARS:
-            return body
+        if len(body) <= limit:
+            return state, body
     while rows > 20:
         rows //= 2
         body = _render(state, repo, rows)
-        if len(body) <= MAX_COMMENT_CHARS:
-            return body
-    while len(body) > MAX_COMMENT_CHARS and state.failures:
+        if len(body) <= limit:
+            return state, body
+    while len(body) > limit and state.failures:
         state = _fold(state, _batch(len(state.failures)))
         body = _render(state, repo, rows)
-    return body
+    return state, body
+
+
+def render_comment(state: State, repo: str) -> str:
+    """The ledger comment: a human part, then the state as JSON inside an HTML
+    comment, kept under `MAX_COMMENT_CHARS` (`fit`)."""
+    return fit(state, repo)[1]
 
 
 def parse_comment(body: str, login: str | None, user_type: str | None) -> State | None:
@@ -602,7 +620,13 @@ def parse_comment(body: str, login: str | None, user_type: str | None) -> State 
     if not trusted_author(login, user_type) or not body.startswith(SENTINEL):
         return None
     payload = _parse_json_block(body, STATE_BEGIN, STATE_END)
-    if not payload or payload.get("schema") != SCHEMA or not isinstance(payload.get("test_id"), str):
+    if not payload or payload.get("schema") != SCHEMA:
+        return None
+    return _state_from_payload(payload)
+
+
+def _state_from_payload(payload) -> State | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("test_id"), str):
         return None
     try:
         return State(
@@ -617,6 +641,56 @@ def parse_comment(body: str, login: str | None, user_type: str | None) -> State 
         )
     except (TypeError, ValueError):
         return None
+
+
+# --- the watchlist (spec §4.4) ------------------------------------------------------
+
+
+def _watch_line(state: State, repo: str) -> str:
+    places = ", ".join(code_span(o) for o in sorted(distinct_occurrences(state))) or "no current place"
+    line = f"- {code_span(state.test_id)} – {failure_count(state)} failures at {places}"
+    if state.failures:
+        latest = max(state.failures, key=_failure_order)
+        line += f"; latest {latest.at}, [run {latest.run_id}, attempt {latest.attempt}]({run_url(repo, latest.run_id, latest.attempt)})"
+    return line
+
+
+def render_watchlist(states: list[State], repo: str) -> str:
+    """One watchlist comment: a line per test, then every test's state – the
+    same payload a ledger comment holds – as one JSON block. The ledger splits
+    the watchlist across as many of these as it needs (spec §4.4)."""
+    ordered = sorted(states, key=lambda s: s.test_id)
+    lines = [
+        WATCHLIST_SENTINEL,
+        "### Flake watchlist",
+        "",
+        f"Tests that have failed in fewer than {QUALIFY_DISTINCT_OCCURRENCES} distinct places and have no issue of "
+        "their own. A test that fails in a second place gets its own issue, seeded with the history kept here, "
+        "and leaves this list.",
+        "",
+    ]
+    lines += [_watch_line(s, repo) for s in ordered] or ["Nothing here: no test is on this part of the watchlist."]
+    lines += [
+        "",
+        "<sub>Written by the flake ledger (docs/specs/2026-10-07-flake-autofix-design.md). "
+        "Edited in place each run; do not edit by hand.</sub>",
+    ]
+    payload = {"schema": SCHEMA, "tests": [_state_payload(s) for s in ordered]}
+    return "\n".join(lines) + "\n\n" + _json_block(WATCHLIST_BEGIN, WATCHLIST_END, payload)
+
+
+def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list[State] | None:
+    """The states in one watchlist comment, or None: only a comment the bot
+    wrote (`trusted_author`), under the sentinel, whose block parses."""
+    if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL):
+        return None
+    payload = _parse_json_block(body, WATCHLIST_BEGIN, WATCHLIST_END)
+    if not payload or payload.get("schema") != SCHEMA or not isinstance(payload.get("tests"), list):
+        return None
+    states = [_state_from_payload(t) for t in payload["tests"]]
+    if any(s is None for s in states):
+        return None
+    return states
 
 
 # --- the attempt comment (written by `publish`, read by `ledger` and the picker) ---

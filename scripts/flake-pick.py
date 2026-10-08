@@ -156,6 +156,9 @@ def open_bot_pr(number: int, prs: list[dict]) -> int | None:
 
 def eligible(view, prs: list[dict]) -> tuple[bool, str]:
     state = view.ledger
+    if fl.WATCHLIST_LABEL in view.labels:
+        # The watchlist holds many tests' histories, none of them a target.
+        return False, "the flake watchlist"
     if view.unreadable:
         # The bot's own comment does not parse: its attempts are unknown, and
         # the ledger leaves such an issue alone too.
@@ -196,6 +199,8 @@ def check_dispatch(views: dict, number: int, prs: list[dict]):
         raise Refused(f"issue #{number} is not open")
     if fl.FLAKY_LABEL not in view.labels:
         raise Refused(f"issue #{number} is not labelled {fl.FLAKY_LABEL}")
+    if fl.WATCHLIST_LABEL in view.labels:
+        raise Refused(f"issue #{number} is the flake watchlist, not one test's issue")
     if view.unreadable:
         raise Refused(f"issue #{number} has a bot comment that does not parse; its attempt history is unknown")
     if view.ledger is None:

@@ -42,7 +42,8 @@ Both problems have the same root: failures are recorded per *run* or per
 **Goals**
 
 - Record every flaky-test failure per test, from structured results, in a place
-  that outlives the 7-day artifact retention: one GitHub issue per test.
+  that outlives the 7-day artifact retention: one GitHub issue per test that
+  qualifies, and one shared watchlist issue for the tests that have not yet.
 - Count both sources of evidence: nightly stress failures and rerun-erased
   failures in PR and `main` CI.
 - Once a test crosses a threshold, attempt a fix automatically: one attempt per
@@ -75,8 +76,9 @@ Both problems have the same root: failures are recorded per *run* or per
 Six components, each with one job:
 
 1. **Ledger** (`scripts/flake-ledger.py`) – reads structured test results from
-   the nightly and from CI, and maintains one issue per flaky test. Deterministic;
-   no model involved.
+   the nightly and from CI, and maintains one issue per flaky test, plus one
+   watchlist issue for tests below the threshold. Deterministic; no model
+   involved.
 2. **Picker** (`scripts/flake-pick.py`) – chooses tonight's target from the
    ledger, or none.
 3. **Fixer session** – `anthropics/claude-code-action` on a macOS runner,
@@ -248,12 +250,18 @@ fix (§4.4). A test **qualifies** for a fix attempt when either:
 
 ### 4.4 The issue
 
-Each test with at least one recorded failure has exactly one issue. The ledger
-creates it at the first failure rather than at the threshold, because the issue
-is where the history lives (below): CI keeps the xunit artifacts for only 7
-days, so a failure recorded nowhere else would be lost before a second one
-arrived to meet the threshold. The threshold gates fix attempts, not issues.
-The issue has three parts:
+Every recorded failure is kept on an issue, because CI keeps the xunit
+artifacts for only 7 days: a failure recorded nowhere else would be lost
+before a second one arrived to meet the threshold. But one issue per first
+failure floods a public repository – a report-only run on 2026-10-08 planned
+123 new issues, of which 15 qualified; most of the rest were whole suites that
+failed in one bad run. So a test gets an issue of its own only once it
+qualifies (§4.3), and until then its history lives on the **watchlist**
+(below), one issue shared by every such test. A test that already has an
+issue – one the ledger opened, or a human's it adopted – keeps recording there
+whether or not it qualifies.
+
+A test's own issue has three parts:
 
 - **Title** – `Flaky test: <test ID>`, exact. The title is the lookup key.
 - **Label** – `flaky`. The ledger creates the label if it is missing.
@@ -270,6 +278,52 @@ The issue has three parts:
   created at the first attempt and edited in place after. The `publish` job is
   its only writer (§7). It holds one entry per attempt, human-readable and as a
   JSON block, recording the facts known when `fix` ends (below).
+
+**The watchlist** is one issue, titled `Flake watchlist` and labelled
+`flake-watchlist` – its own label, never `flaky`, so neither the per-test
+lookup below nor the picker (§5) ever reads it as a test's issue. It holds every
+test that has a recorded failure, no issue of its own, and does not qualify.
+The ledger finds it by label and authorship: the oldest issue under the label
+that the bot itself opened, open or closed. An issue under the label opened by
+anyone else is not the watchlist, and the summary lists it. If none exists the
+ledger creates it, once, the first time a test needs it. If two bot-opened
+ones exist, it uses the oldest and leaves the other unread, and the summary
+lists both.
+
+Its state is in bot comments marked `<!-- flake-watchlist v1 -->`, each
+holding, for each of its tests, a line for a human and the same state a
+ledger comment holds – failures with their merge keys and occurrence keys,
+folded counts, the window's folded merge keys – in one JSON block. Each entry
+is degraded as a ledger comment is, signatures first, then folding the oldest
+failures with their merge keys kept for the read window, to a budget that lets
+it fit in a comment alone. GitHub refuses a comment over 65,536 characters, so
+the ledger splits the watchlist across as many comments as it needs, each kept
+under the same 60,000 it keeps a ledger comment under:
+
+- **Placement** – a test stays in the comment it is in. A test new to the
+  watchlist joins the last comment. A comment that grows past the limit hands
+  its last tests, in test-ID order, to the next comment, and the last one
+  overflows into a new comment, so tests only ever move forward.
+- **Write order** – new comments first, then existing ones from the last to
+  the first. Every test that moves is written to its new comment before its
+  old one drops it, so a run that dies midway leaves a test in two comments,
+  which the next read merges by merge key, and never in none.
+- **Bounded count** – a comment left empty is edited to say so and reused,
+  never deleted, so the number of comments is the most the watchlist has ever
+  needed. Entries are not aged out: the watchlist is bounded by the number of
+  tests in the suite.
+- **Trust** – only the bot's own comments are state, as for ledger comments
+  (below). A bot comment that does not parse is left untouched, takes no
+  tests, and is listed in the summary.
+
+**Leaving the watchlist.** When a watchlisted test fails in a second distinct
+place it qualifies, and the ledger opens its issue, seeded with the full
+history from its watchlist entry, then takes it off the watchlist. The issue
+and its ledger comment are written before any watchlist comment, so a run
+that dies between the two leaves the test on both; the next run finds the
+issue (by its `flaky` label, or by title), merges the watchlist entry into it
+by merge key, and drops the entry. Nothing else takes a test off the
+watchlist.
 
 **Who records each attempt outcome.** Every outcome the picker (§5) depends
 on is written as structured state by a job that runs no model, so the picker
@@ -297,7 +351,8 @@ no two jobs ever edit the same comment:
 Promotion writes no state: whether a PR is ready is GitHub's own PR state, and
 nothing the picker decides depends on it.
 
-**Only the bot's own comments are state.** Both comments are written with the
+**Only the bot's own comments are state.** Both comments, and the watchlist's
+comments, are written with the
 `tbd-flake-fixer` App token – the `ledger` job mints it too, for every issue
 write – so their author is the App's bot account, `tbd-flake-fixer[bot]`. A
 reader accepts a comment as ledger or attempt state only if it carries the
@@ -311,15 +366,15 @@ comment with a sentinel and any other author is ignored, and the `ledger`
 job's summary lists it so a human can see the attempt. Any number of such
 forgeries changes nothing the bot reads.
 
-The issue is the ledger's only durable store, because the artifacts it reads
-expire. Their retention differs, and each sets a read window:
+The issues – each test's own and the watchlist – are the ledger's only durable
+store, because the artifacts it reads expire. Their retention differs, and each sets a read window:
 
 - **`xunit-results`** (`test.yml`) – `retention-days: 7`. The ledger reads
   `test.yml` runs created in the last 7 days. A run whose rerun comes more than
   7 days after its attempt 1 has lost attempt 1's results and is not counted.
 - **`retry-metrics`** (`test.yml`) – no `retention-days`, so the repository
   default applies, 90 days today. The ledger still reads only the same 7-day
-  window of runs: the issue already holds anything older, and one window for
+  window of runs: the issues already hold anything older, and one window for
   both `test.yml` artifacts means a run's two sources are always read together.
 - **`nightly-xunit`** (nightly) – `retention-days: 7`, set by this design. The
   ledger reads nightly runs created in the last 7 days.
@@ -335,7 +390,9 @@ nothing.
    `inventory` subcommand already lists these – when issue N belongs to this
    test alone. Issue N is then the test's issue: the ledger adds the `flaky`
    label and its comment, and leaves the title alone.
-3. Otherwise the ledger creates one.
+3. Otherwise, once the test qualifies, the ledger creates one, seeded from
+   the test's watchlist entry. Until it qualifies the test stays on the
+   watchlist.
 
 **Matching an inventory row to a test.** An inventory row carries the file,
 the function name without its parameter list, and the issue – no suite. The
@@ -350,7 +407,8 @@ summary; the test then falls through to step 3.
 it and it carries no bot ledger comment for a different test ID. Otherwise –
 several tests' traits name N, N already holds another test's ledger, or N is a
 suite-level issue such as the nightly stress targets' #961 – the ledger opens a
-separate per-test issue and links N from it: two tests are two flakes. The
+separate per-test issue once the test qualifies, and links N from it: two tests
+are two flakes. Until then the test's watchlist entry carries the link. The
 per-test issue is the one everything keys on: the `flakefix/issue-<N>` branch
 name, the one-open-PR rule (§5), the ledger and attempt comments, and the
 PR's `Fixes #N`. The shared issue gets nothing beyond the link.
@@ -387,8 +445,9 @@ brief lists the fix as a prior attempt that did not hold. Recurrence after a
 fix is exactly the evidence a human needs to see.
 
 **Worked example: PR #960.** Under this design the first failure of
-`TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()` opens its
-issue, and the second distinct branch qualifies it. Suppose a human's PR #960
+`TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()` puts it on
+the watchlist, and the second distinct branch qualifies it and opens its
+issue, carrying both failures. Suppose a human's PR #960
 carries `Fixes #<that issue>`: merging it closes the issue as completed, with
 #960 as the closer and its merge commit as the fix commit. A later failure on a
 branch cut before #960 and not rebased is `pre-fix` and changes nothing. A
@@ -400,15 +459,21 @@ issue would stay closed. Had #960 not referenced the issue at all, the issue
 would stay open with no fix on record, and the bot could pick it; a human
 closing it by hand, as completed with no closer, ends that.
 
-The ledger posts nothing besides its one comment per issue, and the reopen
-comment above. A new failure updates the ledger comment; it never adds a
-second one.
+The ledger posts nothing besides its one comment per issue, the reopen
+comment above, and the watchlist's comments. A new failure updates the ledger
+comment; it never adds a second one.
+
+The ledger paces its writes at one issue's writes, or one watchlist comment,
+every three seconds, under GitHub's limit on content creation.
 
 ### 4.5 Report-only mode
 
 With the ledger flag off (§10), the ledger computes everything and writes it to
 the job summary instead of to issues. That lets its counts be checked against
-the issues humans have filed before it writes anything public.
+the issues humans have filed before it writes anything public. The summary
+leads with two counts – the per-test issues the run would open, and the tests
+on the watchlist – and then lists each test with where its failures go: its
+issue, a new issue, or the watchlist.
 
 Report-only mode mints no App token and writes no flake issue, but a red
 `ledger` run is still reported: the failure note to the tracking issue (§8)
@@ -421,7 +486,11 @@ the job token makes.
 ## 5. Picking a target
 
 The picker reads the open and closed `flaky` issues' ledger comments and the
-list of open PRs, and chooses at most one test. A test is **eligible** when:
+list of open PRs, and chooses at most one test. It never selects the
+watchlist: it lists only `flaky` issues, and an issue that also carries the
+`flake-watchlist` label is refused by name, on the schedule and on dispatch,
+so a mislabelled watchlist is never a target. A test on the watchlist does not
+qualify and has no issue to pick. A test is **eligible** when:
 
 - it qualifies (§4.3);
 - its issue is open;
@@ -1283,17 +1352,23 @@ names who reclaims its orphans:
 - **PRs** are capped at one open per test (§5). An abandoned draft is visible,
   owned by its issue, and closed by a human; closing it hands its branch to the
   reclaimer.
-- **Issues** are one per test, found by exact title before any create (§4.4),
-  and the `ledger` job runs under a concurrency group so two runs cannot race to
-  create the same one. Issues are records, not leaks; humans close them.
+- **Issues** are one per qualifying test, found by exact title before any
+  create (§4.4), and the `ledger` job runs under a concurrency group so two runs
+  cannot race to create the same one. Issues are records, not leaks; humans
+  close them.
+- **The watchlist issue** is one fixed resource: found by its label and the
+  bot's authorship before any create, created once, and reused for every
+  sub-threshold test. Its comments are edited in place; one left empty is
+  reused rather than deleted, so their number is the most the watchlist has
+  ever needed (§4.4).
 
 Four more things the bot creates need no reclaimer, each for a stated reason:
 
 - **The `flakefix-candidate` artifact** is uploaded with `retention-days: 7`.
   `publish` consumes it within minutes; the week is for a human reading a
   failed attempt. GitHub deletes it on expiry.
-- **Labels** – `flaky`, `flakefix-skip`, and `flakefix-weak-evidence` – are a
-  fixed set of three names, created once if missing and reused after. Their
+- **Labels** – `flaky`, `flake-watchlist`, `flakefix-skip`, and
+  `flakefix-weak-evidence` – are a fixed set of four names, created once if missing and reused after. Their
   number cannot grow with use, so nothing accumulates.
 - **Commit statuses** (`flakefix/stress`) are one per pushed SHA per attempt,
   immutable metadata on that commit with no separate lifetime. They are
@@ -1360,15 +1435,27 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   commit present (that failure dropped, the test still planned), with the fix
   commit gone (red), and a compare that answers 500 (red); a title search that reads every page, fails closed on an incomplete
   answer, and keeps a quote or an overlong title from breaking the phrase; and
-  expired or never-uploaded artifacts, each listed in the summary.
+  expired or never-uploaded artifacts, each listed in the summary. The
+  watchlist: a test below the threshold goes on the watchlist and gets no
+  issue; a second place opens its issue seeded with the watchlist's history
+  and takes it off the watchlist, in write mode writing the issue before the
+  watchlist; an issue found after a run died between the two is seeded from
+  the watchlist; an existing per-test issue below the threshold keeps
+  recording there; a forged watchlist comment and a watchlist issue opened by
+  someone else, each ignored and listed; a missing watchlist created once and
+  not again; two watchlists, the oldest used and both listed; the report's
+  counts of issues to open and tests watched; and a watchlist too big for one
+  comment, split under the body limit with every test held once, a new test
+  touching only the last comment, and a test moved by an overflow written to
+  its new comment before its old one.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
   `merged`), with and without a later failure; a `session_failed` abort,
   retried at once, and two in a row with no failure between, which wait; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
-  issue refused for each missing condition (closed, no `flaky` label, no ledger
-  comment, a ledger comment from a login other than the bot's, an unparsable
+  issue refused for each missing condition (closed, no `flaky` label, the
+  `flake-watchlist` label, no ledger comment, a ledger comment from a login other than the bot's, an unparsable
   JSON block, an open bot PR); a closed issue, never picked whatever its
   failures; a brief built from fixtures that also hold human comments and
   forged sentinel comments, none of whose text appears in it; and the refusal

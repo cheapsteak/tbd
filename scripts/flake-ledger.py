@@ -2,8 +2,11 @@
 """The flake ledger: one GitHub issue per flaky test (spec §4).
 
 docs/specs/2026-10-07-flake-autofix-design.md is the design. The ledger reads
-per-test results from two sources and keeps, on one issue per test, one
-comment holding that test's failure history:
+per-test results from two sources and keeps each test's failure history: on
+the test's own issue, in one comment, once the test qualifies (two distinct
+places) or already has an issue; until then, as one entry on the single
+`flake-watchlist` issue, whose bot comments hold every such test's history.
+The sources:
 
 - **The nightly stress loop** – every failing `<testcase>` in a nightly run's
   `nightly-xunit` artifact.
@@ -89,8 +92,11 @@ RUN_LISTING_CAP = 1000
 # Runs on the bot's own branches describe its candidate, not the suite.
 FLAKEFIX_PREFIX = "flakefix/"
 
-LABEL_COLOR = "B60205"
-LABEL_DESCRIPTION = "One flaky test, tracked by the flake ledger"
+# The labels the ledger creates if missing: name -> (color, description).
+LABELS = {
+    fl.FLAKY_LABEL: ("B60205", "One flaky test, tracked by the flake ledger"),
+    fl.WATCHLIST_LABEL: ("C5DEF5", "The flake ledger's one watchlist of tests below the threshold"),
+}
 
 # GitHub's search API allows about 30 requests a minute; title lookups pause
 # between calls so a first run with many new tests stays under it.
@@ -399,6 +405,65 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
     return issues
 
 
+@dataclass
+class Watchlist:
+    """The one watchlist issue (spec §4.4), as `fetch` read it. `slots` are its
+    bot comments that parsed, oldest first, each with the tests it holds; a
+    bot comment that does not parse is no slot, so it is never written."""
+
+    number: int | None = None
+    slots: list[tuple[int, list[str], str]] = field(default_factory=list)  # (comment id, tests, body)
+    entries: dict[str, fl.State] = field(default_factory=dict)
+
+
+def _merge_entries(first: fl.State, second: fl.State) -> fl.State:
+    """One test found in two watchlist comments: a run that died between
+    writing a test's new comment and its old one. Keep the fuller entry and
+    add the other's failures by merge key."""
+    keep, other = (first, second) if fl.failure_count(first) >= fl.failure_count(second) else (second, first)
+    merged, _ = fl.merge(keep, other.failures)
+    return merged
+
+
+def load_watchlist(raw: list[dict], notes: Notes) -> Watchlist:
+    """The watchlist is the oldest issue labelled `flake-watchlist` that the
+    bot opened. An issue under that label opened by anyone else is not the
+    watchlist; a second bot-opened one is listed and left alone."""
+    mine = []
+    for item in raw:
+        if fl.trusted_author(item.get("login"), item.get("type")):
+            mine.append(item)
+        else:
+            notes.forged.append(f"#{item['number']}: labelled `{fl.WATCHLIST_LABEL}` but opened by `{item.get('login')}` ({item.get('type')}), not the watchlist")
+    if not mine:
+        return Watchlist()
+    mine.sort(key=lambda i: (i.get("created_at") or "", int(i["number"])))
+    chosen = mine[0]
+    if len(mine) > 1:
+        notes.duplicates.append(
+            f"watchlist issues {', '.join('#' + str(i['number']) for i in mine)}; using the oldest, #{chosen['number']}, and leaving the others unread"
+        )
+    watch = Watchlist(number=int(chosen["number"]))
+    for comment in sorted(chosen.get("comments", []), key=lambda c: c["id"]):
+        body, login, kind = comment.get("body") or "", comment.get("login"), comment.get("type")
+        if not body.startswith(fl.WATCHLIST_SENTINEL):
+            continue
+        if not fl.trusted_author(login, kind):
+            notes.forged.append(f"#{watch.number} comment {comment['id']}: a watchlist sentinel by `{login}` ({kind}), ignored")
+            continue
+        states = fl.parse_watchlist(body, login, kind)
+        if states is None:
+            notes.unreadable.append(f"#{watch.number} comment {comment['id']}: the bot's own watchlist comment does not parse; it is left untouched")
+            continue
+        for state in states:
+            if state.test_id in watch.entries:
+                notes.duplicates.append(f"`{state.test_id}`: in two watchlist comments; merged")
+                state = _merge_entries(watch.entries[state.test_id], state)
+            watch.entries[state.test_id] = state
+        watch.slots.append((int(comment["id"]), [s.test_id for s in states], body))
+    return watch
+
+
 def map_tests_to_issues(issues: dict[int, IssueView], tests: set[str], notes: Notes) -> dict[str, int]:
     """A test's issue: the one whose bot ledger comment names it, else the one
     whose title is exactly `Flaky test: <id>`, open or closed (spec §4.4)."""
@@ -478,7 +543,7 @@ def issue_serves_test_alone(number: int, test: str, inventory: list[tuple[str, s
     if number in targets.values():
         return False
     view = issues.get(number)
-    if view is None or view.unreadable:
+    if view is None or view.unreadable or fl.WATCHLIST_LABEL in view.labels:
         return False
     if view.ledger is not None and view.ledger.test_id != test:
         return False
@@ -631,7 +696,12 @@ def _same_body(rendered: str, existing: str | None) -> bool:
     return rendered.replace("\r\n", "\n").rstrip() == existing.replace("\r\n", "\n").rstrip()
 
 
-def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ctx: Context, notes: Notes) -> tuple[dict | None, dict | None]:
+def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ctx: Context, notes: Notes, watched: fl.State | None = None) -> tuple[dict | None, dict | None, fl.State | None]:
+    """One test's plan: `(action, summary, watch)`. `action` is its issue's
+    writes, or None; `watch` is its watchlist entry when it stays on the
+    watchlist – no issue of its own, and below the threshold – else None. A
+    summary of None means the test was skipped, and its watchlist entry, if
+    any, stays as it is."""
     view = ctx.issues.get(issue_number) if issue_number is not None else None
     create = None
     add_label = False
@@ -646,12 +716,25 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
         if trait is not None and trait in ctx.issues and ctx.issues[trait].unreadable:
             # It may hold this test's own history; a second issue would split it.
             notes.unreadable.append(f"`{test}`: its trait's issue #{trait} has an unparsable bot comment; skipped")
-            return None, None
+            return None, None, None
         if trait is not None and issue_serves_test_alone(trait, test, ctx.inventory, ctx.targets, ctx.issues):
             view = ctx.issues[trait]
         elif trait is not None:
             links = [trait]
-    state = view.ledger if view is not None and view.ledger is not None else fl.State(test_id=test, links=links)
+    if view is not None and view.ledger is not None:
+        state = view.ledger
+        if watched is not None:
+            # A run that seeded the issue from the watchlist died before
+            # taking the test off it: the issue already holds this history.
+            state, _ = fl.merge(state, watched.failures)
+    elif watched is not None:
+        # The watchlist holds the test's history: it seeds a new issue, or
+        # an issue found without a ledger comment yet (one a run created and
+        # then died before commenting on, or a human's).
+        state = replace(watched, links=watched.links or links)
+    else:
+        state = fl.State(test_id=test, links=links)
+    known = len(state.failures)
     state, pr_fixes = record_pr_outcomes(state, view, ctx)
     # The latest close event's fix is on record whether or not the issue is
     # still closed: an issue the ledger reopened, or a human reopened, keeps the
@@ -662,28 +745,36 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     state = add_fixes(state, pr_fixes + closer)
     state, recurrences = classify(state, new, ctx)
     reopen = bool(recurrences) and view is not None and view.state == "CLOSED" and bool(closer)
-
-    if view is None:
-        create = {"title": fl.issue_title(test), "body": creation_body(test, links)}
-    elif fl.FLAKY_LABEL not in view.labels:
-        add_label = True
-    body = fl.render_comment(state, ctx.repo)
-    existing = view.ledger_body if view is not None else None
     summary = {
         "test_id": test,
         "issue": view.number if view else None,
         "issue_state": view.state if view else None,
-        "create": create is not None,
+        "create": False,
+        "watch": False,
+        "from_watchlist": watched is not None,
         "links": state.links,
         "failures": fl.failure_count(state),
-        "new_failures": len(state.failures) - (len(view.ledger.failures) if view and view.ledger else 0),
+        "new_failures": len(state.failures) - known,
         "distinct": sorted(fl.distinct_occurrences(state)),
         "episode": state.episode,
         "qualifies": fl.qualifies(state),
         "reopen": reopen,
     }
+    if view is None and not summary["qualifies"]:
+        # Spec §4.4: below the threshold with no issue of its own, the test
+        # is kept on the watchlist rather than given a public issue.
+        summary["watch"] = True
+        return None, summary, state
+
+    if view is None:
+        create = {"title": fl.issue_title(test), "body": creation_body(test, state.links)}
+        summary["create"] = True
+    elif fl.FLAKY_LABEL not in view.labels:
+        add_label = True
+    body = fl.render_comment(state, ctx.repo)
+    existing = view.ledger_body if view is not None else None
     if create is None and not add_label and not reopen and _same_body(body, existing):
-        return None, summary
+        return None, summary, None
     action = {
         "test_id": test,
         "issue": view.number if view else None,
@@ -695,7 +786,78 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
         "comment_body": body,
         "qualifies": summary["qualifies"],
     }
-    return action, summary
+    return action, summary, None
+
+
+def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) -> dict:
+    """The watchlist's writes (spec §4.4). Each test keeps the comment it is
+    in; a test new to the watchlist joins the last one. A comment over the
+    body limit hands its last tests, in test-ID order, to the next comment,
+    and the last overflows into a new one, so tests only ever move forward.
+    The writes go new comments first, then the existing ones last first: every
+    moved test is written to its new comment before its old one drops it, so a run that dies midway leaves it
+    in two comments (merged on the next read), never in none. A comment left
+    empty is edited to say so and reused, never deleted.
+
+    Each entry is first degraded as a ledger comment is (`fl.fit`), to a
+    budget that lets it fit in a comment alone."""
+    fitted = {t: fl.fit(s, repo, fl.WATCHLIST_ENTRY_CHARS)[0] for t, s in entries.items()}
+    groups = [[t for t in tests if t in fitted] for _, tests, _ in watch.slots]
+    placed = {t for g in groups for t in g}
+    if not groups:
+        groups = [[]]
+    groups[-1].extend(sorted(set(fitted) - placed))
+
+    def body_of(group: list[str]) -> str:
+        return fl.render_watchlist([fitted[t] for t in group], repo)
+
+    i = 0
+    while i < len(groups):
+        groups[i].sort()
+        while len(groups[i]) > 1 and len(body_of(groups[i])) > fl.MAX_COMMENT_CHARS:
+            if i + 1 == len(groups):
+                groups.append([])
+            groups[i + 1].insert(0, groups[i].pop())
+        if len(body_of(groups[i])) > fl.MAX_COMMENT_CHARS:
+            raise AnalysisError(f"watchlist entry `{groups[i][0]}` does not fit in one comment")
+        i += 1
+
+    writes = []
+    for index, group in enumerate(groups):
+        comment_id, existing = (watch.slots[index][0], watch.slots[index][2]) if index < len(watch.slots) else (None, None)
+        if comment_id is None and not group:
+            continue
+        body = body_of(group)
+        if _same_body(body, existing):
+            continue
+        writes.append({"index": index, "comment_id": comment_id, "body": body, "tests": len(group)})
+    # New comments first, in order, so comment IDs keep the comments' order;
+    # they only gain tests. Then existing ones, last first.
+    writes.sort(key=lambda w: (w["comment_id"] is not None, w["index"] if w["comment_id"] is None else -w["index"]))
+    create = None
+    if watch.number is None and writes:
+        create = {"title": fl.WATCHLIST_TITLE, "body": watchlist_issue_body()}
+    before = set(watch.entries)
+    return {
+        "issue": watch.number,
+        "create": create,
+        "writes": writes,
+        "tests": len(fitted),
+        "added": len(set(fitted) - before),
+        "removed": len(before - set(fitted)),
+        "comments": sum(1 for g in groups if g),
+    }
+
+
+def watchlist_issue_body() -> str:
+    return "\n".join([
+        f"The flake ledger's watchlist: every test that has failed in fewer than {fl.QUALIFY_DISTINCT_OCCURRENCES} "
+        "distinct places and has no issue of its own (docs/specs/2026-10-07-flake-autofix-design.md, §4.4).",
+        "",
+        "Its history lives in the bot's comments below, edited in place each run, because CI keeps the test "
+        "results for only 7 days. A test that fails in a second place gets its own `flaky` issue, seeded with "
+        "that history, and leaves this list. This issue is never a fix target.",
+    ])
 
 
 def analyze(work: Path, collect_missing: bool = False) -> dict:
@@ -715,11 +877,16 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
             for failure in view.ledger.failures:
                 if failure.file:
                     files.setdefault(view.ledger.test_id, (failure.file, failure.line))
+    watch = load_watchlist(_require_json(work / "watchlist.json"), notes)
+    for state in watch.entries.values():
+        for failure in state.failures:
+            if failure.file:
+                files.setdefault(state.test_id, (failure.file, failure.line))
     note_inventory_rows(inventory, files, notes)
     gone_issues = {int(n): int(status) for n, status in _read_json(work / "fetch_notes.json", {}).get("gone_issues", {}).items()}
     for number, status in sorted(gone_issues.items()):
         notes.gone.append(f"#{number} (HTTP {status}): a failing test whose trait names it gets an issue of its own; check the trait's number")
-    mapping = map_tests_to_issues(issues, set(by_test), notes)
+    mapping = map_tests_to_issues(issues, set(by_test) | set(watch.entries), notes)
     ctx = Context(
         repo=repo,
         issues=issues,
@@ -733,12 +900,22 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
         unresolved=set(_read_json(work / "ancestry_unresolved.json", [])),
     )
     actions, tests = [], []
+    # A watchlist entry with no new failure and no issue carries over as it
+    # is; so does one whose test was skipped below.
+    on_watch = {t: s for t, s in watch.entries.items() if t not in by_test and t not in mapping}
     for test in sorted(set(by_test) | set(mapping)):
+        watched = watch.entries.get(test)
         if test in mapping and issues[mapping[test]].unreadable:
+            if watched is not None:
+                on_watch[test] = watched
             continue
-        action, summary = plan_for_test(test, mapping.get(test), by_test.get(test, []), ctx, notes)
+        action, summary, stays = plan_for_test(test, mapping.get(test), by_test.get(test, []), ctx, notes, watched)
         if summary is None:
+            if watched is not None:
+                on_watch[test] = watched
             continue
+        if stays is not None:
+            on_watch[test] = stays
         tests.append(summary)
         if action is not None:
             actions.append(action)
@@ -746,6 +923,7 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     return {
         "repo": repo,
         "actions": actions,
+        "watchlist": plan_watchlist(watch, on_watch, repo),
         "tests": tests,
         "notes": notes.__dict__,
         "missing_ancestry": sorted(ctx.missing),
@@ -761,9 +939,28 @@ def report(plan: dict, write: bool) -> str:
     tests = plan["tests"]
     if not tests:
         lines.append("No flaky-test failures in the read window, and no issue to update.")
+    watch = plan.get("watchlist") or {"issue": None, "create": None, "writes": [], "tests": 0, "added": 0, "removed": 0, "comments": 0}
+    opening = [t for t in tests if t["create"]]
+    promoted = sum(1 for t in opening if t.get("from_watchlist"))
+    if watch["issue"] is not None:
+        home = f"#{watch['issue']}"
+    elif watch["create"]:
+        home = "a new issue"
+    else:
+        home = "none yet"
+    lines += [
+        f"**Per-test issues to open: {len(opening)}** ({promoted} promoted from the watchlist). "
+        f"**Tests on the watchlist: {watch['tests']}** ({watch['added']} new, {watch['removed']} leaving it), "
+        f"in {watch['comments']} comment(s); the watchlist issue: {home}.",
+        "",
+    ]
     for t in sorted(tests, key=lambda t: (-t["failures"], t["test_id"])):
-        if t["create"]:
+        if t.get("watch"):
+            where = "the watchlist"
+        elif t["create"]:
             where = "a new issue" + (f", linking #{t['links'][0]}" if t["links"] else "")
+            if t.get("from_watchlist"):
+                where += ", seeded from the watchlist"
         else:
             where = f"#{t['issue']} ({t['issue_state'].lower()})"
         extra = "; reopens it as a recurrence" if t["reopen"] else ""
@@ -772,7 +969,8 @@ def report(plan: dict, write: bool) -> str:
             f"{len(t['distinct'])} distinct places in episode {t['episode'] + 1}, "
             f"qualifies: {'yes' if t['qualifies'] else 'no'}; {where}{extra}"
         )
-    lines += ["", f"Planned issue writes: {len(plan['actions'])}."]
+    watch_writes = len(watch["writes"]) + (1 if watch["create"] else 0)
+    lines += ["", f"Planned issue writes: {len(plan['actions'])} per-test issue(s), and {watch_writes} on the watchlist."]
     for title, key in (
         ("Unreadable artifacts", "unreadable"),
         ("Artifacts not read (expired, or never uploaded)", "unavailable"),
@@ -927,14 +1125,42 @@ def _close_info(repo: str, number: int) -> tuple[str | None, dict | None]:
     return reason, fix
 
 
-def _fetch_issue(repo: str, raw: dict) -> dict:
-    number = int(raw["number"])
+def _sentinel_comments(repo: str, number: int, sentinels: tuple[str, ...]) -> list[dict]:
+    """Every comment on one issue that starts with one of `sentinels`, with
+    its author: the reader decides which authors count."""
     comments = []
     for c in gh_lines("api", "--paginate", f"repos/{repo}/issues/{number}/comments?per_page=100", "--jq", ".[]"):
         body = c.get("body") or ""
-        if body.startswith(fl.SENTINEL) or body.startswith(fl.ATTEMPTS_SENTINEL):
+        if body.startswith(sentinels):
             user = c.get("user") or {}
             comments.append({"id": c["id"], "login": user.get("login"), "type": user.get("type"), "body": body})
+    return comments
+
+
+def _fetch_watchlist(repo: str) -> list[dict]:
+    """Every issue labelled `flake-watchlist`, open or closed, with its author;
+    the comments only of those the bot opened, the only ones `analyze` reads."""
+    found = []
+    for raw in gh_lines("api", "--paginate", f"repos/{repo}/issues?labels={fl.WATCHLIST_LABEL}&state=all&per_page=100", "--jq", ".[] | select(.pull_request == null)"):
+        user = raw.get("user") or {}
+        item = {
+            "number": int(raw["number"]),
+            "title": raw.get("title") or "",
+            "state": (raw.get("state") or "").upper(),
+            "login": user.get("login"),
+            "type": user.get("type"),
+            "created_at": raw.get("created_at") or "",
+            "comments": [],
+        }
+        if fl.trusted_author(item["login"], item["type"]):
+            item["comments"] = _sentinel_comments(repo, item["number"], (fl.WATCHLIST_SENTINEL,))
+        found.append(item)
+    return sorted(found, key=lambda i: i["number"])
+
+
+def _fetch_issue(repo: str, raw: dict) -> dict:
+    number = int(raw["number"])
+    comments = _sentinel_comments(repo, number, (fl.SENTINEL, fl.ATTEMPTS_SENTINEL))
     state = (raw.get("state") or "").upper()
     # Read for open issues too: one that was closed by a fix and reopened keeps
     # that fix on record, which is what lets a run that died between the reopen
@@ -1010,6 +1236,8 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
         for i in gh_lines("api", "--paginate", f"repos/{repo}/issues?labels={fl.FLAKY_LABEL}&state=all&per_page=100", "--jq", ".[] | select(.pull_request == null)")
     }
     issues = {n: _fetch_issue(repo, raw) for n, raw in raw_issues.items()}
+    watchlist = _fetch_watchlist(repo)
+    _write_json(work / "watchlist.json", watchlist)
 
     # Issues outside the label that the lookup may need: each issue a trait
     # names, and an exact-title match for each failing test not yet mapped.
@@ -1033,7 +1261,8 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     _write_json(work / "fetch_notes.json", {"gone_issues": gone_issues})
     notes = Notes()
     by_test, _ = collect_failures(work, repo, now, notes, read_targets(work))
-    mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test), Notes())
+    watched = set(load_watchlist(watchlist, Notes()).entries)
+    mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test) | watched, Notes())
     for test in sorted(set(by_test) - set(mapping)):
         title = fl.issue_title(test)
         for hit in _search_title(repo, title):
@@ -1124,24 +1353,38 @@ def fetch_ancestry(work: Path, repo: str, pairs: list[str]) -> None:
     _write_json(work / "ancestry_unresolved.json", sorted(unresolved))
 
 
-def _ensure_label(repo: str) -> None:
+def _ensure_labels(repo: str, wanted: set[str]) -> None:
     # `--jq` prints a bare string unquoted, so ask for objects, which it prints as JSON.
-    names = [label["name"] for label in gh_lines("api", "--paginate", f"repos/{repo}/labels?per_page=100", "--jq", ".[] | {name}")]
-    if fl.FLAKY_LABEL not in names:
-        gh_write("api", "-X", "POST", f"repos/{repo}/labels", payload={"name": fl.FLAKY_LABEL, "color": LABEL_COLOR, "description": LABEL_DESCRIPTION})
+    names = {label["name"] for label in gh_lines("api", "--paginate", f"repos/{repo}/labels?per_page=100", "--jq", ".[] | {name}")}
+    for name in sorted(wanted - names):
+        color, description = LABELS[name]
+        gh_write("api", "-X", "POST", f"repos/{repo}/labels", payload={"name": name, "color": color, "description": description})
+
+
+def _pause() -> None:
+    if WRITE_PAUSE_S > 0:
+        time.sleep(WRITE_PAUSE_S)
 
 
 def apply(plan: dict, repo: str) -> None:
     """Each action is one issue's writes: the issue, its label, a reopen, then
-    the ledger comment. The first failed write stops the run, and the next run
+    the ledger comment. The watchlist's writes come after every action, so a
+    test promoted off it is on its own issue, history and all, before the
+    watchlist drops it. The first failed write stops the run, and the next run
     converges from whatever landed: an issue created without its comment is
-    found again by title, and a reopened issue keeps its closing fix on record
-    (`_fetch_issue`), so the recurrence is classified again and written. The
-    one write a death can lose is the reopen comment, whose content the ledger
-    comment repeats."""
+    found again by title and seeded from the watchlist again, and a reopened
+    issue keeps its closing fix on record (`_fetch_issue`), so the recurrence
+    is classified again and written. The one write a death can lose is the
+    reopen comment, whose content the ledger comment repeats."""
     actions = plan["actions"]
+    watch = plan.get("watchlist") or {"create": None, "writes": [], "issue": None}
+    labels = set()
     if any(a["create"] or a["add_label"] for a in actions):
-        _ensure_label(repo)
+        labels.add(fl.FLAKY_LABEL)
+    if watch["create"]:
+        labels.add(fl.WATCHLIST_LABEL)
+    if labels:
+        _ensure_labels(repo, labels)
     for action in actions:
         number = action["issue"]
         if action["create"]:
@@ -1156,8 +1399,21 @@ def apply(plan: dict, repo: str) -> None:
             gh_write("api", "-X", "PATCH", f"repos/{repo}/issues/comments/{action['comment_id']}", payload={"body": action["comment_body"]})
         else:
             gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": action["comment_body"]})
-        if WRITE_PAUSE_S > 0:
-            time.sleep(WRITE_PAUSE_S)
+        _pause()
+    if not watch["writes"]:
+        return
+    number = watch["issue"]
+    if watch["create"]:
+        created = gh_write("api", "-X", "POST", f"repos/{repo}/issues", payload={**watch["create"], "labels": [fl.WATCHLIST_LABEL]})
+        number = int(created["number"])
+        _pause()
+    # Already ordered last comment first (`plan_watchlist`).
+    for write in watch["writes"]:
+        if write["comment_id"]:
+            gh_write("api", "-X", "PATCH", f"repos/{repo}/issues/comments/{write['comment_id']}", payload={"body": write["body"]})
+        else:
+            gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": write["body"]})
+        _pause()
 
 
 def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: int, days: int, run_attempt: int = 1) -> str:
