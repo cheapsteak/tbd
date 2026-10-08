@@ -322,9 +322,10 @@ struct QueuedPromptOnCreateTests {
             await waitUntil("alert") { state.alertMessage != nil }
             #expect(harness.parked == nil)
             #expect(state.alertIsError)
-            // The row never existed, so the text has nowhere to be recovered
-            // from but the pasteboard.
-            #expect(harness.copied == ["never lands"])
+            // The row never existed, so the file is the only copy; the
+            // pasteboard is left alone once the file is written.
+            #expect(harness.saved.map(\.text) == ["never lands"])
+            #expect(harness.copied.isEmpty)
         }
     }
 
@@ -350,7 +351,7 @@ struct QueuedPromptOnCreateTests {
     /// The modal is dismissed by the time a refusal comes back and there is no
     /// draft store behind it, so an alert on its own would leave the operator's
     /// message existing nowhere at all.
-    @Test("A refused first message is handed back on the clipboard")
+    @Test("A refused first message is handed back in a file")
     func refusalKeepsTheComposedTextRecoverable() async throws {
         try await withAppState { state in
             let repoID = UUID()
@@ -367,11 +368,11 @@ struct QueuedPromptOnCreateTests {
 
             await waitUntil("alert") { state.alertMessage != nil }
             // Trimmed exactly as the parking RPC would have carried it.
-            #expect(harness.copied == ["the thing I typed"])
+            #expect(harness.saved.map(\.text) == ["the thing I typed"])
             // The alert names the reason AND where the text went, so neither
             // fact can arrive without the other.
             #expect(state.alertMessage?.contains("not an agent") == true)
-            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
+            #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
             #expect(state.alertIsError)
         }
     }
@@ -397,8 +398,8 @@ struct QueuedPromptOnCreateTests {
             await waitUntil("alert") { state.alertMessage != nil }
             #expect(harness.calls.contains(RPCMethod.worktreeSetPendingPrompt))
             #expect(harness.parked == nil)
-            #expect(harness.copied == ["the socket died"])
-            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
+            #expect(harness.saved.map(\.text) == ["the socket died"])
+            #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
             #expect(state.alertIsError)
         }
     }
@@ -425,8 +426,9 @@ struct QueuedPromptOnCreateTests {
             #expect(harness.saved.first?.text == "keep me")
             #expect(state.alertRevealPath == Self.savedPath)
             #expect(state.alertMessage?.contains(Self.savedPath) == true)
-            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
-            #expect(harness.copied == ["keep me"])
+            // The file holds the text, so the pasteboard is not touched — a
+            // Copy Path from the alert would overwrite it anyway.
+            #expect(harness.copied.isEmpty)
         }
     }
 
@@ -468,7 +470,7 @@ struct QueuedPromptOnCreateTests {
             #expect(harness.copied == ["clipboard only"])
             #expect(state.alertRevealPath == nil)
             #expect(state.alertMessage?.contains("could not be saved to a file") == true)
-            #expect(state.alertMessage?.contains("clipboard only") == true)
+            #expect(state.alertMessage?.contains("copied to your clipboard instead") == true)
             #expect(state.alertIsError)
         }
     }
@@ -484,12 +486,15 @@ struct QueuedPromptOnCreateTests {
             target.resolve(.failed)
 
             state.keepUnsentDraftAfterFailedCreation(target, draft: "\n half-typed thought \n")
+            // Deferred a turn, so the alert lands after the sheet has gone.
+            #expect(state.alertMessage == nil)
+            await waitUntil("alert") { state.alertMessage != nil }
 
             #expect(harness.saved.count == 1)
             #expect(harness.saved.first?.repoID == repoID)
             #expect(harness.saved.first?.worktreeName == "brave-otter")
             #expect(harness.saved.first?.text == "half-typed thought")
-            #expect(harness.copied == ["half-typed thought"])
+            #expect(harness.copied.isEmpty)
             #expect(state.alertRevealPath == Self.savedPath)
             #expect(state.alertMessage?.contains("Worktree creation failed") == true)
             #expect(state.alertIsError)
@@ -506,11 +511,190 @@ struct QueuedPromptOnCreateTests {
             target.resolve(.failed)
 
             state.keepUnsentDraftAfterFailedCreation(target, draft: "  \n\t ")
+            await drain()
 
             #expect(harness.saved.isEmpty)
             #expect(harness.copied.isEmpty)
             #expect(state.alertMessage == nil)
         }
+    }
+
+    // MARK: - Creation that fails after the daemon row existed
+
+    /// Drive a creation to the point the daemon row exists and the target has
+    /// resolved `.created` — where `git worktree add` has yet to run.
+    private func createdAndAwaitingGit(
+        _ state: AppState, _ harness: Harness, repoID: UUID
+    ) async throws -> (QueuedPromptTarget, Worktree) {
+        let created = daemonWorktree(repoID: repoID, name: "late-fail")
+        arm(state, harness, created: created)
+        state.daemonCapabilities = capabilities(queuedPrompt: true)
+        state.createWorktree(repoID: repoID)
+        let target = try #require(state.queuedPromptTarget)
+        await waitUntil("created") { target.resolution == .created(created.id) }
+        await waitUntil("swap") { state.findWorktree(id: created.id) != nil }
+        return (target, created)
+    }
+
+    private func failCreation(_ state: AppState, _ id: UUID, creationFailed: Bool = true) {
+        state.handleDelta(.worktreeArchived(
+            WorktreeIDDelta(worktreeID: id, creationFailed: creationFailed)))
+    }
+
+    @Test("A parked first message is saved when git worktree add fails afterwards")
+    func parkedMessageIsSavedOnLateCreationFailure() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: repoID)
+            state.submitQueuedPrompt(target, text: "parked then lost", submit: true)
+            await waitUntil("parked") {
+                state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == false
+            }
+            #expect(harness.parked?.text == "parked then lost")
+
+            failCreation(state, created.id)
+
+            #expect(harness.saved.count == 1)
+            #expect(harness.saved.first?.text == "parked then lost")
+            #expect(harness.saved.first?.repoID == repoID)
+            // ONE alert: the failure and where the text went, together.
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
+            #expect(state.alertRevealPath == Self.savedPath)
+            #expect(state.firstMessagesAwaitingCreation.isEmpty)
+            #expect(state.creationWatchTargets.isEmpty)
+        }
+    }
+
+    @Test("An open composer is told when git worktree add fails, and its draft is saved")
+    func openDraftIsSavedOnLateCreationFailure() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: repoID)
+
+            failCreation(state, created.id)
+
+            // The generic alert stands down for the open sheet, which will
+            // raise one alert of its own as it closes.
+            #expect(target.hasFailed)
+            #expect(target.failureAfterCreate?.contains("Couldn't create worktree") == true)
+            #expect(state.alertMessage == nil)
+            #expect(state.creationWatchTargets.isEmpty)
+
+            // What the sheet does on seeing `hasFailed`.
+            #expect(QueuedPromptModal.shouldHandOffDraft(creationFailed: target.hasFailed, submitted: false))
+            state.keepUnsentDraftAfterFailedCreation(target, draft: "half typed")
+            await waitUntil("alert") { state.alertMessage != nil }
+
+            #expect(harness.saved.map(\.text) == ["half typed"])
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
+            #expect(state.alertRevealPath == Self.savedPath)
+        }
+    }
+
+    @Test("An open composer with a blank draft still gets the failure alert")
+    func blankOpenDraftStillGetsTheFailureAlert() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+
+            failCreation(state, created.id)
+            state.keepUnsentDraftAfterFailedCreation(target, draft: "   ")
+            await waitUntil("alert") { state.alertMessage != nil }
+
+            #expect(harness.saved.isEmpty)
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertRevealPath == nil)
+        }
+    }
+
+    @Test("A deliberate archive of a creating row saves nothing")
+    func deliberateArchiveSavesNothing() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            state.submitQueuedPrompt(target, text: "the operator archived this", submit: true)
+            await waitUntil("parked") {
+                state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == false
+            }
+
+            failCreation(state, created.id, creationFailed: false)
+
+            #expect(harness.saved.isEmpty)
+            #expect(state.alertMessage == nil)
+            #expect(target.hasFailed == false)
+            // Released all the same, so nothing leaks.
+            #expect(state.firstMessagesAwaitingCreation.isEmpty)
+            #expect(state.creationWatchTargets.isEmpty)
+        }
+    }
+
+    @Test("A queued composer whose creation fails late is dropped, and the generic alert stands")
+    func backloggedTargetIsDroppedOnLateFailure() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let blocker = QueuedPromptTarget(placeholderID: UUID(), repoID: UUID(), worktreeName: "x")
+            state.presentQueuedPrompt(blocker)
+            let repoID = UUID()
+            let created = daemonWorktree(repoID: repoID, name: "late-fail")
+            arm(state, harness, created: created)
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+            state.createWorktree(repoID: repoID)
+            let queued = try #require(state.queuedPromptBacklog.first)
+            await waitUntil("created") { queued.resolution == .created(created.id) }
+            await waitUntil("swap") { state.findWorktree(id: created.id) != nil }
+
+            failCreation(state, created.id)
+
+            #expect(state.queuedPromptBacklog.isEmpty)
+            #expect(queued.hasFailed)
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(harness.saved.isEmpty)
+        }
+    }
+
+    @Test("A refresh releases watches for rows that finished creating, never one mid-RPC")
+    func refreshReleasesFinishedCreationWatches() async {
+        await withAppState { state in
+            let repoID = UUID()
+            var active = daemonWorktree(repoID: repoID, name: "done")
+            active.status = .active
+            let creating = daemonWorktree(repoID: repoID, name: "still-creating")
+            let inFlightID = UUID()
+            let missingID = UUID()
+            func message(_ inFlight: Bool) -> FirstMessageAwaitingCreation {
+                FirstMessageAwaitingCreation(
+                    text: "t", repoID: repoID, worktreeName: "n", parkingInFlight: inFlight)
+            }
+            let target = QueuedPromptTarget(placeholderID: UUID(), repoID: repoID, worktreeName: "n")
+            state.creationWatchTargets = [active.id: target, creating.id: target, missingID: target]
+            state.firstMessagesAwaitingCreation = [
+                active.id: message(false), creating.id: message(false),
+                inFlightID: message(true), missingID: message(false),
+            ]
+
+            // Scoped refresh: a row absent from the list may belong to
+            // another repo, so only a listed, finished row is released.
+            state.releaseCreationWatches(observing: [active, creating], complete: false)
+            #expect(Set(state.creationWatchTargets.keys) == [creating.id, missingID])
+            #expect(Set(state.firstMessagesAwaitingCreation.keys) == [creating.id, inFlightID, missingID])
+
+            // Unscoped refresh: absent means gone — except mid-RPC.
+            state.releaseCreationWatches(observing: [active, creating], complete: true)
+            #expect(Set(state.creationWatchTargets.keys) == [creating.id])
+            #expect(Set(state.firstMessagesAwaitingCreation.keys) == [creating.id, inFlightID])
+        }
+    }
+
+    @Test("The composer hands its draft off only on failure, and never after a submit")
+    func shouldHandOffDraftBranches() {
+        #expect(QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: false))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: true))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: false))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: true))
     }
 
     @Test("Closing an alert clears its file, and a plain alert carries none")

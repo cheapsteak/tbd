@@ -1942,6 +1942,21 @@ final class AppState {
     /// the operator can be left typing into a modal bound to the *previous*
     /// target. They queue instead.
     @ObservationIgnored var queuedPromptBacklog: [QueuedPromptTarget] = []
+    /// Composer targets whose daemon row exists but may still fail to finish
+    /// creating, keyed by the daemon's worktree ID. `worktree.create` returns
+    /// once the row exists, so the target resolves `.created` long before
+    /// `git worktree add` runs; a failure there arrives later as a
+    /// `.worktreeArchived(creationFailed: true)` delta, and this is how that
+    /// delta finds the composer it belongs to. Released when the row is seen
+    /// leaving `.creating`, when it is archived, or when an unscoped refresh
+    /// no longer lists it.
+    @ObservationIgnored var creationWatchTargets: [UUID: QueuedPromptTarget] = [:]
+    /// First messages handed to the daemon for a row that may still fail to
+    /// finish creating, keyed by the daemon's worktree ID. A failed creation
+    /// deletes the row and its `pending_prompt` with it, so this is the only
+    /// copy left to save. Released on the same terms as
+    /// `creationWatchTargets`, except while its parking RPC is in flight.
+    @ObservationIgnored var firstMessagesAwaitingCreation: [UUID: FirstMessageAwaitingCreation] = [:]
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -1987,11 +2002,6 @@ final class AppState {
                 checkoutPRHead: request.checkoutPRHead
             )
         }
-    /// How `submitQueuedPrompt` parks the composed text — injectable for the
-    /// same reason as `worktreeCreator`.
-    /// A `nil` text unparks — the daemon clears the column and disarms any
-    /// wait — which is how the composer's Discard reaches the store without a
-    /// verb of its own.
     /// Where a first message that never reached its worktree is written —
     /// `UnsentPromptFile` under `~/tbd/repos/<repoID>/unsent-prompts/`.
     /// Returns the path written. Injectable so tests never write under the
@@ -2005,6 +2015,11 @@ final class AppState {
                     directory: TBDConstants.unsentPromptsDir(repoID: repoID),
                     date: Date())
             }
+    /// How `submitQueuedPrompt` parks the composed text — injectable for the
+    /// same reason as `worktreeCreator`.
+    /// A `nil` text unparks — the daemon clears the column and disarms any
+    /// wait — which is how the composer's Discard reaches the store without a
+    /// verb of its own.
     @ObservationIgnored lazy var pendingPromptSetter:
         @MainActor (UUID, String?, Bool) async throws -> WorktreeSetPendingPromptResult =
             { [daemonClient] worktreeID, text, submit in
@@ -2934,7 +2949,18 @@ final class AppState {
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
         // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
-        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+        var failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+        // A first message composed for this row — parked, or still being typed
+        // — would otherwise vanish with it. When one is taken over, its own
+        // alert carries the failure, so the generic one stands down rather
+        // than stacking a second alert.
+        if handOffFirstMessage(
+            forArchivedWorktree: delta.worktreeID,
+            creationFailed: delta.creationFailed,
+            failureMessage: failureMessage
+        ) {
+            failureMessage = nil
+        }
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
@@ -3682,6 +3708,7 @@ final class AppState {
             // `.inFlight` until the daemon reports the row `.active` — this
             // periodic refresh is where that flip is observed.
             promoteRevivedWorktrees(observing: allWts)
+            releaseCreationWatches(observing: allWts, complete: repoID == nil)
 
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet

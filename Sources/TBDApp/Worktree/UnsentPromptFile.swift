@@ -7,8 +7,8 @@ import TBDShared
 ///
 /// Written only when creation or parking fails — never while the operator is
 /// typing — so the directory holds exactly the messages that were lost
-/// somewhere else. The pasteboard copy that accompanies it is a convenience;
-/// this file is the store, because the next copy overwrites the pasteboard.
+/// somewhere else. This file is the store; the pasteboard is used only when
+/// the write fails, because the next copy overwrites it.
 ///
 /// `OrphanGC` is the named reconciler for the directory: it removes files
 /// older than 30 days under `gcEnabled`.

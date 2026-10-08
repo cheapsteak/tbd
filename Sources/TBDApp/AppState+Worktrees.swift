@@ -125,6 +125,11 @@ extension AppState {
                 // been created, and threw their typed prompt away with the row
                 // still there to receive it.
                 promptTarget?.resolve(.created(wt.id))
+                // The row exists, but `git worktree add` has not run yet; its
+                // failure arrives later as a delta keyed by this ID.
+                if let promptTarget {
+                    creationWatchTargets[wt.id] = promptTarget
+                }
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
                 // flight. A nil result means neither the placeholder nor a
@@ -220,7 +225,7 @@ extension AppState {
         // nothing to compose for, and its modal was never on screen, so no
         // draft exists to save. Presenting it would only flash a sheet that
         // closes itself on appearing.
-        queuedPromptBacklog.removeAll { $0.resolution == .failed }
+        queuedPromptBacklog.removeAll { $0.hasFailed }
         guard promptSheetSlotIsFree, !queuedPromptBacklog.isEmpty else { return }
         let next = queuedPromptBacklog.removeFirst()
         Task { @MainActor in
@@ -243,7 +248,10 @@ extension AppState {
     /// modal is gone by the time any of these answers arrives, so an alert
     /// alone would leave a message that exists nowhere. Every path that ends
     /// without the text parked hands it to `keepUnqueuedFirstMessage`, which
-    /// writes it to a file and puts it on the pasteboard.
+    /// writes it to a file (the pasteboard only if that write fails). Parked
+    /// is not yet safe, either: a creation that fails after this deletes the
+    /// row and its `pending_prompt`, so the text is held in
+    /// `firstMessagesAwaitingCreation` until the row finishes creating.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -251,23 +259,41 @@ extension AppState {
             switch await target.awaitResolution() {
             case .failed:
                 // There is no row to park against. Say so rather than dropping
-                // the prompt silently; the text is still on screen behind the
-                // alert only if the sheet is up, so name what happened.
+                // the prompt silently.
                 logger.error("Queued prompt not sent: worktree creation failed")
                 keepUnqueuedFirstMessage(
-                    trimmed, for: target,
+                    trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
                     "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
+                // Held until the row is seen to finish creating: a later
+                // creation failure deletes the row and the parked text with
+                // it, and this is the copy `handOffFirstMessage` saves. Marked
+                // in flight so a refresh cannot release it mid-RPC.
+                firstMessagesAwaitingCreation[worktreeID] = FirstMessageAwaitingCreation(
+                    text: trimmed, repoID: target.repoID,
+                    worktreeName: target.worktreeName, parkingInFlight: true)
+                let outcome: Result<WorktreeSetPendingPromptResult, Error>
                 do {
-                    let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
-                    if case .refused(let reason) = result {
-                        keepUnqueuedFirstMessage(
-                            trimmed, for: target, "First message was not queued: \(reason)")
-                    }
+                    outcome = .success(try await pendingPromptSetter(worktreeID, trimmed, submit))
                 } catch {
+                    outcome = .failure(error)
+                }
+                // Gone means a creation-failure delta landed during the RPC
+                // and already saved the text and raised the alert.
+                guard firstMessagesAwaitingCreation[worktreeID] != nil else { return }
+                switch outcome {
+                case .success(.refused(let reason)):
+                    firstMessagesAwaitingCreation[worktreeID] = nil
+                    keepUnqueuedFirstMessage(
+                        trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                        "First message was not queued: \(reason)")
+                case .success:
+                    firstMessagesAwaitingCreation[worktreeID]?.parkingInFlight = false
+                case .failure(let error):
+                    firstMessagesAwaitingCreation[worktreeID] = nil
                     logger.error("Failed to queue prompt: \(error, privacy: .public)")
                     keepUnqueuedFirstMessage(
-                        trimmed, for: target,
+                        trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
                         "Failed to queue your first message: \(error.localizedDescription)")
                 }
             }
@@ -275,40 +301,112 @@ extension AppState {
     }
 
     /// Save the draft of a modal that was still open, unsent, when its
-    /// creation failed. Called by `QueuedPromptModal` as it closes itself on
-    /// `.failed`. A blank draft has nothing to keep and raises no alert.
+    /// creation failed. Called by `QueuedPromptModal` as it closes itself.
+    ///
+    /// Runs on the next main-actor turn, so the alert is raised after the
+    /// sheet has gone rather than over it. A blank draft has nothing to keep;
+    /// it still raises the failure alert when the failure came from a delta,
+    /// because `applyWorktreeArchivedDelta` stood its own alert down for this
+    /// sheet.
     func keepUnsentDraftAfterFailedCreation(_ target: QueuedPromptTarget, draft: String) {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        logger.error("Unsent first message kept: worktree creation failed")
-        keepUnqueuedFirstMessage(
-            trimmed, for: target,
-            "Worktree creation failed — your first message was not sent.")
+        let lateFailure = target.failureAfterCreate
+        Task { @MainActor in
+            guard !trimmed.isEmpty else {
+                if let lateFailure { showAlert(lateFailure, isError: true) }
+                return
+            }
+            logger.error("Unsent first message kept: worktree creation failed")
+            keepUnqueuedFirstMessage(
+                trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                lateFailure.map { "\($0) Your first message was not sent." }
+                    ?? "Worktree creation failed — your first message was not sent.")
+        }
+    }
+
+    /// Take over the first message belonging to a row the daemon just
+    /// archived, and report whether its alert now carries the failure (so the
+    /// caller's generic creation-failure alert must stand down).
+    ///
+    /// Every archive releases the row's entries; only a failed creation acts
+    /// on them. A deliberate archive of a `.creating` row leaves its parked
+    /// text where the operator put it — the archive is theirs.
+    ///
+    /// - A message already handed to the daemon is saved to a file here,
+    ///   under one alert that opens with the failure.
+    /// - A composer still open is told; it saves its own draft and raises that
+    ///   alert as it closes.
+    /// - A composer still queued behind another sheet was never on screen, so
+    ///   it is dropped and the generic alert stands.
+    func handOffFirstMessage(
+        forArchivedWorktree worktreeID: UUID, creationFailed: Bool, failureMessage: String?
+    ) -> Bool {
+        let target = creationWatchTargets.removeValue(forKey: worktreeID)
+        let parked = firstMessagesAwaitingCreation.removeValue(forKey: worktreeID)
+        guard creationFailed else { return false }
+        let failure = failureMessage ?? "Worktree creation failed."
+        if let parked {
+            logger.error("Parked first message kept: worktree creation failed")
+            keepUnqueuedFirstMessage(
+                parked.text, repoID: parked.repoID, worktreeName: parked.worktreeName,
+                "\(failure) Your first message was not sent.")
+            return true
+        }
+        guard let target else { return false }
+        if queuedPromptTarget === target {
+            target.failAfterCreate(reason: failure)
+            return true
+        }
+        target.failAfterCreate(reason: failure)
+        queuedPromptBacklog.removeAll { $0 === target }
+        return false
+    }
+
+    /// Release the creation watches for rows that a refresh shows have
+    /// finished creating — anything listed with a status other than
+    /// `.creating`. With `complete` (an unscoped refresh, which lists every
+    /// unarchived row) a watched row missing from the list is gone too, so
+    /// its entries go: a creation-failure delta missed while disconnected
+    /// would otherwise pin them forever. A message whose parking RPC is still
+    /// in flight is never released here; `submitQueuedPrompt` settles it.
+    func releaseCreationWatches(observing worktrees: [Worktree], complete: Bool) {
+        guard !creationWatchTargets.isEmpty || !firstMessagesAwaitingCreation.isEmpty else { return }
+        let status = Dictionary(worktrees.map { ($0.id, $0.status) }, uniquingKeysWith: { first, _ in first })
+        func finished(_ id: UUID) -> Bool {
+            guard let current = status[id] else { return complete }
+            return current != .creating
+        }
+        for id in creationWatchTargets.keys where finished(id) {
+            creationWatchTargets[id] = nil
+        }
+        for (id, message) in firstMessagesAwaitingCreation where !message.parkingInFlight && finished(id) {
+            firstMessagesAwaitingCreation[id] = nil
+        }
     }
 
     /// Hand a composed first message back to the operator after it failed to
     /// reach its worktree, and tell them where it went.
     ///
     /// The file is the store (`UnsentPromptFile`): it survives the alert, the
-    /// next copy, and a restart. The pasteboard copy rides along because it is
-    /// where the operator would paste from anyway. If the file cannot be
-    /// written the pasteboard is all that is left, and the alert says so
-    /// rather than naming a file that does not exist. `reason` is a sentence —
-    /// the alert appends where the text is, so the two facts arrive together
-    /// and neither can be shown without the other.
-    private func keepUnqueuedFirstMessage(_ text: String, for target: QueuedPromptTarget, _ reason: String) {
-        pasteboardWriter(text)
+    /// next copy, and a restart, and the alert names it with Copy Path and
+    /// Reveal in Finder. The pasteboard is the fallback only when the file
+    /// cannot be written, and the alert then says so rather than naming a file
+    /// that does not exist. `reason` is a sentence — the alert appends where
+    /// the text is, so the two facts arrive together and neither can be shown
+    /// without the other.
+    private func keepUnqueuedFirstMessage(
+        _ text: String, repoID: UUID, worktreeName: String, _ reason: String
+    ) {
         do {
-            let path = try unsentPromptWriter(target.repoID, target.worktreeName, text)
+            let path = try unsentPromptWriter(repoID, worktreeName, text)
             let shown = (path as NSString).abbreviatingWithTildeInPath
-            showAlert(
-                "\(reason) It was saved to \(shown) and copied to your clipboard.",
-                isError: true, revealPath: path)
+            showAlert("\(reason) It was saved to \(shown).", isError: true, revealPath: path)
         } catch {
             logger.error("Could not save unsent first message: \(error.localizedDescription, privacy: .public)")
+            pasteboardWriter(text)
             showAlert(
                 "\(reason) It could not be saved to a file (\(error.localizedDescription)), "
-                    + "so it has been copied to your clipboard only.",
+                    + "so it has been copied to your clipboard instead.",
                 isError: true)
         }
     }
@@ -1670,4 +1768,17 @@ extension AppState {
     func closeTerminalTab() {
         closeFocusedTab()
     }
+}
+
+/// A first message handed to the daemon for a row that may still fail to
+/// finish creating — the copy `AppState.handOffFirstMessage` saves when that
+/// failure deletes the row and its `pending_prompt` with it.
+struct FirstMessageAwaitingCreation: Equatable {
+    let text: String
+    let repoID: UUID
+    let worktreeName: String
+    /// True while `worktree.setPendingPrompt` is outstanding. A refresh never
+    /// releases an entry in this state, so the RPC's own outcome can tell
+    /// "a failure delta took this" (entry gone) from "still mine".
+    var parkingInFlight: Bool
 }

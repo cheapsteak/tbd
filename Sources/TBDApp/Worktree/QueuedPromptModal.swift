@@ -35,7 +35,25 @@ final class QueuedPromptTarget: ObservableObject, Identifiable {
     let worktreeName: String
 
     @Published private(set) var resolution: Resolution?
+    /// Set when creation fails AFTER the daemon row existed — the common
+    /// case, since `git worktree add` runs after `worktree.create` returns and
+    /// its failure arrives as a `.worktreeArchived(creationFailed: true)`
+    /// delta. `resolution` is set-once and already `.created` by then, so this
+    /// is a separate fact. Carries the failure sentence the alert should open
+    /// with, which is how the generic failure alert and the draft's alert
+    /// become one.
+    @Published private(set) var failureAfterCreate: String?
     private var waiters: [CheckedContinuation<Resolution, Never>] = []
+
+    /// Whether creation failed, before or after the daemon row existed.
+    var hasFailed: Bool { resolution == .failed || failureAfterCreate != nil }
+
+    /// Record that creation failed after the row existed. Set-once, like
+    /// `resolve`.
+    func failAfterCreate(reason: String) {
+        guard failureAfterCreate == nil else { return }
+        failureAfterCreate = reason
+    }
 
     init(placeholderID: UUID, repoID: UUID, worktreeName: String) {
         self.id = placeholderID
@@ -133,7 +151,8 @@ enum QueuedPromptComposer {
 /// running with an idle agent, exactly as before the feature existed. Follows
 /// the sheet convention of `ScratchInstructionsView`.
 ///
-/// If creation fails while the sheet is still up, the sheet closes itself:
+/// If creation fails while the sheet is still up — before or after the daemon
+/// row existed — the sheet closes itself:
 /// there is no worktree left to compose for. Any unsent text goes to
 /// `AppState.keepUnsentDraftAfterFailedCreation` first, which writes it to a
 /// file and raises the alert naming it — closing rather than staying open
@@ -208,16 +227,23 @@ struct QueuedPromptModal: View {
         }
         .padding(20)
         .frame(width: 480)
-        // `.task` rather than `.onChange(of: target.resolution)`: a modal
-        // presented after its creation already resolved sees no change, and
-        // must still close. Cancelled when the sheet goes away, so a submit or
-        // Cancel that closed it first hands nothing over twice.
-        .task {
-            guard await target.awaitResolution() == .failed,
-                  !Task.isCancelled, !submitted else { return }
+        // `initial: true`: a modal presented after its creation already
+        // failed sees no change, and must still hand off and close.
+        .onChange(of: target.hasFailed, initial: true) { _, failed in
+            guard Self.shouldHandOffDraft(creationFailed: failed, submitted: submitted) else { return }
             appState.keepUnsentDraftAfterFailedCreation(target, draft: draft)
             dismiss()
         }
+    }
+
+    /// Whether the sheet hands its draft to `AppState` and closes. Only on a
+    /// failed creation, and never after a submit: from then on
+    /// `submitQueuedPrompt` owns every failure, and handing off here too would
+    /// save the same message twice when a failure lands between the submit and
+    /// the sheet's teardown. A blank draft is still handed off — `AppState`
+    /// decides it has nothing to save, and may still owe the failure alert.
+    nonisolated static func shouldHandOffDraft(creationFailed: Bool, submitted: Bool) -> Bool {
+        creationFailed && !submitted
     }
 
     private func submit(_ text: String) {
