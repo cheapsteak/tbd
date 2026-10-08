@@ -21,6 +21,12 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
         a second. Only a comment the bot wrote is ever edited.
     comment --repo R --issue N --body F
         posts one issue comment.
+    promote-facts --repo R --branch B --sha S --conclusion C --event E --app-login L --out F
+        reads what promotion is decided on: the open PR on B, the commit
+        statuses on S, and the PR's changed files. Reads only.
+    promote-decide --facts F
+        pure: prints `PROMOTE`, `PROMOTE label` (promote, adding the weak
+        label first), or `SKIP <reason>`.
 
 ONLY THE BOT'S OWN COMMENTS ARE STATE. The attempt comment is found by its
 sentinel AND its author (`flake_lib.trusted_author`); a forged sentinel is left
@@ -300,6 +306,99 @@ def ensure_weak_label(repo: str, pr: int) -> None:
     ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{pr}/labels", payload={"labels": [WEAK_LABEL]})
 
 
+# --- promotion (spec §6.5, §7) -------------------------------------------------------------
+
+PROMOTE_BRANCH = re.compile(r"flakefix/issue-[0-9]+")
+PROMOTE_EVENT = "pull_request"
+# GitHub's pull-request files endpoint lists at most this many files.
+PR_FILES_LISTED_MAX = 3000
+WEAK_CLAUSE = "weak evidence"
+
+
+def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str, app_login: str) -> dict:
+    """Everything promote-decide reads, from GitHub. A failed read raises, so
+    the PR stays a draft (fail closed)."""
+    owner = repo.split("/", 1)[0]
+    raw = ledger.gh_json("api", f"repos/{repo}/pulls?head={owner}:{branch}&state=open&per_page=100")
+    if not isinstance(raw, list):
+        raise Malformed("the pulls listing is not a list")
+    prs = [{
+        "number": int(p["number"]),
+        "state": p.get("state"),
+        "draft": p.get("draft"),
+        "head_sha": (p.get("head") or {}).get("sha"),
+        "head_ref": (p.get("head") or {}).get("ref"),
+        "head_repo": ((p.get("head") or {}).get("repo") or {}).get("full_name"),
+        "author": (p.get("user") or {}).get("login"),
+        "author_type": (p.get("user") or {}).get("type"),
+        "labels": [label.get("name") for label in p.get("labels") or []],
+        "changed_files": None,
+    } for p in raw]
+    facts = {"repo": repo, "branch": branch, "app_login": app_login, "run_conclusion": conclusion,
+             "run_event": event, "run_head_sha": sha, "prs": prs, "statuses": [], "files": []}
+    if len(prs) != 1:
+        return facts
+    number = prs[0]["number"]
+    # The list endpoint omits changed_files; the single-PR one carries it.
+    one = ledger.gh_json("api", f"repos/{repo}/pulls/{number}")
+    prs[0]["changed_files"] = one.get("changed_files") if isinstance(one, dict) else None
+    facts["statuses"] = ledger.gh_lines(
+        "api", "--paginate", f"repos/{repo}/commits/{sha}/statuses?per_page=100", "--jq",
+        ".[] | {context, state, description, creator: .creator.login, creator_type: .creator.type, created_at, id}")
+    facts["files"] = ledger.gh_lines(
+        "api", "--paginate", f"repos/{repo}/pulls/{number}/files?per_page=100", "--jq",
+        ".[] | {filename, previous_filename}")
+    return facts
+
+
+def promote_decision(facts: dict) -> str:
+    """Spec §7: ready only when the PR's own CI passed on the head the verifier
+    passed. Every condition is required; the first that fails names the skip."""
+    try:
+        app = facts["app_login"]
+        if facts["run_event"] != PROMOTE_EVENT:
+            return f"SKIP the run was a {facts['run_event']} run, not the PR's own CI"
+        if facts["run_conclusion"] != "success":
+            return f"SKIP the PR's CI concluded {facts['run_conclusion']}"
+        if not PROMOTE_BRANCH.fullmatch(facts["branch"] or ""):
+            return "SKIP not a flakefix/issue-<N> branch"
+        prs = facts["prs"]
+        if len(prs) != 1:
+            return f"SKIP {len(prs)} open PRs use the branch, not one"
+        pr = prs[0]
+        if pr["state"] != "open":
+            return "SKIP the PR is not open"
+        if pr["draft"] is not True:
+            return "SKIP the PR is not a draft"
+        if pr["head_ref"] != facts["branch"]:
+            return "SKIP the PR's head is another branch"
+        if pr["head_repo"] != facts["repo"]:
+            return "SKIP the PR's head is in another repository"
+        if not (pr["author"] == app and pr["author_type"] == fl.BOT_USER_TYPE):
+            return f"SKIP the PR was opened by {pr['author']}, not the bot"
+        if pr["head_sha"] != facts["run_head_sha"]:
+            return "SKIP the PR's head moved after the run (a push the verifier never judged)"
+        mine = [s for s in facts["statuses"]
+                if s["context"] == STATUS_CONTEXT and s["creator"] == app and s["creator_type"] == fl.BOT_USER_TYPE]
+        if not mine:
+            return f"SKIP no {STATUS_CONTEXT} status from the bot on the head"
+        newest = max(mine, key=lambda s: (s["created_at"], int(s["id"])))
+        if newest["state"] != "success":
+            return f"SKIP {STATUS_CONTEXT} is {newest['state']}"
+        listed = facts["files"]
+        if not isinstance(pr["changed_files"], int) or pr["changed_files"] != len(listed) \
+                or len(listed) >= PR_FILES_LISTED_MAX:
+            return "SKIP the PR's changed files could not all be listed"
+        protected = facts["protected_touched"]
+        if protected:
+            return "SKIP the PR touches protected files: " + ", ".join(protected)
+        if WEAK_CLAUSE in (newest.get("description") or "") and WEAK_LABEL not in pr["labels"]:
+            return "PROMOTE label"
+        return "PROMOTE"
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise Malformed(f"malformed promotion facts: {error!r}") from error
+
+
 # --- CLI -------------------------------------------------------------------------------------
 
 
@@ -339,6 +438,16 @@ def main(argv: list[str]) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--body", type=Path, required=True)
+    p = sub.add_parser("promote-facts")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--branch", required=True)
+    p.add_argument("--sha", required=True)
+    p.add_argument("--conclusion", required=True)
+    p.add_argument("--event", required=True)
+    p.add_argument("--app-login", required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("promote-decide")
+    p.add_argument("--facts", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "body":
@@ -354,6 +463,11 @@ def main(argv: list[str]) -> int:
                                               args.session_failed)) + "\n")
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
+        elif args.command == "promote-facts":
+            facts = promote_facts(args.repo, args.branch, args.sha, args.conclusion, args.event, args.app_login)
+            args.out.write_text(json.dumps(facts) + "\n")
+        elif args.command == "promote-decide":
+            print(promote_decision(read_json(args.facts)))
         elif args.command == "weak-label":
             ensure_weak_label(args.repo, args.pr)
         else:

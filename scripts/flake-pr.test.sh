@@ -49,7 +49,7 @@ cd "$SCRATCH" || exit 2
 mutant_of() {
   local expr="$1" file="$2" dir name
   dir="$(mktmpd)"
-  cp "$HERE/flake_lib.py" "$HERE/flake-ledger.py" "$PR_SH" "$PR_PY" "$dir/"
+  cp "$HERE/flake_lib.py" "$HERE/flake-ledger.py" "$HERE/flake-verify.sh" "$PR_SH" "$PR_PY" "$dir/"
   name="$(basename "$file")"
   sed -E "$expr" "$file" > "$dir/$name"
   if cmp -s "$file" "$dir/$name"; then
@@ -404,11 +404,14 @@ test_an_attempt_comment_by_another_author_is_not_edited() {
 # changes a path matching PATH_REGEX (every push without one).
 reject_pushes() {
   local d="$1" msg="$2" re="${3:-.}"
+  # The message goes through a file: GitHub's text holds backticks, which the
+  # unquoted heredoc below would run as commands.
+  printf '%s\n' "$msg" > "$d/reject-message"
   cat > "$d/origin.git/hooks/pre-receive" <<EOF
 #!/usr/bin/env bash
 while read -r old new ref; do
   if git diff --name-only $(cat "$d/pick/base_sha") "\$new" | grep -qE '$re'; then
-    echo "$msg" >&2
+    cat "$d/reject-message" >&2
     exit 1
   fi
 done
@@ -433,6 +436,24 @@ test_a_rejected_push_opens_no_pr_and_says_why() {
   assert_contains "and says it was not a workflow change" "$(logged "$d")" "for a reason other than a workflow change"
   assert_lacks "with no PR" "$(logged "$d")" "pr create"
   assert_eq "recorded push-refused" "push-refused" "$(recorded "$d" | jq -r .outcome)"
+}
+
+# A candidate that touches .github/workflows/ but is refused for another
+# reason (here a hook, as a lease or protection rule would) is not a workflow
+# refusal: only GitHub's permission text says that.
+test_a_workflow_candidate_refused_for_another_reason_goes_red() {
+  local d rc mutant
+  d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  reject_pushes "$d" 'pre-receive hook declined: stale info'
+  rc="$(publish "$d")"
+  assert_eq "the run goes red" "1" "$rc"
+  assert_contains "and says it was not a workflow change" "$(logged "$d")" "for a reason other than a workflow change"
+  assert_lacks "it does not blame the workflow permission" "$(logged "$d")" "appears to need a workflow change"
+  assert_eq "recorded push-refused" "push-refused" "$(recorded "$d" | jq -r .outcome)"
+  mutant="$(mutant_of 's#if grep -qiE "\$WORKFLOW_REFUSAL" "\$err"; then#if grep -qiE "$WORKFLOW_REFUSAL" "$err" || git diff --name-only "$base" "$head" | grep -q "^\\.github/workflows/"; then#' "$PR_SH")"
+  d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  reject_pushes "$d" 'pre-receive hook declined: stale info'
+  assert_eq "mutation: classifying on the diff turns it green" "0" "$(publish "$d" "$mutant")"
 }
 
 test_a_stale_branch_is_replaced_deliberately() {
@@ -683,8 +704,26 @@ ended_before_verify() {
 }
 test_session_processes_are_ended_before_each_verify() { check "processes end, from a checked private copy, between each session and its verify" ended_before_verify 'cp "$T/procs-before-2" "$own/procs-before"' 'true'; }
 
-publish_group() { job_block "$1" publish | grep -q 'group: flake-fixer-publish'; }
-test_publish_has_its_own_concurrency_group() { check "publish queues in its own group, where no ledger run can cancel it" publish_group 'group: flake-fixer-publish' 'group: flake-ledger-state'; }
+# The attempt lock: the whole run, from pick to publish, for every trigger that
+# can start `fix`, never cancelling a run in progress; no job-level group on
+# fix or publish, where GitHub could cancel a pending publish.
+LOCK_EXPR="group: \${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'fix')) && 'flake-fixer-attempt' || format('flake-fixer-run-{0}', github.run_id) }}"
+attempt_lock() {
+  local top
+  top="$(awk '/^concurrency:$/{p=1; print; next} p && /^[^ ]/{exit} p' "$1")"
+  grep -qF "  $LOCK_EXPR" <<< "$top" &&
+    grep -q '^  cancel-in-progress: false$' <<< "$top" &&
+    ! job_block "$1" fix | grep -q 'concurrency:' &&
+    ! job_block "$1" publish | grep -q 'concurrency:'
+}
+test_one_attempt_holds_the_lock_from_pick_to_publish() {
+  check "the run-level attempt lock covers fix and publish" attempt_lock "$LOCK_EXPR" "group: flake-fixer-\${{ github.run_id }}"
+  local c
+  c="$(mutated $'  cancel-in-progress: false\n\njobs:' $'  cancel-in-progress: true\n\njobs:')"
+  if ( set +o pipefail; attempt_lock "$c" ); then echo "FAIL - mutation: a cancelling lock passes"; FAIL=1; else echo "ok   - mutation: a cancelling lock fails"; fi
+  c="$(mutated '    # No job-level concurrency group: the run already holds' $'    concurrency:\n      group: flake-fixer-publish\n    # No job-level concurrency group: the run already holds')"
+  if ( set +o pipefail; attempt_lock "$c" ); then echo "FAIL - mutation: a publish job group passes"; FAIL=1; else echo "ok   - mutation: a publish job group fails"; fi
+}
 
 publish_always() {
   local job open
@@ -1089,6 +1128,261 @@ test_publish_discards_an_artifact_that_is_not_what_fix_packaged() {
   assert_eq "both sides sum the same way" "$pkg" "$pub"
   job="$(job_block "$WORKFLOW" publish)"
   assert_eq "and checks before it pushes" "0" "$(awk '/name: Check the candidate against/{c=NR} /name: Push, open the draft PR/{p=NR} END{print !(c && p && c < p)}' <<< "$job")"
+}
+
+# ============================================================================
+# the promote step (spec §6.5, §7), against a stub gh
+# ============================================================================
+
+PSHA=1111111111111111111111111111111111111111
+PBRANCH=flakefix/issue-10
+
+# pworld [JQ_PR] [JQ_STATUSES] [JQ_FILES] -> D, a stub gh answering for one
+# PR on PBRANCH whose every promotion condition holds; each JQ edits one part.
+# The stub applies no --jq, so statuses and files are routed already projected.
+pworld() {
+  local d; d="$(mktmpd)"
+  stub_gh "$d"
+  jq -n --arg sha "$PSHA" --arg ref "$PBRANCH" --arg repo "$REPO" --arg bot "$BOT" \
+    '{number: 77, state: "open", draft: true, head: {sha: $sha, ref: $ref, repo: {full_name: $repo}},
+      user: {login: $bot, type: "Bot"}, labels: []}' | jq "${1:-.}" | jq -s . > "$d/pulls.json"
+  jq -n --arg bot "$BOT" '[{context: "flakefix/stress", state: "success", description: "no failure observed in 59 runs",
+      creator: $bot, creator_type: "Bot", created_at: "2026-10-08T06:00:00Z", id: 1}]' | jq "${2:-.}" | jq -c '.[]' > "$d/statuses"
+  jq -n '[{filename: "Tests/TBDSharedTests/HolderLockTests.swift", previous_filename: null}]' | jq "${3:-.}" | jq -c '.[]' > "$d/files"
+  jq -n --argjson n "$(wc -l < "$d/files" | tr -d ' ')" '{changed_files: $n}' > "$d/one.json"
+  jq -n --arg d "$d" '[
+    {match: "^api repos/cheapsteak/tbd/pulls\\?head=cheapsteak:flakefix/issue-10&state=open", file: ($d + "/pulls.json")},
+    {match: "^api repos/cheapsteak/tbd/pulls/77$", file: ($d + "/one.json")},
+    {match: "commits/1111111111111111111111111111111111111111/statuses", file: ($d + "/statuses")},
+    {match: "pulls/77/files", file: ($d + "/files")},
+    {match: "labels\\?per_page", out: ""},
+    {match: "-X POST", out: "{}"},
+    {match: "^pr ready 77 --repo cheapsteak/tbd$", out: ""}
+  ]' > "$d/routes.json"
+  printf '%s' "$d"
+}
+
+# promote D [DIR] [CONCLUSION] [EVENT] -> exit code; output in D/out
+promote() {
+  local d="$1" dir="${2:-$HERE}" rc=0
+  (cd "$d" && GH_TOKEN=job-token APP_TOKEN=app-token FLAKE_GH_CMD="$d/gh" \
+    bash "$dir/flake-pr.sh" promote --repo "$REPO" --branch "$PBRANCH" --sha "$PSHA" \
+      --conclusion "${3:-success}" --event "${4:-pull_request}" --app-login "$BOT") > "$d/out" 2>&1 || rc=$?
+  echo "$rc"
+}
+promoted() { grep -q '^app-token pr ready 77' "$1/log" && echo yes || echo no; }
+
+# skips NAME MUTATION_SED [JQ_PR] [JQ_STATUSES] [JQ_FILES] [CONCLUSION] [EVENT]:
+# the world as edited is not promoted, and with the guard removed it is.
+skips() {
+  local name="$1" expr="$2" d mutant
+  d="$(pworld "${3:-.}" "${4:-.}" "${5:-.}")"
+  assert_eq "$name: exit 0" "0" "$(promote "$d" "$HERE" "${6:-success}" "${7:-pull_request}")"
+  assert_eq "$name: stays a draft" "no" "$(promoted "$d")"
+  assert_contains "$name: says why" "$(cat "$d/out")" "SKIP"
+  mutant="$(mutant_of "$expr" "$PR_PY")"
+  d="$(pworld "${3:-.}" "${4:-.}" "${5:-.}")"
+  promote "$d" "$mutant" "${6:-success}" "${7:-pull_request}" > /dev/null
+  assert_eq "mutation: $name is promoted without its guard" "yes" "$(promoted "$d")"
+}
+
+test_all_conditions_hold_promotes() {
+  local d; d="$(pworld)"
+  assert_eq "exit 0" "0" "$(promote "$d")"
+  assert_eq "marked ready" "yes" "$(promoted "$d")"
+  assert_lacks "no label write for strong evidence" "$(logged "$d")" "-X POST"
+}
+
+test_promote_uses_the_app_token_for_ready() {
+  local d mutant; d="$(pworld)"
+  promote "$d" > /dev/null
+  assert_eq "reads use the job token" "" "$(grep -v '^  STDIN' "$d/log" | grep -v ' pr ready ' | grep -v '^job-token ')"
+  assert_contains "the ready uses the App token" "$(logged "$d")" "app-token pr ready 77 --repo $REPO"
+  mutant="$(mutant_of 's/ghw pr ready/"$GH_CMD" pr ready/' "$PR_SH")"
+  d="$(pworld)"; promote "$d" "$mutant" > /dev/null
+  assert_contains "mutation: without ghw the job token raises the ready" "$(logged "$d")" "job-token pr ready 77"
+}
+
+test_a_red_run_does_not_promote() {
+  skips "a red run" 's/if facts\["run_conclusion"\] != "success":/if False:/' . . . failure
+}
+
+test_a_run_that_is_not_the_prs_own_ci_does_not_promote() {
+  skips "a dispatched run" 's/if facts\["run_event"\] != PROMOTE_EVENT:/if False:/' . . . success workflow_dispatch
+}
+
+test_a_missing_stress_status_does_not_promote() {
+  skips "no stress status, only another context" 's/s\["context"\] == STATUS_CONTEXT and //' . '.[0].context = "ci/other"'
+}
+
+test_a_failure_stress_status_does_not_promote() {
+  skips "a failure status" 's/if newest\["state"\] != "success":/if False:/' . '.[0].state = "failure"'
+}
+
+test_a_status_set_by_someone_else_does_not_count() {
+  skips "a success status by a human" 's/s\["creator"\] == app and s\["creator_type"\] == fl.BOT_USER_TYPE/True/' . \
+    '.[0].creator = "mallory" | .[0].creator_type = "User"'
+}
+
+test_a_newer_failure_status_overrides_an_older_success() {
+  # GitHub lists newest first; the older success is listed first here, so a
+  # reader that took the first entry would also be wrong.
+  skips "a newer failure" 's/newest = max\(mine/newest = min(mine/' . \
+    '[.[0], (.[0] | .state = "failure" | .created_at = "2026-10-08T07:00:00Z" | .id = 2)]'
+}
+
+test_a_head_that_moved_after_verification_does_not_promote() {
+  skips "a moved head" 's/if pr\["head_sha"\] != facts\["run_head_sha"\]:/if False:/' '.head.sha = "2222222222222222222222222222222222222222"'
+}
+
+test_a_non_draft_or_human_authored_pr_is_left_alone() {
+  skips "a PR already ready" 's/if pr\["draft"\] is not True:/if False:/' '.draft = false'
+  skips "a human-authored PR" 's/if not \(pr\["author"\] == app and pr\["author_type"\] == fl.BOT_USER_TYPE\):/if False:/' \
+    '.user = {login: "alice", type: "User"}'
+  skips "a PR from another repository" 's/if pr\["head_repo"\] != facts\["repo"\]:/if False:/' '.head.repo.full_name = "mallory/tbd"'
+}
+
+test_a_pr_touching_a_protected_file_does_not_promote() {
+  skips "a protected file" 's/if protected:/if False:/' . . '. + [{filename: "scripts/test.sh", previous_filename: null}]'
+  skips "a protected file renamed away" 's/if protected:/if False:/' . . \
+    '[{filename: "scripts/renamed.sh", previous_filename: "scripts/flake-verify.sh"}]'
+}
+
+test_a_failed_read_leaves_the_pr_a_draft() {
+  local d; d="$(pworld)"
+  jq '[.[] | select(.match | test("statuses") | not)]' "$d/routes.json" > "$d/r" && mv "$d/r" "$d/routes.json"
+  assert_eq "exit 2" "2" "$(promote "$d")"
+  assert_eq "stays a draft" "no" "$(promoted "$d")"
+}
+
+# A protected list that does not load must fail the call, not match nothing.
+test_a_protected_list_that_does_not_load_fails_closed() {
+  local d dir mutant protected='. + [{filename: "scripts/test.sh", previous_filename: null}]'
+  dir="$(mktmpd)"
+  cp "$HERE/flake_lib.py" "$HERE/flake-ledger.py" "$PR_SH" "$PR_PY" "$dir/"
+  : > "$dir/flake-verify.sh"
+  d="$(pworld . . "$protected")"
+  assert_eq "an empty verifier script exits 2" "2" "$(promote "$d" "$dir")"
+  assert_eq "and stays a draft" "no" "$(promoted "$d")"
+  mutant="$(mutant_of 's/declare -F is_protected > \/dev\/null && \[\[ \$\{#PROTECTED_PATTERNS\[@\]\} -gt 0 \]\] \|\| exit 2/true/' "$PR_SH")"
+  : > "$mutant/flake-verify.sh"
+  d="$(pworld . . "$protected")"
+  promote "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the load check a protected file is promoted" "yes" "$(promoted "$d")"
+}
+
+test_files_that_could_not_all_be_listed_do_not_promote() {
+  local d mutant
+  d="$(pworld)"; echo '{"changed_files": 3001}' > "$d/one.json"
+  assert_eq "exit 0" "0" "$(promote "$d")"
+  assert_eq "stays a draft" "no" "$(promoted "$d")"
+  mutant="$(mutant_of 's/if not isinstance\(pr\["changed_files"\], int\) or pr\["changed_files"\] != len\(listed\) \\/if False \\/' "$PR_PY")"
+  d="$(pworld)"; echo '{"changed_files": 3001}' > "$d/one.json"
+  promote "$d" "$mutant" > /dev/null
+  assert_eq "mutation: an incomplete listing is promoted without the check" "yes" "$(promoted "$d")"
+}
+
+test_a_weak_evidence_clean_pr_still_promotes() {
+  local d mutant weak='.[0].description = "no failure observed in 5 runs; weak evidence: a no-op would pass 77.4% of the time"'
+  d="$(pworld '.labels = [{name: "flakefix-weak-evidence"}]' "$weak")"
+  promote "$d" > /dev/null
+  assert_eq "weak and labelled: promoted" "yes" "$(promoted "$d")"
+  assert_lacks "with no second label write" "$(logged "$d")" "-X POST"
+  d="$(pworld . "$weak")"
+  promote "$d" > /dev/null
+  assert_eq "weak and unlabelled: promoted" "yes" "$(promoted "$d")"
+  assert_contains "after the App adds the label" "$(logged "$d")" "app-token api -X POST repos/$REPO/issues/77/labels"
+  assert_eq "the label goes on before the ready" "1" "$(awk '/issues\/77\/labels/{l=NR} / pr ready 77/{r=NR} END{print (l && r && l < r) ? 1 : 0}' "$d/log")"
+  mutant="$(mutant_of 's/if WEAK_CLAUSE in/if False and WEAK_CLAUSE in/' "$PR_PY")"
+  d="$(pworld . "$weak")"; promote "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: without the weak check no label is added" "$(logged "$d")" "issues/77/labels"
+}
+
+test_promote_writes_no_ledger_or_attempt_state() {
+  local d; d="$(pworld)"
+  promote "$d" > /dev/null
+  assert_lacks "no comment read or written" "$(logged "$d")" "comments"
+}
+
+test_promote_decide_is_pure_and_rejects_malformed_facts() {
+  local d; d="$(mktmpd)"
+  echo '{"run_event": "pull_request"}' > "$d/f.json"
+  local rc=0; FLAKE_GH_CMD=/nonexistent bash "$PR_SH" promote-decide --facts "$d/f.json" > /dev/null 2>&1 || rc=$?
+  assert_eq "malformed facts exit 2" "2" "$rc"
+}
+
+# --- the promote job's structure ----------------------------------------------
+
+promote_gated() {
+  local job c
+  job="$(job_block "$1" promote | awk '/^    if: >-$/{p=1; next} p && /^    [a-z]/{exit} p')"
+  for c in "vars.FLAKE_FIXER_ENABLED == 'true'" "github.repository == 'cheapsteak/tbd'" "github.event_name == 'workflow_run'" \
+      "github.event.workflow_run.name == 'Test'" "github.event.workflow_run.path == '.github/workflows/test.yml'" \
+      "github.event.workflow_run.event == 'pull_request'" \
+      "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
+      "github.event.workflow_run.head_repository.full_name == github.repository"; do
+    grep -qF "$c" <<< "$job" || return 1
+  done
+  grep -q '^    workflows: \[Nightly, Test\]$' "$1"
+}
+test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
+  check "promote's if names the flag, the workflow, the PR event, the prefix and the repository" promote_gated \
+    "      github.event.workflow_run.head_repository.full_name == github.repository" "      true"
+  local c
+  c="$(mutated '      vars.FLAKE_FIXER_ENABLED == '"'true'"' &&
+      github.repository' '      github.repository')"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: an unflagged promote passes"; FAIL=1; else echo "ok   - mutation: an unflagged promote fails"; fi
+  c="$(mutated 'workflows: [Nightly, Test]' 'workflows: [Nightly]')"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: no Test trigger passes"; FAIL=1; else echo "ok   - mutation: no Test trigger fails"; fi
+}
+
+# No `run:` block in the file names the branch (or any workflow_run text) as an
+# expression: it reaches scripts through env.
+branch_through_env() {
+  ! awk '
+    /^ *run: \|$/ { match($0, /^ */); ind = RLENGTH; inrun = 1; next }
+    /^ *run: / { if (index($0, "github.event.workflow_run.head_branch")) bad = 1 }
+    inrun { match($0, /^ */); if (RLENGTH <= ind && $0 !~ /^ *$/) inrun = 0 }
+    inrun && index($0, "github.event.workflow_run.head_branch") { bad = 1 }
+    END { exit !bad }' "$1"
+}
+test_promote_passes_the_branch_through_env_not_interpolation() {
+  check "the branch never appears inside run:" branch_through_env \
+    'bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH"' \
+    'bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "${{ github.event.workflow_run.head_branch }}"'
+}
+
+test_promote_checkout_drops_credentials() {
+  local job
+  job="$(job_block "$WORKFLOW" promote)"
+  assert_contains "promote checks out main" "$job" "ref: main"
+  assert_eq "promote's checkout drops credentials" "1" "$(grep -A4 'uses: actions/checkout' <<< "$job" | grep -c 'persist-credentials: false')"
+  local c; c="$(mktmpd)/wf.yml"
+  awk '/^  promote:$/{p=1} p && /persist-credentials: false/{sub(/false/, "true")} {print}' "$WORKFLOW" > "$c"
+  assert_eq "mutation: a credentialed promote checkout is caught" "0" "$(job_block "$c" promote | grep -A4 'uses: actions/checkout' | grep -c 'persist-credentials: false')"
+}
+
+promote_tokens() {
+  local job perms
+  job="$(job_block "$1" promote)"
+  perms="$(awk '/^    permissions:/{p=1; next} p && /^    [a-z]/{exit} p' <<< "$job")"
+  [[ -n "$perms" ]] && ! grep -qE 'write|id-token' <<< "$perms" &&
+    step "$1" promote "Check the App token's bot login" | grep -q 'scripts/flake_lib.py check-app-slug' &&
+    step "$1" promote "Promote if verified" | grep -q 'APP_TOKEN: ${{ steps.app-token.outputs.token }}'
+}
+test_promote_reads_with_the_job_token_and_writes_with_the_app() {
+  check "promote's job token only reads, and the App's login is checked" promote_tokens \
+    $'      pull-requests: read\n      statuses: read\n    steps:' $'      pull-requests: write\n      statuses: read\n    steps:'
+}
+
+ledger_nightly_only() {
+  job_block "$1" ledger | awk '/^    if: >-$/{p=1; next} p && /^    [a-z]/{exit} p' |
+    grep -qF "(github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Nightly')"
+}
+test_the_ledger_job_ignores_test_completions() {
+  check "the ledger job runs after Nightly, not Test" ledger_nightly_only \
+    "(github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Nightly')" \
+    "(github.event_name == 'workflow_run')"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
