@@ -113,8 +113,12 @@ def iso(moment: datetime) -> str:
 
 
 def eligible_run(run: dict, repo: str) -> bool:
-    """Same-repository runs only, and none on the bot's own branches."""
+    """Same-repository runs only, and none on the bot's own branches. A nightly
+    counts only on `main`: one dispatched on a branch tests unmerged code, and a
+    failure there may be a real regression rather than a flake."""
     if run.get("head_repo") != repo:
+        return False
+    if run.get("workflow") == "nightly" and run.get("head_branch") != "main":
         return False
     return not (run.get("head_branch") or "").startswith(FLAKEFIX_PREFIX)
 
@@ -178,13 +182,13 @@ def _artifact_dir(work: Path, artifact: dict) -> Path:
     return path
 
 
-def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tuple[str, int | None]], targets: dict[str, int]) -> list[fl.Failure]:
+def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tuple[str, int | None]], targets: dict[str, int]) -> list[tuple[str, fl.Failure]]:
     """Every failure one eligible run contributes. Also records, in `files`,
     each test's source file from its retry-metrics records (any outcome), which
     is how an inventory row is matched to a test (spec §4.4)."""
     starts = {a["attempt"]: a["started_at"] for a in run["attempts"]}
     erased = rerun_erased(run)
-    found: list[fl.Failure] = []
+    found: list[tuple[str, fl.Failure]] = []
     for artifact in needed_artifacts(run):
         attempt = attempt_for_artifact(run["attempts"], artifact["created_at"])
         if attempt is None:
@@ -204,9 +208,10 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
                         files.setdefault(test_id, (record["file"], record.get("line")))
                     if record.get("outcome") != "passedOnRetry" or test_id == fl.EXCLUDED_TEST_ID:
                         continue
-                    found.append(
+                    found.append((
+                        test_id,
                         fl.Failure(
-                            key=f"{run['run_id']}:{attempt}:retry-metrics:{test_id}",
+                            key=f"{run['run_id']}:{attempt}:retry-metrics",
                             run_id=run["run_id"],
                             attempt=attempt,
                             occurrence=fl.occurrence_key("ci-retry", run["head_branch"], at),
@@ -216,8 +221,8 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
                             head_sha=run["head_sha"],
                             file=record.get("file"),
                             line=record.get("line"),
-                        )
-                    )
+                        ),
+                    ))
             continue
         if artifact["name"] == XUNIT_ARTIFACT and not (erased and attempt == 1):
             continue
@@ -236,9 +241,10 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
             for case in cases:
                 if case.outcome != "failed" or case.test_id == fl.EXCLUDED_TEST_ID:
                     continue
-                found.append(
+                found.append((
+                    case.test_id,
                     fl.Failure(
-                        key=f"{run['run_id']}:{attempt}:{relative}:{case.test_id}",
+                        key=f"{run['run_id']}:{attempt}:{relative}",
                         run_id=run["run_id"],
                         attempt=attempt,
                         occurrence=fl.occurrence_key(source, run["head_branch"], at),
@@ -247,8 +253,8 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
                         signature=fl.signature(case.message),
                         head_sha=run["head_sha"],
                         suite_issue=suite_issue,
-                    )
-                )
+                    ),
+                ))
     return found
 
 
@@ -256,15 +262,15 @@ def collect_failures(work: Path, repo: str, now: datetime, notes: Notes, targets
     runs = _read_json(work / "runs.json", [])
     by_test: dict[str, list[fl.Failure]] = {}
     files: dict[str, tuple[str, int | None]] = {}
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for run in runs:
         if not eligible_run(run, repo) or not in_window(run, now):
             continue
-        for failure in failures_from_run(run, work, notes, files, targets):
-            if failure.key in seen:
+        for test_id, failure in failures_from_run(run, work, notes, files, targets):
+            # A parameterized test fails once per case under one ID: one failure.
+            if (test_id, failure.key) in seen:
                 continue
-            seen.add(failure.key)
-            test_id = failure.key.split(":", 3)[3]
+            seen.add((test_id, failure.key))
             by_test.setdefault(test_id, []).append(failure)
     return by_test, files
 
@@ -284,6 +290,9 @@ class IssueView:
     ledger_comment_id: int | None = None
     ledger_body: str | None = None
     attempts: list[fl.Attempt] = field(default_factory=list)
+    # A bot comment on this issue does not parse (a hand edit, say). The issue
+    # is left untouched and listed, rather than stopping every other test.
+    unreadable: bool = False
 
 
 def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
@@ -310,7 +319,9 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
             if is_ledger:
                 state = fl.parse_comment(body, login, kind)
                 if state is None:
-                    raise AnalysisError(f"#{view.number} comment {comment['id']}: the bot's own ledger comment does not parse")
+                    notes.unreadable.append(f"#{view.number} comment {comment['id']}: the bot's own ledger comment does not parse; the issue is left untouched")
+                    view.unreadable = True
+                    continue
                 if view.ledger is not None:
                     notes.duplicates.append(f"#{view.number}: a second bot ledger comment {comment['id']}, ignored")
                     continue
@@ -318,7 +329,9 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
             else:
                 attempts = fl.parse_attempts(body, login, kind)
                 if attempts is None:
-                    raise AnalysisError(f"#{view.number} comment {comment['id']}: the bot's own attempt comment does not parse")
+                    notes.unreadable.append(f"#{view.number} comment {comment['id']}: the bot's own attempt comment does not parse; the issue is left untouched")
+                    view.unreadable = True
+                    continue
                 view.attempts.extend(attempts)
         issues[view.number] = view
     return issues
@@ -403,7 +416,7 @@ def issue_serves_test_alone(number: int, test: str, inventory: list[tuple[str, s
     if number in targets.values():
         return False
     view = issues.get(number)
-    if view is None:
+    if view is None or view.unreadable:
         return False
     if view.ledger is not None and view.ledger.test_id != test:
         return False
@@ -539,12 +552,15 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
             links = [trait]
     state = view.ledger if view is not None and view.ledger is not None else fl.State(test_id=test, links=links)
     state, pr_fixes = record_pr_outcomes(state, view, ctx)
+    # The latest close event's fix is on record whether or not the issue is
+    # still closed: an issue the ledger reopened, or a human reopened, keeps the
+    # fix it was closed with. Only a closed issue is reopened, though.
     closer = []
-    if view is not None and view.state == "CLOSED" and view.closed_reason == "completed" and view.closing_fix:
+    if view is not None and view.closed_reason == "completed" and view.closing_fix:
         closer = [view.closing_fix]
     state = add_fixes(state, pr_fixes + closer)
     state, recurrences = classify(state, new, ctx)
-    reopen = bool(recurrences) and view is not None and bool(closer)
+    reopen = bool(recurrences) and view is not None and view.state == "CLOSED" and bool(closer)
 
     if view is None:
         create = {"title": fl.issue_title(test), "body": creation_body(test, links)}
@@ -612,6 +628,8 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     )
     actions, tests = [], []
     for test in sorted(set(by_test) | set(mapping)):
+        if test in mapping and issues[mapping[test]].unreadable:
+            continue
         action, summary = plan_for_test(test, mapping.get(test), by_test.get(test, []), ctx, notes)
         tests.append(summary)
         if action is not None:
@@ -800,9 +818,10 @@ def _fetch_issue(repo: str, raw: dict) -> dict:
             user = c.get("user") or {}
             comments.append({"id": c["id"], "login": user.get("login"), "type": user.get("type"), "body": body})
     state = (raw.get("state") or "").upper()
-    reason, fix = (None, None)
-    if state == "CLOSED":
-        reason, fix = _close_info(repo, number)
+    # Read for open issues too: one that was closed by a fix and reopened keeps
+    # that fix on record, which is what lets a run that died between the reopen
+    # and the ledger write converge on the next one.
+    reason, fix = _close_info(repo, number)
     return {
         "number": number,
         "title": raw.get("title") or "",
@@ -925,9 +944,13 @@ def _ensure_label(repo: str) -> None:
 
 
 def apply(plan: dict, repo: str) -> None:
-    """Each action is one issue's writes, in an order that converges if the run
-    dies between any two: the issue, its label, a reopen, then the ledger
-    comment. The first failed write stops the run."""
+    """Each action is one issue's writes: the issue, its label, a reopen, then
+    the ledger comment. The first failed write stops the run, and the next run
+    converges from whatever landed: an issue created without its comment is
+    found again by title, and a reopened issue keeps its closing fix on record
+    (`_fetch_issue`), so the recurrence is classified again and written. The
+    one write a death can lose is the reopen comment, whose content the ledger
+    comment repeats."""
     actions = plan["actions"]
     if any(a["create"] or a["add_label"] for a in actions):
         _ensure_label(repo)

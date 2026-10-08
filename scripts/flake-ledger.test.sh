@@ -229,7 +229,7 @@ print(m.qualifies(m.State("t/x()", episode=1, failures=[F("1", "night:2026-10-01
   out="$(py <<< "$script")"
   assert_eq "episode 1 with one failure qualifies" "True" "$(sed -n 1p <<< "$out")"
   assert_eq "episode 1 with no failure yet does not" "False" "$(sed -n 2p <<< "$out")"
-  mutant="$(mutant_of 's/^    if state.episode > 0 and current > 0:$/    if False:/' "$LIB")"
+  mutant="$(mutant_of 's/^    if state.episode > 0 and current_count\(state\) > 0:$/    if False:/' "$LIB")"
   out="$(py "$mutant" <<< "$script")"
   assert_eq "mutation: without the recurrence clause one key is not enough" "False" "$(sed -n 1p <<< "$out")"
 }
@@ -330,6 +330,30 @@ print(m.render_comment(p, "cheapsteak/tbd") == body)
   assert_eq "re-rendering the degraded state is stable" "True" "$(sed -n 2p <<< "$out")"
 }
 
+test_a_burst_of_recent_failures_still_fits_and_stays_deduplicated() {
+  local out script mutant
+  script='
+from datetime import date, timedelta
+fs = []
+for i in range(300):
+    day = date(2026, 10, 1) + timedelta(days=i // 50)
+    fs.append(m.Failure(key=f"{37000000000 + i}:1:retry-metrics", run_id=37000000000 + i, attempt=1,
+                        occurrence=f"branch:some-feature-branch-{i % 40}", at=f"{day.isoformat()}T11:00:00Z",
+                        source="ci-retry", signature="passed on retry (2 attempts)", head_sha="a" * 40,
+                        file="Tests/TBDDaemonTests/SomeQuarantinedSuiteTests.swift", line=123))
+s = m.State("TBDDaemonTests.SomeQuarantinedSuiteTests/someQuarantinedTest()", failures=fs)
+body = m.render_comment(s, "cheapsteak/tbd")
+p = m.parse_comment(body, m.BOT_LOGIN, "Bot")
+again, changed = m.merge(p, fs)
+print(len(body) <= m.MAX_COMMENT_CHARS, m.failure_count(p), len(m.distinct_occurrences(p)), changed)
+'
+  out="$(py <<< "$script")"
+  assert_eq "300 failures in six days: under the limit, all counted, none re-added" "True 300 40 False" "$out"
+  mutant="$(mutant_of 's/^    while len\(body\) > MAX_COMMENT_CHARS and state.failures:$/    while False:/' "$LIB")"
+  out="$(py "$mutant" <<< "$script")"
+  assert_contains "mutation: without folding the burst overflows" "$out" "False 300"
+}
+
 # ============================================================================
 # analyze: sources, exclusions, attempt windows
 # ============================================================================
@@ -367,6 +391,45 @@ test_flakefix_branches_are_excluded() {
   mutant="$(mutant_of 's/^FLAKEFIX_PREFIX = "flakefix\/"$/FLAKEFIX_PREFIX = "nothing-matches\/"/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_eq "mutation: without the exclusion it plans an issue" "1" "$(jq '.actions | length' <<< "$out")"
+}
+
+test_a_nightly_dispatched_on_a_branch_is_excluded() {
+  local w out mutant
+  w="$(newwork)"
+  build run "$w" --id 1011 --workflow nightly --branch feature-x \
+    --attempt "1|2026-10-05T11:00:00Z|failure" --artifact "10111|nightly-xunit|2026-10-05T13:00:00Z"
+  build xunit "$w/artifacts/10111/FastPassWhole-1-swift-testing.xml" "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "a branch nightly says nothing about flakiness" "0" "$(jq '.tests | length' <<< "$out")"
+  mutant="$(mutant_of 's/^    if run.get\("workflow"\) == "nightly" and run.get\("head_branch"\) != "main":$/    if False:/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: without the main-only rule it is counted" "1" "$(jq '.tests | length' <<< "$out")"
+}
+
+test_an_unparsable_bot_comment_leaves_that_issue_alone_and_the_rest_running() {
+  local w out body
+  w="$(newwork)"
+  erased_run "$w" 1012 sidebar
+  nightly_run "$w" 2012 2026-10-05 'TBDSharedTests.OtherTests/other()'
+  body="$(mktmpd)/broken.md"
+  printf '%s\nhand-edited\n<!-- flake-ledger-state\n{not json\nflake-ledger-state -->\n' '<!-- flake-ledger v1 -->' > "$body"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "95|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_eq "no write to the issue with the broken comment" "0" "$(jq '[.actions[] | select(.issue == 970)] | length' <<< "$out")"
+  assert_eq "and no second issue for its test" "0" "$(jq --arg t "$HOLDER" '[.actions[] | select(.test_id == $t)] | length' <<< "$out")"
+  assert_contains "it is listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#970 comment 95"
+  assert_eq "the other test is still planned" "TBDSharedTests.OtherTests/other()" "$(jq -r '.actions[0].test_id' <<< "$out")"
+}
+
+test_a_reopened_issue_keeps_its_closing_fix_so_a_died_run_converges() {
+  local w out
+  w="$(newwork)"
+  erased_run "$w" 1013 rebased --sha cccc
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --state OPEN --closed-reason completed --label flaky \
+    --fix "9609609@2026-10-05T12:00:00Z@960"
+  build set "$w" ancestry.json '{"9609609..cccc": true}'
+  out="$(analyze "$w")"
+  assert_eq "already open: the recurrence is recorded, with no second reopen" "1 false" "$(jq -r '"\(.tests[0].episode) \(.actions[0].reopen)"' <<< "$out")"
 }
 
 test_the_quarantine_self_test_is_excluded() {
@@ -782,6 +845,7 @@ stub_world() {
     {match: "issues/[0-9]+/comments\\?per_page", out: ""},
     {match: "search/issues", out: ""},
     {match: "labels\\?per_page", out: ""},
+    {match: "graphql", out: "{\"data\": {\"repository\": {\"issue\": {\"timelineItems\": {\"nodes\": []}}}}}"},
     {match: "-X POST repos/cheapsteak/tbd/issues --input", out: "{\"number\": 1000}"},
     {match: "-X (POST|PATCH)", out: "{}"}
   ]' > "$dir/routes.json"

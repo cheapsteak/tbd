@@ -276,10 +276,14 @@ QUALIFY_DISTINCT_OCCURRENCES = 2
 # The human-readable failure list shows at most this many, newest first. The
 # JSON block keeps every failure (or, past the body limit, its folded count).
 HUMAN_FAILURE_ROWS = 200
-# Past the body limit, failures are folded into counts, but only once they are
-# this many days older than the newest one: beyond every artifact read window
-# (7 days, spec §4.4), so nothing can read them again and need their merge key.
-FOLD_AFTER_DAYS = 8
+# Past the body limit, the oldest failures are folded into per-place counts. A
+# folded failure this close in time to the newest one may still be inside an
+# artifact read window (7 days, spec §4.4), so its merge key is kept beside the
+# counts until it ages out, and rereading its run adds nothing.
+FOLD_KEEP_KEYS_DAYS = 8
+# Each degrading step works on this fraction of the failures at a time, so a
+# large state renders in a bounded number of passes rather than one per failure.
+DEGRADE_BATCH_FRACTION = 0.1
 # The valve's inert ref for a branch (docs/specs/2026-08-16-remote-verification-
 # valve-design.md) is the same branch, so it is the same occurrence.
 PREFLIGHT_PREFIX = "preflight/"
@@ -287,7 +291,7 @@ PREFLIGHT_PREFIX = "preflight/"
 
 @dataclass(frozen=True)
 class Failure:
-    key: str  # merge key: f"{run_id}:{attempt}:{origin}:{test_id}"
+    key: str  # merge key within one test's state: f"{run_id}:{attempt}:{origin}"
     run_id: int
     attempt: int
     occurrence: str  # "night:YYYY-MM-DD" | "branch:<name>" | "main:YYYY-MM-DD"
@@ -304,9 +308,7 @@ class Failure:
 
 @dataclass(frozen=True)
 class Folded:
-    """Failures folded into a count to keep the comment under the body limit.
-    Only failures older than the read window are folded, so none of them can be
-    read again and need its merge key."""
+    """Failures folded into a count to keep the comment under the body limit."""
 
     occurrence: str
     episode: int
@@ -322,6 +324,8 @@ class State:
     episode: int = 0
     failures: list[Failure] = field(default_factory=list)
     folded: list[Folded] = field(default_factory=list)
+    # [key, at] of folded failures recent enough to be read again (FOLD_KEEP_KEYS_DAYS).
+    folded_keys: list[list[str]] = field(default_factory=list)
     # Fix commits on record (spec §4.4): {"sha", "at", "episode", "via", "pr"}.
     fixes: list[dict] = field(default_factory=list)
     # Bot PR outcomes the ledger recorded: {"number", "outcome", "merge_sha", "episode"}.
@@ -362,18 +366,21 @@ def failure_count(state: State) -> int:
     return len(state.failures) + sum(f.count for f in state.folded)
 
 
+def current_count(state: State) -> int:
+    return len(current_failures(state)) + sum(f.count for f in _current_folded(state))
+
+
 def qualifies(state: State) -> bool:
     """Spec §4.3: the current episode spans two or more distinct occurrence
     keys, or the current episode is a recurrence with at least one failure."""
-    current = len(current_failures(state)) + sum(f.count for f in _current_folded(state))
-    if state.episode > 0 and current > 0:
+    if state.episode > 0 and current_count(state) > 0:
         return True
     return len(distinct_occurrences(state)) >= QUALIFY_DISTINCT_OCCURRENCES
 
 
 def merge(old: State, new_failures: Iterable[Failure]) -> tuple[State, bool]:
     """Add failures whose merge key the state does not hold yet."""
-    known = {f.key for f in old.failures}
+    known = {f.key for f in old.failures} | {k for k, _ in old.folded_keys}
     added = [f for f in new_failures if f.key not in known]
     if not added:
         return old, False
@@ -434,6 +441,7 @@ def _state_payload(state: State) -> dict:
         "episode": state.episode,
         "failures": [_compact(asdict(f)) for f in state.failures],
         "folded": [asdict(f) for f in state.folded],
+        "folded_keys": state.folded_keys,
         "fixes": state.fixes,
         "prs": state.prs,
         "links": state.links,
@@ -451,10 +459,10 @@ def _human(state: State, repo: str, rows: int) -> str:
         SENTINEL,
         f"### Flake ledger: {_code(state.test_id)}",
         "",
-        f"**Failures:** {failure_count(state)} across {len(distinct)} distinct places "
-        f"in the current episode (episode {state.episode + 1}; threshold: "
-        f"{QUALIFY_DISTINCT_OCCURRENCES}). Qualifies for a fix attempt: "
-        f"{'yes' if qualifies(state) else 'no'}.",
+        f"**Failures:** {failure_count(state)} recorded in all. The current episode "
+        f"(episode {state.episode + 1}) has {current_count(state)}, across {len(distinct)} "
+        f"distinct places (threshold: {QUALIFY_DISTINCT_OCCURRENCES}). Qualifies for a fix "
+        f"attempt: {'yes' if qualifies(state) else 'no'}.",
     ]
     if state.links:
         refs = ", ".join(f"#{n}" for n in state.links)
@@ -501,24 +509,28 @@ def _render(state: State, repo: str, rows: int) -> str:
     return _human(state, repo, rows) + "\n\n" + _json_block(STATE_BEGIN, STATE_END, _state_payload(state))
 
 
-def _fold_oldest(state: State) -> State | None:
-    """Fold the oldest unfolded failure into a count, or None when nothing old
-    enough remains. Only failures older than the read window are folded."""
-    if not state.failures:
-        return None
+def _batch(total: int) -> int:
+    return max(1, int(total * DEGRADE_BATCH_FRACTION))
+
+
+def _fold(state: State, count: int) -> State:
+    """Fold the `count` oldest failures into per-place counts, keeping the merge
+    keys of those still young enough to be read again."""
     ordered = sorted(state.failures, key=_failure_order)
-    newest_day = ordered[-1].at[:10]
-    oldest = ordered[0]
-    if _days_between(oldest.at[:10], newest_day) <= FOLD_AFTER_DAYS:
-        return None
+    newest = ordered[-1].at[:10]
     folded = list(state.folded)
-    for i, f in enumerate(folded):
-        if (f.occurrence, f.episode, f.pre_fix) == (oldest.occurrence, oldest.episode, oldest.pre_fix):
-            folded[i] = replace(f, count=f.count + 1, first=min(f.first, oldest.at), last=max(f.last, oldest.at))
-            break
-    else:
-        folded.append(Folded(oldest.occurrence, oldest.episode, oldest.pre_fix, 1, oldest.at, oldest.at))
-    return replace(state, failures=ordered[1:], folded=folded)
+    keys = [pair for pair in state.folded_keys if _days_between(pair[1][:10], newest) <= FOLD_KEEP_KEYS_DAYS]
+    for failure in ordered[:count]:
+        place = (failure.occurrence, failure.episode, failure.pre_fix)
+        for i, f in enumerate(folded):
+            if (f.occurrence, f.episode, f.pre_fix) == place:
+                folded[i] = replace(f, count=f.count + 1, first=min(f.first, failure.at), last=max(f.last, failure.at))
+                break
+        else:
+            folded.append(Folded(failure.occurrence, failure.episode, failure.pre_fix, 1, failure.at, failure.at))
+        if _days_between(failure.at[:10], newest) <= FOLD_KEEP_KEYS_DAYS:
+            keys.append([failure.key, failure.at])
+    return replace(state, failures=ordered[count:], folded=folded, folded_keys=keys)
 
 
 def _days_between(a: str, b: str) -> int:
@@ -528,30 +540,31 @@ def _days_between(a: str, b: str) -> int:
 def render_comment(state: State, repo: str) -> str:
     """The ledger comment: a human part, then the state as JSON inside an HTML
     comment. Kept under `MAX_COMMENT_CHARS` by, in order: blanking signatures
-    oldest first, showing fewer rows in the human list, and folding failures
-    older than the read window into per-occurrence counts."""
-    body = _render(state, repo, HUMAN_FAILURE_ROWS)
+    oldest first, showing fewer rows in the human list, and folding the oldest
+    failures into per-place counts, each step in batches. Only the merge keys
+    of folded failures inside the read window are kept, so the body fits unless
+    roughly a thousand failures land within one window."""
+    rows = HUMAN_FAILURE_ROWS
+    body = _render(state, repo, rows)
     if len(body) <= MAX_COMMENT_CHARS:
         return body
     ordered = sorted(state.failures, key=_failure_order)
-    for i in range(len(ordered)):
-        if ordered[i].signature:
+    signed = [i for i, f in enumerate(ordered) if f.signature]
+    step = _batch(len(ordered))
+    for start in range(0, len(signed), step):
+        for i in signed[start : start + step]:
             ordered[i] = replace(ordered[i], signature="")
-            state = replace(state, failures=list(ordered))
-            body = _render(state, repo, HUMAN_FAILURE_ROWS)
-            if len(body) <= MAX_COMMENT_CHARS:
-                return body
-    rows = HUMAN_FAILURE_ROWS
+        state = replace(state, failures=list(ordered))
+        body = _render(state, repo, rows)
+        if len(body) <= MAX_COMMENT_CHARS:
+            return body
     while rows > 20:
         rows //= 2
         body = _render(state, repo, rows)
         if len(body) <= MAX_COMMENT_CHARS:
             return body
-    while len(body) > MAX_COMMENT_CHARS:
-        folded = _fold_oldest(state)
-        if folded is None:
-            break
-        state = folded
+    while len(body) > MAX_COMMENT_CHARS and state.failures:
+        state = _fold(state, _batch(len(state.failures)))
         body = _render(state, repo, rows)
     return body
 
@@ -571,6 +584,7 @@ def parse_comment(body: str, login: str | None, user_type: str | None) -> State 
             episode=int(payload.get("episode", 0)),
             failures=[Failure(**f) for f in payload.get("failures", [])],
             folded=[Folded(**f) for f in payload.get("folded", [])],
+            folded_keys=[[str(k), str(at)] for k, at in payload.get("folded_keys", [])],
             fixes=list(payload.get("fixes", [])),
             prs=list(payload.get("prs", [])),
             links=[int(n) for n in payload.get("links", [])],

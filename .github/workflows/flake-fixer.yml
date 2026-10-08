@@ -72,6 +72,10 @@ jobs:
 
       - name: Reclaim flakefix/* branches no open PR uses
         if: vars.FLAKE_FIXER_ENABLED == 'true'
+        # A sweep that keeps or fails to delete a ref exits non-zero; that is
+        # the reclaimer's business and must not stop the ledger behind it. Its
+        # step stays red in the run for a human to read.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
