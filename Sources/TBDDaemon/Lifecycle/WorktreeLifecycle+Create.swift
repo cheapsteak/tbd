@@ -632,8 +632,11 @@ extension WorktreeLifecycle {
         do {
             deleted = try await db.worktrees.deleteReturning(id: worktreeID)
         } catch {
+            // Nothing was read, so a parked message cannot be ruled out: report
+            // it as possibly lost rather than let the delta imply nothing was.
             logger.error("could not delete failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             deleted = nil
+            lost = true
         }
         // Blankness is judged on a trimmed copy; the file gets the text as
         // parked, so a leading indent (a code block, say) survives.

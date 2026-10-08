@@ -3005,7 +3005,9 @@ final class AppState {
                !delta.unsentPromptLost { return nil }
         }
         if delta.unsentPromptLost {
-            return ("\(failure) Its first message could not be saved.", nil)
+            // "If one was queued": the daemon sets the flag when it could not
+            // even read the row, so a message is possible, not certain.
+            return ("\(failure) Its first message, if one was queued, could not be saved.", nil)
         }
         guard let path = delta.unsentPromptPath else { return (failure, nil) }
         let shown = (path as NSString).abbreviatingWithTildeInPath

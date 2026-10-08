@@ -357,8 +357,9 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// failed, and on every deliberate archive. Optional so payloads from a
     /// daemon that predates it still decode.
     public let unsentPromptPath: String?
-    /// True when the deleted row held a first message the daemon tried and
-    /// failed to save, so it exists nowhere now. Absent (older daemons) reads
+    /// True when the row may have held a first message the daemon could not
+    /// save: the save failed, the row had no repo to save under, or the
+    /// rollback could not read the row at all. Absent (older daemons) reads
     /// as false.
     public let unsentPromptLost: Bool
 

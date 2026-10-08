@@ -589,7 +589,7 @@ struct QueuedPromptOnCreateTests {
             archive(state, UUID(), unsentPromptLost: true)
 
             #expect(state.alertMessage?.contains("Worktree creation failed.") == true)
-            #expect(state.alertMessage?.contains("could not be saved") == true)
+            #expect(state.alertMessage?.contains("Its first message, if one was queued, could not be saved.") == true)
             #expect(state.alertRevealPath == nil)
         }
     }
