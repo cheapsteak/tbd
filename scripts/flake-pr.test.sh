@@ -1459,10 +1459,12 @@ promote_gated() {
       "github.event.workflow_run.event == 'pull_request'" "github.event.workflow_run.conclusion == 'success'" \
       "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
       "github.event.workflow_run.head_repository.full_name == github.repository" \
-      "github.event_name == 'status'" "github.event.context == 'flakefix/stress'" "github.event.state == 'success'" \
-      "contains(toJSON(github.event.branches.*.name), '\"flakefix/issue-')"; do
+      "github.event_name == 'status'" "github.event.context == 'flakefix/stress'" "github.event.state == 'success'"; do
     grep -qF "$c" <<< "$job" || return 1
   done
+  # No filter on a status's `branches`: GitHub lists at most 10, so it could
+  # miss the PR's branch; `promote --from-status` resolves the PR itself.
+  ! grep -qF "github.event.branches" <<< "$job" || return 1
   grep -q '^    workflows: \[Nightly, Test\]$' "$1" && grep -qF "    branches: [main, 'flakefix/issue-*']" "$1" &&
     grep -q '^  status:$' "$1"
 }
@@ -1479,6 +1481,9 @@ test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: no status trigger passes"; FAIL=1; else echo "ok   - mutation: no status trigger fails"; fi
   c="$(mutated "        github.event.context == 'flakefix/stress' &&" "")"
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: any status context passes"; FAIL=1; else echo "ok   - mutation: any status context fails"; fi
+  c="$(mutated "        github.event.state == 'success'))" "        github.event.state == 'success' &&
+        contains(toJSON(github.event.branches.*.name), '\"flakefix/issue-')))")"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: a status filtered on its capped branch list passes"; FAIL=1; else echo "ok   - mutation: a status filtered on its capped branch list fails"; fi
 }
 
 # The status trigger runs the same script, through env, with --from-status.
