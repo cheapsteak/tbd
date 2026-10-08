@@ -66,6 +66,7 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
 
         #expect(delta.creationFailed)
         #expect(delta.unsentPromptPath == nil)
+        #expect(delta.unsentPromptLost == false)
         #expect(fm.fileExists(atPath: reposDir.path) == false)
         #expect(try await db.worktrees.getLocal(id: row.id) == nil)
     }
@@ -149,6 +150,7 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
 
         #expect(delta.creationFailed)
         #expect(delta.unsentPromptPath == nil)
+        #expect(delta.unsentPromptLost)
         #expect(try await db.worktrees.getLocal(id: row.id) == nil)
     }
 }

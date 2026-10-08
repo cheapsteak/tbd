@@ -14,6 +14,15 @@ struct WorktreeIDDeltaCodingTests {
         #expect(delta.worktreeID == id)
         #expect(delta.creationFailed == false)
         #expect(delta.unsentPromptPath == nil)
+        #expect(delta.unsentPromptLost == false)
+    }
+
+    @Test func unsentPromptLostRoundTrips() throws {
+        let original = WorktreeIDDelta(worktreeID: id, creationFailed: true, unsentPromptLost: true)
+        let decoded = try JSONDecoder().decode(
+            WorktreeIDDelta.self, from: try JSONEncoder().encode(original))
+        #expect(decoded.unsentPromptLost)
+        #expect(decoded.unsentPromptPath == nil)
     }
 
     @Test func aPayloadWithoutTheUnsentPromptPathDecodes() throws {

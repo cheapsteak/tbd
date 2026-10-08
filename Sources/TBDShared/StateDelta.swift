@@ -357,18 +357,26 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// failed, and on every deliberate archive. Optional so payloads from a
     /// daemon that predates it still decode.
     public let unsentPromptPath: String?
+    /// True when the deleted row held a first message the daemon tried and
+    /// failed to save, so it exists nowhere now. Absent (older daemons) reads
+    /// as false.
+    public let unsentPromptLost: Bool
 
-    public init(worktreeID: UUID, creationFailed: Bool = false, unsentPromptPath: String? = nil) {
+    public init(
+        worktreeID: UUID, creationFailed: Bool = false,
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
+    ) {
         self.worktreeID = worktreeID
         self.creationFailed = creationFailed
         self.unsentPromptPath = unsentPromptPath
+        self.unsentPromptLost = unsentPromptLost
     }
 
     // Explicit decoding: a synthesized `init(from:)` ignores property defaults
     // and would throw `keyNotFound` against an older daemon that never sends
     // this key. Absent means "not a creation failure".
     private enum CodingKeys: String, CodingKey {
-        case worktreeID, creationFailed, unsentPromptPath
+        case worktreeID, creationFailed, unsentPromptPath, unsentPromptLost
     }
 
     public init(from decoder: any Decoder) throws {
@@ -376,6 +384,7 @@ public struct WorktreeIDDelta: Codable, Sendable {
         self.worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
         self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
         self.unsentPromptPath = try c.decodeIfPresent(String.self, forKey: .unsentPromptPath)
+        self.unsentPromptLost = try c.decodeIfPresent(Bool.self, forKey: .unsentPromptLost) ?? false
     }
 }
 

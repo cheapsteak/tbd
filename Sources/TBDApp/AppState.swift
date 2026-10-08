@@ -2987,8 +2987,8 @@ final class AppState {
     /// when it closes (`queuedPromptTarget`'s observer) and when it submits
     /// (`submitQueuedPrompt`), so an entry that is also the presented target
     /// is a live, unsubmitted sheet whose `onChange(of: hasFailed)` will run.
-    /// A daemon-saved message is the one exception: that alert is the only
-    /// place its path is named, so it stands regardless.
+    /// A daemon-saved (or daemon-lost) message is the one exception: that
+    /// alert is the only place its fate is named, so it stands regardless.
     private func creationFailureAlert(
         _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
     ) -> (text: String, revealPath: String?)? {
@@ -3000,7 +3000,11 @@ final class AppState {
         if let composer {
             composer.failAfterCreate(reason: failure)
             queuedPromptBacklog.removeAll { $0 === composer }
-            if queuedPromptTarget === composer, delta.unsentPromptPath == nil { return nil }
+            if queuedPromptTarget === composer, delta.unsentPromptPath == nil,
+               !delta.unsentPromptLost { return nil }
+        }
+        if delta.unsentPromptLost {
+            return ("\(failure) Its first message could not be saved.", nil)
         }
         guard let path = delta.unsentPromptPath else { return (failure, nil) }
         let shown = (path as NSString).abbreviatingWithTildeInPath

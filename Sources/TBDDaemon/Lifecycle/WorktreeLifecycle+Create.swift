@@ -614,7 +614,8 @@ extension WorktreeLifecycle {
     /// daemon — the only side that still has the text — writes it to
     /// `~/tbd/repos/<repoID>/unsent-prompts/` (`UnsentPromptFile`) and names
     /// the file in the delta. A blank or absent prompt writes nothing. A
-    /// failed write is logged and leaves the path nil: the row is deleted
+    /// failed write is logged, leaves the path nil and sets
+    /// `unsentPromptLost` so the app can say so: the row is deleted
     /// either way, because a creation that failed must not linger as a
     /// `.creating` row.
     ///
@@ -624,6 +625,7 @@ extension WorktreeLifecycle {
         worktreeID: UUID, reposDir: URL? = nil, date: Date? = nil
     ) async -> WorktreeIDDelta {
         var savedPath: String?
+        var lost = false
         // Read and delete in one transaction, so a park racing this rollback
         // either lands in the returned row or is refused for the missing one.
         let deleted: Worktree?
@@ -647,10 +649,13 @@ extension WorktreeLifecycle {
                     directory: directory, date: date ?? now())
                 logger.info("saved parked first message of failed create \(worktreeID, privacy: .public) to \(savedPath ?? "", privacy: .public)")
             } catch {
+                lost = true
                 logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
-        return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptPath: savedPath)
+        return WorktreeIDDelta(
+            worktreeID: worktreeID, creationFailed: true,
+            unsentPromptPath: savedPath, unsentPromptLost: lost)
     }
 
     /// Creates an initial Notes tab and appends it to the tab order (last; the

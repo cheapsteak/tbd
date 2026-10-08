@@ -537,10 +537,12 @@ struct QueuedPromptOnCreateTests {
     }
 
     private func archive(
-        _ state: AppState, _ id: UUID, creationFailed: Bool = true, unsentPromptPath: String? = nil
+        _ state: AppState, _ id: UUID, creationFailed: Bool = true,
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
     ) {
         state.handleDelta(.worktreeArchived(WorktreeIDDelta(
-            worktreeID: id, creationFailed: creationFailed, unsentPromptPath: unsentPromptPath)))
+            worktreeID: id, creationFailed: creationFailed,
+            unsentPromptPath: unsentPromptPath, unsentPromptLost: unsentPromptLost)))
     }
 
     @Test("The failure alert names the file the daemon saved a parked message to")
@@ -559,6 +561,23 @@ struct QueuedPromptOnCreateTests {
             #expect(state.alertRevealPath == daemonPath)
             // The daemon saved it; the app writes nothing of its own.
             #expect(harness.saved.isEmpty)
+        }
+    }
+
+    @Test("The failure alert says when the daemon could not save the parked message")
+    func failureAlertSaysTheMessageWasLost() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+
+            // Stands even with the composer open: this alert is the only
+            // place the loss is named.
+            archive(state, created.id, unsentPromptLost: true)
+
+            #expect(target.hasFailed)
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertMessage?.contains("could not be saved") == true)
+            #expect(state.alertRevealPath == nil)
         }
     }
 
