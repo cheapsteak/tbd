@@ -838,13 +838,21 @@ session can rewrite, and checks the runner against it afterwards:
   session can append to `$GITHUB_ENV` and `$GITHUB_PATH`, and the runner hands
   both to every later step: `BASH_ENV`, `PYTHONPATH`, `DYLD_*`, a `PATH` entry
   ahead of `git`, or new values for the job's own paths. So the job records
-  its environment as a step output just before session 1, and every later
-  `run:` step runs under `bash -p`, which reads no `BASH_ENV` or `ENV` and
-  imports no exported function, unsets every variable except the ones its own
-  `env:` sets, and restores the record. A path a `with:` or
-  `working-directory:` names comes from the `runner.temp` context, never from
-  `env`. The verifier's Python runs isolated (`-I -S`), so no `PYTHON*`
-  variable or site directory reaches the verdict.
+  its environment as a step output just before session 1, pinning `git` to no
+  global or system config, and every later `run:` step runs under `bash -p`,
+  which reads no `BASH_ENV` or `ENV` and imports no exported function, then
+  re-runs itself under `env -i` with only the variables its own `env:` sets
+  and the record. `env -i` rather than `unset`, because an entry such as
+  `BASH_FUNC_x%%` is no shell variable, so `unset` cannot remove it, and every
+  child `bash` would import it. A path a `with:` or `working-directory:` names
+  comes from the `runner.temp` context, never from `env`. The verifier's own
+  Python – the judge and the digest – runs isolated (`-I -S`), so no `PYTHON*`
+  variable or site directory reaches it.
+- **The artifact is checked against what was packaged.** The upload is a
+  `uses:` step, which still runs in the environment a session left. So the
+  packaging step sums the files `publish` acts on – the outcome, the bundle,
+  its head, and the verdict – into a job output, and `publish` discards an
+  artifact that does not match and records the attempt `aborted`.
 - **Try 1's output is digested before session 2.** When session 2 makes no
   commit, try 1's verdict stands (§6.6). It is used only if it matches, byte
   for byte, the digest taken before session 2 started, and it is removed after
@@ -853,11 +861,14 @@ session can rewrite, and checks the runner against it afterwards:
 If any check fails, or a new PID is still alive after the kill, the attempt
 aborts and `publish` records `aborted`. These checks keep the session's working
 state, processes and environment out of the verdict, and the verifier's own
-scripts and tree unchanged; they do not stop a session that tampers with tools
-elsewhere on the runner before it ends – a Homebrew binary, a Python site
-directory, `~/.gitconfig`. Nor do they cover the candidate's own tests, which
-run during the stress loop as the same user; those are in the diff a human
-reviews. That is why the verdict alone never promotes: the PR's own `test.yml`
+scripts and tree unchanged. They are best-effort against a session that shares
+the runner and its user: they close the cheap paths, not every path. They do
+not stop a session that replaces tools elsewhere on the runner before it ends
+– a Homebrew binary such as `python3` or `bash`, a Python site directory that
+the test runner's Python still reads, a `launchd` job – or that uses the
+runner's passwordless `sudo`. Nor do they cover the candidate's own tests,
+which run during the stress loop as the same user; those are in the diff a
+human reviews. That is why the verdict alone never promotes: the PR's own `test.yml`
 run on a fresh runner must also be green (§7), and a human reviews and merges.
 
 ### 6.5 What a clean run means

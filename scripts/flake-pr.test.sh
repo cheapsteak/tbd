@@ -868,7 +868,8 @@ test_a_tampered_verification_tree_aborts_the_attempt() {
 }
 
 # What a session can append to $GITHUB_ENV and $GITHUB_PATH: BASH_ENV, which
-# bash runs before the script; a PATH entry ahead of git and python3; a T
+# bash runs before the script; an exported function, which every child bash
+# imports and no `unset` reaches; a PATH entry ahead of git and python3; a T
 # holding a passing verdict; a variable the record does not name (GIT_DIR).
 injected_env_ignored() {
   local rt rc evil
@@ -876,36 +877,42 @@ injected_env_ignored() {
   printf 'touch %q\n' "$rt/bash-env-ran" > "$evil/bash_env"
   printf '#!/bin/sh\ntouch %q\nexit 1\n' "$rt/shadow-ran" > "$evil/git"; cp "$evil/git" "$evil/python3"; chmod +x "$evil/git" "$evil/python3"
   echo "$VERDICT_PASS" > "$evil/verdict.json"
-  rc="$(end_run "$1" 2 "$rt" BASH_ENV="$evil/bash_env" PATH="$evil:$PATH" T="$evil" GIT_DIR="$evil")"
-  [[ "$rc" == 0 && ! -e "$rt/bash-env-ran" && ! -e "$rt/shadow-ran" ]] &&
+  rc="$(end_run "$1" 2 "$rt" BASH_ENV="$evil/bash_env" PATH="$evil:$PATH" T="$evil" GIT_DIR="$evil" \
+    "BASH_FUNC_awk%%=() {  touch $rt/function-ran; command awk \"\$@\"; }")"
+  [[ "$rc" == 0 && ! -e "$rt/bash-env-ran" && ! -e "$rt/shadow-ran" && ! -e "$rt/function-ran" ]] &&
     [[ "$(jq -r .verdict "$rt/flakefix/verify/verdict.json")" == fail ]]
 }
 test_an_injected_environment_does_not_reach_the_step() {
   check "BASH_ENV is not read (bash -p)" injected_env_ignored \
     'shell: /bin/bash --noprofile --norc -p -eo pipefail {0}' 'shell: /bin/bash --noprofile --norc -eo pipefail {0}' all
-  check "a variable the record does not name is unset" injected_env_ignored \
-    'for v in $(compgen -e); do case "$keep" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac; done' 'true' all
-  check "the record replaces PATH and T" injected_env_ignored \
-    'while IFS= read -r -d' 'true || while IFS= read -r -d' all
+  check "the step re-runs itself with nothing but its env: and the record" injected_env_ignored \
+    'exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env' 'export "${e[@]}"' all
 }
 
-# Every `run:` step after session 1 starts the same way: bash -p, then the
-# record restored over the environment it was handed, in the same three lines
-# as "End session 1".
+# Every `run:` step after session 1 starts the same way: bash -p, then a
+# re-run under `env -i` with its own `env:` and the record, in the same lines
+# as "End session 1"; and its `keep` names exactly its `env:` keys.
 post_session_steps_scrubbed() {
-  local job names name script pre n=0
+  local job names name script pre keep envs n=0
   job="$(job_block "$1" fix)"
-  pre="$(step_script "$1" "End session 1" | sed -n 2,4p)"
-  grep -qF 'restore="$CLEAN_ENV"' <<< "$pre" && grep -qF 'unset "$v"' <<< "$pre" && grep -qF '/usr/bin/base64 -d' <<< "$pre" || return 1
+  pre="$(step_script "$1" "End session 1" | sed -n 2,7p)"
+  grep -qF 'restore="$CLEAN_ENV"' <<< "$pre" && grep -qF 'exec /usr/bin/env -i "${e[@]}"' <<< "$pre" &&
+    grep -qF '/usr/bin/base64 -d' <<< "$pre" || return 1
   names="$(awk '/name: Fixer session 1/{p=1} p && /^      - name: /{sub(/^      - name: /, ""); print}' <<< "$job")"
   while IFS= read -r name; do
     script="$(step_script "$1" "$name")"
     [[ -n "$script" ]] || continue  # a `uses:` step
     n=$((n + 1))
     [[ "$(step_shell "$1" "$name")" == '/bin/bash --noprofile --norc -p -eo pipefail {0}' ]] || { echo "  [$name] has no bash -p shell" >&2; return 1; }
-    [[ "$name" == "Package the attempt" ]] && continue
-    [[ "$(sed -n 2,4p <<< "$script")" == "$pre" ]] || { echo "  [$name] does not restore the record first" >&2; return 1; }
+    if [[ "$name" == "Package the attempt" ]]; then
+      grep -qF 'exec /usr/bin/env -i PATH=/usr/bin:/bin' <<< "$(sed -n 1,3p <<< "$script")" || return 1
+      continue
+    fi
+    [[ "$(sed -n 2,7p <<< "$script")" == "$pre" ]] || { echo "  [$name] does not restore the record first" >&2; return 1; }
     step "$1" fix "$name" | grep -qF 'CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}' || return 1
+    keep="$(sed -n '1s/^keep="\(.*\)"$/\1/p' <<< "$script" | tr ' ' '\n' | grep -vE '^(GITHUB_OUTPUT|GITHUB_STEP_SUMMARY)?$' | sort)"
+    envs="$(step "$1" fix "$name" | awk '/^        env:$/{p=1; next} p && !/^          [A-Z_0-9]+:/{exit} p{sub(/^ +/, ""); sub(/:.*/, ""); print}' | grep -v '^CLEAN_ENV$' | sort)"
+    [[ "$keep" == "$envs" ]] || { echo "  [$name] keeps [$keep] but sets [$envs]" >&2; return 1; }
   done <<< "$names"
   [[ "$n" -ge 10 ]] && ! awk '/name: Fixer session 1/{p=1} p' <<< "$job" | grep -qF '${{ env.'
 }
@@ -918,14 +925,61 @@ test_every_step_after_session_1_runs_in_the_recorded_environment() {
     'path: ${{ runner.temp }}/flakefix/
 ' 'path: ${{ env.T }}/
 '
+  check "and each step keeps exactly the variables its env: sets" post_session_steps_scrubbed \
+    'keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "' 'keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "'
 }
 
 test_the_package_step_scrubs_without_a_record() {
   local script
   script="$(step_script "$WORKFLOW" "Package the attempt")"
-  assert_contains "it unsets what it was handed" "$script" 'for v in $(compgen -e); do case "$keep"'
-  assert_contains "fixes PATH to the system's" "$script" 'export PATH=/usr/bin:/bin'
+  assert_contains "it re-runs itself on the system's PATH alone" "$script" 'exec /usr/bin/env -i PATH=/usr/bin:/bin'
   assert_contains "and takes T from the runner" "$script" "T='\${{ runner.temp }}/flakefix'"
+}
+
+judge_survives_no_answer() {
+  local i
+  for i in 1 2; do step "$1" fix "Judge try $i" | grep -qF 'q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"' || return 1; done
+}
+test_a_judge_without_a_quarantine_answer_still_judges() {
+  check "a missing answer does not end the Judge step under -e" judge_survives_no_answer \
+    'q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"' 'q="$(cat "$T/verify/quarantined" 2>/dev/null)"'
+}
+
+# publish's check of the artifact against the sums `fix` packaged.
+publish_check_script() { step "$1" publish "Check the candidate against" | awk '/^        run: \|$/{p=1; next} p' | sed -E 's/^ {10}//'; }
+sums_of() {
+  local f got=""
+  for f in outcome candidate.bundle head_sha verify/verdict.json; do
+    if [[ -f "$1/$f" ]]; then got="$got$f:$(shasum -a 256 < "$1/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
+  done
+  printf '%s' "$got"
+}
+tampered_artifact_discarded() {
+  local rt a sums
+  rt="$(mktmpd)"; a="$rt/flakefix-candidate"; mkdir -p "$a/verify"
+  echo candidate > "$a/outcome"; echo bundle > "$a/candidate.bundle"; echo "$VERDICT_FAIL" > "$a/verify/verdict.json"
+  sums="$(sums_of "$a")"
+  publish_check_script "$1" > "$rt/check.sh"
+  RUNNER_TEMP="$rt" SUMS="$sums" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
+  [[ -f "$a/verify/verdict.json" ]] || return 1  # an untouched artifact is kept
+  echo "$VERDICT_PASS" > "$a/verify/verdict.json"
+  RUNNER_TEMP="$rt" SUMS="$sums" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
+  [[ ! -e "$a" ]] || return 1
+  mkdir -p "$a"; echo x > "$a/outcome"
+  RUNNER_TEMP="$rt" SUMS="" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
+  [[ ! -e "$a" ]]  # no sums at all: nothing is trusted
+}
+test_publish_discards_an_artifact_that_is_not_what_fix_packaged() {
+  check "a verdict changed after packaging is discarded" tampered_artifact_discarded \
+    'if [ "$got" != "$SUMS" ]; then' 'if false; then'
+  assert_contains "fix exports the sums" "$(job_block "$WORKFLOW" fix | sed -n 1,20p)" 'sums: ${{ steps.package.outputs.sums }}'
+  assert_contains "publish reads them" "$(step "$WORKFLOW" publish "Check the candidate against")" 'SUMS: ${{ needs.fix.outputs.sums }}'
+  local job pkg pub
+  pkg="$(step_script "$WORKFLOW" "Package the attempt" | grep -F 'shasum -a 256 <' | sed 's/^ *//')"
+  pub="$(publish_check_script "$WORKFLOW" | grep -F 'shasum -a 256 <' | sed 's/^ *//; s/\$A/$T/g; s/got/sums/g')"
+  assert_eq "both sides sum the same way" "$pkg" "$pub"
+  job="$(job_block "$WORKFLOW" publish)"
+  assert_eq "and checks before it pushes" "0" "$(awk '/name: Check the candidate against/{c=NR} /name: Push, open the draft PR/{p=NR} END{print !(c && p && c < p)}' <<< "$job")"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
