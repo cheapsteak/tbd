@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="TestResults" errors="0" tests="2" failures="0" skipped="0" time="1.0">
+    <testcase classname="TBDDaemonTests" name="nilPreferredKeepsOrder()" time="37.79694975" />
+    <testcase classname="TBDDaemonTests.TBDHomeSerialized.ActuationLogSpawnWiringTests" name="worktreeCreateWithUnknownRepoWritesNoRow()" time="0.071262959" />
+  </testsuite>
+</testsuites>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="TestResults" errors="0" tests="5" failures="1" skipped="1" time="1.0">
+    <testcase classname="TBDSharedTests" name="hookPathArchive()" time="2.145191875" />
+    <testcase classname="TBDSharedTests.HolderLockTests" name="secondAcquisitionFailsWhileFirstIsHeld()" time="5.283687875" />
+    <testcase classname="TBDSharedTests.HolderLockTests" name="lockIsReacquirableAfterRelease()" time="5.28331075" >
+      <failure message="Caught error: .alreadyHeld(path: &quot;/tmp/holder-lock-X/session.lock&quot;) (error)" />
+    </testcase>
+    <testcase classname="TBDSharedTests.HolderLockTests" name="acquiresAnUncontendedLock()" time="5.283391833" />
+    <testcase classname="TBDAppTests.TerminalStalePixelRepaintTests" name="scrollRepaintErasesVacatedCells()" >
+      <skipped>harness does not yet drive SwiftTerm's invalidation; see comment</skipped>
+    </testcase>
+  </testsuite>
+</testsuites>
