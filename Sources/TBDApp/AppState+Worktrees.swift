@@ -253,12 +253,16 @@ extension AppState {
     /// without the text parked hands it to `keepUnqueuedFirstMessage`, which
     /// writes it to a file (the pasteboard only if that write fails). Text
     /// that WAS parked and then lost to a failed creation is the daemon's to
-    /// save: it deletes the row, so it writes the file and names it in the
-    /// failure delta. A park that races that delete is refused for the
-    /// missing row and lands in the refusal branch here.
+    /// save: its rollback reads and deletes the row in one transaction, writes
+    /// the file and names it in the failure delta. A park that races that
+    /// rollback either commits first, and is in what the daemon saves, or
+    /// finds no row and is refused — landing in the refusal branch here.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // A submitted composer hands nothing off on failure, so it must stop
+        // looking like one that will raise the failure alert itself.
+        composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== target }
         Task {
             switch await target.awaitResolution() {
             case .failed:
@@ -290,15 +294,19 @@ extension AppState {
     /// creation failed. Called by `QueuedPromptModal` as it closes itself.
     ///
     /// Runs on the next main-actor turn, so the alert is raised after the
-    /// sheet has gone rather than over it. A blank draft has nothing to keep
-    /// and raises nothing: a failure that came by delta has already raised
-    /// its alert, and this one, when there is a draft, replaces it with the
-    /// same failure plus where the draft went.
+    /// sheet has gone rather than over it. A failure that came by delta
+    /// raised no alert of its own for an open composer, so this one always
+    /// raises one: the failure plus where the draft went, or the failure alone
+    /// for a blank draft. A blank draft whose creation failed before the row
+    /// existed raises nothing, as before.
     func keepUnsentDraftAfterFailedCreation(_ target: QueuedPromptTarget, draft: String) {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         let lateFailure = target.failureAfterCreate
         Task { @MainActor in
+            guard !trimmed.isEmpty else {
+                if let lateFailure { showAlert(lateFailure, isError: true) }
+                return
+            }
             logger.error("Unsent first message kept: worktree creation failed")
             keepUnqueuedFirstMessage(
                 trimmed, repoID: target.repoID, worktreeName: target.worktreeName,

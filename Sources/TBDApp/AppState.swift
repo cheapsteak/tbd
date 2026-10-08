@@ -2965,9 +2965,9 @@ final class AppState {
         // pre-session hook — arrives with creationFailed == false and must stay
         // silent, even though the row is `.creating` at this moment.
         //
-        // Raised even when an open composer is about to save its draft: that
-        // composer's own alert replaces this one in the single alert slot, and
-        // if it has nothing to save this one is the only word of the failure.
+        // Nil when the open composer will raise the alert itself — replacing
+        // an alert while it is on screen is not reliable on macOS, so there is
+        // only ever one.
         if let message = failureMessage {
             showAlert(message.text, isError: true, revealPath: message.revealPath)
         }
@@ -2977,9 +2977,18 @@ final class AppState {
     ///
     /// Names the file the daemon saved the row's parked first message to, if
     /// it saved one. Tells this row's composer the creation failed: an open
-    /// one saves its draft and closes, a queued one — never on screen, so
-    /// holding no draft — is dropped from the queue. A deliberate archive
-    /// (`creationFailed == false`) returns nil and leaves the composer alone.
+    /// one saves its draft, closes and raises the alert itself — so this
+    /// returns nil for it — while a queued one, never on screen and so
+    /// holding no draft, is dropped from the queue and this alert stands. A
+    /// deliberate archive (`creationFailed == false`) returns nil and leaves
+    /// the composer alone.
+    ///
+    /// "Open" is exact because of what the map holds: a composer leaves it
+    /// when it closes (`queuedPromptTarget`'s observer) and when it submits
+    /// (`submitQueuedPrompt`), so an entry that is also the presented target
+    /// is a live, unsubmitted sheet whose `onChange(of: hasFailed)` will run.
+    /// A daemon-saved message is the one exception: that alert is the only
+    /// place its path is named, so it stands regardless.
     private func creationFailureAlert(
         _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
     ) -> (text: String, revealPath: String?)? {
@@ -2991,6 +3000,7 @@ final class AppState {
         if let composer {
             composer.failAfterCreate(reason: failure)
             queuedPromptBacklog.removeAll { $0 === composer }
+            if queuedPromptTarget === composer, delta.unsentPromptPath == nil { return nil }
         }
         guard let path = delta.unsentPromptPath else { return (failure, nil) }
         let shown = (path as NSString).abbreviatingWithTildeInPath

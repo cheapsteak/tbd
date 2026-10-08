@@ -82,6 +82,42 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(fm.fileExists(atPath: reposDir.path) == false)
     }
 
+    @Test func settingAPromptOnAMissingRowReportsNoRowWritten() async throws {
+        let (_, db) = try makeLifecycle()
+        let row = try await makeCreatingRow(db)
+        #expect(try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "x", submit: true))
+
+        try await db.worktrees.delete(id: row.id)
+
+        #expect(try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "x", submit: true) == false)
+    }
+
+    @Test func aParkOnAMissingRowIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setQueuedPrompt(true)
+        let coordinator = PendingPromptCoordinator(db: db)
+
+        let result = await coordinator.park(worktreeID: UUID(), text: "x", submit: true)
+
+        guard case .refused(let reason) = result else {
+            Issue.record("expected a refusal, got \(result)")
+            return
+        }
+        #expect(reason.contains("worktree not found"))
+    }
+
+    @Test func deleteReturningHandsBackTheParkedPromptAndRemovesTheRow() async throws {
+        let (_, db) = try makeLifecycle()
+        let row = try await makeCreatingRow(db)
+        try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "held", submit: false)
+
+        let deleted = try await db.worktrees.deleteReturning(id: row.id)
+
+        #expect(deleted?.pendingPrompt == "held")
+        #expect(try await db.worktrees.get(id: row.id) == nil)
+        #expect(try await db.worktrees.deleteReturning(id: row.id) == nil)
+    }
+
     @Test func aFailedWriteLeavesThePathNilAndStillDeletesTheRow() async throws {
         let (lifecycle, db) = try makeLifecycle()
         let row = try await makeCreatingRow(db)

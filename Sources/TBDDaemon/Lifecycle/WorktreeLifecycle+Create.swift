@@ -218,6 +218,13 @@ extension WorktreeLifecycle {
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
     ///
+    /// `rollBackOnFailure: true` (the default) deletes the row through
+    /// `rollBackFailedCreate`, so a first message parked in it is still saved
+    /// to `unsent-prompts/`; those callers (the legacy `createWorktree` and
+    /// fresh revive) discard the returned delta, so nothing surfaces the saved
+    /// file's path. `worktree.create` passes `false` and rolls back itself to
+    /// broadcast that path.
+    ///
     /// When a `preSession` hook resolves, only the hook's terminal is created
     /// here; the primary terminals are spawned by the returned
     /// `.preSessionPending` task once the hook completes (or times out).
@@ -582,7 +589,9 @@ extension WorktreeLifecycle {
         } catch {
             // On failure, delete the DB row — unless the caller rolls back
             // itself, as `worktree.create` does to learn where the row's
-            // parked first message went (`rollBackFailedCreate`).
+            // parked first message went (`rollBackFailedCreate`). Callers that
+            // keep the default (the legacy `createWorktree`, fresh revive)
+            // still get the message saved, but nothing surfaces its path.
             if rollBackOnFailure {
                 _ = await rollBackFailedCreate(worktreeID: worktreeID)
             }
@@ -610,7 +619,16 @@ extension WorktreeLifecycle {
         worktreeID: UUID, reposDir: URL? = nil, date: Date? = nil
     ) async -> WorktreeIDDelta {
         var savedPath: String?
-        if let row = try? await db.worktrees.getLocal(id: worktreeID),
+        // Read and delete in one transaction, so a park racing this rollback
+        // either lands in the returned row or is refused for the missing one.
+        let deleted: Worktree?
+        do {
+            deleted = try await db.worktrees.deleteReturning(id: worktreeID)
+        } catch {
+            logger.error("could not delete failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            deleted = nil
+        }
+        if let row = deleted,
            let repoID = row.repoID,
            let text = row.pendingPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty {
@@ -627,7 +645,6 @@ extension WorktreeLifecycle {
                 logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
-        try? await db.worktrees.delete(id: worktreeID)
         return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptPath: savedPath)
     }
 

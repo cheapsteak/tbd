@@ -567,6 +567,7 @@ struct QueuedPromptOnCreateTests {
         try await withAppState { state in
             let harness = Harness()
             let (_, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            state.dismissPresentedPromptSheet()
 
             archive(state, created.id)
 
@@ -585,12 +586,11 @@ struct QueuedPromptOnCreateTests {
 
             archive(state, created.id)
 
-            // The failure alert goes up at once; the composer's own alert,
-            // naming its draft, replaces it in the single slot.
+            // The open composer raises the one alert itself, so the delta
+            // raises none — replacing an alert on screen is unreliable.
             #expect(target.hasFailed)
             #expect(target.failureAfterCreate?.contains("Couldn't create worktree") == true)
-            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
-            #expect(state.alertRevealPath == nil)
+            #expect(state.alertMessage == nil)
             #expect(state.composerTargetsByWorktreeID.isEmpty)
 
             // What the sheet does on seeing `hasFailed`.
@@ -603,6 +603,53 @@ struct QueuedPromptOnCreateTests {
             #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
             #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
             #expect(state.alertRevealPath == Self.savedPath)
+        }
+    }
+
+    @Test("An open composer with a blank draft still raises the failure alert")
+    func blankOpenDraftStillRaisesTheFailureAlert() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+
+            archive(state, created.id)
+            #expect(state.alertMessage == nil)
+            state.keepUnsentDraftAfterFailedCreation(target, draft: "  \n ")
+            await waitUntil("alert") { state.alertMessage != nil }
+
+            #expect(harness.saved.isEmpty)
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertRevealPath == nil)
+        }
+    }
+
+    @Test("A submitted composer leaves the failure alert to the delta")
+    func submittedComposerDoesNotSuppressTheAlert() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            // Send, with the sheet not yet torn down when the delta lands.
+            state.submitQueuedPrompt(target, text: "sent", submit: true)
+            #expect(state.queuedPromptTarget === target)
+            #expect(state.composerTargetsByWorktreeID.isEmpty)
+
+            archive(state, created.id)
+
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+        }
+    }
+
+    @Test("A daemon-saved path is named even with an open composer")
+    func daemonPathAlertStandsWithAnOpenComposer() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            let daemonPath = "/tmp/fake-home/repos/r/unsent-prompts/x.md"
+
+            archive(state, created.id, unsentPromptPath: daemonPath)
+
+            #expect(target.hasFailed)
+            #expect(state.alertRevealPath == daemonPath)
         }
     }
 
