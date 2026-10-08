@@ -338,7 +338,7 @@ struct BoundedProcessRunnerTests {
                 stdin: Data("x".utf8),
                 timeout: .seconds(10), didCreateProcess: probe.record)
         }
-        #expect(probe.descriptorCount == 4, "expected stdout, stderr and both stdin ends")
+        #expect(probe.descriptorCount == 6, "expected both ends of stdout, stderr and stdin")
         await Self.expectReleased(probe)
     }
 
@@ -651,9 +651,13 @@ struct BoundedProcessRunnerTests {
         kill(pid, 0) == 0 || errno != ESRCH
     }
 
-    /// Waits for the probed `Process` to deallocate and each recorded descriptor
-    /// to be released. Polled because the deadline's clock armer is a cancelled
-    /// `Task` that drops its capture only once it next runs.
+    /// Expects every recorded descriptor to be closed already, then waits for
+    /// the probed `Process` to deallocate. The descriptors are checked at once
+    /// because the runner closes each end before it resumes the caller; were
+    /// any left to the `Process`'s deallocation, the wait below would pass by
+    /// releasing them late. The `Process` is polled because the deadline's
+    /// clock armer is a cancelled `Task` that drops its capture only once it
+    /// next runs.
     private static func expectReleased(
         _ probe: SpawnProbe, sourceLocation: SourceLocation = #_sourceLocation
     ) async {
@@ -661,6 +665,11 @@ struct BoundedProcessRunnerTests {
         #expect(probe.failures.isEmpty, "the hook could not watch: \(probe.failures)",
                 sourceLocation: sourceLocation)
         #expect(probe.descriptorCount >= 2, "the hook recorded no pipe descriptors",
+                sourceLocation: sourceLocation)
+        // Every pipe end is closed before the call resumes its caller, so the
+        // descriptors must already be gone; only the `Process` may linger.
+        let heldOnReturn = probe.heldDescriptors
+        #expect(heldOnReturn.isEmpty, "a failed spawn returned still holding \(heldOnReturn)",
                 sourceLocation: sourceLocation)
         let outcome = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
@@ -695,8 +704,10 @@ struct BoundedProcessRunnerTests {
 ///
 /// The question is asked of this process's descriptor table only. Watching
 /// the other end for EOF (or EPIPE) instead would also count every copy a
-/// sibling test's child inherited, since nothing marks `Pipe()` descriptors
-/// close-on-exec, so an unrelated long-running child could fake a leak.
+/// sibling test's child inherited: `Pipe()` descriptors are not close-on-exec,
+/// and `Process` closes nothing that lacks `FD_CLOEXEC` (see
+/// `HolderDescriptorInheritanceTests`), so an unrelated long-running child
+/// could fake a leak.
 private final class SpawnProbe: @unchecked Sendable {
     private struct Descriptor {
         let role: String
@@ -739,10 +750,11 @@ private final class SpawnProbe: @unchecked Sendable {
                     continue
                 }
                 newPins.append(pin)
+                // A failed spawn leaves the runner owning both ends of every
+                // pipe: the child never received its end, and the snapshot
+                // closes the stdout and stderr read ends.
                 watch("\(name) write end", pipe.fileHandleForWriting)
-                // Only stdin's read end is the parent's to close on a failed
-                // spawn; the runner reads stdout and stderr through theirs.
-                if name == "stdin" { watch("stdin read end", pipe.fileHandleForReading) }
+                watch("\(name) read end", pipe.fileHandleForReading)
             }
             lock.withLock {
                 self.process = process

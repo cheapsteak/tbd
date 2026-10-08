@@ -473,6 +473,9 @@ func runBoundedProcess(
         let stdoutHandle: FileHandle
         let stderrHandle: FileHandle?
         var replicaToClose: Int32 = -1
+        // The parent's copies of the child's stdout and stderr ends, which a
+        // failed spawn closes itself. Empty under `.pseudoTerminal`.
+        var outputWriteEnds: [FileHandle] = []
 
         switch stdio {
         case .pipes:
@@ -489,6 +492,7 @@ func runBoundedProcess(
             stderrHandle = stderrPipe.fileHandleForReading
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+            outputWriteEnds = [stdoutPipe.fileHandleForWriting, stderrPipe.fileHandleForWriting]
         case .pseudoTerminal:
             var primary: Int32 = -1
             var replica: Int32 = -1
@@ -761,6 +765,12 @@ func runBoundedProcess(
             // synchronously and immediately, long before the (>=100ms) watchdog
             // could fire, so this path reliably wins the claim.
             _ = snapshot()
+            // Nor did the child receive the output pipes' write ends. Closed
+            // after the snapshot, so the EOF they raise never wakes a drain
+            // handler, and through their handles, like stdin's, so the
+            // `Process`'s eventual deallocation does not close the numbers
+            // again. They go now instead of whenever that deallocation comes.
+            for handle in outputWriteEnds { try? handle.close() }
             guard state.claim() else { return }
             deadline.disarm()
             continuation.resume(throwing: error)
