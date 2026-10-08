@@ -31,6 +31,8 @@
 #       exit 0 whenever the loop ran (the judge decides), 2 on a harness error.
 #   flake-verify.sh protected-touched --base SHA
 #       prints protected paths the candidate changed; exit 1 if any, 2 on error.
+#   flake-verify.sh protected-in                          (cwd: anywhere; pure)
+#       the same for NUL-separated paths on stdin.
 #   flake-verify.sh judge --scope S --test ID --dir D --iterations N
 #                         --quarantined yes|no [--protected-touched F] [--plan F]
 #                         [--baseline-md F]                               (pure)
@@ -325,7 +327,7 @@ matches_any() {
 is_protected() { matches_any "$1" "${PROTECTED_PATTERNS[@]}"; }
 
 cmd_protected_touched() {
-  local base="" listing path found=1
+  local base="" listing found=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --base) base="${2:-}"; shift 2 ;;
@@ -336,12 +338,29 @@ cmd_protected_touched() {
   # Through a file, not a pipe: a failed diff must not read as an empty one.
   listing="$(mktemp "${TMPDIR:-/tmp}/flake-verify-changed.XXXXXX")" || die "cannot create a temporary file"
   changed_paths "$base...HEAD" > "$listing" || { rm -f "$listing"; die "git diff $base...HEAD failed"; }
-  while IFS= read -r -d '' path; do
-    if is_protected "$path"; then shown "$path"; echo; found=0; fi
-  done < "$listing"
+  list_protected < "$listing" || found=0
   rm -f "$listing"
   [[ "$found" -eq 0 ]] && return 1
   return 0
+}
+
+# list_protected: NUL-separated paths on stdin; prints the protected ones, one
+# per line; 1 if any.
+list_protected() {
+  local path found=1
+  # `|| [[ -n $path ]]`: a last path with no NUL after it is still checked.
+  while IFS= read -r -d '' path || [[ -n "$path" ]]; do
+    if is_protected "$path"; then shown "$path"; echo; found=0; fi
+  done
+  [[ "$found" -eq 0 ]] && return 1
+  return 0
+}
+
+# protected-in: list_protected over paths a caller already holds (promote reads
+# a PR's files from GitHub, with no tree to diff).
+cmd_protected_in() {
+  [[ $# -eq 0 ]] || die "protected-in: takes no arguments; NUL-separated paths on stdin"
+  list_protected
 }
 
 # --- the session's processes -------------------------------------------------------
@@ -461,10 +480,11 @@ main() {
     apply-candidate)       cmd_apply_candidate "$@" ;;
     stress)                cmd_stress "$@" ;;
     protected-touched)     cmd_protected_touched "$@" ;;
+    protected-in)          cmd_protected_in "$@" ;;
     judge)                 cmd_judge "$@" ;;
     snapshot-processes)    cmd_snapshot_processes "$@" ;;
     end-session-processes) cmd_end_session_processes "$@" ;;
-    *) die "usage: $0 {quarantined|baseline|choose-scope|plan-iterations|apply-candidate|stress|protected-touched|judge|snapshot-processes|end-session-processes} ..." ;;
+    *) die "usage: $0 {quarantined|baseline|choose-scope|plan-iterations|apply-candidate|stress|protected-touched|protected-in|judge|snapshot-processes|end-session-processes} ..." ;;
   esac
 }
 

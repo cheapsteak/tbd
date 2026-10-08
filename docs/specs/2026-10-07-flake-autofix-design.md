@@ -114,6 +114,21 @@ The workflow's `workflow_dispatch` takes a required `job` input, a choice of
 job's job-level `if:` selects it by trigger and, on dispatch, by `job`, so one
 workflow file serves both manual paths.
 
+One attempt runs at a time, from pick to publish. A run that can start `fix`
+– the schedule, or a dispatch of `fix` – holds a whole-run concurrency lock,
+without cancel-in-progress; every other run gets a group of its own. The lock
+belongs to the run rather than to a job because the picker learns that a test
+is taken only from what `publish` writes, the open PR and the attempt record
+(§5): a second `fix` that started while the first run's `publish` was pending
+could pick the same test. GitHub cancels a pending run when a newer one queues
+in the same group; such a run has started no job and recorded nothing. A
+scheduled run's work is the newer run's too, because it picks afresh. A
+dispatch that named an issue is lost: that issue is not attempted, and the
+cancelled run in the Actions list is the only trace, so a human dispatches one
+issue at a time and re-dispatches a cancelled one. Neither `fix` nor `publish` has a job-level group, since a group a
+`publish` queued in would be one where a pending `publish` could be cancelled
+and record nothing.
+
 06:00 UTC falls in the US night, and the `fix` job's 240-minute timeout (§9)
 ends it by 10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
 when it is busy – the last five nightlies started between 15:00 and 19:30 UTC –
@@ -987,10 +1002,22 @@ Transitions, each owned by the PR driver:
   draft stays open for a human to read, finish, or close.
 - **Promote.** When `test.yml` completes on a `flakefix/*` branch, the
   `promote` job marks the PR ready for review only if all of these hold for the
-  run's head SHA: the run concluded `success`, the SHA carries
-  `flakefix/stress` = `success`, and the SHA is still the PR's head. A human
+  run's head SHA: the run is the PR's own (`pull_request`) run and concluded
+  `success`, the SHA carries `flakefix/stress` = `success` (the newest such
+  status the bot set on it), and the SHA is still the PR's head. A human
   push to the branch moves the head to an unverified SHA, so the bot never
-  promotes over a human's work. Promotion uses the App token, because a
+  promotes over a human's work. The PR must also still be the bot's open draft
+  from this repository, and none of its changed files, read from GitHub and
+  matched against `main`'s protected list (§6.4), may be protected – a check
+  independent of the one the verifier made. A weak-evidence PR is promoted
+  like any other (§6.5); if it lacks the `flakefix-weak-evidence` label,
+  because `publish` died before adding it, `promote` adds it first. GitHub's
+  ready takes no expected head, so `promote` reads the head again after it;
+  if a push landed in between, it returns the PR to draft and goes red.
+  Promotion has one trigger, a `test.yml` completion: a stress status that
+  lands after the PR's run completed (a re-run `publish`, say) promotes
+  nothing until a human re-runs `test.yml`, and the PR stays a draft, which
+  is the safe side. Promotion uses the App token, because a
   `ready_for_review` event raised by `GITHUB_TOKEN` would not start
   `claude-review`.
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so
@@ -1347,7 +1374,7 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   job token says so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
   back to the job token when the App token is missing, and grants
   `issues: write` to no other job.
-- **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
+- **`flake-pr.test.sh`** – promotion's conditions (§7), each failing alone; a
   head that moved after verification; the attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists, and a failed
   session with no commit packaged as `aborted` marked `session_failed`,

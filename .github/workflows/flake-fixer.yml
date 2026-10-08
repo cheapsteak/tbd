@@ -12,7 +12,8 @@ name: Flake fixer
 #   - `publish` turns that artifact into a branch, a draft PR, a commit status
 #     and an attempt record, with the App token, on a runner no model touched
 #     (§7);
-#   - `promote` joins later.
+#   - `promote` marks that draft ready for review once the PR's own `test.yml`
+#     run passes on the head the verifier passed (§7).
 #
 # OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
 # 'true', the ledger runs report-only: it computes everything, writes it to the
@@ -40,9 +41,15 @@ on:
   # timeout ends it before the nightly's 11:00 schedule.
   schedule:
     - cron: '0 6 * * *'
+  # Nightly completions start `ledger`; Test completions on a flakefix/issue-<N>
+  # PR start `promote`. The branch filter keeps every other PR's Test runs from
+  # starting a run of this file: Nightly runs on main, and only the bot pushes
+  # flakefix/issue-<N>. A Test run on main still starts one, all of whose jobs
+  # are skipped without a runner.
   workflow_run:
-    workflows: [Nightly]
+    workflows: [Nightly, Test]
     types: [completed]
+    branches: [main, 'flakefix/issue-*']
   workflow_dispatch:
     inputs:
       job:
@@ -57,8 +64,27 @@ on:
 
 permissions: {}
 
-# No workflow-level concurrency: each job carries its own group, so a run
-# started by one trigger never queues behind another job's.
+# ONE ATTEMPT AT A TIME, FROM PICK TO PUBLISH. A run that can start `fix` (the
+# schedule, or a dispatch of `fix`) takes the whole-run lock
+# `flake-fixer-attempt`; every other run gets a group of its own and never
+# queues. The lock is the run's, not a job's, because the picker learns that a
+# test is taken only from what `publish` writes – the open PR and the attempt
+# record – so a second `fix` that started while the first run's `publish` was
+# still pending or running could pick the same test. Two job-level groups
+# cannot close that gap: `fix` B would start the moment `fix` A ended, ahead of
+# `publish` A.
+#
+# No cancel-in-progress, so a run that holds the lock is never cancelled and
+# its `publish` always runs. GitHub does cancel a PENDING run when a newer one
+# queues in the same group; such a run has started no job, picked nothing and
+# recorded nothing, so no state is lost. A scheduled run's work is the newer
+# run's too, since it picks afresh. A dispatch that named an `issue` is not:
+# that issue is not attempted, and the cancelled run in the Actions list is
+# the only trace, so dispatch one issue at a time and re-dispatch a cancelled
+# one.
+concurrency:
+  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'fix')) && 'flake-fixer-attempt' || format('flake-fixer-run-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   ledger:
@@ -221,9 +247,8 @@ jobs:
     # two verifier runs of 24 each, and 20 for checkouts, ending the
     # session's processes, and the artifacts.  Worst case 235.
     timeout-minutes: 240
-    concurrency:
-      group: flake-fixer-fix
-      cancel-in-progress: false
+    # Serialized by the run's attempt lock (top of file), which also covers
+    # this run's `publish`.
     # Read scopes only, and no id-token: the session's GITHUB_TOKEN cannot
     # write, and claude-code-action cannot trade OIDC for the Claude App's
     # installation token (§6.1).
@@ -1042,13 +1067,11 @@ jobs:
     if: always() && vars.FLAKE_FIXER_ENABLED == 'true' && github.repository == 'cheapsteak/tbd' && needs.fix.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Its own group, not the ledger's: GitHub cancels a pending job when a
-    # newer one queues in the same group, and a cancelled publish would record
-    # nothing. It writes only the attempt comment and its own comments, never
-    # the ledger comment or an issue, so the two cannot collide.
-    concurrency:
-      group: flake-fixer-publish
-      cancel-in-progress: false
+    # No job-level concurrency group: the run already holds the attempt lock
+    # (top of file), and any group publish queued in would be one where GitHub
+    # could cancel it while pending, recording nothing. It writes only the
+    # attempt comment and its own comments, never the ledger comment or an
+    # issue, so it need not queue behind `ledger` either.
     # The job token reads nothing it needs; every write uses the App token.
     permissions:
       contents: read
@@ -1138,3 +1161,78 @@ jobs:
           mkdir -p "$RUNNER_TEMP/flakefix-candidate"
           bash scripts/flake-pr.sh open --pick-dir "$RUNNER_TEMP/flakefix-pick" \
             --attempt-dir "$RUNNER_TEMP/flakefix-candidate" --repo "$GITHUB_REPOSITORY"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # promote: when a flakefix/issue-<N> PR's own `test.yml` run completes, mark
+  # the draft ready for review if the run passed on the head the verifier
+  # passed (§7). Weak evidence is promoted too, carrying its label and status
+  # text (§6.5). It writes no ledger or attempt state (§4.4); a skip changes
+  # nothing.
+  promote:
+    name: promote
+    if: >-
+      vars.FLAKE_FIXER_ENABLED == 'true' &&
+      github.repository == 'cheapsteak/tbd' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Test' &&
+      startsWith(github.event.workflow_run.path, '.github/workflows/test.yml') &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No concurrency group. Each promote decides for its own run's head SHA,
+    # so a group would let GitHub cancel a pending promote for the current
+    # head in favour of a newer one queued for an older SHA, which skips.
+    # Two promotes of one head may overlap: the label and the ready are
+    # idempotent.
+    # The job token reads; the ready (and a missing weak label) uses the App
+    # token, because a ready_for_review raised by GITHUB_TOKEN starts no
+    # claude-review (§7).
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    steps:
+      # main's scripts, never the candidate's: the protected list promote
+      # checks against is main's.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Mint the tbd-flake-fixer App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+          # Only what promote writes: the ready (and its undo) and the label.
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Check the App token's bot login
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::error::the App token's login is not the one the readers trust (scripts/flake_lib.py BOT_LOGIN)"
+            exit 1
+          fi
+
+      # The branch is attacker-adjacent text: it reaches the script through
+      # env, never as an expression inside `run:`.
+      - name: Promote if verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
+            --conclusion "$CONCLUSION" --event "$RUN_EVENT"
