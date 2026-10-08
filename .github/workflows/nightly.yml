@@ -122,8 +122,9 @@ jobs:
             --post
 
       # ── Step 2: flake-ledger stress loop ────────────────────────────────────
-      # Attaches to #494 (ControlModeInputHealthTests), #503 (GitManagerTimeout
-      # + the whole-fast-pass repro shape) and #496 (AppearanceDebounce).
+      # Attaches to #494 (ControlModeInputHealthTests), #961 (GitManagerTimeout),
+      # #496 (AppearanceDebounce) and #962 (the whole-fast-pass catch-all).
+      # #503 is the archive of both #961's and #962's earlier reports.
       - name: Flake-ledger stress loop
         id: stress
         continue-on-error: true
