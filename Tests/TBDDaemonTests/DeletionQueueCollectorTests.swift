@@ -200,6 +200,44 @@ struct DeletionQueueCollectorTests {
         ) == .keep(reason: "live-cwd"))
     }
 
+    @Test func keepsAWorktreeCreatedAfterItsRowWasArchived() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // The row was archived an hour before this directory existed: the
+        // old directory left with that archive, and someone recreated a
+        // worktree at the same path with `git worktree add`. It passes every
+        // other gate (linked, inside the pool, no live cwd, past grace), which
+        // is exactly how such a worktree, and the uncommitted work in it,
+        // used to be reaped as an "interrupted archive".
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        try "work in progress\n".write(
+            toFile: f.worktree + "/notes.txt", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(-3600)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "recreated"))
+        #expect(FileManager.default.fileExists(atPath: f.worktree + "/notes.txt"))
+    }
+
+    @Test func stillReapsAWorktreeThatPredatesItsArchive() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // The genuine interrupted archive: the directory existed before the
+        // row was archived. The recreated gate must not hold this one.
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(60)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0) == .reap)
+    }
+
     // MARK: - Candidate enumeration
 
     @Test func interruptedArchivesSelectsOnlyArchivedRowsWhoseDirectoryExists() async throws {

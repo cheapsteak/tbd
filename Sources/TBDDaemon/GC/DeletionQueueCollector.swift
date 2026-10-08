@@ -35,9 +35,9 @@ public struct InterruptedArchive: Sendable, Equatable {
 }
 
 public enum DeletionQueueDecision: Sendable, Equatable {
-    /// `reason` is one of `"locked"`, `"grace"`, `"not-tbd-prefix"`,
-    /// `"not-linked"`, `"no-repo"`, `"live-cwd"`. Each is a spec invariant
-    /// with its own test.
+    /// `reason` is one of `"locked"`, `"grace"`, `"recreated"`,
+    /// `"not-tbd-prefix"`, `"not-linked"`, `"no-repo"`, `"live-cwd"`. Each is
+    /// a spec invariant with its own test.
     case keep(reason: String)
     case reap
 }
@@ -168,6 +168,20 @@ public struct DeletionQueueCollector: Sendable {
             return .keep(reason: "grace")
         }
 
+        // An interrupted archive left behind the directory it was archiving,
+        // so that directory is older than the archive. One created AFTER the
+        // row was archived is a new worktree that happens to reuse the path —
+        // typically recreated with `git worktree add` by whoever was still
+        // working in the old one — and reaping it deletes work the archive
+        // never saw. It stays, outside TBD's lifecycle, until someone revives
+        // or forgets the row. An unreadable creation date proves nothing
+        // either way and falls through to the gates below, as before.
+        if let archivedAt = candidate.archivedAt,
+           let created = Self.creationDate(of: candidate.path),
+           created > archivedAt {
+            return .keep(reason: "recreated")
+        }
+
         guard candidate.allowedPrefixes.contains(where: { isUnder(candidate.path, prefix: $0) })
         else {
             return .keep(reason: "not-tbd-prefix")
@@ -238,6 +252,12 @@ public struct DeletionQueueCollector: Sendable {
     }
 
     // MARK: - Helpers
+
+    /// The directory's own creation time (APFS birth time), or `nil` when the
+    /// filesystem does not report one.
+    static func creationDate(of path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.creationDate] as? Date
+    }
 
     /// True when `path` is the prefix itself or sits beneath it. Compares
     /// resolved paths so a trailing slash, `..`, or a `/var` -> `/private/var`
