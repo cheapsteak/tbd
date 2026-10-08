@@ -639,6 +639,23 @@ struct QueuedPromptOnCreateTests {
         }
     }
 
+    @Test("A cancelled composer leaves the failure alert to the delta")
+    func cancelledComposerDoesNotSuppressTheAlert() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            // Cancel or Escape, with the sheet not yet torn down.
+            state.withdrawComposer(target)
+            #expect(state.queuedPromptTarget === target)
+            #expect(state.composerTargetsByWorktreeID.isEmpty)
+
+            archive(state, created.id)
+
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(harness.saved.isEmpty)
+        }
+    }
+
     @Test("A daemon-saved path is named even with an open composer")
     func daemonPathAlertStandsWithAnOpenComposer() async throws {
         try await withAppState { state in

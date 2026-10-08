@@ -248,7 +248,12 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.worktreeHasNoRepo(worktreeID)
         }
         guard let repo = try await db.repos.get(id: rid) else {
-            try? await db.worktrees.delete(id: worktreeID)
+            // Same rollback as the failure path below, so a parked first
+            // message is saved here too; a caller that rolls back itself
+            // (`worktree.create`) finds the row still there to save from.
+            if rollBackOnFailure {
+                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+            }
             throw WorktreeLifecycleError.repoNotFound(rid)
         }
 

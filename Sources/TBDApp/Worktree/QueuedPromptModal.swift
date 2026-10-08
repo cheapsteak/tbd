@@ -199,7 +199,7 @@ struct QueuedPromptModal: View {
                 initialText: draft,
                 onTextChange: { draft = $0 },
                 onSubmit: { submit($0) },
-                onCancel: { dismiss() }
+                onCancel: { cancel() }
             )
             .frame(minHeight: 140)
             .padding(4)
@@ -213,7 +213,7 @@ struct QueuedPromptModal: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { cancel() }
                     .keyboardShortcut(.cancelAction)
                 // `draft`, not the editor's own string, and safe for the same
                 // reason the disabled state is: this closure is rebuilt on
@@ -244,6 +244,14 @@ struct QueuedPromptModal: View {
     /// before the failure hands nothing off.
     nonisolated static func shouldHandOffDraft(creationFailed: Bool, submitted: Bool) -> Bool {
         creationFailed && !submitted
+    }
+
+    /// Cancel and Escape. Discards the draft by design; withdraws the
+    /// composer first so a failure landing during the teardown raises its own
+    /// alert rather than waiting on this sheet.
+    private func cancel() {
+        appState.withdrawComposer(target)
+        dismiss()
     }
 
     private func submit(_ text: String) {

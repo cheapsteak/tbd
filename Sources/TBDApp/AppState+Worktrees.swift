@@ -262,7 +262,7 @@ extension AppState {
         guard !trimmed.isEmpty else { return }
         // A submitted composer hands nothing off on failure, so it must stop
         // looking like one that will raise the failure alert itself.
-        composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== target }
+        withdrawComposer(target)
         Task {
             switch await target.awaitResolution() {
             case .failed:
@@ -288,6 +288,15 @@ extension AppState {
                 }
             }
         }
+    }
+
+    /// Stop treating `target`'s composer as one that will raise a creation
+    /// failure's alert itself. Called as the sheet starts to close — Cancel,
+    /// Escape, submit — before `dismiss()` lands, so an entry in
+    /// `composerTargetsByWorktreeID` always means "open and staying open" and
+    /// a failure delta in that window raises its own alert.
+    func withdrawComposer(_ target: QueuedPromptTarget) {
+        composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== target }
     }
 
     /// Save the draft of a modal that was still open, unsent, when its
