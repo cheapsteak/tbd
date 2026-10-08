@@ -6,7 +6,7 @@ import TBDShared
 /// The remote counterpart of `ComposerState`, and ordered the same way: scope
 /// first (is there a composer at all), then whether the session is running,
 /// then whether it is blocked. Every input is a machine fact — the provider's
-/// declared capabilities, the two config flags, and the `state` /
+/// declared capabilities and the `state` /
 /// `agent_state` the provider reported through `list` and `events`. Nothing
 /// here reads rendered terminal text.
 ///
@@ -21,8 +21,8 @@ import TBDShared
 /// composer, an exited remote session stays disabled: there is no wake path
 /// for a remote target (spec non-goal).
 enum RemoteComposerState: Equatable {
-    /// No composer: the provider does not declare `send-submit`, either flag
-    /// is off, or the session is not in the mirror.
+    /// No composer: the provider does not declare `send-submit`, or the
+    /// session is not in the mirror.
     case hidden
     /// The session is running and not blocked; submitting sends the message.
     case running
@@ -69,14 +69,9 @@ enum RemoteComposerState: Equatable {
 
     static func resolve(
         capabilities: [String],
-        session: RemoteSessionPayload?,
-        remoteTranscriptEnabled: Bool,
-        composerEnabled: Bool
+        session: RemoteSessionPayload?
     ) -> RemoteComposerState {
-        guard RemoteSessionDetailGates.offersComposer(
-            capabilities: capabilities,
-            remoteTranscriptEnabled: remoteTranscriptEnabled,
-            composerEnabled: composerEnabled),
+        guard RemoteSessionDetailGates.offersComposer(capabilities: capabilities),
             let session
         else { return .hidden }
 

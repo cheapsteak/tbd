@@ -351,9 +351,8 @@ public enum RPCMethod {
     /// Brings a session's local transcript cache
     /// (`~/tbd/remote-transcripts/<provider>/<sessionID>/`) up to date through
     /// `transcript read --since`, and says where it is. The app tails the file;
-    /// the daemon runs no timers of its own for transcripts. Refused unless
-    /// `remote_transcript_enabled` is on and the provider declares
-    /// `transcript.read`. Design:
+    /// the daemon runs no timers of its own for transcripts. Refused unless the
+    /// provider declares `transcript.read`. Design:
     /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
     public static let remoteTranscriptSync = "remote.transcriptSync"
     /// Submits a message to a remote session through `send <id> --submit`, the
@@ -417,15 +416,6 @@ public enum RPCMethod {
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
     public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
-    /// The transcript-composer gate (`transcript_composer_enabled`) — the
-    /// feature's only opt-in. Reading needs no method of its own: `config.get`
-    /// already carries the resolved value.
-    public static let configSetTranscriptComposerEnabled = "config.setTranscriptComposerEnabled"
-    /// The remote-transcript gate (`remote_transcript_enabled`) — the soak
-    /// switch for `remote.transcriptSync`, the remote transcript pane and its
-    /// composer. Reading needs no method of its own: `config.get` carries the
-    /// resolved value and `daemon.capabilities` carries it to the app.
-    public static let configSetRemoteTranscriptEnabled = "config.setRemoteTranscriptEnabled"
     /// The model-proxy gate (`model_proxy_enabled`) — whether a new pty-holder
     /// session's Messages API traffic is routed through the loopback proxy.
     /// Reading needs no method of its own: `config.get` carries the resolved
@@ -2035,24 +2025,6 @@ public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
 /// so an operator who turns the feature off stays off when the shipped default
 /// graduates.
 public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setTranscriptComposerEnabled` — the composer gate (default
-/// OFF during soak). Writing either value is the explicit gesture that lifts the
-/// column out of its NULL "never chose" state, so an operator who turns the
-/// feature off stays off when the shipped default graduates.
-public struct ConfigSetTranscriptComposerEnabledParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setRemoteTranscriptEnabled` — the remote-transcript gate
-/// (default OFF during soak). Writing either value is the explicit gesture that
-/// lifts the column out of its NULL "never chose" state, so an operator who
-/// turns the feature off stays off when the shipped default graduates.
-public struct ConfigSetRemoteTranscriptEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -3964,13 +3936,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// tmux — so Settings disables the toggle and says why rather than offering
     /// a switch that would change nothing.
     public let ptyHolderSupported: Bool
-    /// Whether the live transcript's message composer is enabled
-    /// (`transcript_composer_enabled`). Default OFF while it soaks. The app gates
-    /// the whole composer — the field, the completions request, attachment
-    /// writes — on this, so with it false the transcript pane behaves exactly as
-    /// it did before. Resolved through `Config.transcriptComposerEnabledDefault`,
-    /// so an install that never touched the toggle reports the shipped default.
-    public let transcriptComposerEnabled: Bool
     /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
     /// while it soaks. Read at spawn time, so the Settings toggle reads it back
     /// from here rather than from a local guess — and a session already running
@@ -4003,16 +3968,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// streams nothing, and this field says so rather than making the app
     /// re-derive the pair.
     public var transcriptStreamingEnabled: Bool
-    /// Whether the remote transcript pane and its composer are enabled
-    /// (`remote_transcript_enabled`). Default OFF while it soaks. The app shows
-    /// the Transcript toggle on a remote session only with this on (and the
-    /// provider declaring `transcript.read`); the remote composer additionally
-    /// needs `transcriptComposerEnabled`. Resolved through
-    /// `Config.remoteTranscriptEnabledDefault`.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `modelProxyEnabled` gives.
-    public var remoteTranscriptEnabled: Bool = Config.remoteTranscriptEnabledDefault
     /// Whether the profile balancing gate is currently set (design 2026-09-05
     /// §6). Default OFF while it soaks. Resolved through
     /// `Config.profileBalancingEnabledDefault`, so an install that never touched
@@ -4047,7 +4002,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 ptyHolderSupported: Bool = false,
-                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault,
                 modelProxyEnabled: Bool = Config.modelProxyDefault,
                 modelProxySupported: Bool = false,
                 modelProxyPort: Int? = nil,
@@ -4071,7 +4025,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.updateMode = updateMode
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
-        self.transcriptComposerEnabled = transcriptComposerEnabled
         self.modelProxyEnabled = modelProxyEnabled
         self.modelProxySupported = modelProxySupported
         self.modelProxyPort = modelProxyPort
@@ -4136,12 +4089,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
-        // New field for the composer gate. A daemon that does not send it has no
-        // `terminal.completions` either, so fall through to the shipped default
-        // rather than showing a composer nothing can serve.
-        transcriptComposerEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .transcriptComposerEnabled)
-            ?? Config.transcriptComposerEnabledDefault
         // New fields for the model proxy. A daemon that does not send
         // `modelProxyEnabled` runs no proxy at all, so fall through to the
         // shipped defaults rather than assuming the route is live. `supported`,
@@ -4157,12 +4104,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
-        // New field for the remote-transcript gate. A daemon that does not send
-        // it has no `remote.transcriptSync` either, so fall through to the
-        // shipped default rather than showing a pane nothing can fill.
-        remoteTranscriptEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .remoteTranscriptEnabled)
-            ?? Config.remoteTranscriptEnabledDefault
         // New field for the profile balancing gate. A daemon that does not send
         // it knows nothing about the feature, so fall through to the shipped
         // default rather than assuming it is off.

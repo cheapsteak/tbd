@@ -358,9 +358,7 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
-        await reclaimAttachments(
-            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
-        )
+        await reclaimAttachments(dryRun: dryRun, planned: &planned, reaped: &reaped)
 
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
@@ -1280,13 +1278,8 @@ public actor OrphanGC {
     /// filesystem cannot be transactional, so the sweep is the mechanism and
     /// create-time cleanup is the optimisation.
     ///
-    /// Gated by `transcriptComposerEnabled` on top of `gcEnabled`, because the
-    /// feature that writes these files is itself behind that flag — a machine
-    /// that has never opened the composer has nothing here for this phase to be
-    /// right or wrong about. `dryRun` bypasses the flag exactly as `sweep` lets
-    /// it bypass `gcEnabled`: planning is read-only, and someone deciding whether
-    /// to enable a default-off flag needs to see what enabling it would reclaim.
-    /// A NON-dry run still requires the flag.
+    /// Gated by `gcEnabled` alone, like the agent-worktree loop: the composer
+    /// that writes these files has no gate of its own.
     ///
     /// **An unreadable worktree list skips the whole leg**, rather than reading
     /// an empty list as "no worktree is live" and reaping every directory.
@@ -1307,10 +1300,8 @@ public actor OrphanGC {
     /// message in a worktree that no longer exists — or, for a per-file reap,
     /// for one nobody sent in two weeks.
     private func reclaimAttachments(
-        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+        dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.transcriptComposerEnabled || dryRun else { return }
-
         let live: Set<UUID>
         do {
             live = Set(try await db.worktrees.list().map(\.id))
@@ -1335,8 +1326,6 @@ public actor OrphanGC {
                 """)
             case .reap:
                 planned.append("REAP attachments \(candidate.path)")
-                // This leg's guard is `transcriptComposerEnabled || dryRun`, so
-                // every line below runs only with the flag actually on.
                 guard !dryRun else { continue }
                 guard attachmentsCollector.reap(candidate) else {
                     planned.append("KEEP unlink-failed \(candidate.path)")
@@ -1952,12 +1941,6 @@ public actor OrphanGC {
 
         // Attachments first: it is one `removeItem` and cannot fail the
         // scratchpad reclaim below.
-        //
-        // NOT additionally gated on the composer flag. The directory exists only
-        // because the composer wrote into it, and a person who turned the
-        // composer off afterwards would otherwise leave images behind
-        // permanently — a flag that gates CREATION must not gate the reclaim of
-        // what was already created.
         let attachments = attachmentsBase.appendingPathComponent(worktreeID.uuidString)
         if FileManager.default.fileExists(atPath: attachments.path) {
             do {

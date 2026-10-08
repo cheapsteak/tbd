@@ -283,8 +283,7 @@ struct TableTranscriptPaneView: View {
                 // table, and it must not take a half-written message with it.
                 if let decision = Self.composerMount(
                     terminal: terminal,
-                    worktree: appState.findWorktree(id: worktreeID),
-                    composerEnabled: appState.transcriptComposerEnabled) {
+                    worktree: appState.findWorktree(id: worktreeID)) {
                     Divider()
                     MessageComposerView(
                         terminal: decision.terminal,
@@ -337,21 +336,18 @@ struct TableTranscriptPaneView: View {
 
     /// Whether this pane mounts a composer, and with what.
     ///
-    /// Static and taking its three inputs explicitly so the gate is assertable
-    /// without a view hierarchy — including both branches of the daemon
-    /// capability, which is the flag this whole feature ships behind.
+    /// Static and taking its inputs explicitly so the gate is assertable without
+    /// a view hierarchy.
     ///
     /// `!= .hidden` rather than `isEnabled`: a parked session's composer is
     /// mounted and disabled-looking but very much present, because sending to it
     /// is what resumes it.
     static func composerMount(
-        terminal: Terminal?, worktree: Worktree?, composerEnabled: Bool
+        terminal: Terminal?, worktree: Worktree?
     ) -> ComposerMount? {
         guard let worktree else { return nil }
         let state = ComposerState.resolve(
-            terminal: terminal,
-            isRemoteWorktree: !worktree.location.isLocal,
-            composerEnabled: composerEnabled)
+            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
         guard state != .hidden, let terminal, let local = LocalWorktree(worktree) else {
             return nil
         }

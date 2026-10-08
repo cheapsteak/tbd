@@ -71,10 +71,19 @@ enum RemoteSessionDetailGates {
     /// provider no longer reports, and on a stale snapshot, where mutating a
     /// session is unsafe — the same conditions under which the context menu
     /// withholds Send Text….
+    ///
+    /// Also withheld while the transcript's composer is on screen and taking
+    /// messages (`transcriptComposerTakesInput`): the composer is the input
+    /// path there, and a second field below it would be the redundant one.
+    /// Only an *enabled* composer counts. A blocked composer tells the person
+    /// to answer the prompt in the terminal, and with no live terminal
+    /// attached the footer's raw keystrokes are how they do it; a starting,
+    /// unknown or exited session's composer cannot send at all.
     static func showsSendFooter(
-        capabilities: [String], gone: Bool, snapshotFresh: Bool, hasLiveAttachedPane: Bool
+        capabilities: [String], gone: Bool, snapshotFresh: Bool, hasLiveAttachedPane: Bool,
+        transcriptComposerTakesInput: Bool
     ) -> Bool {
-        snapshotFresh && !gone && !hasLiveAttachedPane
+        snapshotFresh && !gone && !hasLiveAttachedPane && !transcriptComposerTakesInput
             && capabilities.contains(sendCapability)
     }
 
@@ -89,11 +98,9 @@ enum RemoteSessionDetailGates {
     // MARK: - Remote transcript
 
     /// Whether the window toolbar offers the Transcript toggle for a remote
-    /// session: the provider declares `transcript.read` and
-    /// `remote_transcript_enabled` is on. The flag is a parameter, not read
-    /// here, so this stays a pure function of its inputs.
-    static func showsTranscriptToggle(capabilities: [String], featureEnabled: Bool) -> Bool {
-        featureEnabled && capabilities.contains(transcriptReadCapability)
+    /// session: the provider declares `transcript.read`.
+    static func showsTranscriptToggle(capabilities: [String]) -> Bool {
+        capabilities.contains(transcriptReadCapability)
     }
 
     /// Whether the detail pane shows the transcript half of its split: the
@@ -101,17 +108,25 @@ enum RemoteSessionDetailGates {
     /// says open. A hidden toggle hides the pane too, so a provider that
     /// stops declaring `transcript.read` never leaves a pane nothing can
     /// close.
-    static func showsTranscriptPane(capabilities: [String], featureEnabled: Bool, open: Bool) -> Bool {
-        open && showsTranscriptToggle(capabilities: capabilities, featureEnabled: featureEnabled)
+    static func showsTranscriptPane(capabilities: [String], open: Bool) -> Bool {
+        open && showsTranscriptToggle(capabilities: capabilities)
+    }
+
+    /// Whether the transcript pane's composer is on screen and enabled: the
+    /// pane is shown (`showsTranscriptPane`) and the composer's state accepts
+    /// a message. `RemoteComposerState.resolve` already folds in
+    /// `offersComposer`, so a provider without `send-submit` answers false.
+    static func transcriptComposerTakesInput(
+        capabilities: [String], transcriptOpen: Bool, composerState: RemoteComposerState
+    ) -> Bool {
+        showsTranscriptPane(capabilities: capabilities, open: transcriptOpen)
+            && composerState.isEnabled
     }
 
     /// Whether a remote session can have a submitting composer at all:
-    /// the provider declares `send-submit`, and both
-    /// `remote_transcript_enabled` and `transcript_composer_enabled` are on.
-    /// The composer's finer states live in `RemoteComposerState`.
-    static func offersComposer(
-        capabilities: [String], remoteTranscriptEnabled: Bool, composerEnabled: Bool
-    ) -> Bool {
-        remoteTranscriptEnabled && composerEnabled && capabilities.contains(sendSubmitCapability)
+    /// the provider declares `send-submit`. The composer's finer states live in
+    /// `RemoteComposerState`.
+    static func offersComposer(capabilities: [String]) -> Bool {
+        capabilities.contains(sendSubmitCapability)
     }
 }

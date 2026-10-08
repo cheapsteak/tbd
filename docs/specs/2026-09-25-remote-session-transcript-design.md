@@ -97,9 +97,8 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
 ### RPCs
 
-- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless `remote_transcript_enabled` is on and the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
+- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
 - **`remote.sendMessage {provider, sessionID, text}`** invokes `send <id> --submit` with `text` on stdin and a 30-second timeout. It is refused:
-  - unless both `remote_transcript_enabled` and `transcript_composer_enabled` are on — the daemon checks the flags itself, so a direct RPC call cannot send input the hidden composer would not;
   - unless the provider declares `send-submit`;
   - when the provider's snapshot is stale, as `remote.send` is;
   - while the mirrored `agent_state` is `waiting_input`, because the agent is blocked on a prompt and an Enter would choose its highlighted option — the refusal says to answer the prompt in the terminal;
@@ -111,9 +110,9 @@ The cache sits outside the Claude projects store on purpose: `ClaudeSessionScann
 
 The existing `remote.transcript` RPC and `tbd remote transcript` keep their full-fetch behavior and invoke `transcript read`. `remote.retain`, `remote.import`, `remote.recall`, and `remote.delete`'s retain path check the namespaced capabilities and invoke the namespaced verbs.
 
-### Flag
+### Gating
 
-`remote_transcript_enabled` is a new `config` column with no SQL default, resolved as `remote_transcript_enabled ?? Config.remoteTranscriptEnabledDefault`, which is `false`. It gates `remote.transcriptSync`, the pane, and the composer. The composer also requires the existing `transcript_composer_enabled`, so remote and local composers are switched together. Graduation flips `Config.remoteTranscriptEnabledDefault`.
+The remote transcript carries no feature flag. `remote.transcriptSync`, the pane, and the composer are gated by the provider's own declarations — `transcript.read` for the sync and the pane, `send-submit` for the composer — under the remote-backends gate and the cloud gate every provider-named verb already sits behind. The daemon checks those declarations itself, so a direct RPC call cannot do what the hidden pane or composer would not.
 
 ### Reclaiming the cache
 
@@ -122,13 +121,13 @@ The cache directory is a new kind of durable resource, and `OrphanGC` reclaims i
 - A session directory is reclaimed when TBD no longer tracks its `(provider, sessionID)` and nothing has been written to it within `gcGraceSeconds`, the grace window every other leg uses. A session is tracked while a `remote_session` row for it has `dismissed = 0` or a `worktree` row for it has a status other than `archived`. Row absence alone would not do: dismissing sets `dismissed = 1` and keeps the row, and archiving keeps the worktree row, so a sweep that waited for rows to disappear would never reclaim a dismissed or archived session's cache. A session un-dismissed or unarchived after its cache was reclaimed simply refetches. The window keeps a sync that raced a dismiss from losing its file mid-write.
 - A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. A sync already in flight for that session drops what it fetched instead of writing it back into a recreated directory. The sweep is the guarantee; the eager removal is only prompt cleanup.
 
-The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install that never enabled `remote_transcript_enabled` has no such directories, so the leg finds nothing. The leg walks the whole cache root against the rows rather than a record of what it created, so it also reclaims directories written before it existed.
+The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install whose providers never served a transcript has no such directories, so the leg finds nothing. The leg walks the whole cache root against the rows rather than a record of what it created, so it also reclaims directories written before it existed.
 
 ## App
 
 ### Opening the transcript
 
-Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read` and `remote_transcript_enabled` is on.
+Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read`.
 
 Whether the transcript is open is one preference shared by every remote session, stored in `UserDefaults` under `remoteTranscriptOpen`. Unset reads as open, so the first remote session a user views shows its transcript. Closing it with the toggle stores `false`, and every remote session then opens without it until the toggle stores `true` again.
 
@@ -153,14 +152,14 @@ The remote pane reuses `MessageComposerView` and its send coordinator. A compose
 
 For a remote target:
 
-- **Visibility** – shown only when the provider declares `send-submit` and both flags are on.
+- **Visibility** – shown only when the provider declares `send-submit`.
 - **Disabled states** – "Session has exited" when it has; "Waiting on a prompt — answer it in the terminal" while `agent_state` is `waiting_input`.
 - **Omissions** – no slash-command menu, since the completion inventory comes from a local terminal (a typed `/command` is still sent as text); no image attachments, since staged images are local paths the remote machine cannot read; no wake path for an exited session.
 - **Submission** – submit calls `remote.sendMessage`. The text stays in the composer until the call succeeds, and success triggers a sync. Not sent shows the composer's failure banner. Unknown shows a distinct banner — "May have been sent — check the transcript before sending again" — triggers a sync so the transcript can answer the question, and keeps the text without offering a one-keystroke resend: the user must edit the text or confirm before it can be sent again. Neither outcome resubmits automatically.
 
 The attached terminal and the composer are independent writers to the same session. Text left unsent in the agent's own input box is prefixed to the composer's message. This is the limitation the local composer already accepts.
 
-The existing send footer is unchanged: it still appears only when no terminal is live.
+The existing send footer appears only when no terminal is live and the composer is not on screen taking messages. A composer that is shown but cannot send — blocked on a prompt, starting, unknown, or exited — leaves the footer in place, because with no live terminal its raw keystrokes are the only way to answer a prompt.
 
 ## Testing
 
@@ -177,19 +176,17 @@ Each gate is tested on both branches.
   - a `transcript.jsonl` longer than `state.json`'s `length` is truncated on load;
   - paths follow `TBD_HOME`.
 - **RPC gates**:
-  - `remote.transcriptSync` refused with the flag off, without `transcript.read`, or for a dismissed session;
-  - `remote.sendMessage` refused with either flag off, without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
+  - `remote.transcriptSync` refused without `transcript.read`, or for a dismissed session;
+  - `remote.sendMessage` refused without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
   - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
 - **OrphanGC leg** – keeps a directory whose session has an undismissed `remote_session` row or an unarchived `worktree` row, keeps one written within `gcGraceSeconds`, reclaims one outside the window whose only rows are dismissed or archived, reclaims one with no rows at all, and does nothing with `gcEnabled` off; a successful `remote.delete` and `remote.dismiss` remove only their own session's directory, and a failed delete removes nothing.
 - **Sync driver**, on an injected clock – the 3-second cadence; a sync that is not caught up is followed at once, after its page is published, until one catches up and the cadence resumes; a failed sync waits the interval even mid-load; hiding the pane mid-load starts no further sync while the one in flight still publishes; a sync finishing after the driver is retired, or after a switch to another session, publishes nothing; a pane mounted over an existing cache has the file's path and `state.json`'s generation before any sync completes, and no cache file leaves it in the full loading state.
-- **App gates** – toolbar toggle visibility against the capability and flag; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
-- **Config column** – a pre-migration row reads NULL and follows the default constant; an explicit `false` survives a change to it.
+- **App gates** – toolbar toggle visibility against the capability; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
 
 ## Rollout
 
-- Everything ships behind `remote_transcript_enabled`, default off; the composer also needs `transcript_composer_enabled`. The soak enables both against a provider that implements `transcript.read` and `send-submit`.
 - The namespace rename is a hard cutover in TBD. A provider that has not adopted the namespaced spellings loses, until it does, every transcript operation it declares under a bare spelling — `transcript` (read), `retain`, `import`, and `recall` alike. Every other capability keeps working. No provider shipped the bare `transcript` or `import`, so in practice an un-updated provider loses retain and recall.
 - Provider implementations of `transcript read` (with paging and `reset`), `send --submit`, and the renamed verbs are tracked with each provider.
 

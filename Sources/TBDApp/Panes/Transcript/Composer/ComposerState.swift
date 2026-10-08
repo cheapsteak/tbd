@@ -14,8 +14,8 @@ import TBDShared
 /// sitting on a dialog, and telling somebody to answer it in the terminal would
 /// send them to a pane with a shell in it.
 enum ComposerState: Equatable {
-    /// No composer at all: the flag is off, the worktree is remote, or this is
-    /// not a Claude session. Scope is Claude sessions on local worktrees; Codex,
+    /// No composer at all: the worktree is remote, or this is not a Claude
+    /// session. Scope is Claude sessions on local worktrees; Codex,
     /// shell and remote are out, and the archived transcript view never gets one.
     case hidden
     /// Claude is working, idle, or in an informational state. A message sent
@@ -46,9 +46,9 @@ enum ComposerState: Equatable {
     }
 
     static func resolve(
-        terminal: Terminal?, isRemoteWorktree: Bool, composerEnabled: Bool
+        terminal: Terminal?, isRemoteWorktree: Bool
     ) -> ComposerState {
-        guard composerEnabled, !isRemoteWorktree,
+        guard !isRemoteWorktree,
               let terminal, terminal.kind == .claude
         else { return .hidden }
 
