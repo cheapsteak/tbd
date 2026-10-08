@@ -1,9 +1,10 @@
 name: Flake fixer
 
-# docs/specs/2026-10-07-flake-autofix-design.md. The spec's four jobs share this
-# one file (§3); this file holds the first of them, `ledger`, which reads
-# per-test results from the nightly and from rerun-erased CI runs and keeps one
-# issue per flaky test (§4). `fix`, `publish` and `promote` join it later.
+# docs/specs/2026-10-07-flake-autofix-design.md. The spec's jobs share this one
+# file (§3). It holds two of them so far: `ledger`, which reads per-test results
+# from the nightly and from rerun-erased CI runs and keeps one issue per flaky
+# test (§4), and `ledger-notice`, which reports a red `ledger` run (§8). `fix`,
+# `publish` and `promote` join them later.
 #
 # OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
 # 'true', the ledger runs report-only: it computes everything, writes it to the
@@ -19,7 +20,7 @@ name: Flake fixer
 # A RED LEDGER RUN IS REPORTED IN EITHER MODE (§8), by `ledger-notice`. Without
 # an App token whose login checked out – report-only mode, or a mint that
 # failed – it posts with the job token, as github-actions[bot]. That one
-# comment on the tracking issue is the only write the job token ever makes,
+# comment on the tracking issue is the only issue write the job token makes,
 # and `ledger-notice` is the only job whose token may write issues.
 #
 # `workflow_run` fires only from this file as it exists on `main`, so nothing
@@ -107,9 +108,8 @@ jobs:
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          expected="$(python3 scripts/flake_lib.py bot-login)"
-          if [ "${APP_SLUG}[bot]" != "$expected" ]; then
-            echo "::error::the App token belongs to '${APP_SLUG}[bot]', but the ledger's readers trust only '$expected' (scripts/flake_lib.py BOT_LOGIN)"
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::error::the App token's login is not the one the ledger's readers trust (scripts/flake_lib.py BOT_LOGIN)"
             exit 1
           fi
 
@@ -166,9 +166,8 @@ jobs:
           APP_SLUG: ${{ steps.notice-app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          expected="$(python3 scripts/flake_lib.py bot-login)"
-          if [ "${APP_SLUG}[bot]" != "$expected" ]; then
-            echo "::warning::the App token belongs to '${APP_SLUG}[bot]', not '$expected'; the notice uses the job token"
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::warning::the App token's login is not the trusted one; the notice uses the job token"
             exit 1
           fi
 
@@ -180,10 +179,12 @@ jobs:
           USE_APP_TOKEN: ${{ steps.notice-bot-login.outcome == 'success' }}
         run: |
           set -euo pipefail
+          # The token is chosen once; the job token always carries --job-token,
+          # so its comment says how it was posted.
           if [ "$USE_APP_TOKEN" = "true" ]; then
-            FLAKE_WRITE_TOKEN="$APP_TOKEN" python3 scripts/flake-ledger.py report-red-run \
-              --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE"
+            token="$APP_TOKEN"; extra=()
           else
-            FLAKE_WRITE_TOKEN="$JOB_TOKEN" python3 scripts/flake-ledger.py report-red-run \
-              --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE" --job-token
+            token="$JOB_TOKEN"; extra=(--job-token)
           fi
+          FLAKE_WRITE_TOKEN="$token" python3 scripts/flake-ledger.py report-red-run \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE" "${extra[@]}"

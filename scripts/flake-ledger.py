@@ -36,8 +36,9 @@ nothing more. A read failure is never treated as "nothing there", because an
 empty answer would plan the wrong writes. Two answers are the exception,
 because they are definite rather than missing: GitHub saying (HTTP 404) that
 an issue a `.flaky(issue:)` trait names does not exist, or that a commit a
-compare call names does not exist. Each skips the one test it concerns, and
-the summary lists it. Writes go per issue, each one
+compare call names does not exist. The first skips the tests whose trait names
+it (a deleted issue, HTTP 410, instead gives them issues of their own); the
+second leaves out the one failure it concerns. The summary lists each. Writes go per issue, each one
 idempotent, so a run that dies midway leaves earlier issues correct and the next
 run converges.
 
@@ -102,8 +103,11 @@ WRITE_PAUSE_S = float(os.environ.get("FLAKE_WRITE_PAUSE_S", "3"))
 # twin (`nightly-flake-stress.sh --xunit-dir`).
 NIGHTLY_FILE = re.compile(r"^(?P<target>.+?)-\d+(?:-swift-testing)?\.xml$")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
-# GitHub's search returns at most this many results for one query.
+# GitHub's search returns at most this many results for one query, and
+# rejects a query longer than 256 characters; the phrase is capped below that,
+# leaving room for the `repo:` and `in:` qualifiers.
 SEARCH_RESULT_CAP = 1000
+SEARCH_PHRASE_MAX = 200
 
 
 class GhError(Exception):
@@ -117,7 +121,9 @@ class GhError(Exception):
 
 # The answers that say a thing does not exist, as opposed to "could not ask".
 # Only these let one lookup be skipped; every other failure fails the run.
-ISSUE_GONE_STATUSES = (404, 410)  # 410: the issue was deleted
+# 404 on an issue: no such number, likely a mistyped trait. 410: deleted.
+ISSUE_GONE_STATUSES = (404, 410)
+ISSUE_DELETED_STATUS = 410
 COMPARE_GONE_STATUSES = (404,)  # a commit GitHub no longer has
 
 
@@ -184,20 +190,26 @@ def rerun_erased(run: dict) -> bool:
     return any(a["conclusion"] == "success" for a in ordered[1:])
 
 
-def needed_artifacts(run: dict) -> list[dict]:
-    """The artifacts the analysis reads from one run, unexpired only. What
-    expired or was never uploaded is listed by `artifact_gaps`."""
-    live = [a for a in run.get("artifacts", []) if not a.get("expired")]
+def wanted_artifacts(run: dict) -> list[dict]:
+    """Every artifact of a kind the analysis reads from one run, expired or
+    not: the one selector both `needed_artifacts` and `artifact_gaps` use."""
+    artifacts = run.get("artifacts", [])
     if run["workflow"] == "nightly":
-        return [a for a in live if a["name"] == NIGHTLY_ARTIFACT]
-    wanted = [a for a in live if a["name"] == RETRY_ARTIFACT]
+        return [a for a in artifacts if a["name"] == NIGHTLY_ARTIFACT]
+    wanted = [a for a in artifacts if a["name"] == RETRY_ARTIFACT]
     if rerun_erased(run):
         wanted += [
             a
-            for a in live
+            for a in artifacts
             if a["name"] == XUNIT_ARTIFACT and attempt_for_artifact(run["attempts"], a["created_at"]) == 1
         ]
     return wanted
+
+
+def needed_artifacts(run: dict) -> list[dict]:
+    """The artifacts the analysis reads from one run, unexpired only. What
+    expired or was never uploaded is listed by `artifact_gaps`."""
+    return [a for a in wanted_artifacts(run) if not a.get("expired")]
 
 
 def artifact_gaps(run: dict) -> list[str]:
@@ -206,23 +218,17 @@ def artifact_gaps(run: dict) -> list[str]:
     rerun-erased run, or a nightly with no `nightly-xunit` (which a nightly
     whose build failed legitimately leaves). Missing `retry-metrics` is not
     listed: an attempt cancelled before its tests ran has none."""
-    gaps = []
     rid = run["run_id"]
-    artifacts = run.get("artifacts", [])
+    wanted = wanted_artifacts(run)
+    gaps = []
     if run["workflow"] == "nightly":
-        kinds = [a for a in artifacts if a["name"] == NIGHTLY_ARTIFACT]
-        if not kinds:
+        if not wanted:
             gaps.append(f"nightly run {rid}: no `{NIGHTLY_ARTIFACT}` artifact")
-    else:
-        kinds = [a for a in artifacts if a["name"] == RETRY_ARTIFACT]
-        if rerun_erased(run):
-            first = [a for a in artifacts if a["name"] == XUNIT_ARTIFACT and attempt_for_artifact(run["attempts"], a["created_at"]) == 1]
-            if not first:
-                gaps.append(f"run {rid}: attempt 1 failed and a rerun passed, but it has no attempt-1 `{XUNIT_ARTIFACT}` artifact")
-            kinds += first
-    for a in kinds:
-        if a.get("expired"):
-            gaps.append(f"run {rid}: `{a['name']}` artifact {a['id']} has expired")
+    elif rerun_erased(run) and not any(a["name"] == XUNIT_ARTIFACT for a in wanted):
+        gaps.append(f"run {rid}: attempt 1 failed and a rerun passed, but it has no attempt-1 `{XUNIT_ARTIFACT}` artifact")
+    for artifact in wanted:
+        if artifact.get("expired"):
+            gaps.append(f"run {rid}: `{artifact['name']}` artifact {artifact['id']} has expired")
     return gaps
 
 
@@ -499,10 +505,13 @@ class Context:
     pr_states: dict[str, dict]
     ancestry: dict[str, bool]
     collect_missing: bool
-    # `.flaky(issue:)` numbers GitHub says do not exist, and fix..head pairs
-    # whose compare call said a commit does not exist (both from `fetch`).
-    gone_issues: set[int] = field(default_factory=set)
+    # `.flaky(issue:)` numbers GitHub says do not exist, with the status it
+    # gave, and fix..head pairs whose compare call said a commit does not
+    # exist (both from `fetch`).
+    gone_issues: dict[int, int] = field(default_factory=dict)
     unresolved: set[str] = field(default_factory=set)
+    # Failures left out of this run's plan, for the summary.
+    dropped: list[str] = field(default_factory=list)
     missing: set[str] = field(default_factory=set)
 
 
@@ -565,7 +574,13 @@ def classify(state: fl.State, new: list[fl.Failure], ctx: Context) -> tuple[fl.S
         pair = f"{fix['sha']}..{failure.head_sha}"
         contains = ctx.ancestry.get(pair)
         if contains is None and pair in ctx.unresolved:
-            raise SkipTest(f"GitHub could not compare the fix with the failing commit ({pair}): a commit does not exist (HTTP 404)")
+            # Only this failure is unplaceable; the test's others still are.
+            # It is not recorded, so a later run that can compare places it.
+            ctx.dropped.append(
+                f"`{state.test_id}`: failure {failure.key} not recorded: GitHub could not compare "
+                f"the fix with its commit ({pair}), which does not exist (HTTP 404)"
+            )
+            continue
         if contains is None:
             if not ctx.collect_missing:
                 raise AnalysisError(f"no ancestry fetched for {pair}")
@@ -627,10 +642,14 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     links: list[int] = []
     if view is None:
         trait = trait_issue_for(test, ctx.inventory, ctx.files)
-        if trait is not None and trait in ctx.gone_issues:
+        gone = ctx.gone_issues.get(trait) if trait is not None else None
+        if gone == ISSUE_DELETED_STATUS:
+            # A deleted issue holds no history to split: the test gets its own.
+            trait = None
+        elif gone is not None:
             # Likely a mistyped number for this test's real issue; a new one
             # could split its history, as with an unreadable one below.
-            raise SkipTest(f"its `.flaky(issue: {trait})` names #{trait}, which GitHub says does not exist")
+            raise SkipTest(f"its `.flaky(issue: {trait})` names #{trait}, which GitHub says does not exist (HTTP {gone})")
         if trait is not None and trait in ctx.issues and ctx.issues[trait].unreadable:
             # It may hold this test's own history; a second issue would split it.
             notes.unreadable.append(f"`{test}`: its trait's issue #{trait} has an unparsable bot comment; skipped")
@@ -704,9 +723,12 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
                 if failure.file:
                     files.setdefault(view.ledger.test_id, (failure.file, failure.line))
     note_inventory_rows(inventory, files, notes)
-    gone_issues = {int(n) for n in _read_json(work / "fetch_notes.json", {}).get("gone_issues", [])}
-    for number in sorted(gone_issues):
-        notes.skipped.append(f"#{number}, named by a `.flaky(issue:)` trait: GitHub says it does not exist; not read")
+    gone_issues = {int(n): int(status) for n, status in _read_json(work / "fetch_notes.json", {}).get("gone_issues", {}).items()}
+    for number, status in sorted(gone_issues.items()):
+        if status == ISSUE_DELETED_STATUS:
+            notes.skipped.append(f"#{number}, named by a `.flaky(issue:)` trait, was deleted (HTTP 410); a test it names gets its own issue")
+        else:
+            notes.skipped.append(f"#{number}, named by a `.flaky(issue:)` trait: GitHub says it does not exist (HTTP {status}); its tests are skipped")
     mapping = map_tests_to_issues(issues, set(by_test), notes)
     ctx = Context(
         repo=repo,
@@ -734,6 +756,7 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
         tests.append(summary)
         if action is not None:
             actions.append(action)
+    notes.skipped.extend(ctx.dropped)
     return {
         "repo": repo,
         "actions": actions,
@@ -783,9 +806,11 @@ def report(plan: dict, write: bool) -> str:
 
 
 def gh(*args: str, input: bytes | None = None, write: bool = False) -> bytes:
-    """One `gh` call. Raises GhError on a non-zero exit; stderr is passed
-    through for the log and never read as data. A write uses the App token
-    from FLAKE_WRITE_TOKEN, so issues and comments are authored by the bot."""
+    """One `gh` call. Raises GhError on a non-zero exit. stderr is passed
+    through for the log; the only thing read from it is the HTTP status, so a
+    definite 404 or 410 can be told apart. A write uses FLAKE_WRITE_TOKEN: the
+    App token, so issues and comments are authored by the bot, except for
+    `report-red-run --job-token`, whose one comment uses the job token."""
     env = dict(os.environ)
     if write:
         token = os.environ.get("FLAKE_WRITE_TOKEN", "")
@@ -1001,9 +1026,9 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
 
     # Issues outside the label that the lookup may need: each issue a trait
     # names, and an exact-title match for each failing test not yet mapped.
-    gone_issues: list[int] = []
+    gone_issues: dict[str, int] = {}
     for _, _, number in read_inventory(work):
-        if number in issues or number in gone_issues:
+        if number in issues or str(number) in gone_issues:
             continue
         try:
             raw = gh_json("api", f"repos/{repo}/issues/{number}")
@@ -1012,7 +1037,7 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
             # trait names it (`analyze`); any other failure fails the run.
             if error.status not in ISSUE_GONE_STATUSES:
                 raise
-            gone_issues.append(number)
+            gone_issues[str(number)] = error.status
             continue
         # A trait naming a pull request names no issue to adopt; the test then
         # gets its own issue linking the number.
@@ -1051,9 +1076,14 @@ def _search_title(repo: str, title: str) -> list[dict]:
 
     GitHub's search has no escape for a `"` inside a quoted phrase and drops
     punctuation when it tokenizes, so a `"` in the title becomes a space
-    rather than ending the phrase early. A page GitHub marks incomplete (the
+    rather than ending the phrase early. A title too long for the query is
+    searched by a whole-word prefix. A page GitHub marks incomplete (the
     search timed out) or a match count past the result cap fails closed."""
     phrase = title.replace('"', " ")
+    if len(phrase) > SEARCH_PHRASE_MAX:
+        # GitHub rejects a query longer than 256 characters (HTTP 422). A
+        # prefix ending on a whole word still matches the full title.
+        phrase = re.sub(r"\w*$", "", phrase[:SEARCH_PHRASE_MAX]).rstrip()
     pages = gh_lines(
         "api", "--paginate", "-X", "GET", "search/issues",
         "-f", f'q=repo:{repo} is:issue in:title "{phrase}"', "-f", "per_page=100",
@@ -1073,8 +1103,8 @@ def fetch_ancestry(work: Path, repo: str, pairs: list[str]) -> None:
     """Whether each fix commit is an ancestor of each failing head, from the
     compare API: `ahead` or `identical` means it is, `behind` or `diverged`
     means it is not. A 404 – a commit GitHub no longer has – goes into
-    `ancestry_unresolved.json`, and `analyze` skips that one test. Any other
-    failure or answer fails closed."""
+    `ancestry_unresolved.json`, and `analyze` leaves that one failure out of
+    the plan. Any other failure or answer fails closed."""
     ancestry = _read_json(work / "ancestry.json", {})
     unresolved = set(_read_json(work / "ancestry_unresolved.json", []))
     for pair in pairs:
@@ -1134,8 +1164,9 @@ def apply(plan: dict, repo: str) -> None:
 
 def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: int, days: int) -> str:
     """Spec §8: the conclusion of the `ledger` job in the most recent earlier
-    completed run of this workflow that ran it. Runs whose `ledger` job was
-    skipped – every run another job's trigger started – are passed over."""
+    run of this workflow whose `ledger` job finished. Runs whose `ledger` job
+    was skipped – every run another job's trigger started – or has not
+    finished are passed over."""
     seen = 0
     page = 1
     horizon = now - timedelta(days=days)
@@ -1147,7 +1178,10 @@ def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: 
             seen += 1
             if seen > max_runs:
                 return "none"
-            if int(run["id"]) == run_id or run.get("status") != "completed":
+            # Only runs before this one. An earlier run need not be completed:
+            # its `ledger` job may have failed while its own `ledger-notice`
+            # job still runs, and that red must still count.
+            if int(run["id"]) >= run_id:
                 continue
             if parse_time(run["created_at"]) < horizon:
                 return "none"
@@ -1168,7 +1202,7 @@ def report_red_run(repo: str, run_id: int, issue: int, now: datetime, job_token:
     The comment is written with `$FLAKE_WRITE_TOKEN`: the App token when the
     workflow has one whose login checked out, otherwise the workflow's job
     token (`job_token`) – in report-only mode, or when minting the App token
-    failed. This comment is the one write the job token ever makes."""
+    failed. This comment is the only issue write the job token makes."""
     previous = previous_ledger_conclusion(repo, run_id, now, max_runs=300, days=8)
     if previous == "failure":
         return "the previous ledger run was also red; not commenting again"

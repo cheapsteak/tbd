@@ -89,12 +89,15 @@ Six components, each with one job:
    PR, records the verdict, comments on the issue, and later marks the PR ready.
 6. **Branch reclaimer** – removes `flakefix/*` branches no open PR uses.
 
-They run in one new workflow, `.github/workflows/flake-fixer.yml`, as four
+They run in one new workflow, `.github/workflows/flake-fixer.yml`, as five
 jobs:
 
 - **`ledger`** (ubuntu) – runs when the nightly workflow completes
   (`workflow_run`), and on `workflow_dispatch` with `job: ledger`. Runs the
   reclaimer when `FLAKE_FIXER_ENABLED` is on (§10, §11), then the ledger.
+- **`ledger-notice`** (ubuntu) – runs after `ledger` when it failed, in either
+  ledger mode, and posts the tracking-issue note (§8). It is the only job
+  whose token may write issues.
 - **`fix`** (macos-26) – scheduled once a night at 06:00 UTC, and on
   `workflow_dispatch` with `job: fix` and an optional issue number. Runs the
   picker, the
@@ -394,8 +397,8 @@ Report-only mode mints no App token and writes no flake issue, but a red
 posts in either mode. Without the App token it posts with the workflow's job
 token (`github.token`), so it appears as `github-actions[bot]`. A report-only
 soak whose job fails every night would otherwise fail unnoticed, which is the
-one outcome the soak exists to rule out. That comment is the only write the
-job token ever makes.
+one outcome the soak exists to rule out. That comment is the only issue write
+the job token makes.
 
 ## 5. Picking a target
 
@@ -920,7 +923,15 @@ Transitions, each owned by the PR driver:
 ## 8. Failure handling
 
 - **The ledger cannot read or write GitHub.** The ledger fails closed: it exits
-  non-zero and writes nothing more that run. It never posts a partial ledger
+  non-zero and writes nothing more that run. Two answers are definite rather
+  than missing, and do not fail the run: GitHub saying that an issue a
+  `.flaky(issue:)` trait names does not exist, and saying that a commit a
+  compare call names does not exist. An issue that answers 404 – most likely a
+  mistyped number for the test's real issue – skips the tests whose trait
+  names it, since a new issue could split that test's history; one that
+  answers 410, deleted, gives them issues of their own. A compare that answers
+  404 leaves only that one failure unrecorded, and a later run that can compare
+  it records it. The job summary lists each. It never posts a partial ledger
   comment and never comments about its own failure on a flake issue. Writes are
   per issue and idempotent, so a run that dies midway leaves earlier issues
   correct and the next run converges. The job going red is the signal; on the
@@ -929,14 +940,16 @@ Transitions, each owned by the PR driver:
   later consecutive reds. "After a green one" comes from GitHub, not from
   stored state: a job that runs when `ledger` fails, `ledger-notice`, asks the
   Actions API for the conclusion of the `ledger` job in the most recent earlier
-  completed run of this workflow that ran it, and posts only if that conclusion
-  was `success` or there is no such run.
+  run of this workflow whose `ledger` job finished, and posts only if that
+  conclusion was `success` or there is no such run. That earlier run need not
+  have completed: its own `ledger-notice` job may still be running, and the
+  next run's `ledger` job, queued behind it, can fail first.
 
   The note posts in report-only mode too (§4.5). Its token is the App token
   when the ledger flag is on, the mint succeeds, and the App's login checks out
   (§4.4); otherwise – report-only mode, a mint that failed, or a token from the
   wrong App – it is the workflow's job token, and the comment says so. The job
-  token writes nothing else: `ledger-notice` is the only job whose token may
+  token writes no other issue: `ledger-notice` is the only job whose token may
   write issues, and the `ledger` job's token can only read them.
 - **The picker cannot read the ledger.** No attempt that night. The `fix` job
   ends red without starting a session.
@@ -1184,8 +1197,13 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   `Module.Outer.Inner/test()`), and a test outside any suite;
   occurrence keys and the threshold at one and two keys; issue
   lookup by title, by `.flaky` trait, and by creation;
-  the same run processed twice with no change; and an API error that leaves the
-  ledger unwritten.
+  the same run processed twice with no change; an API error that leaves the
+  ledger unwritten; a trait issue that answers 404 (its tests skipped, the run
+  green, a 502 still red) and one that answers 410 (a fresh issue); a compare
+  that answers 404 (that failure dropped, the test still planned, a 500 still
+  red); a title search that reads every page, fails closed on an incomplete
+  answer, and keeps a quote or an overlong title from breaking the phrase; and
+  expired or never-uploaded artifacts, each listed in the summary.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,

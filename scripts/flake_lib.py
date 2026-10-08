@@ -648,11 +648,21 @@ _ROW_SAFE = re.compile(r"[\t\r\n]+")
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("usage: flake_lib.py {cases|retry-records|bot-login} ...", file=sys.stderr)
+        print("usage: flake_lib.py {cases|retry-records|bot-login|check-app-slug} ...", file=sys.stderr)
         return 2
     command, rest = argv[0], argv[1:]
     if command == "bot-login":
         print(BOT_LOGIN)
+        return 0
+    if command == "check-app-slug":
+        # The workflows' one check that a minted App token's slug names the
+        # login the readers trust. Exit 1, with the reason, when it does not.
+        if len(rest) != 1:
+            print("usage: flake_lib.py check-app-slug SLUG", file=sys.stderr)
+            return 2
+        if f"{rest[0]}[bot]" != BOT_LOGIN:
+            print(f"the App token belongs to '{rest[0]}[bot]', but the ledger's readers trust only '{BOT_LOGIN}'", file=sys.stderr)
+            return 1
         return 0
     if command == "cases":
         rows = []

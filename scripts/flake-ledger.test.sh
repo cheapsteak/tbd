@@ -1041,15 +1041,15 @@ runs_world() {
   stub_gh "$dir"
 }
 
-run_entry() { printf '{"id": %s, "event": "%s", "status": "completed", "created_at": "2026-10-07T18:00:00Z"}' "$1" "$2"; }
+run_entry() { printf '{"id": %s, "event": "%s", "status": "%s", "created_at": "2026-10-07T18:00:00Z"}' "$1" "$2" "${3:-completed}"; }
 
 prev() { FLAKE_GH_CMD="$1/gh" python3 "$LEDGER" previous-ledger-conclusion --repo "$REPO" --run-id 500 --now 2026-10-08T00:00:00Z; }
 
 test_previous_ledger_conclusion_skips_runs_whose_ledger_job_was_skipped() {
   local d
   d="$(mktmpd)"
-  runs_world "$d" "[$(run_entry 504 workflow_run), $(run_entry 503 workflow_dispatch), $(run_entry 502 workflow_run), $(run_entry 501 workflow_run)]" \
-    504=skipped 503=skipped 502=skipped 501=failure
+  runs_world "$d" "[$(run_entry 499 workflow_run), $(run_entry 498 workflow_dispatch), $(run_entry 497 workflow_run), $(run_entry 496 workflow_run)]" \
+    499=skipped 498=skipped 497=skipped 496=failure
   assert_eq "the first non-skipped ledger job decides" "failure" "$(prev "$d")"
 }
 
@@ -1058,6 +1058,19 @@ test_previous_ledger_conclusion_ignores_the_current_run() {
   d="$(mktmpd)"
   runs_world "$d" "[$(run_entry 500 workflow_run), $(run_entry 499 workflow_run)]" 500=failure 499=success
   assert_eq "the current run's own ledger job is not the previous one" "success" "$(prev "$d")"
+}
+
+test_previous_ledger_conclusion_counts_an_earlier_run_still_in_progress() {
+  local d mutant
+  # Run 499's ledger failed while its own ledger-notice job still runs; run 501
+  # started after this one and says nothing about what came before it.
+  d="$(mktmpd)"
+  runs_world "$d" "[$(run_entry 501 workflow_run), $(run_entry 499 workflow_run in_progress), $(run_entry 498 workflow_run)]" \
+    501=success 499=failure 498=success
+  assert_eq "the in-progress run's red ledger decides" "failure" "$(prev "$d")"
+  mutant="$(mutant_of 's/^            if int\(run\["id"\]\) >= run_id:$/            if int(run["id"]) == run_id or run.get("status") != "completed":/' "$LEDGER")"
+  assert_eq "mutation: skipping unfinished runs posts a second note for one streak" "success" \
+    "$(FLAKE_GH_CMD="$d/gh" python3 "$mutant/flake-ledger.py" previous-ledger-conclusion --repo "$REPO" --run-id 500 --now 2026-10-08T00:00:00Z)"
 }
 
 test_previous_ledger_conclusion_is_none_when_no_ledger_ran() {
@@ -1139,24 +1152,43 @@ test_a_trait_naming_a_missing_issue_skips_only_that_issue_in_fetch() {
   assert_eq "mutation: without the 404 rule the whole run fails" "2" "$rc"
 }
 
-test_a_test_whose_trait_issue_is_missing_is_skipped_and_the_rest_planned() {
-  local w out mutant
-  w="$(newwork)"
+# trait_world GONE_JSON -> a work dir where OtherTests/flaky()'s trait names
+# #600, fetch recorded GONE_JSON for it, and HOLDER failed one nightly.
+trait_world() {
+  local w; w="$(newwork)"
   build run "$w" --id 1701 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "17011|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/17011/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
   nightly_run "$w" 2701 2026-10-05 "$HOLDER"
   printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
-  build set "$w" fetch_notes.json '{"gone_issues": [600]}'
+  build set "$w" fetch_notes.json "$1"
+  printf '%s' "$w"
+}
+
+test_a_test_whose_trait_issue_is_missing_is_skipped_and_the_rest_planned() {
+  local w out mutant
+  w="$(trait_world '{"gone_issues": {"600": 404}}')"
   out="$(analyze "$w")"
   assert_eq "only the other test is planned" "$HOLDER" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")"
-  assert_contains "the skipped test is listed with its reason" "$(jq -r '.notes.skipped[]' <<< "$out")" "\`TBDSharedTests.OtherTests/flaky()\`: its \`.flaky(issue: 600)\` names #600, which GitHub says does not exist; skipped"
+  assert_contains "the skipped test is listed with its reason" "$(jq -r '.notes.skipped[]' <<< "$out")" "\`TBDSharedTests.OtherTests/flaky()\`: its \`.flaky(issue: 600)\` names #600, which GitHub says does not exist (HTTP 404); skipped"
   assert_contains "and the report shows it" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "Skipped (every other test was still planned)"
-  mutant="$(mutant_of 's/^        if trait is not None and trait in ctx.gone_issues:$/        if False:/' "$LEDGER")"
+  mutant="$(mutant_of 's/^        elif gone is not None:$/        elif False:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_contains "mutation: without the skip a second issue is created for it" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")" "OtherTests/flaky()"
 }
 
-test_a_compare_404_skips_only_that_test() {
+test_a_test_whose_trait_issue_was_deleted_gets_its_own_issue() {
+  local w out mutant
+  w="$(trait_world '{"gone_issues": {"600": 410}}')"
+  out="$(analyze "$w")"
+  assert_eq "the test gets a fresh issue, linking nothing" "Flaky test: TBDSharedTests.OtherTests/flaky() []" \
+    "$(jq -r '.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600") | if . then "[600]" else "[]" end)"' <<< "$out")"
+  assert_contains "and the deletion is listed" "$(jq -r '.notes.skipped[]' <<< "$out")" "#600, named by a \`.flaky(issue:)\` trait, was deleted (HTTP 410)"
+  mutant="$(mutant_of 's/^ISSUE_DELETED_STATUS = 410$/ISSUE_DELETED_STATUS = 0/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: a deleted issue read as a typo skips the test forever" "0" "$(jq '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()")] | length' <<< "$out")"
+}
+
+test_a_compare_404_does_not_fail_the_run() {
   local d out rc=0 mutant routes
   local issue='{"number": 970, "title": "Flaky test: '"$HOLDER"'", "state": "closed", "labels": [{"name": "flaky"}]}'
   local close='{"data": {"repository": {"issue": {"timelineItems": {"nodes": [{"createdAt": "2026-10-05T12:00:00Z", "stateReason": "COMPLETED", "closer": {"__typename": "PullRequest", "number": 960, "merged": true, "mergedAt": "2026-10-05T12:00:00Z", "mergeCommit": {"oid": "9609609"}}}]}}}}}'
@@ -1168,8 +1200,8 @@ test_a_compare_404_skips_only_that_test() {
   d="$(mktmpd)"; stub_world "$d" "$routes"
   out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)" || rc=$?
   assert_eq "a 404 from compare does not fail the run" "0" "$rc"
-  assert_contains "the test is listed as skipped" "$out" "\`$HOLDER\`: GitHub could not compare the fix with the failing commit (9609609..538ba7eb)"
-  assert_eq "and nothing is written for it" "" "$(writes_in "$d/log")"
+  assert_contains "the failure is listed as not recorded" "$out" "\`$HOLDER\`: failure 37517751216:1:xunit-app-swift-testing.xml not recorded: GitHub could not compare the fix with its commit (9609609..538ba7eb)"
+  assert_lacks "and nothing reopens the issue on it" "$(writes_in "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/970 "
   d="$(mktmpd)"; stub_world "$d" "$(jq '(.[] | select(.match | startswith("compare"))) |= (.err = "gh: Server Error (HTTP 500)\n")' <<< "$routes")"
   rc=0; FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null || rc=$?
   assert_eq "a 500 still fails closed" "2" "$rc"
@@ -1177,6 +1209,54 @@ test_a_compare_404_skips_only_that_test() {
   mutant="$(mutant_of 's/^COMPARE_GONE_STATUSES = .*$/COMPARE_GONE_STATUSES = ()/' "$LEDGER")"
   rc=0; FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" --write > /dev/null || rc=$?
   assert_eq "mutation: without the 404 rule the whole run fails" "2" "$rc"
+}
+
+test_an_uncomparable_failure_is_dropped_and_the_test_still_planned() {
+  local w out mutant rc=0
+  w="$(newwork)"
+  erased_run "$w" 1901 rebased --sha cccc
+  erased_run "$w" 1902 gone --sha dddd
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --state CLOSED --closed-reason completed --label flaky \
+    --fix "9609609@2026-10-05T12:00:00Z@960"
+  build set "$w" ancestry.json '{"9609609..cccc": true}'
+  build set "$w" ancestry_unresolved.json '["9609609..dddd"]'
+  out="$(analyze "$w")"
+  assert_eq "the comparable failure still reopens the issue" "true 1" "$(jq -r '"\(.actions[0].reopen) \(.tests[0].episode)"' <<< "$out")"
+  assert_contains "it is recorded" "$(jq -r '.actions[0].comment_body' <<< "$out")" '1901:1:xunit-app-swift-testing.xml'
+  assert_lacks "and the dropped one is not" "$(jq -r '.actions[0].comment_body' <<< "$out")" '1902:1:xunit-app-swift-testing.xml'
+  assert_contains "the other is listed" "$(jq -r '.notes.skipped[]' <<< "$out")" "failure 1902:1:xunit-app-swift-testing.xml not recorded"
+  mutant="$(mutant_of 's/^        if contains is None and pair in ctx.unresolved:$/        if False:/' "$LEDGER")"
+  analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without dropping it the whole analysis fails" "2" "$rc"
+}
+
+test_a_long_title_is_searched_by_a_whole_word_prefix() {
+  local d mutant script title q
+  d="$(mktmpd)"
+  jq -n '[{match: "search/issues", out: ""}]' > "$d/routes.json"; stub_gh "$d"
+  title="Flaky test: TBDSharedTests.LongSuite/$(printf 'word%03d_' $(seq 1 60))end()"
+  script='
+import sys, importlib.util
+s = importlib.util.spec_from_file_location("fl_ledger", sys.argv[1]); m = importlib.util.module_from_spec(s); sys.modules["fl_ledger"] = m; s.loader.exec_module(m)
+m._search_title("cheapsteak/tbd", sys.argv[2])
+'
+  FLAKE_GH_CMD="$d/gh" python3 -c "$script" "$LEDGER" "$title"
+  q="$(grep search/issues "$d/log" | sed -n 's/.*in:title "\([^"]*\)".*/\1/p')"
+  assert_eq "the phrase fits under GitHub's limit" "yes" "$([[ ${#q} -le 200 && ${#q} -gt 0 ]] && echo yes || echo "no (${#q})")"
+  assert_eq "and is a prefix of the title" "yes" "$([[ "$title" == "$q"* ]] && echo yes || echo no)"
+  : > "$d/log"
+  mutant="$(mutant_of 's/^SEARCH_PHRASE_MAX = 200$/SEARCH_PHRASE_MAX = 100000/' "$LEDGER")"
+  FLAKE_GH_CMD="$d/gh" python3 -c "$script" "$mutant/flake-ledger.py" "$title"
+  q="$(grep search/issues "$d/log" | sed -n 's/.*in:title "\([^"]*\)".*/\1/p')"
+  assert_eq "mutation: uncapped, the whole title is sent" "${#title}" "${#q}"
+}
+
+test_check_app_slug_accepts_only_the_trusted_app() {
+  local rc=0
+  python3 "$LIB" check-app-slug tbd-flake-fixer 2>/dev/null || rc=$?
+  assert_eq "the trusted slug" "0" "$rc"
+  rc=0; python3 "$LIB" check-app-slug some-other-app 2>/dev/null || rc=$?
+  assert_eq "another App" "1" "$rc"
 }
 
 # search_page ISSUE_JSON... -> one `--jq` page line as `_search_title` asks for it.
@@ -1273,7 +1353,7 @@ test_ledger_writes_only_when_its_flag_is_true() {
   assert_contains "--write only under it" "$block" 'if [ "$LEDGER_ENABLED" = "true" ]; then'
   assert_eq "exactly one --write" "1" "$(grep -c -- '--write' <<< "$block")"
   assert_contains "the App token is minted only under it" "$(step_block "$WORKFLOW" "Mint the tbd-flake-fixer App token")" "if: vars.FLAKE_LEDGER_ENABLED == 'true'"
-  assert_contains "and its slug is checked against the trusted login" "$(step_block "$WORKFLOW" "Check the App token's bot login")" 'scripts/flake_lib.py bot-login'
+  assert_contains "and its slug is checked against the trusted login" "$(step_block "$WORKFLOW" "Check the App token's bot login")" 'scripts/flake_lib.py check-app-slug "$APP_SLUG"'
   assert_contains "the reclaimer cannot stop the ledger" "$(step_block "$WORKFLOW" "Reclaim flakefix/")" "continue-on-error: true"
 }
 
@@ -1318,8 +1398,8 @@ check_job_token_writes_only_the_notice() {
   [[ "$(grep -c '^      issues: write$' "$file")" == 1 ]] || return 1
   job_block "$file" ledger-notice | grep -q '^      issues: write$' || return 1
   job_block "$file" ledger | grep -q '^      issues: read$' || return 1
-  [[ "$(grep -c 'FLAKE_WRITE_TOKEN="\$JOB_TOKEN"' "$file")" == 1 ]] || return 1
-  grep -A1 'FLAKE_WRITE_TOKEN="\$JOB_TOKEN"' "$file" | grep -q -- '--job-token' || return 1
+  [[ "$(grep -c '\$JOB_TOKEN' "$file")" == 1 ]] || return 1
+  grep -q 'token="\$JOB_TOKEN"; extra=(--job-token)$' "$file" || return 1
   ! grep -q 'FLAKE_WRITE_TOKEN: \${{ github.token }}' "$file"
 }
 
@@ -1332,6 +1412,7 @@ test_a_red_ledger_run_is_reported_in_either_mode() {
   assert_contains "a failed mint does not stop the notice" "$(step_block "$WORKFLOW" "Mint the App token for the notice")" "continue-on-error: true"
   assert_contains "the App token only under the flag" "$(step_block "$WORKFLOW" "Mint the App token for the notice")" "if: vars.FLAKE_LEDGER_ENABLED == 'true'"
   assert_contains "and only once its login checked out" "$(step_block "$WORKFLOW" "Report the first red")" "USE_APP_TOKEN: \${{ steps.notice-bot-login.outcome == 'success' }}"
+  assert_contains "with the same check the ledger job uses" "$(step_block "$WORKFLOW" "Check the notice token's bot login")" 'scripts/flake_lib.py check-app-slug "$APP_SLUG"'
   assert_lacks "the ledger job no longer posts it" "$(job_block "$WORKFLOW" ledger)" "report-red-run"
   check_job_token_writes_only_the_notice "$WORKFLOW" || rc=$?
   assert_eq "the job token writes only the notice" "0" "$rc"
@@ -1339,7 +1420,7 @@ test_a_red_ledger_run_is_reported_in_either_mode() {
   awk '/^  ledger:$/{l=1} /^  ledger-notice:$/{l=0} l && /^      issues: read$/{sub(/read/, "write")} {print}' "$WORKFLOW" > "$copy"
   rc=0; check_job_token_writes_only_the_notice "$copy" || rc=$?
   assert_eq "mutation: issues: write on the ledger job fails the check" "1" "$rc"
-  sed 's/ --job-token$//' "$WORKFLOW" > "$copy"
+  sed 's/extra=(--job-token)$/extra=()/' "$WORKFLOW" > "$copy"
   rc=0; check_job_token_writes_only_the_notice "$copy" || rc=$?
   assert_eq "mutation: a job-token post that does not say so fails the check" "1" "$rc"
 }
