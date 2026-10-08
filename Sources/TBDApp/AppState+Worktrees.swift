@@ -126,9 +126,11 @@ extension AppState {
                 // still there to receive it.
                 promptTarget?.resolve(.created(wt.id))
                 // The row exists, but `git worktree add` has not run yet; its
-                // failure arrives later as a delta keyed by this ID.
+                // failure arrives later as a delta keyed by this ID — or has
+                // already arrived, ahead of this response, in which case the
+                // composer is told now instead of watching for it.
                 if let promptTarget {
-                    creationWatchTargets[wt.id] = promptTarget
+                    watchCreation(of: wt.id, for: promptTarget)
                 }
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
@@ -265,6 +267,14 @@ extension AppState {
                     trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
                     "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
+                // The creation failed before this submit got here, after the
+                // row existed. Parking would race the deleted row.
+                if let lateFailure = target.failureAfterCreate {
+                    keepUnqueuedFirstMessage(
+                        trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                        "\(lateFailure) Your first message was not sent.")
+                    return
+                }
                 // Held until the row is seen to finish creating: a later
                 // creation failure deletes the row and the parked text with
                 // it, and this is the copy `handOffFirstMessage` saves. Marked
@@ -334,15 +344,17 @@ extension AppState {
     ///
     /// - A message already handed to the daemon is saved to a file here,
     ///   under one alert that opens with the failure.
-    /// - A composer still open is told; it saves its own draft and raises that
-    ///   alert as it closes.
-    /// - A composer still queued behind another sheet was never on screen, so
-    ///   it is dropped and the generic alert stands.
+    /// - A composer on screen and unsubmitted is told; it saves its own draft
+    ///   and raises that alert as it closes.
+    /// - Any other composer — queued behind another sheet, already sent, or
+    ///   closing — is marked failed (and dropped from the queue), and the
+    ///   caller's generic alert stands.
     func handOffFirstMessage(
         forArchivedWorktree worktreeID: UUID, creationFailed: Bool, failureMessage: String?
     ) -> Bool {
         let target = creationWatchTargets.removeValue(forKey: worktreeID)
         let parked = firstMessagesAwaitingCreation.removeValue(forKey: worktreeID)
+        creationWatchesListed.remove(worktreeID)
         guard creationFailed else { return false }
         let failure = failureMessage ?? "Worktree creation failed."
         if let parked {
@@ -353,34 +365,77 @@ extension AppState {
             return true
         }
         guard let target else { return false }
-        if queuedPromptTarget === target {
-            target.failAfterCreate(reason: failure)
-            return true
-        }
         target.failAfterCreate(reason: failure)
         queuedPromptBacklog.removeAll { $0 === target }
-        return false
+        // Only a composer that is on screen, unsubmitted and not closing
+        // will hand its draft off and raise the alert. Anything else — a
+        // queued composer, one already sent or cancelled — leaves the alert
+        // to the caller.
+        return target.composerTakesHandOff
     }
 
-    /// Release the creation watches for rows that a refresh shows have
-    /// finished creating — anything listed with a status other than
-    /// `.creating`. With `complete` (an unscoped refresh, which lists every
-    /// unarchived row) a watched row missing from the list is gone too, so
-    /// its entries go: a creation-failure delta missed while disconnected
-    /// would otherwise pin them forever. A message whose parking RPC is still
-    /// in flight is never released here; `submitQueuedPrompt` settles it.
+    /// Start watching a created row for a later creation failure — or, when
+    /// the failure delta already arrived ahead of `worktree.create`'s
+    /// response, report it to the composer at once.
+    func watchCreation(of worktreeID: UUID, for target: QueuedPromptTarget) {
+        if let index = recentCreationFailures.firstIndex(of: worktreeID) {
+            recentCreationFailures.remove(at: index)
+            target.failAfterCreate(reason: "Worktree creation failed.")
+            return
+        }
+        creationWatchTargets[worktreeID] = target
+    }
+
+    /// Remember a creation-failure delta's worktree ID, so a
+    /// `worktree.create` response processed after it is not taken for a live
+    /// row. Size-bounded rather than timed: an entry is consumed by the one
+    /// response it races, and the bound only caps failures nobody raced.
+    func noteCreationFailure(_ worktreeID: UUID) {
+        recentCreationFailures.append(worktreeID)
+        if recentCreationFailures.count > Self.recentCreationFailureLimit {
+            recentCreationFailures.removeFirst(
+                recentCreationFailures.count - Self.recentCreationFailureLimit)
+        }
+    }
+
+    static let recentCreationFailureLimit = 32
+
+    /// Settle the creation watches against a refresh's list of rows.
+    ///
+    /// - **Listed, not `.creating`** — finished; released.
+    /// - **Listed, `.creating`** — still going; marked as seen.
+    /// - **Absent from a `complete` (unscoped) list, and seen before** — the
+    ///   row vanished while still creating, most likely a failure delta missed
+    ///   while disconnected. Treated as a failed creation, so a parked message
+    ///   is saved rather than dropped.
+    /// - **Absent, never seen** — kept. A list issued before the row was
+    ///   inserted can be processed after the watch was registered, so absence
+    ///   proves nothing until a refresh has listed the row at least once.
+    ///
+    /// A message whose parking RPC is still in flight is never touched here;
+    /// `submitQueuedPrompt` settles it.
     func releaseCreationWatches(observing worktrees: [Worktree], complete: Bool) {
         guard !creationWatchTargets.isEmpty || !firstMessagesAwaitingCreation.isEmpty else { return }
         let status = Dictionary(worktrees.map { ($0.id, $0.status) }, uniquingKeysWith: { first, _ in first })
-        func finished(_ id: UUID) -> Bool {
-            guard let current = status[id] else { return complete }
-            return current != .creating
-        }
-        for id in creationWatchTargets.keys where finished(id) {
-            creationWatchTargets[id] = nil
-        }
-        for (id, message) in firstMessagesAwaitingCreation where !message.parkingInFlight && finished(id) {
-            firstMessagesAwaitingCreation[id] = nil
+        let watched = Set(creationWatchTargets.keys).union(
+            firstMessagesAwaitingCreation.filter { !$0.value.parkingInFlight }.keys)
+        for id in watched {
+            switch status[id] {
+            case .some(.creating):
+                creationWatchesListed.insert(id)
+            case .some:
+                creationWatchTargets[id] = nil
+                firstMessagesAwaitingCreation[id] = nil
+                creationWatchesListed.remove(id)
+            case .none:
+                guard complete, creationWatchesListed.contains(id) else { continue }
+                creationWatchesListed.remove(id)
+                let name = firstMessagesAwaitingCreation[id]?.worktreeName
+                    ?? creationWatchTargets[id]?.worktreeName ?? "worktree"
+                _ = handOffFirstMessage(
+                    forArchivedWorktree: id, creationFailed: true,
+                    failureMessage: "Worktree \"\(name)\" disappeared before it finished creating.")
+            }
         }
     }
 

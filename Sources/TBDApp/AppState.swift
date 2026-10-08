@@ -1957,6 +1957,14 @@ final class AppState {
     /// copy left to save. Released on the same terms as
     /// `creationWatchTargets`, except while its parking RPC is in flight.
     @ObservationIgnored var firstMessagesAwaitingCreation: [UUID: FirstMessageAwaitingCreation] = [:]
+    /// Watched rows a refresh has listed since the watch began. Only these
+    /// can be judged gone by their absence from a later list; see
+    /// `releaseCreationWatches`.
+    @ObservationIgnored var creationWatchesListed: Set<UUID> = []
+    /// Worktree IDs from recent creation-failure deltas, newest last, bounded
+    /// by `recentCreationFailureLimit`. Lets a `worktree.create` response
+    /// processed after its own failure delta see that the row is already gone.
+    @ObservationIgnored var recentCreationFailures: [UUID] = []
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -2950,6 +2958,12 @@ final class AppState {
         // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
         var failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+        if delta.creationFailed, creationWatchTargets[delta.worktreeID] == nil,
+           firstMessagesAwaitingCreation[delta.worktreeID] == nil {
+            // Nothing is watching this row yet — its `worktree.create`
+            // response may still be on its way. Leave a note for it.
+            noteCreationFailure(delta.worktreeID)
+        }
         // A first message composed for this row — parked, or still being typed
         // — would otherwise vanish with it. When one is taken over, its own
         // alert carries the failure, so the generic one stands down rather
