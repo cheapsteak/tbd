@@ -344,9 +344,10 @@ count's latest time, so an entry degraded to counts alone ages from its real
 last failure. A test that fails after its entry aged out starts a fresh entry,
 with no memory of the old one; a flake that quiet is a fresh observation, and
 without aging the watchlist would grow with every test ID that ever failed
-once, renamed and deleted tests included. An entry whose test already has an
-issue of its own is not aged: it is waiting to be confirmed on that issue
-(below).
+once, renamed and deleted tests included. An entry bound for an issue of its
+own is not aged: one whose test has an issue, whose `.flaky(issue:)` issue
+serves it alone, or that qualifies and so is waiting for its issue to be
+created. Each is waiting to be confirmed on that issue (below).
 
 **Leaving the watchlist.** When a watchlisted test fails in a second distinct
 place it qualifies, and the ledger opens its issue, seeded with the full
@@ -354,7 +355,10 @@ history from its watchlist entry. The ledger writes the watchlist before any
 issue (§8), so in that run the test stays on the watchlist, its entry updated
 with the run's failures. A later run that reads the issue's ledger comment
 already holding every failure the entry holds – merged by merge key, as two
-copies of an entry are – drops the entry. A test leaves the watchlist only once
+copies of an entry are, and counting at least as many failures, folded counts
+included – drops the entry. Until then every run plans the test, whether or
+not it failed again, so an issue whose create failed is created again even
+after the failures that qualified it have left the read window. A test leaves the watchlist only once
 its history is on its own issue: if the issue's create or comment write fails,
 the entry still holds everything, and the next run finds the issue (by its
 `flaky` label, or by title) or creates it again, seeded from the entry. Aging
@@ -1186,7 +1190,11 @@ Transitions, each owned by the PR driver:
   test's issue does not stop the others: the ledger lists it in the summary,
   goes on to the next issue, and exits non-zero once every write was tried, so
   one bad issue neither hides behind a green run nor holds back every test
-  after it. A test promoted off the watchlist is still on it until a later run
+  after it. The exception is an answer that fails every write after it – 401
+  for a bad or expired token, 403 or 429 for a rate limit – which stops the
+  issue writes there, listing the rest as not tried, because writing on
+  through a rate limit only prolongs it. A failed write after a create names
+  the number GitHub gave the new issue. A test promoted off the watchlist is still on it until a later run
   reads its history on the issue (§4.4), so a failed issue write loses
   nothing. Two answers are definite rather
   than missing, and do not fail the run: GitHub saying that an issue a
@@ -1499,11 +1507,16 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   before the issue, and the next run, reading the issue's ledger comment
   holding that history, drops the entry; an issue found without its ledger
   comment, and one whose ledger comment lacks a watched failure, each seeded
-  from the watchlist with the entry kept; a failed issue write listed while
-  the next issue is still written, ending the run red, and a failed watchlist
-  write stopping the run before any issue; an entry with no failure in 30
-  days aged out against an injected now and listed, one folded to counts
-  aging from its latest folded failure, one whose test has an issue not aged,
+  from the watchlist with the entry kept, and an entry folded to counts kept
+  against a ledger without them; a qualifying entry whose issue was never
+  created, created again with no new failure and not aged; a failed issue
+  write listed while the next issue is still written, ending the run red, a
+  401, 403 or 429 stopping the issue writes there, a failed write after a
+  create naming the new issue, and a failed watchlist write stopping the run
+  before any issue; an entry with no failure in 30 days aged out against an
+  injected now and listed, exactly 30 days aged and a second less kept, one
+  folded to counts aging from its latest folded failure, one whose test has
+  an issue not aged,
   and an aged-out test that fails again starting a fresh entry; folding
   keeping a count's latest failure time; an existing per-test issue below the threshold keeps
   recording there; a forged watchlist comment and a watchlist issue opened by

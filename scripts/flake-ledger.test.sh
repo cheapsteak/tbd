@@ -1000,10 +1000,10 @@ APPLY_PLAN='{actions: [
     {test_id: "c/d()", issue: 971, create: null, add_label: false, reopen: false, reopen_body: null, comment_id: 5, comment_body: "y", qualifies: false}],
   watchlist: {issue: 900, create: null, add_label: false, writes: [{index: 0, comment_id: 901, body: "w", tests: 1}]}}'
 
-# apply_with DIR FAILING_ROUTE [LEDGER] -> apply's stdout+stderr; DIR/rc holds its exit code.
+# apply_with DIR FAILING_ROUTE [LEDGER] [STDERR] -> apply's stdout+stderr; DIR/rc holds its exit code.
 apply_with() {
-  local d="$1" failing="$2" script="${3:-$LEDGER}" rc=0
-  jq -n --arg failing "$failing" '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: $failing, exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
+  local d="$1" failing="$2" script="${3:-$LEDGER}" err="${4:-}" rc=0
+  jq -n --arg failing "$failing" --arg err "$err" '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: $failing, exit: 1, err: $err}, {match: "-X", out: "{}"}]' > "$d/routes.json"
   stub_gh "$d"
   jq -n "$APPLY_PLAN" > "$d/plan.json"
   FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$script" apply --plan "$d/plan.json" --repo "$REPO" 2>&1 || rc=$?
@@ -1030,6 +1030,33 @@ test_apply_keeps_going_past_a_failed_issue_write() {
   mutant="$(mutant_of 's/^    if not failed:$/    if True:/' "$LEDGER")"
   apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" > /dev/null
   assert_eq "mutation: ignoring the failures ends the run green" "0" "$(cat "$d/rc")"
+}
+
+test_a_rate_limit_or_bad_token_stops_the_issue_writes() {
+  local d out status mutant
+  for status in 401 403 429; do
+    d="$(mktmpd)"
+    out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "gh: error (HTTP $status)")"
+    assert_eq "HTTP $status: exit 2" "2" "$(cat "$d/rc")"
+    assert_lacks "HTTP $status: no write after it" "$(cat "$d/log")" "comments/5 "
+    assert_contains "HTTP $status: the rest are listed as not tried" "$out" "\`c/d()\`: not tried after HTTP $status"
+  done
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^STOP_STATUSES = \(401, 403, 429\)$/STOP_STATUSES = ()/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: error (HTTP 403)" > /dev/null
+  assert_contains "mutation: writing on through a rate limit" "$(cat "$d/log")" "comments/5 "
+}
+
+test_a_failed_write_after_a_create_names_the_new_issue() {
+  local d out rc=0
+  d="$(mktmpd)"
+  jq -n '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: "-X POST repos/cheapsteak/tbd/issues --input", out: "{\"number\": 1234}"},
+          {match: "issues/1234/comments", exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
+  stub_gh "$d"
+  jq -n '{actions: [{test_id: "a/b()", issue: null, create: {title: "Flaky test: a/b()", body: "b"}, add_label: false, reopen: false, reopen_body: null, comment_id: null, comment_body: "x", qualifies: true}]}' > "$d/plan.json"
+  out="$(FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$LEDGER" apply --plan "$d/plan.json" --repo "$REPO" 2>&1)" || rc=$?
+  assert_eq "exit 2" "2" "$rc"
+  assert_contains "the half-written issue is named by its number" "$out" '`a/b()` (#1234)'
 }
 
 test_a_failed_watchlist_write_stops_the_run_before_any_issue() {
@@ -1169,8 +1196,33 @@ test_an_issue_without_the_watchlist_history_is_seeded_and_the_entry_kept() {
   out="$(analyze "$w")"
   assert_contains "a ledger missing a watched failure gets it" "$(jq -r '.actions[] | select(.issue == 970) | .comment_body' <<< "$out")" '"key":"1:1:x"'
   assert_eq "and the entry stays until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
-  mutant="$(mutant_of 's/^    return \{f.key for f in _absorb\(ledger, watched\).failures\} == .*$/    return True/' "$LEDGER")"
+  mutant="$(mutant_of 's/^    return \{f.key for f in absorbed.failures\} == .*$/    return True/' "$LEDGER")"
   assert_eq "mutation: trusting any ledger drops the entry before its failure is on the issue" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+  # An entry folded down to counts, against a ledger without those counts.
+  body="$(mktmpd)/ledger.md"; local folded; folded="$(mktmpd)/watch.md"
+  build ledger-body "$body" "{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}"
+  build watchlist-body "$folded" "[{\"test_id\": \"$HOLDER\", \"failures\": [], \"folded\": [{\"occurrence\": \"branch:a\", \"episode\": 0, \"pre_fix\": false, \"count\": 5, \"first\": \"2026-09-01T11:00:00Z\", \"last\": \"2026-09-19T11:00:00Z\"}]}]"
+  w="$(newwork)"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$folded"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "971|$BOT|Bot|$body"
+  assert_eq "a ledger lacking the entry's folded counts does not take it off" "1" "$(analyze "$w" | jq '.watchlist.tests')"
+  mutant="$(mutant_of 's/ and fl.failure_count\(ledger\) >= fl.failure_count\(watched\)$//' "$LEDGER")"
+  assert_eq "mutation: comparing keys alone drops the folded history" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+}
+
+test_a_promoted_test_whose_issue_was_never_created_is_retried_without_a_new_failure() {
+  local w out body mutant
+  # The entry qualifies (two places) but no issue exists: the create failed,
+  # and its failures have since left the read window. It is 40 days old.
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT, {\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-08-29T11:00:00Z\", \"source\": \"ci-xunit\"}]}]"
+  w="$(newwork --now 2026-10-30T00:00:00Z)"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_eq "its issue is created again, from the entry, and the entry kept, not aged" "Flaky test: $HOLDER 1" \
+    "$(jq -r '"\(.actions[0].create.title) \(.watchlist.tests)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(mapping\) \| bound$/    planned = set(by_test) | set(mapping)/' "$LEDGER")"
+  assert_eq "mutation: planning only tests with new failures strands it" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
 }
 
 test_an_existing_issue_below_the_threshold_keeps_recording_there() {
@@ -1348,6 +1400,8 @@ test_a_watchlist_entry_with_no_failure_in_thirty_days_ages_out() {
   assert_eq "a test failing again after aging out starts fresh: one failure, on the watchlist, no issue" "true 1 null" \
     "$(jq -r --arg t "$HOLDER" '(.tests[] | select(.test_id == $t) | "\(.watch) \(.failures)") + " " + ([.actions[] | select(.test_id == $t)][0].issue | tostring)' <<< "$out")"
   assert_contains "the report has the section" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "**Aged off the watchlist (no failure in 30 days):**"
+  assert_lacks "exactly 30 days since the newest failure: aged" "$(watched_tests "$(analyze "$(aging_work 2026-10-20T11:00:00Z)")")" "Recent"
+  assert_contains "a second under 30 days: kept" "$(watched_tests "$(analyze "$(aging_work 2026-10-20T10:59:59Z)")")" "Recent"
   out="$(analyze "$(aging_work 2026-10-25T00:00:00Z)")"
   assert_eq "a later now ages Recent and Folded too; Pending, waiting on its issue, stays" "TBDSharedTests.Pending/f()" "$(watched_tests "$out")"
   mutant="$(mutant_of 's/^WATCHLIST_AGE_OUT_DAYS = 30$/WATCHLIST_AGE_OUT_DAYS = 3000/' "$LIB")"
@@ -1355,7 +1409,7 @@ test_a_watchlist_entry_with_no_failure_in_thirty_days_ages_out() {
   assert_eq "mutation: without aging HOLDER's old night and new branch qualify it for an issue" "Flaky test: $HOLDER" "$(jq -r --arg t "$HOLDER" '.actions[] | select(.test_id == $t) | .create.title' <<< "$out")"
   mutant="$(mutant_of 's/ \+ \[f.last for f in state.folded\], default=""\)$/, default="")/' "$LIB")"
   assert_lacks "mutation: ignoring folded counts ages an entry folded down to counts" "$(watched_tests "$(analyze "$w" "$mutant")")" "Folded"
-  mutant="$(mutant_of 's/^        if test not in mapping and \(not newest/        if (not newest/' "$LEDGER")"
+  mutant="$(mutant_of 's/^        if test not in exempt and \(not newest/        if (not newest/' "$LEDGER")"
   assert_lacks "mutation: aging a test that has an issue drops its unconfirmed history" "$(watched_tests "$(analyze "$w" "$mutant")")" "Pending"
 }
 
@@ -1423,7 +1477,7 @@ test_a_watched_test_is_title_searched_only_when_it_may_qualify() {
   ledger_run "$d" > /dev/null
   assert_contains "a second place: searched before its issue is created" "$(grep search/issues "$d/log")" "lockIsReacquirableAfterRelease"
   d="$(mktmpd)"; stub_world "$d" "$(watch_routes branch:sidebar-groups-toggle true)"
-  mutant="$(mutant_of 's/^        if test in entries and not _may_qualify\(entries\[test\], by_test\[test\]\):$/        if False:/' "$LEDGER")"
+  mutant="$(mutant_of 's/^        if test in entries and not _may_qualify\(entries\[test\], by_test.get\(test, \[\]\)\):$/        if False:/' "$LEDGER")"
   LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null
   assert_contains "mutation: searching every watched test every run" "$(grep search/issues "$d/log")" "lockIsReacquirableAfterRelease"
 }

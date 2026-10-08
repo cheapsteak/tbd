@@ -132,6 +132,9 @@ class GhError(Exception):
 # Only these let one lookup be skipped; every other failure fails the run.
 ISSUE_GONE_STATUSES = (404, 410)  # 410: the issue was deleted
 COMPARE_GONE_STATUSES = (404,)  # a commit GitHub no longer has
+# A write answered with one of these fails every write after it: a token that
+# is bad or expired (401), or a rate limit (403 secondary, 429). `apply` stops.
+STOP_STATUSES = (401, 403, 429)
 
 
 class AnalysisError(Exception):
@@ -432,10 +435,13 @@ def _absorb(keep: fl.State, other: fl.State) -> fl.State:
     return merged
 
 
-def _holds(ledger: fl.State, watched: fl.State) -> bool:
-    """Whether an issue's ledger, as read, already holds every failure of the
-    test's watchlist entry, so dropping the entry loses nothing."""
-    return {f.key for f in _absorb(ledger, watched).failures} == {f.key for f in ledger.failures}
+def _holds(ledger: fl.State, absorbed: fl.State, watched: fl.State) -> bool:
+    """Whether an issue's ledger, as read, already holds the test's watchlist
+    entry, so dropping the entry loses nothing: `_absorb(ledger, watched)`
+    (`absorbed`) adds no failure, and the ledger counts at least as many
+    failures as the entry, folded counts included, so an entry folded down to
+    counts is not taken as held by a ledger that lacks them."""
+    return {f.key for f in absorbed.failures} == {f.key for f in ledger.failures} and fl.failure_count(ledger) >= fl.failure_count(watched)
 
 
 def _merge_entries(first: fl.State, second: fl.State) -> fl.State:
@@ -746,12 +752,14 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
             view = ctx.issues[trait]
         elif trait is not None:
             links = [trait]
+    held = False
     if view is not None and view.ledger is not None:
         state = view.ledger
         if watched is not None:
-            # A run that seeded the issue from the watchlist died before
-            # taking the test off it: the issue already holds this history.
-            state = _absorb(state, watched)
+            # A test promoted off the watchlist: its issue holds this history,
+            # or will once this run's write lands (below).
+            state = _absorb(view.ledger, watched)
+            held = _holds(view.ledger, state, watched)
     elif watched is not None:
         # The watchlist holds the test's history: it seeds a new issue, or
         # an issue found without a ledger comment yet (one a run created and
@@ -795,7 +803,7 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     # issue, so a test promoted off it keeps its entry, updated, until a run
     # reads its issue's ledger comment already holding that history. Only
     # then is dropping the entry safe whatever this run's issue writes do.
-    pending = watched is not None and not (view is not None and view.ledger is not None and _holds(view.ledger, watched))
+    pending = watched is not None and not held
     keep = state if pending else None
     summary["leaves_watchlist_next_run"] = pending
     if view is None:
@@ -898,21 +906,35 @@ def watchlist_issue_body() -> str:
     ])
 
 
-def age_out(entries: dict[str, fl.State], mapping: dict[str, int], now: datetime, notes: Notes) -> dict[str, fl.State]:
-    """Spec §4.4: the watchlist entries that stay, every one whose newest
-    failure, folded counts included, is under `WATCHLIST_AGE_OUT_DAYS` old. A
-    test with an issue of its own is not aged: its entry is waiting to be
-    confirmed on that issue (`plan_for_test`). An aged-out test that fails
-    again, this run or later, starts a fresh entry."""
+def age_out(entries: dict[str, fl.State], exempt: set[str], now: datetime, notes: Notes) -> dict[str, fl.State]:
+    """Spec §4.4: the watchlist entries that stay – every one in `exempt`, and
+    every other whose newest failure, folded counts included, is less than
+    `WATCHLIST_AGE_OUT_DAYS` old. An aged-out test that fails again, this run
+    or later, starts a fresh entry."""
     cutoff = now - timedelta(days=fl.WATCHLIST_AGE_OUT_DAYS)
     kept = {}
     for test, state in entries.items():
         newest = fl.newest_failure_at(state)
-        if test not in mapping and (not newest or parse_time(newest) < cutoff):
-            notes.aged.append(f"`{test}`: no failure since {newest or 'ever'}; off the watchlist")
+        if test not in exempt and (not newest or parse_time(newest) <= cutoff):
+            notes.aged.append(f"`{test}`: no failure since {newest or 'ever'}, so its entry is dropped; a later failure starts a fresh one")
             continue
         kept[test] = state
     return kept
+
+
+def bound_for_an_issue(entries: dict[str, fl.State], mapping: dict[str, int], ctx: Context) -> set[str]:
+    """The watched tests whose history is bound for an issue of its own, so
+    their entries are never aged and are planned every run, new failure or
+    not, until a run confirms the history on the issue (`plan_for_test`): a
+    test with an issue (`mapping`), one whose entry qualifies (its issue is to
+    be created), and one whose `.flaky(issue:)` issue serves it alone."""
+    bound = set()
+    for test, state in entries.items():
+        trait = trait_issue_for(test, ctx.inventory, ctx.files)
+        adopted = trait is not None and trait not in ctx.gone_issues and issue_serves_test_alone(trait, test, ctx.inventory, ctx.targets, ctx.issues)
+        if test in mapping or fl.qualifies(state) or adopted:
+            bound.add(test)
+    return bound
 
 
 def analyze(work: Path, collect_missing: bool = False) -> dict:
@@ -955,11 +977,13 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
         unresolved=set(_read_json(work / "ancestry_unresolved.json", [])),
     )
     actions, tests = [], []
-    entries = age_out(watch.entries, mapping, now, notes)
-    # A watchlist entry with no new failure and no issue carries over as it
+    bound = bound_for_an_issue(watch.entries, mapping, ctx)
+    entries = age_out(watch.entries, bound, now, notes)
+    planned = set(by_test) | set(mapping) | bound
+    # A sub-threshold watchlist entry with no new failure carries over as it
     # is; so does one whose test was skipped below.
-    on_watch = {t: s for t, s in entries.items() if t not in by_test and t not in mapping}
-    for test in sorted(set(by_test) | set(mapping)):
+    on_watch = {t: s for t, s in entries.items() if t not in planned}
+    for test in sorted(planned):
         watched = entries.get(test)
         if test in mapping and issues[mapping[test]].unreadable:
             if watched is not None:
@@ -1331,8 +1355,13 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     by_test, _ = collect_failures(work, repo, now, notes, read_targets(work))
     entries = load_watchlist(watchlist, Notes()).entries
     mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test) | set(entries), Notes())
-    for test in sorted(set(by_test) - set(mapping)):
-        if test in entries and not _may_qualify(entries[test], by_test[test]):
+    # As `analyze` ages and plans them: an aged-out entry starts afresh, and
+    # an entry that qualifies is planned, new failure or not, so its issue is
+    # searched for before it is created again.
+    qualified = {t for t, s in entries.items() if fl.qualifies(s)}
+    entries = age_out(entries, set(mapping) | qualified, now, Notes())
+    for test in sorted((set(by_test) | qualified) - set(mapping)):
+        if test in entries and not _may_qualify(entries[test], by_test.get(test, [])):
             # Searched when it first failed, and again only once it may
             # qualify: a test that stays on the watchlist creates nothing.
             continue
@@ -1489,21 +1518,27 @@ def apply(plan: dict, repo: str) -> list[str]:
             gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": write["body"]})
         _pause()
     failed = []
-    for action in actions:
+    for i, action in enumerate(actions):
+        written = {"number": action["issue"]}
         try:
-            _apply_action(action, repo)
+            _apply_action(action, repo, written)
         except (GhError, KeyError, TypeError, ValueError) as error:
-            where = f"#{action['issue']}" if action["issue"] else "a new issue"
+            where = f"#{written['number']}" if written["number"] else "a new issue, not created"
             failed.append(f"`{action['test_id']}` ({where}): {error}")
+            if isinstance(error, GhError) and error.status in STOP_STATUSES:
+                # A bad token or a rate limit fails every write after it, and
+                # writing on through a rate limit prolongs it.
+                failed += [f"`{a['test_id']}`: not tried after HTTP {error.status}" for a in actions[i + 1 :]]
+                break
         _pause()
     return failed
 
 
-def _apply_action(action: dict, repo: str) -> None:
+def _apply_action(action: dict, repo: str, written: dict) -> None:
     number = action["issue"]
     if action["create"]:
         created = gh_write("api", "-X", "POST", f"repos/{repo}/issues", payload={**action["create"], "labels": [fl.FLAKY_LABEL]})
-        number = int(created["number"])
+        number = written["number"] = int(created["number"])
     elif action["add_label"]:
         gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/labels", payload={"labels": [fl.FLAKY_LABEL]})
     if action["reopen"]:
