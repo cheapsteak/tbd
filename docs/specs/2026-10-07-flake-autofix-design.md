@@ -95,7 +95,7 @@ jobs:
 - **`ledger`** (ubuntu) – runs when the nightly workflow completes
   (`workflow_run`), and on `workflow_dispatch` with `job: ledger`. Runs the
   reclaimer when `FLAKE_FIXER_ENABLED` is on (§10, §11), then the ledger.
-- **`fix`** (macos-26) – scheduled once a night at 05:00 UTC, and on
+- **`fix`** (macos-26) – scheduled once a night at 06:00 UTC, and on
   `workflow_dispatch` with `job: fix` and an optional issue number. Runs the
   picker, the
   baseline, the fixer session, and the verifier. It holds no write credential
@@ -111,24 +111,24 @@ The workflow's `workflow_dispatch` takes a required `job` input, a choice of
 job's job-level `if:` selects it by trigger and, on dispatch, by `job`, so one
 workflow file serves both manual paths.
 
-05:00 UTC falls in the US night, and the `fix` job's timeout (§9) ends it by
-10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
+06:00 UTC falls in the US night, and the `fix` job's 240-minute timeout (§9)
+ends it by 10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
 when it is busy – the last five nightlies started between 15:00 and 19:30 UTC –
 so a delayed `fix` run can still overlap the nightly; that costs a second of
 the five macOS slots, not a failure.
 
 The `fix` job reads the ledger as the most recent `ledger` run left it. That
 run follows the nightly's completion, which over the same five nights fell
-between 15:45 and 19:40 UTC, so the ledger the `fix` job reads is 9 to 14
+between 15:45 and 19:40 UTC, so the ledger the `fix` job reads is 10 to 14
 hours old. The worst-case latency from a test crossing the threshold to an
 attempt, setting aside other tests ranked ahead of it (§5):
 
 - **Crossed by a nightly failure** – the `ledger` run that follows that nightly
-  records it, and the next 05:00 `fix` run attempts it: up to about 13 hours
+  records it, and the next 06:00 `fix` run attempts it: up to about 14 hours
   after the nightly completes.
 - **Crossed by a rerun-erased CI failure** – a rerun that lands just after a
-  `ledger` run waits for the next one, a day or more later, and then for 05:00:
-  about a day and a half, 38 hours at the measured completion times.
+  `ledger` run waits for the next one, a day or more later, and then for 06:00:
+  about a day and a half, 39 hours at the measured completion times.
 
 ## 4. Detection and the ledger
 
@@ -618,9 +618,9 @@ and `publish` records `aborted` (§4.4). The baseline does two jobs:
   that the pre-fix rate at pass scope was not measured; the ledger's counts are
   then the only "before".
 
-The baseline never runs at pass scope: a pass iteration takes about 8 minutes
-warm, so a pass-scope baseline long enough to estimate a rate would cost more
-than the verifier runs it sizes (§9).
+The baseline never runs at pass scope: a warm fast-pass iteration takes about 3
+minutes (§9), so 20 of them would take an hour, more than the two verifier
+runs it sizes together.
 
 **Sizing `N` from the baseline.** The baseline's failure rate on `main` is
 `p = f / v`, where `f` is its reproductions and `v` its non-excluded
@@ -642,12 +642,14 @@ Three cases follow:
 
 - **Test scope, bound reached** – `N` fits under the cap. The verdict carries
   the false-pass probability `(1 - p)^N`, which is under 5%. With the §9
-  estimates the test-scope cap is 73, above the 59 that the smallest
-  measurable `p` needs, so this is the expected case.
-- **Test scope, bound not reached** – the cap is below the computed `N`, which
-  happens only if the measured iteration time is worse than §9 estimates. The
-  verifier runs the cap, and the evidence is **weak** (§6.5): the actual
-  false-pass probability `(1 - p)^N` is 5% or more.
+  figures the test-scope cap is 45, which any `p` of 0.065 or more fits under:
+  a baseline with two or more reproductions (`p` of at least 0.1, `N` of at
+  most 29) reaches the bound.
+- **Test scope, bound not reached** – the cap is below the computed `N`. With
+  the §9 figures this is a baseline with exactly one reproduction: `p` is
+  1/20, 1/19, or 1/18, whose `N` is 59, 56, or 53. The verifier runs the cap,
+  and the evidence is **weak** (§6.5): the actual false-pass probability
+  `(1 - p)^N` is 5% or more – at 45 iterations, 9.9%, 8.8%, or 7.6%.
 - **Pass scope** – the baseline saw 0 failures, so there is no measured `p` to
   size from, and the baseline never runs at pass scope to get one. The
   verifier runs the pass-scope cap and states the bound as **unknown**. The
@@ -814,8 +816,8 @@ the rest: a test that fails again after its fix reopens its issue (§4.4).
 The sizing in §6.3 makes the filter's strength explicit rather than fixed. At
 test scope it is a stated false-pass probability, normally under 5%. At pass
 scope it is weak, and the spec does not pretend otherwise: with today's cap of
-3, a candidate that changed nothing passes with probability 0.86 against a
-flake with `p = 0.05` and 0.61 against one with `p = 0.15`.
+5, a candidate that changed nothing passes with probability 0.77 against a
+flake with `p = 0.05` and 0.44 against one with `p = 0.15`.
 
 **Evidence is weak** when the false-pass probability is 5% or more, or unknown.
 
@@ -951,53 +953,79 @@ Transitions, each owned by the PR driver:
 
 The account allows five concurrent macOS jobs, shared by every workflow.
 
-- **The `fix` job** holds one macOS slot, scheduled at 05:00 UTC, with a
-  300-minute timeout that ends it by 10:00, before the nightly's 11:00
+- **The `fix` job** holds one macOS slot, scheduled at 06:00 UTC, with a
+  240-minute timeout that ends it by 10:00, before the nightly's 11:00
   schedule (§3 covers a delayed start).
 
-  The pass-scope figures come from the nightly's whole-fast-pass arm on
-  2026-10-07. Its filter, `--parallel --skip '^TBDDaemonLiveTests\.'`, runs fast
-  passes 1a, 1b, and 2 together in one process (12,164 tests) under induced
-  load. Its warm iterations took about 8 minutes each; its first took about 38,
-  which likely includes first-build and warm-up cost. Each fast pass the
-  verifier can run is one of those three, a subset of the arm's tests, so the
-  arm's figures are upper bounds for it. The quiet pass is not in the arm; its
-  healthy CI run takes about 2 minutes (117 seconds of tests), so its warm
-  iterations sit well inside the same bound. A test-alone iteration – seconds
-  of test plus `scripts/test.sh` and SwiftPM startup – is estimated at 45
-  seconds.
+  The figures below were measured on CI, in
+  [run 37686691741](https://github.com/cheapsteak/tbd/actions/runs/37686691741),
+  on a 3-core macOS runner building with 2 jobs:
+  - **Cold build** – 1167 seconds. An earlier cache-miss CI run paid 1250
+    seconds for the same compile in its first test step.
+  - **Build after a cache restore** – 761 seconds. That run did not copy
+    `test.yml`'s "Restore source mtimes from git commit times" step, so
+    SwiftPM likely saw every source as changed and rebuilt much of what the
+    cache held. The `fix` job copies that step, before its cache restore, for
+    both trees; the 761 seconds is the ceiling until a run with it is
+    measured.
+  - **A test-alone iteration** – 17 to 25 seconds.
+  - **Fast pass 2 at pass scope, under induced load** – 340 seconds for the
+    first iteration, then 171 seconds for each warm one.
+  - **Incremental rebuild after a one-line test edit** – 26 seconds. The
+    iterations after it took 279 seconds and then 164: a rebuild brings the
+    first-iteration warm-up back, about 115 to 170 seconds of it.
+  - **Fast passes 1a and 1b, and the quiet pass** – not measured. The caps
+    below use fast pass 2's figures for every pass. A 1a or 1b iteration may
+    be slower; if a run overruns its allotment, the verifier step's timeout
+    ends it and the
+    attempt fails closed, and that run's iteration times are the measurement
+    that resets the constants. The quiet pass's healthy CI run takes about 2
+    minutes (117 seconds of tests), without induced load (§6.4).
+
+  Pass 2 is noisy under load. In one pass-2 iteration with 3 spinners,
+  several unrelated tests hit the 240-second per-test time limit and the
+  iteration failed for real. That is why the verdict at pass scope counts
+  only the target test (§6.4): a candidate is not failed by its neighbours'
+  flakes.
 
   The job's fixed costs, as ceilings:
-  - session-tree build from a restored cache – 15 minutes;
-  - verification-tree cold build – 25 minutes (the first CI test step, which
-    pays the whole compile, measured 1250 seconds on a cache miss);
-  - pre-fix baseline, 20 test-alone iterations – 15 minutes;
-  - two sessions, capped at 45 minutes each – 90 minutes;
+  - session-tree build from a restored cache – 15 minutes (761 seconds
+    measured);
+  - verification-tree cold build – 22 minutes (1167 and 1250 seconds
+    measured);
+  - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
+    seconds is 8.3);
+  - two sessions, capped at 60 minutes each – 120 minutes;
   - checkouts, ending the session's processes, the bundle, the artifact
-    upload, and API calls – 20 minutes.
+    upload, and API calls – 20 minutes (not measured).
 
-  That is 165 minutes, which leaves 135 of the 300-minute timeout for the two
-  verifier runs: an allotment `R` of 65 minutes each, with 5 to spare. The
-  push and PR writes happen in `publish`, outside this budget. The session cap
-  is 45 rather than 60 because every session minute comes out of the verifier
-  runs, and those are what make the verdict mean something.
+  That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
+  verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
+  push and PR writes happen in `publish`, outside this budget. Every session
+  minute comes out of the verifier runs, so the 60-minute session cap is what
+  holds `R` to 24.
 
   Each scope's cap on `N` (§6.3) is what fits in one allotment:
 
       cap = floor((R - B - W) / t)
 
-  where `B` is the verifier's incremental rebuild of the candidate (ceiling 10
-  minutes), `W` is the extra time a run's first iteration takes, and `t` is a
-  warm iteration's time. These are named constants in the verifier, so new
-  measurements change the caps by editing one line each:
-  - **Test scope** – `t` = 0.75 minutes and `W` = 0, so the cap is 73.
-  - **Pass scope** – `t` = 8 minutes, and `W` is up to 30 minutes (the arm's
-    first iteration, 38 minutes, less a warm one), so the cap is 3. If a run on
-    an incrementally rebuilt candidate turns out not to pay that warm-up,
-    `W` = 0 and the cap becomes 6.
+  where `B` is the verifier's incremental rebuild of the candidate, `W` is the
+  extra time a run's first iteration takes, and `t` is a warm iteration's
+  time. `B` is 5 minutes: 26 seconds were measured for a one-line test edit,
+  and a fix to a module that more targets import rebuilds more. These are
+  named constants in the verifier, so new measurements change the caps by
+  editing one line each:
+  - **Test scope** – `t` = 25 seconds, the slowest test-alone iteration, and
+    `W` = 0: (24 − 5 − 0) minutes is 1140 seconds, and 1140 / 25 = 45.6, so
+    the cap is 45.
+  - **Pass scope** – `t` = 171 seconds and `W` = 169 seconds (the first
+    iteration's 340 less a warm one's 171, the larger of the two warm-ups
+    measured): (1140 − 169) / 171 = 5.68, so the cap is 5.
 
-  The first implementation slice measures `t`, `W`, `B`, and the cold build,
-  and sets the constants from what it finds.
+  The worst case, with both tries running their full allotment, is the 187
+  minutes of fixed cost plus 2 × 24, which is 235 minutes, 5 under the
+  timeout. A full run inside one allotment costs 5 + 45 × 25 s = 23.75 minutes
+  at test scope, and 5 + 2.82 + 5 × 2.85 = 22.1 minutes at pass scope.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
   once per attempt and so at most once a night.
 - **The `ledger`, `publish`, and `promote` jobs** run on ubuntu and cost no
@@ -1160,9 +1188,10 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   failure and with none; baseline classification of a target failure, a
   deadline kill after the target started (both reproductions), and a build
   failure, a harness error, and an unexecuted target (excluded from `p`); the
-  abort at 3 exclusions and not at 2; `N` sizing for `p` = 0.05 (59), 0.15 (raised to 20),
-  1.0 (20), a `p` whose `N` exceeds the cap (capped, with the false-pass
-  probability in the verdict), and pass scope (the cap, bound unknown); a
+  abort at 3 exclusions and not at 2; `N` sizing for `p` = 0.1 (29), 0.15 (raised to 20),
+  1.0 (20), `p` = 0.05, whose 59 exceeds the cap (capped at 45, with the
+  false-pass probability in the verdict), and pass scope (the cap, bound
+  unknown); a
   baseline iteration of a quarantined target whose record says
   `passedOnRetry`, counted as a failure; the retry check with a missing
   metrics file, an unreadable one, an unparsable line, the writer's disabled
@@ -1221,9 +1250,9 @@ against a fixture that contains one.
   "now passes" is a claim. The verifier makes the decision from xunit output and
   exit codes, which the session cannot change.
 - **Always stressing at pass scope.** It reproduces neighbour-dependent
-  flakes, but a pass iteration costs about 8 minutes where a test-alone one
-  costs under one, so the budget buys 3 pass iterations against 73 test-alone
-  ones. Test scope is the better instrument whenever the test fails alone,
+  flakes, but a warm pass iteration costs about 3 minutes where a test-alone
+  one costs under half a minute, so the budget buys 5 pass iterations against
+  45 test-alone ones. Test scope is the better instrument whenever the test fails alone,
   and the baseline shows when it does.
 - **A fixed iteration count.** One `N` for every test is too many for a test
   that fails often and far too few for one that fails rarely: 20 clean
