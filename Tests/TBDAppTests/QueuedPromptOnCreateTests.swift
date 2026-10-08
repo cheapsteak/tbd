@@ -581,6 +581,25 @@ struct QueuedPromptOnCreateTests {
         }
     }
 
+    @Test("A lost message is reported even for a worktree the app never knew")
+    func lostMessageAlertsForAnUnknownWorktree() async {
+        await withAppState { state in
+            archive(state, UUID(), unsentPromptLost: true)
+
+            #expect(state.alertMessage?.contains("Worktree creation failed.") == true)
+            #expect(state.alertMessage?.contains("could not be saved") == true)
+            #expect(state.alertRevealPath == nil)
+        }
+    }
+
+    @Test("A creation failure for an unknown worktree with nothing parked stays silent")
+    func unknownWorktreeFailureWithNothingParkedStaysSilent() async {
+        await withAppState { state in
+            archive(state, UUID())
+            #expect(state.alertMessage == nil)
+        }
+    }
+
     @Test("Without a daemon path the failure alert offers no file")
     func failureAlertWithoutAPathOffersNoFile() async throws {
         try await withAppState { state in

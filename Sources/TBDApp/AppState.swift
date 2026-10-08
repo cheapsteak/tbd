@@ -2995,7 +2995,8 @@ final class AppState {
         guard delta.creationFailed else { return nil }
         let named = Self.creationFailureMessage(worktree, creationFailed: true)
         guard let failure = named
-            ?? ((composer != nil || delta.unsentPromptPath != nil) ? "Worktree creation failed." : nil)
+            ?? ((composer != nil || delta.unsentPromptPath != nil || delta.unsentPromptLost)
+                ? "Worktree creation failed." : nil)
         else { return nil }
         if let composer {
             composer.failAfterCreate(reason: failure)
