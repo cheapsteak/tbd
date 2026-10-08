@@ -1009,8 +1009,13 @@ Transitions, each owned by the PR driver:
   matched against `main`'s protected list (§6.4), may be protected – a check
   independent of the one the verifier made. A weak-evidence PR is promoted
   like any other (§6.5); if it lacks the `flakefix-weak-evidence` label,
-  because `publish` died before adding it, `promote` adds it first. Promotion
-  uses the App token, because a
+  because `publish` died before adding it, `promote` adds it first. GitHub's
+  ready takes no expected head, so `promote` reads the head again after it;
+  if a push landed in between, it returns the PR to draft and goes red.
+  Promotion has one trigger, a `test.yml` completion: a stress status that
+  lands after the PR's run completed (a re-run `publish`, say) promotes
+  nothing until a human re-runs `test.yml`, and the PR stays a draft, which
+  is the safe side. Promotion uses the App token, because a
   `ready_for_review` event raised by `GITHUB_TOKEN` would not start
   `claude-review`.
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so

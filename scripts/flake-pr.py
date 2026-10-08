@@ -21,7 +21,7 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
         a second. Only a comment the bot wrote is ever edited.
     comment --repo R --issue N --body F
         posts one issue comment.
-    promote-facts --repo R --branch B --sha S --conclusion C --event E --app-login L --out F
+    promote-facts --repo R --branch B --sha S --conclusion C --event E --out F
         reads what promotion is decided on: the open PR on B, the commit
         statuses on S, and the PR's changed files. Reads only.
     promote-decide --facts F
@@ -52,6 +52,8 @@ fenced = fl.fenced
 
 STATUS_CONTEXT = "flakefix/stress"
 STATUS_MAX = 140  # GitHub's limit on a commit status description
+# The weak-evidence clause in a success status; promote reads it back (§6.5).
+WEAK_CLAUSE = "weak evidence"
 WEAK_LABEL = "flakefix-weak-evidence"
 WEAK_LABEL_COLOR = "FBCA04"
 WEAK_LABEL_DESCRIPTION = "Flake fix whose stress evidence is weak: weigh it against the diff"
@@ -109,9 +111,9 @@ def status(verdict: dict) -> tuple[str, str]:
         text = f"no failure observed in {verdict['iterations']} runs"
         if verdict.get("weak"):
             if verdict.get("false_pass") is None:
-                text += "; weak evidence: bound unknown"
+                text += f"; {WEAK_CLAUSE}: bound unknown"
             else:
-                text += f"; weak evidence: a no-op would pass {pct(verdict['false_pass'])} of the time"
+                text += f"; {WEAK_CLAUSE}: a no-op would pass {pct(verdict['false_pass'])} of the time"
         return "success", text[:STATUS_MAX]
     if v == "ineligible":
         text = "not eligible for ready, a human must judge: touches " + ", ".join(verdict.get("protected") or [])
@@ -312,10 +314,9 @@ PROMOTE_BRANCH = re.compile(r"flakefix/issue-[0-9]+")
 PROMOTE_EVENT = "pull_request"
 # GitHub's pull-request files endpoint lists at most this many files.
 PR_FILES_LISTED_MAX = 3000
-WEAK_CLAUSE = "weak evidence"
 
 
-def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str, app_login: str) -> dict:
+def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str) -> dict:
     """Everything promote-decide reads, from GitHub. A failed read raises, so
     the PR stays a draft (fail closed)."""
     owner = repo.split("/", 1)[0]
@@ -334,7 +335,7 @@ def promote_facts(repo: str, branch: str, sha: str, conclusion: str, event: str,
         "labels": [label.get("name") for label in p.get("labels") or []],
         "changed_files": None,
     } for p in raw]
-    facts = {"repo": repo, "branch": branch, "app_login": app_login, "run_conclusion": conclusion,
+    facts = {"repo": repo, "branch": branch, "run_conclusion": conclusion,
              "run_event": event, "run_head_sha": sha, "prs": prs, "statuses": [], "files": []}
     if len(prs) != 1:
         return facts
@@ -355,7 +356,6 @@ def promote_decision(facts: dict) -> str:
     """Spec §7: ready only when the PR's own CI passed on the head the verifier
     passed. Every condition is required; the first that fails names the skip."""
     try:
-        app = facts["app_login"]
         if facts["run_event"] != PROMOTE_EVENT:
             return f"SKIP the run was a {facts['run_event']} run, not the PR's own CI"
         if facts["run_conclusion"] != "success":
@@ -374,12 +374,12 @@ def promote_decision(facts: dict) -> str:
             return "SKIP the PR's head is another branch"
         if pr["head_repo"] != facts["repo"]:
             return "SKIP the PR's head is in another repository"
-        if not (pr["author"] == app and pr["author_type"] == fl.BOT_USER_TYPE):
+        if not fl.trusted_author(pr["author"], pr["author_type"]):
             return f"SKIP the PR was opened by {pr['author']}, not the bot"
         if pr["head_sha"] != facts["run_head_sha"]:
             return "SKIP the PR's head moved after the run (a push the verifier never judged)"
         mine = [s for s in facts["statuses"]
-                if s["context"] == STATUS_CONTEXT and s["creator"] == app and s["creator_type"] == fl.BOT_USER_TYPE]
+                if s["context"] == STATUS_CONTEXT and fl.trusted_author(s["creator"], s["creator_type"])]
         if not mine:
             return f"SKIP no {STATUS_CONTEXT} status from the bot on the head"
         newest = max(mine, key=lambda s: (s["created_at"], int(s["id"])))
@@ -444,7 +444,6 @@ def main(argv: list[str]) -> int:
     p.add_argument("--sha", required=True)
     p.add_argument("--conclusion", required=True)
     p.add_argument("--event", required=True)
-    p.add_argument("--app-login", required=True)
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("promote-decide")
     p.add_argument("--facts", type=Path, required=True)
@@ -464,7 +463,7 @@ def main(argv: list[str]) -> int:
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
         elif args.command == "promote-facts":
-            facts = promote_facts(args.repo, args.branch, args.sha, args.conclusion, args.event, args.app_login)
+            facts = promote_facts(args.repo, args.branch, args.sha, args.conclusion, args.event)
             args.out.write_text(json.dumps(facts) + "\n")
         elif args.command == "promote-decide":
             print(promote_decision(read_json(args.facts)))

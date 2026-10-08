@@ -49,9 +49,12 @@ BRANCH_PREFIX="flakefix/issue-"
 PUSH_ERROR_LINES=15
 # GitHub's refusal of a push that creates or updates a workflow file without
 # the permission: "refusing to allow a GitHub App to create or update workflow
-# `<path>` without `workflows` permission" (an OAuth token's says `workflow`
-# scope). Only this text classifies a refusal as a workflow change.
-WORKFLOW_REFUSAL='to create or update workflow .* without .?workflows?.? (permission|scope)'
+# `<path>` without `workflows` permission" (an OAuth App's or a personal token's
+# ends "without `workflow` scope"). Matched on the shared opening, so any token
+# type's wording counts. Only this text classifies a refusal as a workflow
+# change; if GitHub rewords it, the refusal turns the run red with the generic
+# explanation, which fails loud.
+WORKFLOW_REFUSAL='refusing to allow .* to create or update workflow|to create or update workflow .* without .?workflows?.? (permission|scope)'
 
 # Once the target is known, a failure must still leave an attempt entry:
 # without one the picker sees no attempt and re-picks the test on the same
@@ -246,27 +249,14 @@ cmd_open() {
   record pr-opened --pr "$PR"
 }
 
-# protected_paths: NUL-separated paths on stdin; prints those on the
-# verifier's protected list, one per line. The list and its matcher are
-# flake-verify.sh's own, sourced in a subshell so its globals stay there; a
-# matcher that failed to load fails the call rather than matching nothing.
-protected_paths() {
-  bash -c '
-    source "$1" || exit 2
-    declare -F is_protected > /dev/null && [[ ${#PROTECTED_PATTERNS[@]} -gt 0 ]] || exit 2
-    while IFS= read -r -d "" p; do
-      if is_protected "$p"; then shown "$p"; echo; fi
-    done' _ "$SCRIPT_DIR/flake-verify.sh"
-}
-
 # promote: mark the draft ready once its own CI passed on the head the verifier
-# passed (spec §7). Reads with the job token in GH_TOKEN; the one write, the
-# ready (and the weak label, if publish never added it), uses the App token,
-# because a ready_for_review raised by GITHUB_TOKEN starts no claude-review.
-# It writes no ledger or attempt state (§4.4). Exit 0 promoted or skipped,
-# 2 on a failed read or malformed input, which leaves the PR a draft.
+# passed (spec §7). Reads with the job token in GH_TOKEN; the writes, the ready
+# (and the weak label, if publish never added it), use the App token, because
+# a ready_for_review raised by GITHUB_TOKEN starts no claude-review. It writes
+# no ledger or attempt state (§4.4). Exit 0 promoted or skipped, 2 on a failed
+# read or malformed input, which leaves the PR a draft.
 cmd_promote() {
-  local repo="" branch="" sha="" conclusion="" event="" app_login=""
+  local repo="" branch="" sha="" conclusion="" event=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo) repo="${2:-}"; shift 2 ;;
@@ -274,12 +264,11 @@ cmd_promote() {
       --sha) sha="${2:-}"; shift 2 ;;
       --conclusion) conclusion="${2:-}"; shift 2 ;;
       --event) event="${2:-}"; shift 2 ;;
-      --app-login) app_login="${2:-}"; shift 2 ;;
       *) die "promote: unknown argument $1" ;;
     esac
   done
-  [[ -n "$repo" && -n "$branch" && -n "$conclusion" && -n "$event" && -n "$app_login" ]] \
-    || die "promote: --repo, --branch, --sha, --conclusion, --event and --app-login are required"
+  [[ -n "$repo" && -n "$branch" && -n "$conclusion" && -n "$event" ]] \
+    || die "promote: --repo, --branch, --sha, --conclusion and --event are required"
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "promote: --sha is not a commit id"
   # The branch reaches a URL; nothing but the bot's own names goes further.
   if [[ ! "$branch" =~ ^flakefix/issue-[0-9]+$ ]]; then
@@ -288,15 +277,18 @@ cmd_promote() {
   fi
   [[ -n "${APP_TOKEN:-}" ]] || die "refusing to promote without APP_TOKEN (the tbd-flake-fixer App token)"
 
-  local work facts files protected decision number
-  work="$(mktemp -d "${TMPDIR:-/tmp}/flake-pr-promote.XXXXXX")" || die "cannot create a temporary directory"
-  facts="$work/facts.json"; files="$work/files"; protected="$work/protected"
+  local facts files protected decision number now rc=0
+  PROMOTE_WORK="$(mktemp -d "${TMPDIR:-/tmp}/flake-pr-promote.XXXXXX")" || die "cannot create a temporary directory"
+  trap 'rm -rf "$PROMOTE_WORK"' EXIT
+  facts="$PROMOTE_WORK/facts.json"; files="$PROMOTE_WORK/files"; protected="$PROMOTE_WORK/protected"
   py promote-facts --repo "$repo" --branch "$branch" --sha "$sha" --conclusion "$conclusion" \
-    --event "$event" --app-login "$app_login" --out "$facts" || die "cannot read the promotion facts"
+    --event "$event" --out "$facts" || die "cannot read the promotion facts"
   # Through files, not pipes: a failed listing must not read as an empty one.
   jq -j '.files[] | (.filename, (.previous_filename // empty)) | . + "\u0000"' "$facts" > "$files" \
     || die "cannot list the PR's files"
-  protected_paths < "$files" > "$protected" || die "cannot check the PR's files against the protected list"
+  # The verifier's own matcher, from main's checkout: 0 none, 1 some, else it failed.
+  bash "$SCRIPT_DIR/flake-verify.sh" protected-in < "$files" > "$protected" || rc=$?
+  [[ "$rc" -le 1 ]] || die "cannot check the PR's files against the protected list"
   jq --rawfile p "$protected" '. + {protected_touched: ($p | split("\n") | map(select(length > 0)))}' \
     "$facts" > "$facts.new" || die "cannot record the protected files"
   mv "$facts.new" "$facts" || die "cannot record the protected files"
@@ -304,7 +296,7 @@ cmd_promote() {
   number="$(jq -r '.prs[0].number // empty' "$facts")"
   case "$decision" in
     PROMOTE|"PROMOTE label") ;;
-    SKIP*) echo "flake-pr: $decision"; rm -rf "$work"; return 0 ;;
+    SKIP*) echo "flake-pr: $decision"; return 0 ;;
     *) die "promote-decide printed [$decision]" ;;
   esac
   [[ "$number" =~ ^[0-9]+$ ]] || die "no PR number to promote"
@@ -314,8 +306,15 @@ cmd_promote() {
     FLAKE_WRITE_TOKEN="$APP_TOKEN" py weak-label --repo "$repo" --pr "$number" || die "cannot label PR #$number"
   fi
   ghw pr ready "$number" --repo "$repo" || die "cannot mark PR #$number ready"
+  # GitHub's ready takes no expected head, so a push that landed after the
+  # facts were read would be promoted. Read the head again; if it moved, put
+  # the PR back to draft and go red.
+  now="$("$GH_CMD" api "repos/$repo/pulls/$number" --jq .head.sha)" || now=""
+  if [[ "$now" != "$sha" ]]; then
+    ghw pr ready "$number" --repo "$repo" --undo || die "PR #$number was marked ready, but its head is now ${now:-unreadable}, not $sha, and it could not be returned to draft"
+    die "PR #$number's head is now ${now:-unreadable}, not the verified $sha; returned it to draft"
+  fi
   echo "flake-pr: marked PR #$number ready for review"
-  rm -rf "$work"
 }
 
 main() {
@@ -327,7 +326,7 @@ main() {
     promote-decide)
       [[ "${1:-}" == --facts && -n "${2:-}" ]] || die "usage: $0 promote-decide --facts F"
       py promote-decide --facts "$2" ;;
-    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --branch B --sha S --conclusion C --event E --app-login L | promote-decide --facts F}" ;;
+    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --branch B --sha S --conclusion C --event E | promote-decide --facts F}" ;;
   esac
 }
 

@@ -595,6 +595,21 @@ test_protected_touched_reads_the_candidate_diff() {
   assert_eq "only the protected path" "scripts/ci/watched-test-pass.sh" "$out"
 }
 
+# protected-in: the same matcher over NUL-separated paths on stdin (promote
+# reads a PR's files from GitHub and has no tree to diff).
+test_protected_in_lists_the_protected_paths_it_is_given() {
+  local rc=0 out mutant
+  out="$(printf 'Tests/TBDSharedTests/HolderLockTests.swift\0scripts/flake-verify.sh\0Package.swift\0' | bash "$VERIFY" protected-in)" || rc=$?
+  assert_eq "exit 1 when it prints" "1" "$rc"
+  assert_eq "only the protected paths" "scripts/flake-verify.sh
+Package.swift" "$out"
+  rc=0; out="$(printf 'Tests/TBDSharedTests/HolderLockTests.swift\0' | bash "$VERIFY" protected-in)" || rc=$?
+  assert_eq "exit 0 and silent with none" "0 " "$rc $out"
+  mutant="$(mutant_of 's/^  list_protected$/  true/' "$VERIFY")"
+  rc=0; printf 'scripts/test.sh\0' | bash "$mutant/flake-verify.sh" protected-in > /dev/null || rc=$?
+  assert_eq "mutation: without the matcher nothing is flagged" "0" "$rc"
+}
+
 test_a_renamed_protected_file_is_flagged() {
   local d base rc=0 out mutant
   d="$(repo_pair)"

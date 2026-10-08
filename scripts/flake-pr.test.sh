@@ -1150,9 +1150,12 @@ pworld() {
       creator: $bot, creator_type: "Bot", created_at: "2026-10-08T06:00:00Z", id: 1}]' | jq "${2:-.}" | jq -c '.[]' > "$d/statuses"
   jq -n '[{filename: "Tests/TBDSharedTests/HolderLockTests.swift", previous_filename: null}]' | jq "${3:-.}" | jq -c '.[]' > "$d/files"
   jq -n --argjson n "$(wc -l < "$d/files" | tr -d ' ')" '{changed_files: $n}' > "$d/one.json"
+  echo "$PSHA" > "$d/head-after"
   jq -n --arg d "$d" '[
     {match: "^api repos/cheapsteak/tbd/pulls\\?head=cheapsteak:flakefix/issue-10&state=open", file: ($d + "/pulls.json")},
     {match: "^api repos/cheapsteak/tbd/pulls/77$", file: ($d + "/one.json")},
+    {match: "^api repos/cheapsteak/tbd/pulls/77 --jq .head.sha$", file: ($d + "/head-after")},
+    {match: "^pr ready 77 --repo cheapsteak/tbd --undo$", out: ""},
     {match: "commits/1111111111111111111111111111111111111111/statuses", file: ($d + "/statuses")},
     {match: "pulls/77/files", file: ($d + "/files")},
     {match: "labels\\?per_page", out: ""},
@@ -1167,10 +1170,10 @@ promote() {
   local d="$1" dir="${2:-$HERE}" rc=0
   (cd "$d" && GH_TOKEN=job-token APP_TOKEN=app-token FLAKE_GH_CMD="$d/gh" \
     bash "$dir/flake-pr.sh" promote --repo "$REPO" --branch "$PBRANCH" --sha "$PSHA" \
-      --conclusion "${3:-success}" --event "${4:-pull_request}" --app-login "$BOT") > "$d/out" 2>&1 || rc=$?
+      --conclusion "${3:-success}" --event "${4:-pull_request}") > "$d/out" 2>&1 || rc=$?
   echo "$rc"
 }
-promoted() { grep -q '^app-token pr ready 77' "$1/log" && echo yes || echo no; }
+promoted() { grep -q '^app-token pr ready 77 --repo cheapsteak/tbd$' "$1/log" && echo yes || echo no; }
 
 # skips NAME MUTATION_SED [JQ_PR] [JQ_STATUSES] [JQ_FILES] [CONCLUSION] [EVENT]:
 # the world as edited is not promoted, and with the guard removed it is.
@@ -1197,6 +1200,7 @@ test_promote_uses_the_app_token_for_ready() {
   local d mutant; d="$(pworld)"
   promote "$d" > /dev/null
   assert_eq "reads use the job token" "" "$(grep -v '^  STDIN' "$d/log" | grep -v ' pr ready ' | grep -v '^job-token ')"
+  assert_contains "the head is read again after the ready" "$(tail -1 "$d/log")" "job-token api repos/$REPO/pulls/77 --jq .head.sha"
   assert_contains "the ready uses the App token" "$(logged "$d")" "app-token pr ready 77 --repo $REPO"
   mutant="$(mutant_of 's/ghw pr ready/"$GH_CMD" pr ready/' "$PR_SH")"
   d="$(pworld)"; promote "$d" "$mutant" > /dev/null
@@ -1220,7 +1224,7 @@ test_a_failure_stress_status_does_not_promote() {
 }
 
 test_a_status_set_by_someone_else_does_not_count() {
-  skips "a success status by a human" 's/s\["creator"\] == app and s\["creator_type"\] == fl.BOT_USER_TYPE/True/' . \
+  skips "a success status by a human" 's/fl.trusted_author\(s\["creator"\], s\["creator_type"\]\)/True/' . \
     '.[0].creator = "mallory" | .[0].creator_type = "User"'
 }
 
@@ -1237,7 +1241,7 @@ test_a_head_that_moved_after_verification_does_not_promote() {
 
 test_a_non_draft_or_human_authored_pr_is_left_alone() {
   skips "a PR already ready" 's/if pr\["draft"\] is not True:/if False:/' '.draft = false'
-  skips "a human-authored PR" 's/if not \(pr\["author"\] == app and pr\["author_type"\] == fl.BOT_USER_TYPE\):/if False:/' \
+  skips "a human-authored PR" 's/if not fl.trusted_author\(pr\["author"\], pr\["author_type"\]\):/if False:/' \
     '.user = {login: "alice", type: "User"}'
   skips "a PR from another repository" 's/if pr\["head_repo"\] != facts\["repo"\]:/if False:/' '.head.repo.full_name = "mallory/tbd"'
 }
@@ -1255,20 +1259,32 @@ test_a_failed_read_leaves_the_pr_a_draft() {
   assert_eq "stays a draft" "no" "$(promoted "$d")"
 }
 
-# A protected list that does not load must fail the call, not match nothing.
-test_a_protected_list_that_does_not_load_fails_closed() {
+# A protected-list check that fails must fail the call, not match nothing.
+test_a_protected_list_that_cannot_run_fails_closed() {
   local d dir mutant protected='. + [{filename: "scripts/test.sh", previous_filename: null}]'
   dir="$(mktmpd)"
   cp "$HERE/flake_lib.py" "$HERE/flake-ledger.py" "$PR_SH" "$PR_PY" "$dir/"
-  : > "$dir/flake-verify.sh"
   d="$(pworld . . "$protected")"
-  assert_eq "an empty verifier script exits 2" "2" "$(promote "$d" "$dir")"
+  assert_eq "a missing verifier script exits 2" "2" "$(promote "$d" "$dir")"
   assert_eq "and stays a draft" "no" "$(promoted "$d")"
-  mutant="$(mutant_of 's/declare -F is_protected > \/dev\/null && \[\[ \$\{#PROTECTED_PATTERNS\[@\]\} -gt 0 \]\] \|\| exit 2/true/' "$PR_SH")"
-  : > "$mutant/flake-verify.sh"
+  mutant="$(mutant_of 's/\[\[ "\$rc" -le 1 \]\] \|\| die "cannot check the PR.s files against the protected list"/true/' "$PR_SH")"
+  rm -f "$mutant/flake-verify.sh"
   d="$(pworld . . "$protected")"
   promote "$d" "$mutant" > /dev/null
-  assert_eq "mutation: without the load check a protected file is promoted" "yes" "$(promoted "$d")"
+  assert_eq "mutation: without the exit check a protected file is promoted" "yes" "$(promoted "$d")"
+}
+
+# GitHub's ready takes no expected head: a push between the read and the ready
+# is caught by reading the head again, and the PR goes back to draft.
+test_a_head_that_moved_during_the_ready_is_returned_to_draft() {
+  local d mutant
+  d="$(pworld)"; echo 2222222222222222222222222222222222222222 > "$d/head-after"
+  assert_eq "exit 2" "2" "$(promote "$d")"
+  assert_contains "returned to draft with the App token" "$(logged "$d")" "app-token pr ready 77 --repo $REPO --undo"
+  mutant="$(mutant_of 's/if \[\[ "\$now" != "\$sha" \]\]; then/if false; then/' "$PR_SH")"
+  d="$(pworld)"; echo 2222222222222222222222222222222222222222 > "$d/head-after"
+  assert_eq "mutation: without the re-read it stays ready" "0" "$(promote "$d" "$mutant")"
+  assert_lacks "mutation: and nothing undoes it" "$(logged "$d")" "--undo"
 }
 
 test_files_that_could_not_all_be_listed_do_not_promote() {
@@ -1318,12 +1334,12 @@ promote_gated() {
   job="$(job_block "$1" promote | awk '/^    if: >-$/{p=1; next} p && /^    [a-z]/{exit} p')"
   for c in "vars.FLAKE_FIXER_ENABLED == 'true'" "github.repository == 'cheapsteak/tbd'" "github.event_name == 'workflow_run'" \
       "github.event.workflow_run.name == 'Test'" "github.event.workflow_run.path == '.github/workflows/test.yml'" \
-      "github.event.workflow_run.event == 'pull_request'" \
+      "github.event.workflow_run.event == 'pull_request'" "github.event.workflow_run.conclusion == 'success'" \
       "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
       "github.event.workflow_run.head_repository.full_name == github.repository"; do
     grep -qF "$c" <<< "$job" || return 1
   done
-  grep -q '^    workflows: \[Nightly, Test\]$' "$1"
+  grep -q '^    workflows: \[Nightly, Test\]$' "$1" && grep -qF "    branches: [main, 'flakefix/issue-*']" "$1"
 }
 test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
   check "promote's if names the flag, the workflow, the PR event, the prefix and the repository" promote_gated \

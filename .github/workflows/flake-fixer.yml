@@ -41,12 +41,15 @@ on:
   # timeout ends it before the nightly's 11:00 schedule.
   schedule:
     - cron: '0 6 * * *'
-  # Nightly completions start `ledger`; Test completions start `promote`. Every
-  # Test completion starts a run of this file, and on any branch but a
-  # flakefix/issue-<N> PR's every job in it is skipped without a runner.
+  # Nightly completions start `ledger`; Test completions on a flakefix/issue-<N>
+  # PR start `promote`. The branch filter keeps every other PR's Test runs from
+  # starting a run of this file: Nightly runs on main, and only the bot pushes
+  # flakefix/issue-<N>. A Test run on main still starts one, all of whose jobs
+  # are skipped without a runner.
   workflow_run:
     workflows: [Nightly, Test]
     types: [completed]
+    branches: [main, 'flakefix/issue-*']
   workflow_dispatch:
     inputs:
       job:
@@ -1171,6 +1174,7 @@ jobs:
       github.event.workflow_run.name == 'Test' &&
       github.event.workflow_run.path == '.github/workflows/test.yml' &&
       github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
       startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
@@ -1226,4 +1230,4 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
-            --conclusion "$CONCLUSION" --event "$RUN_EVENT" --app-login "$(python3 scripts/flake_lib.py bot-login)"
+            --conclusion "$CONCLUSION" --event "$RUN_EVENT"
