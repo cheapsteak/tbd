@@ -1391,6 +1391,14 @@ test_promote_reads_with_the_job_token_and_writes_with_the_app() {
     $'      pull-requests: read\n      statuses: read\n    steps:' $'      pull-requests: write\n      statuses: read\n    steps:'
 }
 
+# A group would let GitHub cancel a pending promote for the current head in
+# favour of one queued later for an older SHA.
+promote_ungrouped() { ! job_block "$1" promote | grep -q '^    concurrency:'; }
+test_promote_has_no_concurrency_group() {
+  check "promote queues in no group" promote_ungrouped '    # No concurrency group. Each promote decides' \
+    $'    concurrency:\n      group: flake-promote\n    # No concurrency group. Each promote decides'
+}
+
 ledger_nightly_only() {
   job_block "$1" ledger | awk '/^    if: >-$/{p=1; next} p && /^    [a-z]/{exit} p' |
     grep -qF "(github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Nightly')"

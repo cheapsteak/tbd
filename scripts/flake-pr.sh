@@ -78,7 +78,8 @@ die() {
 }
 py() { python3 "$SCRIPT_DIR/flake-pr.py" "$@"; }
 
-# Every gh call carries the App token, read or write.
+# Every gh call in `open` carries the App token, read or write. `promote`
+# reads with the job token and writes through this.
 ghw() { GH_TOKEN="$APP_TOKEN" "$GH_CMD" "$@"; }
 
 # git with the App token as an HTTP header for this one command. It goes in
@@ -267,7 +268,7 @@ cmd_promote() {
       *) die "promote: unknown argument $1" ;;
     esac
   done
-  [[ -n "$repo" && -n "$branch" && -n "$conclusion" && -n "$event" ]] \
+  [[ -n "$repo" && -n "$branch" && -n "$sha" && -n "$conclusion" && -n "$event" ]] \
     || die "promote: --repo, --branch, --sha, --conclusion and --event are required"
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "promote: --sha is not a commit id"
   # The branch reaches a URL; nothing but the bot's own names goes further.

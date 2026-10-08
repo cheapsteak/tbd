@@ -77,8 +77,11 @@ permissions: {}
 # No cancel-in-progress, so a run that holds the lock is never cancelled and
 # its `publish` always runs. GitHub does cancel a PENDING run when a newer one
 # queues in the same group; such a run has started no job, picked nothing and
-# recorded nothing, so the newer run does the same work in its place, and the
-# cancelled one stays in the Actions list for a human who dispatched it.
+# recorded nothing, so no state is lost. A scheduled run's work is the newer
+# run's too, since it picks afresh. A dispatch that named an `issue` is not:
+# that issue is not attempted, and the cancelled run in the Actions list is
+# the only trace, so dispatch one issue at a time and re-dispatch a cancelled
+# one.
 concurrency:
   group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'fix')) && 'flake-fixer-attempt' || format('flake-fixer-run-{0}', github.run_id) }}
   cancel-in-progress: false
@@ -1179,12 +1182,11 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # One decision per branch at a time. Its queue cannot drop work: a pending
-    # promote cancelled by a newer one for the same branch is superseded by a
-    # run that reads the same PR afresh.
-    concurrency:
-      group: flake-promote-${{ github.event.workflow_run.head_branch }}
-      cancel-in-progress: false
+    # No concurrency group. Each promote decides for its own run's head SHA,
+    # so a group would let GitHub cancel a pending promote for the current
+    # head in favour of a newer one queued for an older SHA, which skips.
+    # Two promotes of one head may overlap: the label and the ready are
+    # idempotent.
     # The job token reads; the ready (and a missing weak label) uses the App
     # token, because a ready_for_review raised by GITHUB_TOKEN starts no
     # claude-review (§7).

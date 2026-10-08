@@ -121,9 +121,11 @@ belongs to the run rather than to a job because the picker learns that a test
 is taken only from what `publish` writes, the open PR and the attempt record
 (§5): a second `fix` that started while the first run's `publish` was pending
 could pick the same test. GitHub cancels a pending run when a newer one queues
-in the same group; such a run has started no job and recorded nothing, so the
-newer run does its work, and the cancelled run stays visible in the Actions
-list. Neither `fix` nor `publish` has a job-level group, since a group a
+in the same group; such a run has started no job and recorded nothing. A
+scheduled run's work is the newer run's too, because it picks afresh. A
+dispatch that named an issue is lost: that issue is not attempted, and the
+cancelled run in the Actions list is the only trace, so a human dispatches one
+issue at a time and re-dispatches a cancelled one. Neither `fix` nor `publish` has a job-level group, since a group a
 `publish` queued in would be one where a pending `publish` could be cancelled
 and record nothing.
 
