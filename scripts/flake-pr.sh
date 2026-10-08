@@ -18,7 +18,9 @@
 # is recorded `aborted` and nothing is pushed (§8).
 #
 # The outcomes it records, one attempt entry each (§4.4):
-#   aborted       no candidate artifact, or one whose verification never finished
+#   aborted       no candidate artifact, or one whose verification never
+#                 finished; marked session_failed when a fixer session failed
+#                 and left no commit (the artifact's abort_kind)
 #   no-diff       the session made no commits; its notes go on the issue
 #   push-refused  GitHub rejected the push; a rejection for touching
 #                 .github/workflows/ (the App has no `workflows` permission) is
@@ -132,7 +134,11 @@ cmd_open() {
       record aborted --reason "The fix job ended before it packaged a candidate (a timeout, a cancellation, or a failed step)."
       return 0 ;;
     aborted)
-      record aborted --reason "The fix job aborted: $(head -c 2000 "$ATTEMPT/abort_reason" 2>/dev/null)"
+      # A session that failed without a commit tried nothing; the picker
+      # does not wait for a new failure after it (§5).
+      local kind=()
+      [[ "$(cat "$ATTEMPT/abort_kind" 2>/dev/null)" == session ]] && kind=(--session-failed)
+      record aborted --reason "The fix job aborted: $(head -c 2000 "$ATTEMPT/abort_reason" 2>/dev/null)" ${kind[@]+"${kind[@]}"}
       return 0 ;;
     no-diff)
       comment no-diff

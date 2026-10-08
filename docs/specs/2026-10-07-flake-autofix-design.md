@@ -263,8 +263,10 @@ no two jobs ever edit the same comment:
 - **`publish`** appends an entry to the attempt comment for every `fix` run
   that picked a target, with the `fix` run's ID and start time, the `main` SHA,
   the session's notes, and one outcome:
-  - `aborted` – the job ended before producing a candidate artifact (§8);
-  - `no-diff` – the session made no commits;
+  - `aborted` – the job ended before producing a candidate artifact (§8),
+    or a fixer session failed and left no commit, which the entry marks
+    `session_failed` because nothing was tried;
+  - `no-diff` – a session that finished made no commits;
   - `push-refused` – GitHub rejected the push (§8);
   - `pr-opened` – with the PR number, the scope, `N`, the false-pass
     probability or `unknown`, whether the evidence was weak (§6.5), whether a
@@ -417,6 +419,12 @@ list of open PRs, and chooses at most one test. A test is **eligible** when:
     once the ledger has recorded a failure after that attempt's start. Without
     that condition the bot would retry the same test every night on the same
     evidence;
+  - `aborted` marked `session_failed` – eligible at once: an outage, an
+    expired token, or a crashed session tried nothing, so waiting for a new
+    failure would only lock the test out. Once: if the attempt before it was
+    also a session failure, with no failure recorded after that one's start,
+    the test waits for a new failure like any other abort, so a session that
+    fails every time on one test cannot hold every night's slot;
   - `pr-opened` with no close recorded yet – not eligible; the open-PR check
     above also covers it;
   - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
@@ -799,6 +807,18 @@ verdict's path:
 - **The package definition** – `Package.swift` and `Package.resolved`, which
   decide what is built, which test targets exist, and which dependency and
   plugin code runs during the build.
+- **The build directories** – `.build/` and `.swiftpm/`. Both are gitignored,
+  so a tracked file under them was forced in, and checking it out would write
+  over the verification tree's warm build, which the verifier keeps between
+  runs. The verifier refuses to apply such a candidate at all, before touching
+  the tree, and the refusal fails the try with its reason; the entries here
+  make sure nothing carrying one could reach a passing verdict another way.
+
+The diff is read NUL-separated, so every name arrives verbatim, and matched
+ignoring case, because the runner's filesystem folds case. A name that is not
+printable ASCII is treated as protected: the filesystem may normalize Unicode,
+so no glob can say which file it really is. Failing closed costs at most a
+draft that a human reads.
 
 A candidate that touches any protected file is "not eligible for ready"
 whatever the stress result. The bot may still have changed it for a good
@@ -1014,9 +1034,14 @@ Transitions, each owned by the PR driver:
   ends red without starting a session.
 - **The build fails before the session starts.** No attempt; the job ends red.
   `main` is expected to build, so this is a CI problem, not a flake.
-- **The session fails** – it errors, times out, or exhausts its turns. Whatever
-  commits it made still go to the verifier; with none, the attempt ends with a
-  comment on the issue.
+- **The session fails** – it errors, times out, or exhausts its turns, or
+  never gets going (an expired token, an API outage). Its step continues on
+  error, so the job reads each session step's own outcome and the action's
+  reported conclusion. Whatever commits a failed session made still go to the
+  verifier. With none, the attempt is not `no-diff`: it is recorded `aborted`,
+  marked `session_failed`, with a reason naming the session and how it failed,
+  and the `fix` job ends red after uploading its artifact, so an outage shows.
+  The picker may retry the test the next night (§5).
 - **The candidate does not build.** The verifier fails it like any other
   failing stress run, and the second try gets the build log.
 - **The stress run fails on both tries.** The draft PR stays open with
@@ -1269,7 +1294,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
-  `merged`), with and without a later failure; a recurrence after `merged`
+  `merged`), with and without a later failure; a `session_failed` abort,
+  retried at once, and two in a row with no failure between, which wait; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, no ledger
   comment, a ledger comment from a login other than the bot's, an unparsable
@@ -1300,7 +1326,10 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   absent from the xunit output; a `passedOnRetry` record; another test failing
   at pass scope while the target passes; and a diff touching a protected file,
   one case per entry in the protected list, each marked not eligible for ready
-  even with a clean stress run.
+  even with a clean stress run; a protected name holding a quote and a
+  non-ASCII byte, a non-ASCII name outside every glob, and a protected name in
+  another case, each flagged; and a candidate that force-adds a file under
+  `.build/`, refused before the warm build is touched.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier
@@ -1310,7 +1339,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   `issues: write` to no other job.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
   head that moved after verification; the attempt entry `publish` writes for
-  each outcome, including `aborted` when no artifact exists; a weak-evidence
+  each outcome, including `aborted` when no artifact exists, and a failed
+  session with no commit packaged as `aborted` marked `session_failed`,
+  never as `no-diff`; a weak-evidence
   candidate, which gets the status clause, the label, and numbers at the top
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that

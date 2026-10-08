@@ -126,6 +126,19 @@ def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
         return False, f"PR #{last.pr} merged in this episode"
     if outcome == "pr-opened":
         return False, f"PR #{last.pr} has no recorded close"
+    if outcome == "aborted" and last.session_failed:
+        # A session that failed without a commit (an outage, an expired
+        # token, a crash) tried nothing, so the next night may try again on
+        # the same evidence – once: a second such failure in a row, with no
+        # failure of the test between them, waits for a new one like any
+        # other abort, so a session that fails every time on this test
+        # cannot hold every night's slot.
+        earlier = sorted(mine, key=lambda a: (a.started_at, a.run_id))[:-1]
+        prev = earlier[-1] if earlier else None
+        repeated = (prev is not None and prev.outcome == "aborted" and prev.session_failed
+                    and latest_failure_at(state) <= prev.started_at)
+        if not repeated:
+            return True, "the last attempt's session failed before trying anything"
     if outcome in RETRY_AFTER_NEW_FAILURE:
         if latest_failure_at(state) > last.started_at:
             return True, f"failed again after the {outcome} attempt"

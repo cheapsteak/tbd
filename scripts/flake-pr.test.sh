@@ -229,6 +229,26 @@ test_no_diff_comments_and_records_without_pushing() {
   assert_eq "recorded no-diff with the notes" "no-diff true" "$(recorded "$d" | jq -r '"\(.outcome) \(.notes | contains("SESSION-NOTES"))"')"
 }
 
+test_a_session_failure_abort_is_recorded_as_one() {
+  local d mutant; d="$(world)"; routes "$d"
+  echo aborted > "$d/attempt/outcome"; rm -f "$d/attempt/candidate.bundle"
+  echo "Fixer session 1 (step failure, Claude Code failure) did not finish and left no commit, so nothing was tried." > "$d/attempt/abort_reason"
+  echo session > "$d/attempt/abort_kind"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_eq "recorded aborted, marked a session failure, saying which" "aborted true true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.session_failed) \(.notes | contains("Fixer session 1"))"')"
+  mutant="$(mutant_of 's/kind=\(--session-failed\)/kind=()/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  echo aborted > "$d/attempt/outcome"; rm -f "$d/attempt/candidate.bundle"; echo x > "$d/attempt/abort_reason"; echo session > "$d/attempt/abort_kind"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without passing the kind it is an ordinary abort" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.session_failed)"')"
+  d="$(world)"; routes "$d"
+  echo aborted > "$d/attempt/outcome"; rm -f "$d/attempt/candidate.bundle"; echo "baseline" > "$d/attempt/abort_reason"
+  publish "$d" > /dev/null
+  assert_eq "any other abort is not marked" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.session_failed)"')"
+}
+
 test_a_pass_opens_a_draft_and_sets_success() {
   local d log; d="$(world)"; routes "$d"
   assert_eq "exit 0" "0" "$(publish "$d")"
@@ -717,6 +737,49 @@ package_needs_collected_commits() {
 }
 test_no_diff_needs_session_one_collected() { check "no-diff only once session 1's commits were collected" package_needs_collected_commits '[ "$C1" != success ]' '[ "$C1" = never ]'; }
 
+# package_run FILE RT VAR=VALUE...: run FILE's "Package the attempt" step in
+# RT, with the step's env as given. Prints the exit code.
+package_run() {
+  local wf="$1" rt="$2" rc=0
+  shift 2
+  step_script "$wf" "Package the attempt" | sed "s|\${{ runner.temp }}|$rt|g" > "$rt/package.sh"
+  : > "$rt/out"; : > "$rt/summary"
+  env -i PATH="$PATH" GITHUB_OUTPUT="$rt/out" GITHUB_STEP_SUMMARY="$rt/summary" \
+    C1= TRY2=false C2= S1= S1_CONCLUSION= S2= S2_CONCLUSION= "$@" \
+    /bin/bash --noprofile --norc -p -eo pipefail "$rt/package.sh" > "$rt/log" 2>&1 || rc=$?
+  echo "$rc"
+}
+# package_outcome FILE S1 S1_CONCLUSION: what Package records for a finished
+# baseline, session 1's commits collected, and no commit.
+package_outcome() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=success S1="$2" S1_CONCLUSION="$3" > /dev/null
+  printf '%s|%s|%s|%s' "$(cat "$rt/flakefix/outcome")" "$(cat "$rt/flakefix/abort_kind" 2>/dev/null)" \
+    "$(grep -c '^session_failed=true$' "$rt/out")" "$(cat "$rt/flakefix/abort_reason" 2>/dev/null)"
+}
+session_failure_is_aborted() {
+  local got
+  got="$(package_outcome "$1" success failure)"
+  [[ "$got" == "aborted|session|1|Fixer session 1 (step success, Claude Code failure)"* ]] || return 1
+  got="$(package_outcome "$1" failure "")"
+  [[ "$got" == "aborted|session|1|Fixer session 1 (step failure, Claude Code reported nothing)"* ]] || return 1
+  # The session that ran and committed nothing is still no-diff.
+  [[ "$(package_outcome "$1" success success)" == "no-diff|"*"|0|" ]]
+}
+test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
+  check "a failed or never-finished session with no commit is aborted, kind session" session_failure_is_aborted \
+    'elif [ -n "$failed_session" ]; then' 'elif false; then'
+  local job
+  job="$(job_block "$WORKFLOW" fix)"
+  assert_contains "the step reads session 1's outcome" "$job" 'S1: ${{ steps.s1.outcome }}'
+  assert_contains "and the action's conclusion" "$job" 'S1_CONCLUSION: ${{ fromJSON(toJSON(steps.s1.outputs)).conclusion }}'
+  assert_contains "and session 2's" "$job" 'S2_CONCLUSION: ${{ fromJSON(toJSON(steps.s2.outputs)).conclusion }}'
+  assert_contains "session 1 has the id it reads" "$(step "$WORKFLOW" fix "Fixer session 1")" 'id: s1'
+  assert_contains "and session 2" "$(step "$WORKFLOW" fix "Fixer session 2")" 'id: s2'
+  assert_contains "the job ends red on it" "$(step "$WORKFLOW" fix "End red when a session failed")" \
+    "if: always() && steps.package.outputs.session_failed == 'true'"
+}
+
 unchanged_try2_keeps_try1() {
   local block
   block="$(step "$1" fix "End session 2")"
@@ -971,7 +1034,7 @@ test_a_judge_without_a_quarantine_answer_still_judges() {
 publish_check_script() { step "$1" publish "Check the candidate against" | awk '/^        run: \|$/{p=1; next} p' | sed -E 's/^ {10}//'; }
 sums_of() {
   local f got=""
-  for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
+  for f in outcome abort_reason abort_kind candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
     if [[ -f "$1/$f" ]]; then got="$got$f:$(shasum -a 256 < "$1/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
   done
   printf '%s' "$got"

@@ -482,6 +482,7 @@ jobs:
           { echo "prompt<<$delim"; cat "$T/prompt1.txt"; echo "$delim"; } >> "$GITHUB_OUTPUT"
 
       - name: Fixer session 1
+        id: s1
         if: steps.pick.outputs.attempted == 'true'
         continue-on-error: true
         timeout-minutes: 60
@@ -601,8 +602,10 @@ jobs:
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
-          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied"; then
-            echo "apply-candidate refused the bundle" > "$T/verify/harness-error"
+          # Its reason goes into the verdict: a candidate that commits into a
+          # build directory is refused here, and the PR must say so.
+          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors"; then
+            { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
             exit 1
           fi
           rc=0
@@ -726,6 +729,7 @@ jobs:
           { echo "prompt<<$delim"; cat "$T/prompt2.txt"; echo "$delim"; } >> "$GITHUB_OUTPUT"
 
       - name: Fixer session 2
+        id: s2
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
         continue-on-error: true
         timeout-minutes: 60
@@ -847,8 +851,10 @@ jobs:
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
-          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied"; then
-            echo "apply-candidate refused the bundle" > "$T/verify/harness-error"
+          # Its reason goes into the verdict: a candidate that commits into a
+          # build directory is refused here, and the PR must say so.
+          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors"; then
+            { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
             exit 1
           fi
           rc=0
@@ -905,13 +911,35 @@ jobs:
           C1: ${{ steps.c1.outcome }}
           TRY2: ${{ steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' }}
           C2: ${{ steps.c2.outcome }}
+          # Each session step's own result, which `continue-on-error` hides
+          # from the job: the runner's outcome, and the action's `conclusion`
+          # output, which matters as much – the action fails its step only
+          # when it throws, not when Claude Code itself ends in failure. The
+          # toJSON round trip only reads an output actionlint's copy of the
+          # action's metadata does not list yet.
+          S1: ${{ steps.s1.outcome }}
+          S1_CONCLUSION: ${{ fromJSON(toJSON(steps.s1.outputs)).conclusion }}
+          S2: ${{ steps.s2.outcome }}
+          S2_CONCLUSION: ${{ fromJSON(toJSON(steps.s2.outputs)).conclusion }}
         run: |
           if [ "${1-}" != --clean-env ]; then
             exec /usr/bin/env -i PATH=/usr/bin:/bin GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
-              C1="$C1" TRY2="$TRY2" C2="$C2" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+              C1="$C1" TRY2="$TRY2" C2="$C2" S1="$S1" S1_CONCLUSION="$S1_CONCLUSION" S2="$S2" S2_CONCLUSION="$S2_CONCLUSION" \
+              /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
           T='${{ runner.temp }}/flakefix'
           set -uo pipefail
+          # Only this step writes the kind; a leftover file is the session's.
+          rm -f "$T/abort_kind"
+          # The session that failed, if one did: a step that did not succeed,
+          # or an action that did not report success (an expired token, an API
+          # outage, a crash, the turn limit), which `continue-on-error` hides.
+          failed_session=""
+          if [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; then
+            failed_session="1 (step $S1, Claude Code ${S1_CONCLUSION:-reported nothing})"
+          elif [ "$TRY2" = true ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
+            failed_session="2 (step $S2, Claude Code ${S2_CONCLUSION:-reported nothing})"
+          fi
           if [ -f "$T/abort_reason" ]; then
             echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
           elif [ ! -f "$T/plan.json" ]; then
@@ -923,7 +951,15 @@ jobs:
             echo "The job ended before a session's commits were collected (a timeout, a cancellation, or a failed step)." > "$T/abort_reason"
             echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
           elif [ -f "$T/candidate.bundle" ]; then
+            # A failed session's commits are still a candidate (§8).
             echo candidate > "$T/outcome"
+          elif [ -n "$failed_session" ]; then
+            # No commit from a session that never finished says nothing about
+            # the test: not `no-diff`, which would wait for a new failure.
+            echo "Fixer session $failed_session did not finish and left no commit, so nothing was tried." > "$T/abort_reason"
+            echo session > "$T/abort_kind"
+            echo aborted > "$T/outcome"
+            echo "session_failed=true" >> "$GITHUB_OUTPUT"
           else
             echo no-diff > "$T/outcome"
           fi
@@ -933,7 +969,7 @@ jobs:
           # whatever environment a session left, so publish checks the
           # artifact against these sums before it trusts it.
           sums=""
-          for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
+          for f in outcome abort_reason abort_kind candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
             if [ -f "$T/$f" ]; then sums="$sums$f:$(shasum -a 256 < "$T/$f" | cut -d' ' -f1);"; else sums="$sums$f:-;"; fi
           done
           echo "sums=$sums" >> "$GITHUB_OUTPUT"
@@ -948,6 +984,26 @@ jobs:
           path: ${{ runner.temp }}/flakefix/
           if-no-files-found: ignore
           retention-days: 7  # spec §11
+
+      # A session that failed without a commit is an outage or a crash, and
+      # `continue-on-error` would otherwise leave the job green (§8). Last, so
+      # the artifact is already uploaded.
+      - name: End red when a session failed
+        if: always() && steps.package.outputs.session_failed == 'true'
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          echo "::error::a fixer session failed and left no commit; the attempt is recorded aborted"
+          exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
   # publish: every write an attempt makes, with the App token, on ubuntu, after
@@ -1035,7 +1091,7 @@ jobs:
           A="$RUNNER_TEMP/flakefix-candidate"
           [ -d "$A" ] || exit 0
           got=""
-          for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
+          for f in outcome abort_reason abort_kind candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
             if [ -f "$A/$f" ]; then got="$got$f:$(shasum -a 256 < "$A/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
           done
           if [ "$got" != "$SUMS" ]; then

@@ -640,6 +640,9 @@ class Attempt:
     weak: bool | None = None
     protected_touched: list[str] | None = None
     verdict: str | None = None  # "pass" | "fail"
+    # `aborted` only: True when a fixer session failed (an outage, an expired
+    # token, a crash) and left no commit, so the attempt tried nothing (§5).
+    session_failed: bool | None = None
 
 
 def render_attempts(attempts: list[Attempt], repo: str) -> str:

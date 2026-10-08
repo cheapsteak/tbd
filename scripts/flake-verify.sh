@@ -91,7 +91,19 @@ PROTECTED_PATTERNS=(
   'Tests/TestSupport/FlakyTestSupport.swift'
   'Package.swift'
   'Package.resolved'
+  # The build directories. Both are gitignored, so a candidate that tracks a
+  # file under them meant to: `git add -f` would put it into the verification
+  # tree's warm build, which `git clean -e .build` keeps. `apply-candidate`
+  # refuses such a candidate outright (BUILD_DIR_PATTERNS); they are listed
+  # here as well so that nothing which reaches the judge can carry one.
+  '.build'
+  '.build/*'
+  '.swiftpm'
+  '.swiftpm/*'
 )
+
+# The paths `apply-candidate` refuses to write into the verification tree.
+BUILD_DIR_PATTERNS=('.build' '.build/*' '.swiftpm' '.swiftpm/*')
 
 # The scripts `test.sh` runs by tree-relative path. `apply-candidate` puts
 # main's copies over the candidate's, so the verdict comes from main's runner.
@@ -241,6 +253,16 @@ cmd_apply_candidate() {
   git fetch -q "$bundle" HEAD || die "cannot fetch the bundle"
   local tip; tip="$(git rev-parse FETCH_HEAD)" || die "no FETCH_HEAD"
   git merge-base --is-ancestor "$base" "$tip" || die "the candidate $tip does not descend from $base"
+  # Before the tree is touched: a tracked file under a build directory would
+  # overwrite the warm build the verdict runs.
+  local listing path planted=""
+  listing="$(mktemp "${TMPDIR:-/tmp}/flake-verify-changed.XXXXXX")" || die "cannot create a temporary file"
+  changed_paths "$base" "$tip" > "$listing" || { rm -f "$listing"; die "git diff $base $tip failed"; }
+  while IFS= read -r -d '' path; do
+    if matches_any "$path" "${BUILD_DIR_PATTERNS[@]}"; then planted="$planted $(shown "$path")"; fi
+  done < "$listing"
+  rm -f "$listing"
+  [[ -z "$planted" ]] || die "the candidate commits files under a build directory, which the verifier never applies:$planted"
   git reset -q --hard "$tip" || die "cannot reset to the candidate"
   local f
   for f in "${RUNNER_CHAIN[@]}"; do
@@ -252,18 +274,48 @@ cmd_apply_candidate() {
   echo "$tip"
 }
 
-# 0 when PATH matches a protected pattern.
-is_protected() {
-  local pattern
-  for pattern in "${PROTECTED_PATTERNS[@]}"; do
-    # shellcheck disable=SC2254 # the pattern is a glob on purpose
-    case "$1" in $pattern) return 0 ;; esac
-  done
-  return 1
+# changed_paths REV...: the paths `git diff REV...` names, NUL-separated and
+# verbatim, so a name holding a newline, a quote or a non-ASCII byte arrives
+# whole rather than C-quoted. --no-renames: a renamed protected file must list
+# its old path too, or a rename (with edits) would slip past every pattern.
+changed_paths() { git diff --no-renames --name-only -z "$@"; }
+
+# 0 when PATH is non-empty printable ASCII, the only kind a glob can be
+# trusted to match the way the filesystem will. The verification tree's
+# filesystem folds case (handled by nocasematch in matches_any) and may
+# normalize Unicode, so a name `case` sees as different could be the same
+# file to it.
+matchable() {
+  local rest
+  # The trailing dot keeps a final newline from vanishing in the substitution.
+  rest="$(printf '%s' "$1" | LC_ALL=C tr -d ' -~'; echo .)"
+  [[ -n "$1" && "$rest" == "." ]]
 }
 
+# PATH as one printable line, for a listing a human reads.
+shown() { if matchable "$1"; then printf '%s' "$1"; else printf '%q' "$1"; fi; }
+
+# matches_any PATH PATTERN...: 0 when PATH matches a pattern, ignoring case,
+# or cannot be matched safely (fail closed).
+matches_any() {
+  local path="$1" pattern rc=1 restore
+  shift
+  matchable "$path" || return 0
+  restore="$(shopt -p nocasematch)"
+  shopt -s nocasematch
+  for pattern in "$@"; do
+    # shellcheck disable=SC2254 # the pattern is a glob on purpose
+    case "$path" in $pattern) rc=0; break ;; esac
+  done
+  eval "$restore"
+  return "$rc"
+}
+
+# 0 when PATH matches a protected pattern, or cannot be matched safely.
+is_protected() { matches_any "$1" "${PROTECTED_PATTERNS[@]}"; }
+
 cmd_protected_touched() {
-  local base="" changed path found=1
+  local base="" listing path found=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --base) base="${2:-}"; shift 2 ;;
@@ -271,13 +323,13 @@ cmd_protected_touched() {
     esac
   done
   [[ -n "$base" ]] || die "protected-touched: --base is required"
-  # --no-renames: a renamed protected file must list its old path too, or a
-  # rename (with edits) would slip past every pattern.
-  changed="$(git diff --no-renames --name-only "$base...HEAD")" || die "git diff $base...HEAD failed"
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    if is_protected "$path"; then echo "$path"; found=0; fi
-  done <<< "$changed"
+  # Through a file, not a pipe: a failed diff must not read as an empty one.
+  listing="$(mktemp "${TMPDIR:-/tmp}/flake-verify-changed.XXXXXX")" || die "cannot create a temporary file"
+  changed_paths "$base...HEAD" > "$listing" || { rm -f "$listing"; die "git diff $base...HEAD failed"; }
+  while IFS= read -r -d '' path; do
+    if is_protected "$path"; then shown "$path"; echo; found=0; fi
+  done < "$listing"
+  rm -f "$listing"
   [[ "$found" -eq 0 ]] && return 1
   return 0
 }

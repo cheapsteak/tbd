@@ -13,7 +13,7 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
     issue-comment --attempt-dir A --kind failed|no-diff|push-refused|aborted
                   [--pr N] [--detail F] --out F
         the visible comment an attempt posts on its issue.
-    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT] --out F
+    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT] [--session-failed] --out F
         the attempt entry, as flake_lib.Attempt JSON.
     record --repo R --issue N --entry F
         appends the entry to the issue's attempt comment, or creates it. A
@@ -205,7 +205,8 @@ def issue_comment(attempt: Path, kind: str, pr: str | None, detail: str) -> str:
 # --- the attempt entry and comment -------------------------------------------------------------
 
 
-def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str) -> dict:
+def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
+          session_failed: bool = False) -> dict:
     target = read_json(pick / "target.json")
     notes = read_text(attempt / "flakefix-notes.md").strip() if attempt.is_dir() else ""
     if reason:
@@ -217,6 +218,7 @@ def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str) 
         episode=int(target.get("episode", 0)),
         outcome=outcome,
         notes=notes[: fl.ATTEMPT_NOTES_CHARS],
+        session_failed=True if outcome == "aborted" and session_failed else None,
     )
     if outcome == "pr-opened":
         verdict = read_json(attempt / "verify" / "verdict.json")
@@ -324,6 +326,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--outcome", choices=fl.ATTEMPT_OUTCOMES, required=True)
     p.add_argument("--pr", type=int)
     p.add_argument("--reason", default="")
+    p.add_argument("--session-failed", action="store_true")
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("record")
     p.add_argument("--repo", required=True)
@@ -347,7 +350,8 @@ def main(argv: list[str]) -> int:
             detail = read_text(args.detail) if args.detail else ""
             args.out.write_text(issue_comment(args.attempt_dir, args.kind, args.pr, detail))
         elif args.command == "entry":
-            args.out.write_text(json.dumps(entry(args.pick_dir, args.attempt_dir, args.outcome, args.pr, args.reason)) + "\n")
+            args.out.write_text(json.dumps(entry(args.pick_dir, args.attempt_dir, args.outcome, args.pr, args.reason,
+                                              args.session_failed)) + "\n")
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
         elif args.command == "weak-label":

@@ -162,6 +162,31 @@ test_closed_unmerged_without_and_with_a_later_failure() {
     '[{"number": 50, "outcome": "closed-unmerged", "merge_sha": null, "episode": 0}]'
 }
 
+# A session that failed without a commit tried nothing: the next night may try
+# again on the same evidence, once. A second such abort in a row, with no
+# failure between them, waits for a new failure like any other.
+test_a_session_failure_abort_is_retried_once_without_a_new_failure() {
+  local w mutant one two
+  one="$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": true')"
+  two="$(attempt aborted 2026-10-03T12:00:00Z '"session_failed": true')"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one]}"
+  assert_eq "one session-failure abort: picked again at once" "rc=0 #10" "$(picked "$w")"
+  mutant="$(mutant_of 's/^    if outcome == "aborted" and last.session_failed:$/    if False:/' "$PICK")"
+  assert_eq "mutation: treated as any abort it waits for a new failure" "rc=3 none" "$(picked "$w" "$mutant")"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one, $two]}"
+  assert_eq "two in a row with no failure between: waits" "rc=3 none" "$(picked "$w")"
+  mutant="$(mutant_of 's/^        if not repeated:$/        if True:/' "$PICK")"
+  assert_eq "mutation: without the bound it takes every night's slot" "rc=0 #10" "$(picked "$w" "$mutant")"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $LATER, \"attempts\": [$one, $two]}"
+  assert_eq "and a failure after the first one starts the count again" "rc=0 #10" "$(picked "$w")"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": null')]}"
+  assert_eq "an abort for any other reason still waits" "rc=3 none" "$(picked "$w")"
+}
+
 test_the_later_failure_clause_is_load_bearing() {
   local w mutant; w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$(attempt aborted 2026-10-02T12:00:00Z)]}"

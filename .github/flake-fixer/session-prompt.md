@@ -35,6 +35,9 @@ the code so it stops, then stop.
   - `Tests/TestSupport/FlakyTestSupport.swift`
   - `Package.swift`
   - `Package.resolved`
+  - `.build`, `.build/*`, `.swiftpm` and `.swiftpm/*`: never commit files
+    under the build directories. A candidate that does is not stress-run at
+    all.
 - You have no network tools and need none. Build and test with the
   repository's own scripts.
 
