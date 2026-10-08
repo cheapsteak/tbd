@@ -118,7 +118,8 @@ def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
     mine = [a for a in view.attempts if a.episode == state.episode]
     if not mine:
         return True, "no attempt in this episode"
-    last = max(mine, key=lambda a: (a.started_at, a.run_id))
+    ordered = sorted(mine, key=lambda a: (a.started_at, a.run_id))
+    last = ordered[-1]
     outcome = last.outcome
     if outcome == "pr-opened":
         outcome = pr_outcome(state, last.pr) or "pr-opened"
@@ -128,13 +129,13 @@ def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
         return False, f"PR #{last.pr} has no recorded close"
     if outcome == "aborted" and last.session_failed:
         # A session that failed without a commit (an outage, an expired
-        # token, a crash) tried nothing, so the next night may try again on
-        # the same evidence – once: a second such failure in a row, with no
-        # failure of the test between them, waits for a new one like any
-        # other abort, so a session that fails every time on this test
-        # cannot hold every night's slot.
-        earlier = sorted(mine, key=lambda a: (a.started_at, a.run_id))[:-1]
-        prev = earlier[-1] if earlier else None
+        # token, a crash) told us nothing about the test, so the next night
+        # may try again on the same evidence – once: a second such failure in
+        # a row, with no failure of the test between them, waits for a new
+        # one like any other abort. That also bounds a session that keeps
+        # running out of turns or time on this test: it cannot hold every
+        # night's slot.
+        prev = ordered[-2] if len(ordered) > 1 else None
         repeated = (prev is not None and prev.outcome == "aborted" and prev.session_failed
                     and latest_failure_at(state) <= prev.started_at)
         if not repeated:

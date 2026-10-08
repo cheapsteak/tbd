@@ -258,7 +258,11 @@ def failing_lines(log: Path) -> list[str]:
 
 def judge(directory: Path, scope: str, test: str, n: int, quarantined: bool) -> Verdict:
     verdict = Verdict()
-    for marker, reason in (("build-failed", "the candidate did not build"), ("harness-error", "the stress harness errored")):
+    # `candidate-refused` and `build-failed` are the candidate's own failures,
+    # so a second try may follow; `harness-error` says nothing about it.
+    for marker, reason in (("candidate-refused", "the verifier refused to apply the candidate"),
+                           ("build-failed", "the candidate did not build"),
+                           ("harness-error", "the stress harness errored")):
         path = directory / marker
         if path.exists():
             verdict.reasons.append(reason)

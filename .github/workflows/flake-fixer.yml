@@ -602,9 +602,17 @@ jobs:
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
-          # Its reason goes into the verdict: a candidate that commits into a
-          # build directory is refused here, and the PR must say so.
-          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors"; then
+          # Exit 3 is the candidate's own failure: it commits into a build
+          # directory, so it is never applied. Its paths become the protected
+          # list and its reason the verdict's, and a second try may follow.
+          # Any other refusal is the harness's.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors" || rc=$?
+          if [ "$rc" = 3 ]; then
+            mv "$T/verify/applied" "$T/verify/protected.txt"
+            cp "$T/verify/apply-errors" "$T/verify/candidate-refused"
+            exit 1
+          elif [ "$rc" != 0 ]; then
             { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
             exit 1
           fi
@@ -641,7 +649,8 @@ jobs:
           # The candidate's own quarantine answer. Anything but yes or no
           # comes with a harness-error marker, which fails the run by itself.
           q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"
-          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
+          # A refused candidate was never asked: its marker fails the run.
+          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
           bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
             --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
             --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
@@ -851,9 +860,17 @@ jobs:
           set -uo pipefail
           base="$(cat "$T/pick/base_sha")"
           mkdir -p "$T/verify"
-          # Its reason goes into the verdict: a candidate that commits into a
-          # build directory is refused here, and the PR must say so.
-          if ! bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors"; then
+          # Exit 3 is the candidate's own failure: it commits into a build
+          # directory, so it is never applied. Its paths become the protected
+          # list and its reason the verdict's, and a second try may follow.
+          # Any other refusal is the harness's.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors" || rc=$?
+          if [ "$rc" = 3 ]; then
+            mv "$T/verify/applied" "$T/verify/protected.txt"
+            cp "$T/verify/apply-errors" "$T/verify/candidate-refused"
+            exit 1
+          elif [ "$rc" != 0 ]; then
             { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
             exit 1
           fi
@@ -890,7 +907,8 @@ jobs:
           # The candidate's own quarantine answer. Anything but yes or no
           # comes with a harness-error marker, which fails the run by itself.
           q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"
-          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
+          # A refused candidate was never asked: its marker fails the run.
+          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
           bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
             --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
             --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
@@ -932,8 +950,11 @@ jobs:
           # Only this step writes the kind; a leftover file is the session's.
           rm -f "$T/abort_kind"
           # The session that failed, if one did: a step that did not succeed,
-          # or an action that did not report success (an expired token, an API
-          # outage, a crash, the turn limit), which `continue-on-error` hides.
+          # or an action that did not report success – an expired token, an API
+          # outage, a crash, the turn limit or the step's timeout – which
+          # `continue-on-error` hides. An action that reports no conclusion at
+          # all counts as failed: the job then goes red, which is how a change
+          # to the action's outputs would show.
           failed_session=""
           if [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; then
             failed_session="1 (step $S1, Claude Code ${S1_CONCLUSION:-reported nothing})"
@@ -954,16 +975,21 @@ jobs:
             # A failed session's commits are still a candidate (§8).
             echo candidate > "$T/outcome"
           elif [ -n "$failed_session" ]; then
-            # No commit from a session that never finished says nothing about
-            # the test: not `no-diff`, which would wait for a new failure.
-            echo "Fixer session $failed_session did not finish and left no commit, so nothing was tried." > "$T/abort_reason"
+            # No commit from a session that never finished is not a finding
+            # about the test: not `no-diff`, which would wait for a new failure.
+            echo "Fixer session $failed_session did not finish and left no commit, so nothing reached the verifier." > "$T/abort_reason"
             echo session > "$T/abort_kind"
             echo aborted > "$T/outcome"
-            echo "session_failed=true" >> "$GITHUB_OUTPUT"
           else
             echo no-diff > "$T/outcome"
           fi
           echo "Outcome: $(cat "$T/outcome")" >> "$GITHUB_STEP_SUMMARY"
+          # Whatever the outcome – a failed session 2 leaves try 1's candidate –
+          # a failed session ends the job red, so an outage shows.
+          if [ -n "$failed_session" ]; then
+            echo "Fixer session $failed_session failed." >> "$GITHUB_STEP_SUMMARY"
+            echo "session_failed=true" >> "$GITHUB_OUTPUT"
+          fi
           # Every file publish reads, summed into a step output no later step can
           # rewrite. The upload below is a `uses:` step, which still runs in
           # whatever environment a session left, so publish checks the
@@ -985,8 +1011,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7  # spec §11
 
-      # A session that failed without a commit is an outage or a crash, and
-      # `continue-on-error` would otherwise leave the job green (§8). Last, so
+      # A failed session – an outage, an expired token, a crash – would
+      # otherwise leave the job green under `continue-on-error` (§8). Last, so
       # the artifact is already uploaded.
       - name: End red when a session failed
         if: always() && steps.package.outputs.session_failed == 'true'
@@ -1002,7 +1028,7 @@ jobs:
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
           set -uo pipefail
-          echo "::error::a fixer session failed and left no commit; the attempt is recorded aborted"
+          echo "::error::a fixer session failed; see the Package step's summary for the attempt's outcome"
           exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────

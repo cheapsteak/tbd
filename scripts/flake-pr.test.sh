@@ -766,9 +766,21 @@ session_failure_is_aborted() {
   # The session that ran and committed nothing is still no-diff.
   [[ "$(package_outcome "$1" success success)" == "no-diff|"*"|0|" ]]
 }
+# A failed session 2 after try 1's candidate: the candidate stands, and the
+# job still ends red.
+failed_session_two_ends_red() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  echo bundle > "$rt/flakefix/candidate.bundle"
+  package_run "$1" "$rt" C1=success C2=success TRY2=true S1=success S1_CONCLUSION=success S2=success S2_CONCLUSION=failure > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == candidate && ! -e "$rt/flakefix/abort_kind" ]] && grep -q '^session_failed=true$' "$rt/out"
+}
 test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
   check "a failed or never-finished session with no commit is aborted, kind session" session_failure_is_aborted \
     'elif [ -n "$failed_session" ]; then' 'elif false; then'
+  check "a failed session 2 keeps try 1's candidate and still ends the job red" failed_session_two_ends_red \
+    '          if [ -n "$failed_session" ]; then
+            echo "Fixer session $failed_session failed."' '          if false; then
+            echo "Fixer session $failed_session failed."'
   local job
   job="$(job_block "$WORKFLOW" fix)"
   assert_contains "the step reads session 1's outcome" "$job" 'S1: ${{ steps.s1.outcome }}'

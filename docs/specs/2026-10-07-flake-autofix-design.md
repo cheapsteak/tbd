@@ -265,7 +265,7 @@ no two jobs ever edit the same comment:
   the session's notes, and one outcome:
   - `aborted` – the job ended before producing a candidate artifact (§8),
     or a fixer session failed and left no commit, which the entry marks
-    `session_failed` because nothing was tried;
+    `session_failed` because nothing reached the verifier;
   - `no-diff` – a session that finished made no commits;
   - `push-refused` – GitHub rejected the push (§8);
   - `pr-opened` – with the PR number, the scope, `N`, the false-pass
@@ -420,11 +420,13 @@ list of open PRs, and chooses at most one test. A test is **eligible** when:
     that condition the bot would retry the same test every night on the same
     evidence;
   - `aborted` marked `session_failed` – eligible at once: an outage, an
-    expired token, or a crashed session tried nothing, so waiting for a new
-    failure would only lock the test out. Once: if the attempt before it was
-    also a session failure, with no failure recorded after that one's start,
-    the test waits for a new failure like any other abort, so a session that
-    fails every time on one test cannot hold every night's slot;
+    expired token, or a crashed session says nothing about the test, so
+    waiting for a new failure would only lock the test out. Once: if the
+    attempt before it was also a session failure, with no failure recorded
+    after that one's start, the test waits for a new failure like any other
+    abort. A session that ran out of turns or time also counts as failed, and
+    the same bound keeps one that does so on every try from holding every
+    night's slot;
   - `pr-opened` with no close recorded yet – not eligible; the open-PR check
     above also covers it;
   - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
@@ -811,14 +813,18 @@ verdict's path:
   so a tracked file under them was forced in, and checking it out would write
   over the verification tree's warm build, which the verifier keeps between
   runs. The verifier refuses to apply such a candidate at all, before touching
-  the tree, and the refusal fails the try with its reason; the entries here
-  make sure nothing carrying one could reach a passing verdict another way.
+  the tree. The refusal is the candidate's own failure, like one that does not
+  build: the try fails with that reason and the paths listed as protected,
+  and a second try may follow. The entries here make sure nothing carrying
+  one could reach a passing verdict another way.
 
 The diff is read NUL-separated, so every name arrives verbatim, and matched
 ignoring case, because the runner's filesystem folds case. A name that is not
 printable ASCII is treated as protected: the filesystem may normalize Unicode,
 so no glob can say which file it really is. Failing closed costs at most a
-draft that a human reads.
+draft that a human reads. The build-directory refusal does not fail closed:
+its patterns are ASCII, which no normalization produces from other
+characters, so a non-ASCII name elsewhere is applied and then flagged here.
 
 A candidate that touches any protected file is "not eligible for ready"
 whatever the stress result. The bot may still have changed it for a good
@@ -1039,9 +1045,12 @@ Transitions, each owned by the PR driver:
   error, so the job reads each session step's own outcome and the action's
   reported conclusion. Whatever commits a failed session made still go to the
   verifier. With none, the attempt is not `no-diff`: it is recorded `aborted`,
-  marked `session_failed`, with a reason naming the session and how it failed,
-  and the `fix` job ends red after uploading its artifact, so an outage shows.
-  The picker may retry the test the next night (§5).
+  marked `session_failed`, with a reason naming the session and how it
+  failed, and the picker may retry the test the next night (§5). Whatever the
+  outcome – a failed second session leaves the first try's candidate – the
+  `fix` job ends red after uploading its artifact, so an outage shows. An
+  action that reports no conclusion counts as failed, so a change to its
+  outputs shows the same way.
 - **The candidate does not build.** The verifier fails it like any other
   failing stress run, and the second try gets the build log.
 - **The stress run fails on both tries.** The draft PR stays open with
@@ -1328,8 +1337,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   one case per entry in the protected list, each marked not eligible for ready
   even with a clean stress run; a protected name holding a quote and a
   non-ASCII byte, a non-ASCII name outside every glob, and a protected name in
-  another case, each flagged; and a candidate that force-adds a file under
-  `.build/`, refused before the warm build is touched.
+  another case, each flagged; a candidate that force-adds a file under
+  `.build/`, refused before the warm build is touched and judged a failure
+  with that reason; and a non-ASCII name elsewhere, which is applied.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier

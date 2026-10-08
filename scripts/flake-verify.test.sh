@@ -329,6 +329,21 @@ three() { local d; d="$(mktmpd)"; it "$d" 1 "$@"; it "$d" 2; it "$d" 3; printf '
 
 test_a_clean_test_scope_run_passes() { assert_eq "clean" "rc=0 pass" "$(judge "$(three)")"; }
 
+# A refused candidate (apply-candidate exit 3) is the candidate's failure:
+# the verdict says so, lists the paths as protected, and blames no harness.
+test_a_refused_candidate_fails_with_its_reason() {
+  local d p mutant; d="$(mktmpd)"; p="$(mktmpd)/protected.txt"
+  echo "the candidate commits files under a build directory: .build/x" > "$d/candidate-refused"
+  echo ".build/x" > "$p"
+  assert_eq "fails" "rc=1 fail" "$(judge "$d" test 3 no "$HERE" --protected-touched "$p")"
+  assert_eq "naming the refusal, not the harness" "the verifier refused to apply the candidate" "$(jq -r '.reasons[0]' "$d/verdict.json")"
+  assert_eq "with the paths protected" ".build/x" "$(jq -r '.protected[0]' "$d/verdict.json")"
+  assert_contains "and the reason for the second try" "$(cat "$d/failing-lines.txt")" "under a build directory"
+  mutant="$(mutant_of 's/^    for marker, reason in \(\("candidate-refused", "the verifier refused to apply the candidate"\),$/    for marker, reason in (("never-written", "x"),/' "$VPY")"
+  rm -f "$d/verdict.json"; judge "$d" test 3 no "$mutant" --protected-touched "$p" > /dev/null
+  assert_lacks "mutation: without the marker it is not named" "$(jq -r '.reasons[0]' "$d/verdict.json")" "refused"
+}
+
 test_a_failing_iteration_fails_at_test_scope() {
   local d; d="$(three --kind FAIL --outcome failed)"
   assert_eq "a failing iteration" "rc=1 fail" "$(judge "$d")"
@@ -610,7 +625,7 @@ test_a_quoted_non_ascii_protected_path_is_flagged() {
   assert_eq "flagged, exit 1" "1" "$rc"
   assert_eq "listed as one shell-quoted line" "$(printf '%q' "$name")" "$out"
   # The listing as it was: C-quoted names, one per line, and no fail-closed.
-  mutant="$(mutant_of 's/--name-only -z/--name-only/; s/read -r -d .. path; do/read -r path; do/; s/^  matchable "\$path" \|\| return 0$/  true/' "$VERIFY")"
+  mutant="$(mutant_of 's/--name-only -z/--name-only/; s/read -r -d .. path; do/read -r path; do/; s/^  matchable "\$1" \|\| return 0$/  true/' "$VERIFY")"
   rc=0; (cd "$d/verify" && bash "$mutant/flake-verify.sh" protected-touched --base "$base" > /dev/null) || rc=$?
   assert_eq "mutation: from the quoted listing it slips through" "0" "$rc"
 }
@@ -625,7 +640,7 @@ test_an_unmatchable_or_recased_path_is_flagged() {
   git -C "$d/verify" add -A; git -C "$d/verify" commit -q -m c
   out="$(cd "$d/verify" && bash "$VERIFY" protected-touched --base "$base")" || rc=$?
   assert_eq "a non-ASCII name outside every glob is flagged" "1" "$rc"
-  mutant="$(mutant_of 's/^  matchable "\$path" \|\| return 0$/  true/' "$VERIFY")"
+  mutant="$(mutant_of 's/^  matchable "\$1" \|\| return 0$/  true/' "$VERIFY")"
   rc=0; (cd "$d/verify" && bash "$mutant/flake-verify.sh" protected-touched --base "$base" > /dev/null) || rc=$?
   assert_eq "mutation: without failing closed it is not" "0" "$rc"
   d="$(repo_pair)"; base="$(git -C "$d/verify" rev-parse HEAD)"
@@ -641,7 +656,7 @@ test_an_unmatchable_or_recased_path_is_flagged() {
 # A candidate that force-adds a file under .build would write it over the
 # verification tree's warm build. It is refused before the tree is touched.
 test_a_candidate_writing_into_the_build_directory_is_refused() {
-  local d base rc=0 err mutant
+  local d base rc=0 out mutant
   d="$(repo_pair)"; base="$(git -C "$d/session" rev-parse HEAD)"
   mkdir -p "$d/session/.build/debug" "$d/verify/.build/debug"
   echo planted > "$d/session/.build/debug/TBDPackageTests"
@@ -649,9 +664,10 @@ test_a_candidate_writing_into_the_build_directory_is_refused() {
   git -C "$d/session" add -f -A; git -C "$d/session" commit -q -m fix
   git -C "$d/session" bundle create -q "$d/c.bundle" "$base..HEAD" 2>/dev/null
   echo warm > "$d/verify/.build/debug/TBDPackageTests"
-  err="$(cd "$d/verify" && bash "$d/vs/flake-verify.sh" apply-candidate --bundle "$d/c.bundle" --base "$base" 2>&1 > /dev/null)" || rc=$?
-  assert_eq "refused with exit 2" "2" "$rc"
-  assert_contains "naming the path" "$err" ".build/debug/TBDPackageTests"
+  out="$(cd "$d/verify" && bash "$d/vs/flake-verify.sh" apply-candidate --bundle "$d/c.bundle" --base "$base" 2> "$d/err")" || rc=$?
+  assert_eq "refused with exit 3, the candidate's failure" "3" "$rc"
+  assert_eq "listing the path on stdout" ".build/debug/TBDPackageTests" "$out"
+  assert_contains "and saying why" "$(cat "$d/err")" "under a build directory"
   assert_eq "the warm build is untouched" "warm" "$(cat "$d/verify/.build/debug/TBDPackageTests")"
   assert_eq "and the tree is still the base" "$base" "$(git -C "$d/verify" rev-parse HEAD)"
   mutant="$(mutant_of 's/^BUILD_DIR_PATTERNS=\(.*\)$/BUILD_DIR_PATTERNS=()/' "$VERIFY")"
@@ -661,6 +677,22 @@ test_a_candidate_writing_into_the_build_directory_is_refused() {
   # Applied anyway (the mutant above), the same paths are protected, so a
   # candidate that reached the judge still could not be promoted.
   assert_contains "and protected" "$(cd "$d/verify" && bash "$VERIFY" protected-touched --base "$base")" ".build/debug/TBDPackageTests"
+}
+
+# The refusal does not fail closed: a non-ASCII name outside the build
+# directories is applied (and flagged as protected later), not refused.
+test_a_non_ascii_name_elsewhere_is_applied() {
+  local d base rc=0 mutant
+  d="$(repo_pair)"; base="$(git -C "$d/session" rev-parse HEAD)"
+  mkdir -p "$d/session/Tests/Fixtures"; echo x > "$d/session/Tests/Fixtures/"$'R\xc3\xa9sum\xc3\xa9.txt'
+  git -C "$d/session" add -A; git -C "$d/session" commit -q -m fixture
+  git -C "$d/session" bundle create -q "$d/c.bundle" "$base..HEAD" 2>/dev/null
+  (cd "$d/verify" && bash "$d/vs/flake-verify.sh" apply-candidate --bundle "$d/c.bundle" --base "$base" > /dev/null 2>&1) || rc=$?
+  assert_eq "applied" "0" "$rc"
+  mutant="$(mutant_of 's/if globs_match "\$path" "\$\{BUILD_DIR_PATTERNS/if matches_any "$path" "${BUILD_DIR_PATTERNS/' "$VERIFY")"
+  cp "$d/vs/test.sh" "$d/vs/swift-safe" "$d/vs/remote-verify.sh" "$d/vs/tbd-home-fingerprint.sh" "$mutant/"
+  rc=0; (cd "$d/verify" && git reset -q --hard "$base" && bash "$mutant/flake-verify.sh" apply-candidate --bundle "$d/c.bundle" --base "$base" > /dev/null 2>&1) || rc=$?
+  assert_eq "mutation: failing closed there refuses it" "3" "$rc"
 }
 
 test_an_unprotected_change_is_not_flagged() {

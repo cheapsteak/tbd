@@ -25,6 +25,8 @@
 #   flake-verify.sh plan-iterations --scope test|pass --baseline-dir D --out F (pure)
 #   flake-verify.sh apply-candidate --bundle B --base SHA
 #       the verification tree becomes exactly SHA plus the bundle's commits.
+#       Exit 3, the tree untouched, when the candidate commits a file under a
+#       build directory; the paths go to stdout.
 #   flake-verify.sh stress --scope test|pass --test ID --iterations N --out-dir D
 #       exit 0 whenever the loop ran (the judge decides), 2 on a harness error.
 #   flake-verify.sh protected-touched --base SHA
@@ -75,6 +77,13 @@ TERM_GRACE_S=5
 KILL_ROUNDS=3
 KILL_GRACE_S=2
 
+# The build directories. Both are gitignored, so a candidate that tracks a
+# file under them meant to: `git add -f` would put it into the verification
+# tree's warm build, which `git clean -e .build` keeps. `apply-candidate`
+# refuses such a candidate before touching the tree; they are protected too
+# (below), so nothing that reaches the judge can carry one.
+BUILD_DIR_PATTERNS=('.build' '.build/*' '.swiftpm' '.swiftpm/*')
+
 # Spec §6.4: every file on the verdict's path. A candidate touching any of them
 # is never promoted. These are `case` globs, in which `*` also matches `/`.
 PROTECTED_PATTERNS=(
@@ -91,19 +100,8 @@ PROTECTED_PATTERNS=(
   'Tests/TestSupport/FlakyTestSupport.swift'
   'Package.swift'
   'Package.resolved'
-  # The build directories. Both are gitignored, so a candidate that tracks a
-  # file under them meant to: `git add -f` would put it into the verification
-  # tree's warm build, which `git clean -e .build` keeps. `apply-candidate`
-  # refuses such a candidate outright (BUILD_DIR_PATTERNS); they are listed
-  # here as well so that nothing which reaches the judge can carry one.
-  '.build'
-  '.build/*'
-  '.swiftpm'
-  '.swiftpm/*'
+  "${BUILD_DIR_PATTERNS[@]}"
 )
-
-# The paths `apply-candidate` refuses to write into the verification tree.
-BUILD_DIR_PATTERNS=('.build' '.build/*' '.swiftpm' '.swiftpm/*')
 
 # The scripts `test.sh` runs by tree-relative path. `apply-candidate` puts
 # main's copies over the candidate's, so the verdict comes from main's runner.
@@ -255,14 +253,23 @@ cmd_apply_candidate() {
   git merge-base --is-ancestor "$base" "$tip" || die "the candidate $tip does not descend from $base"
   # Before the tree is touched: a tracked file under a build directory would
   # overwrite the warm build the verdict runs.
-  local listing path planted=""
+  local listing path planted=()
   listing="$(mktemp "${TMPDIR:-/tmp}/flake-verify-changed.XXXXXX")" || die "cannot create a temporary file"
   changed_paths "$base" "$tip" > "$listing" || { rm -f "$listing"; die "git diff $base $tip failed"; }
   while IFS= read -r -d '' path; do
-    if matches_any "$path" "${BUILD_DIR_PATTERNS[@]}"; then planted="$planted $(shown "$path")"; fi
+    # Not failing closed: every pattern starts `.build` or `.swiftpm`, pure
+    # ASCII, which no normalization makes from other characters, so a
+    # non-ASCII name elsewhere is not refused here (protected-touched flags it).
+    if globs_match "$path" "${BUILD_DIR_PATTERNS[@]}"; then planted+=("$(shown "$path")"); fi
   done < "$listing"
   rm -f "$listing"
-  [[ -z "$planted" ]] || die "the candidate commits files under a build directory, which the verifier never applies:$planted"
+  if [[ ${#planted[@]} -gt 0 ]]; then
+    # Exit 3: the candidate's own failure, not the harness's. The paths go to
+    # stdout, one per line, for the verdict's protected list.
+    printf '%s\n' "${planted[@]}"
+    echo "flake-verify: the candidate commits files under a build directory, which the verifier never applies: ${planted[*]}" >&2
+    exit 3
+  fi
   git reset -q --hard "$tip" || die "cannot reset to the candidate"
   local f
   for f in "${RUNNER_CHAIN[@]}"; do
@@ -282,25 +289,21 @@ changed_paths() { git diff --no-renames --name-only -z "$@"; }
 
 # 0 when PATH is non-empty printable ASCII, the only kind a glob can be
 # trusted to match the way the filesystem will. The verification tree's
-# filesystem folds case (handled by nocasematch in matches_any) and may
+# filesystem folds case (handled by nocasematch in globs_match) and may
 # normalize Unicode, so a name `case` sees as different could be the same
-# file to it.
+# file to it. Pure bash under the C locale, byte by byte: no fork per path.
 matchable() {
-  local rest
-  # The trailing dot keeps a final newline from vanishing in the substitution.
-  rest="$(printf '%s' "$1" | LC_ALL=C tr -d ' -~'; echo .)"
-  [[ -n "$1" && "$rest" == "." ]]
+  local LC_ALL=C
+  [[ -n "$1" && "$1" != *[!\ -~]* ]]
 }
 
 # PATH as one printable line, for a listing a human reads.
 shown() { if matchable "$1"; then printf '%s' "$1"; else printf '%q' "$1"; fi; }
 
-# matches_any PATH PATTERN...: 0 when PATH matches a pattern, ignoring case,
-# or cannot be matched safely (fail closed).
-matches_any() {
+# globs_match PATH PATTERN...: 0 when PATH matches a pattern, ignoring case.
+globs_match() {
   local path="$1" pattern rc=1 restore
   shift
-  matchable "$path" || return 0
   restore="$(shopt -p nocasematch)"
   shopt -s nocasematch
   for pattern in "$@"; do
@@ -309,6 +312,13 @@ matches_any() {
   done
   eval "$restore"
   return "$rc"
+}
+
+# matches_any PATH PATTERN...: globs_match, failing closed – 0 also when PATH
+# cannot be matched safely.
+matches_any() {
+  matchable "$1" || return 0
+  globs_match "$@"
 }
 
 # 0 when PATH matches a protected pattern, or cannot be matched safely.
