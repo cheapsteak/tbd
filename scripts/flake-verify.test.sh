@@ -608,6 +608,11 @@ Package.swift" "$out"
   mutant="$(mutant_of 's/^  list_protected$/  true/' "$VERIFY")"
   rc=0; printf 'scripts/test.sh\0' | bash "$mutant/flake-verify.sh" protected-in > /dev/null || rc=$?
   assert_eq "mutation: without the matcher nothing is flagged" "0" "$rc"
+  rc=0; out="$(printf 'Tests/a.swift\0scripts/test.sh' | bash "$VERIFY" protected-in)" || rc=$?
+  assert_eq "a last path with no NUL after it is still checked" "1 scripts/test.sh" "$rc $out"
+  mutant="$(mutant_of 's/ \|\| \[\[ -n "\$path" \]\]; do$/; do/' "$VERIFY")"
+  rc=0; printf 'Tests/a.swift\0scripts/test.sh' | bash "$mutant/flake-verify.sh" protected-in > /dev/null || rc=$?
+  assert_eq "mutation: without the EOF guard it is dropped" "0" "$rc"
 }
 
 test_a_renamed_protected_file_is_flagged() {

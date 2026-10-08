@@ -1175,7 +1175,7 @@ jobs:
       github.repository == 'cheapsteak/tbd' &&
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.name == 'Test' &&
-      github.event.workflow_run.path == '.github/workflows/test.yml' &&
+      startsWith(github.event.workflow_run.path, '.github/workflows/test.yml') &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success' &&
       startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
@@ -1208,6 +1208,9 @@ jobs:
         with:
           app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
           private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+          # Only what promote writes: the ready (and its undo) and the label.
+          permission-pull-requests: write
+          permission-issues: write
 
       - name: Check the App token's bot login
         env:

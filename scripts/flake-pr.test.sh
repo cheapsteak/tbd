@@ -1333,7 +1333,7 @@ promote_gated() {
   local job c
   job="$(job_block "$1" promote | awk '/^    if: >-$/{p=1; next} p && /^    [a-z]/{exit} p')"
   for c in "vars.FLAKE_FIXER_ENABLED == 'true'" "github.repository == 'cheapsteak/tbd'" "github.event_name == 'workflow_run'" \
-      "github.event.workflow_run.name == 'Test'" "github.event.workflow_run.path == '.github/workflows/test.yml'" \
+      "github.event.workflow_run.name == 'Test'" "startsWith(github.event.workflow_run.path, '.github/workflows/test.yml')" \
       "github.event.workflow_run.event == 'pull_request'" "github.event.workflow_run.conclusion == 'success'" \
       "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
       "github.event.workflow_run.head_repository.full_name == github.repository"; do
@@ -1389,6 +1389,18 @@ promote_tokens() {
 test_promote_reads_with_the_job_token_and_writes_with_the_app() {
   check "promote's job token only reads, and the App's login is checked" promote_tokens \
     $'      pull-requests: read\n      statuses: read\n    steps:' $'      pull-requests: write\n      statuses: read\n    steps:'
+}
+
+# The App token promote mints carries only the scopes it writes with.
+promote_app_scopes() {
+  local mint
+  mint="$(step "$1" promote "Mint the tbd-flake-fixer App token")"
+  [[ "$(grep -c 'permission-' <<< "$mint")" == 2 ]] &&
+    grep -q 'permission-pull-requests: write' <<< "$mint" && grep -q 'permission-issues: write' <<< "$mint"
+}
+test_promote_mints_a_narrow_app_token() {
+  check "promote's App token is narrowed to pull requests and issues" promote_app_scopes \
+    '          permission-issues: write' $'          permission-issues: write\n          permission-contents: write'
 }
 
 # A group would let GitHub cancel a pending promote for the current head in

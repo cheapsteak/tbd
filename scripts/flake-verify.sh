@@ -348,7 +348,8 @@ cmd_protected_touched() {
 # per line; 1 if any.
 list_protected() {
   local path found=1
-  while IFS= read -r -d '' path; do
+  # `|| [[ -n $path ]]`: a last path with no NUL after it is still checked.
+  while IFS= read -r -d '' path || [[ -n "$path" ]]; do
     if is_protected "$path"; then shown "$path"; echo; found=0; fi
   done
   [[ "$found" -eq 0 ]] && return 1
