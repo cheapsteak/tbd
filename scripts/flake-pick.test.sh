@@ -130,6 +130,18 @@ test_an_unreadable_attempt_record_blocks_the_test() {
   assert_eq "mutation: without the check it is picked every night" "rc=0 #10" "$(picked "$w" "$mutant")"
 }
 
+test_the_watchlist_is_never_picked() {
+  local w mutant; w="$(world)"
+  # Even mislabelled `flaky` and holding a qualifying ledger comment.
+  issue "$w" "{\"number\": 10, \"labels\": [\"flaky\", \"flake-watchlist\"], $TWO}"
+  assert_eq "not on the schedule" "rc=3 none" "$(picked "$w")"
+  local out; out="$(pick "$w" "$HERE" --issue 10)"
+  assert_eq "not by dispatch" "rc=2 none" "$(head -1 <<< "$out")"
+  assert_contains "which names why" "$out" "issue #10 is the flake watchlist"
+  mutant="$(mutant_of 's/^    if fl.WATCHLIST_LABEL in view.labels:$/    if False:/' "$PICK")"
+  assert_eq "mutation: without the check it is picked" "rc=0 #10" "$(picked "$w" "$mutant")"
+}
+
 test_flakefix_skip_blocks_the_test() {
   local w; w="$(world)"
   issue "$w" "{\"number\": 10, \"labels\": [\"flaky\", \"flakefix-skip\"], $TWO}"

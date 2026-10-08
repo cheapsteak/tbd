@@ -15,7 +15,10 @@ fixtures/flake/retry-metrics.
     build.py issue WORK --number N [--title T] [--state OPEN|CLOSED]
                  [--label L ...] [--closed-reason R] [--fix SHA@AT[@PR]]
                  [--comment 'ID|LOGIN|TYPE|BODYFILE' ...]
+    build.py watchlist WORK --number N [--login L] [--type T] [--created T]
+                 [--comment 'ID|LOGIN|TYPE|BODYFILE' ...]
     build.py ledger-body OUT STATE_JSON         a rendered ledger comment
+    build.py watchlist-body OUT STATES_JSON     a rendered watchlist comment
     build.py attempts-body OUT ATTEMPTS_JSON    a rendered attempt comment
     build.py set WORK FILE JSON                 overwrite pr_states/ancestry/...
 """
@@ -41,6 +44,13 @@ def _save(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=1) + "\n")
 
 
+def _state(payload: dict) -> fl.State:
+    state = fl._state_from_payload(payload)
+    if state is None:
+        raise SystemExit(f"build.py: not a state: {payload}")
+    return state
+
+
 def main(argv: list[str]) -> int:
     command, rest = argv[0], argv[1:]
     if command == "init":
@@ -51,7 +61,7 @@ def main(argv: list[str]) -> int:
         work = Path(a.work)
         (work / "artifacts").mkdir(parents=True, exist_ok=True)
         _save(work / "meta.json", {"now": a.now, "repo": REPO})
-        for name in ("runs.json", "issues.json"):
+        for name in ("runs.json", "issues.json", "watchlist.json"):
             _save(work / name, [])
         for name in ("pr_states.json", "ancestry.json"):
             _save(work / name, {})
@@ -140,16 +150,29 @@ def main(argv: list[str]) -> int:
                        "comments": comments, "closed_reason": a.closed_reason, "closing_fix": fix})
         _save(Path(a.work) / "issues.json", issues)
         return 0
+    if command == "watchlist":
+        p = argparse.ArgumentParser()
+        p.add_argument("work")
+        p.add_argument("--number", type=int, required=True)
+        p.add_argument("--login", default=fl.BOT_LOGIN)
+        p.add_argument("--type", default="Bot")
+        p.add_argument("--created", default="2026-10-01T00:00:00Z")
+        p.add_argument("--comment", action="append", default=[])
+        a = p.parse_args(rest)
+        comments = []
+        for spec in a.comment:
+            ident, login, kind, body_file = spec.split("|")
+            comments.append({"id": int(ident), "login": login, "type": kind, "body": Path(body_file).read_text()})
+        found = _load(Path(a.work) / "watchlist.json")
+        found.append({"number": a.number, "title": fl.WATCHLIST_TITLE, "state": "OPEN", "login": a.login,
+                      "type": a.type, "created_at": a.created, "labels": [fl.WATCHLIST_LABEL], "comments": comments})
+        _save(Path(a.work) / "watchlist.json", found)
+        return 0
     if command == "ledger-body":
-        payload = json.loads(rest[1])
-        state = fl.State(
-            test_id=payload["test_id"],
-            episode=payload.get("episode", 0),
-            failures=[fl.Failure(**f) for f in payload.get("failures", [])],
-            fixes=payload.get("fixes", []),
-            prs=payload.get("prs", []),
-        )
-        Path(rest[0]).write_text(fl.render_comment(state, REPO))
+        Path(rest[0]).write_text(fl.render_comment(_state(json.loads(rest[1])), REPO))
+        return 0
+    if command == "watchlist-body":
+        Path(rest[0]).write_text(fl.render_watchlist([_state(s) for s in json.loads(rest[1])], REPO))
         return 0
     if command == "attempts-body":
         attempts = [fl.Attempt(**a) for a in json.loads(rest[1])]

@@ -99,6 +99,17 @@ nightly_run() {
 
 newwork() { local w; w="$(mktmpd)"; build init "$w" "$@"; printf '%s' "$w"; }
 
+# A green run on BRANCH whose retry-metrics record TEST as passedOnRetry: one
+# more place for TEST, so a case about its own issue sees it qualify.
+retry_run() {
+  local work="$1" id="$2" branch="$3" test="$4" file="$5"
+  build run "$work" --id "$id" --branch "$branch" --attempt "1|2026-10-07T10:00:00Z|success" --artifact "${id}1|retry-metrics|2026-10-07T10:20:00Z"
+  build retry "$work/artifacts/${id}1/retry-metrics.jsonl" "$test" passedOnRetry "$file"
+}
+
+# The watchlist's first planned comment body.
+watch_body() { jq -r '.watchlist.writes[0].body' <<< "$1"; }
+
 # ============================================================================
 # flake_lib: identity and xunit
 # ============================================================================
@@ -351,7 +362,7 @@ print(len(body) <= m.MAX_COMMENT_CHARS, m.failure_count(p), len(m.distinct_occur
 '
   out="$(py <<< "$script")"
   assert_eq "300 failures in six days: under the limit, all counted, none re-added" "True 300 40 False" "$out"
-  mutant="$(mutant_of 's/^    while len\(body\) > MAX_COMMENT_CHARS and state.failures:$/    while False:/' "$LIB")"
+  mutant="$(mutant_of 's/^    while len\(body\) > limit and state.failures:$/    while False:/' "$LIB")"
   out="$(py "$mutant" <<< "$script")"
   assert_contains "mutation: without folding the burst overflows" "$out" "False 300"
 }
@@ -367,7 +378,7 @@ test_two_attempts_two_artifacts_assigned_by_timestamp() {
   build xunit "$w/artifacts/11439214712/xunit-app-swift-testing.xml" 'TBDSharedTests.OtherTests/attemptTwoOnly()'
   out="$(analyze "$w")"
   assert_eq "attempt 1's failure is planned" "$HOLDER" "$(jq -r '.tests[].test_id' <<< "$out")"
-  assert_contains "with its real signature" "$(jq -r '.actions[0].comment_body' <<< "$out")" "Caught error: .alreadyHeld"
+  assert_contains "with its real signature, on the watchlist" "$(watch_body "$out")" "Caught error: .alreadyHeld"
   mutant="$(mutant_of 's/^            chosen = attempt\["attempt"\]$/            chosen = 1/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_contains "mutation: without the window, attempt 2's artifact is read as attempt 1's" "$(jq -r '.tests[].test_id' <<< "$out")" "attemptTwoOnly"
@@ -378,10 +389,10 @@ test_fork_runs_are_excluded() {
   w="$(newwork)"
   erased_run "$w" 1001 sidebar --repo someone/tbd
   out="$(analyze "$w")"
-  assert_eq "no actions for a fork's run" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "no test for a fork's run" "0" "$(jq '.tests | length' <<< "$out")"
   mutant="$(mutant_of 's/^    if run.get\("head_repo"\) != repo:$/    if False:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
-  assert_eq "mutation: without the fork check it plans an issue" "1" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "mutation: without the fork check it records the test" "1" "$(jq '.tests | length' <<< "$out")"
 }
 
 test_flakefix_branches_are_excluded() {
@@ -389,10 +400,10 @@ test_flakefix_branches_are_excluded() {
   w="$(newwork)"
   erased_run "$w" 1002 flakefix/issue-970
   out="$(analyze "$w")"
-  assert_eq "no actions for the bot's own branch" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "no test for the bot's own branch" "0" "$(jq '.tests | length' <<< "$out")"
   mutant="$(mutant_of 's/^FLAKEFIX_PREFIX = "flakefix\/"$/FLAKEFIX_PREFIX = "nothing-matches\/"/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
-  assert_eq "mutation: without the exclusion it plans an issue" "1" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "mutation: without the exclusion it records the test" "1" "$(jq '.tests | length' <<< "$out")"
 }
 
 test_a_nightly_dispatched_on_a_branch_is_excluded() {
@@ -420,7 +431,7 @@ test_an_unparsable_bot_comment_leaves_that_issue_alone_and_the_rest_running() {
   assert_eq "no write to the issue with the broken comment" "0" "$(jq '[.actions[] | select(.issue == 970)] | length' <<< "$out")"
   assert_eq "and no second issue for its test" "0" "$(jq --arg t "$HOLDER" '[.actions[] | select(.test_id == $t)] | length' <<< "$out")"
   assert_contains "it is listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#970 comment 95"
-  assert_eq "the other test is still planned" "TBDSharedTests.OtherTests/other()" "$(jq -r '.actions[0].test_id' <<< "$out")"
+  assert_eq "the other test is still planned" "TBDSharedTests.OtherTests/other()" "$(jq -r '[.tests[].test_id] | join(",")' <<< "$out")"
 }
 
 test_a_reopened_issue_keeps_its_closing_fix_so_a_died_run_converges() {
@@ -455,7 +466,7 @@ test_passed_on_retry_counts_as_a_failure() {
   build retry "$w/artifacts/10041/retry-metrics.jsonl" 'TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/f()' passedOnRetry Tests/TBDDaemonTests/AutoCloseSetupTests.swift
   out="$(analyze "$w")"
   assert_eq "a green run's passedOnRetry is a failure, under the xunit form" "TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/f() 1" "$(jq -r '.tests[0] | "\(.test_id) \(.failures)"' <<< "$out")"
-  assert_contains "with source ci-retry" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"source":"ci-retry"'
+  assert_contains "with source ci-retry" "$(watch_body "$out")" '"source":"ci-retry"'
 }
 
 test_a_run_that_was_not_rerun_to_green_contributes_no_xunit_failures() {
@@ -476,7 +487,7 @@ test_nightly_failures_carry_the_target_issue() {
   nightly_run "$w" 2001 2026-10-05 "$HOLDER"
   out="$(analyze "$w")"
   assert_eq "night key" "night:2026-10-05" "$(jq -r '.tests[0].distinct[0]' <<< "$out")"
-  assert_contains "the body links the stress target's issue" "$(jq -r '.actions[0].comment_body' <<< "$out")" "stress target #962"
+  assert_contains "the entry names the stress target's issue" "$(watch_body "$out")" '"suite_issue":962'
 }
 
 test_threshold_one_and_two_keys_end_to_end() {
@@ -484,10 +495,10 @@ test_threshold_one_and_two_keys_end_to_end() {
   w="$(newwork)"
   nightly_run "$w" 2002 2026-10-05 "$HOLDER"
   out="$(analyze "$w")"
-  assert_eq "one night: the issue is created, not qualified" "true false" "$(jq -r '.tests[0] | "\(.create) \(.qualifies)"' <<< "$out")"
+  assert_eq "one night: on the watchlist, no issue, not qualified" "false true false 0" "$(jq -r '"\(.tests[0].create) \(.tests[0].watch) \(.tests[0].qualifies) \(.actions | length)"' <<< "$out")"
   erased_run "$w" 1006 sidebar
   out="$(analyze "$w")"
-  assert_eq "one night and one branch: qualifies" "true" "$(jq -r '.tests[0].qualifies' <<< "$out")"
+  assert_eq "one night and one branch: qualifies, and gets its issue" "true true" "$(jq -r '.tests[0] | "\(.qualifies) \(.create)"' <<< "$out")"
 }
 
 test_runs_and_artifacts_outside_the_seven_day_window_are_ignored() {
@@ -552,6 +563,7 @@ test_issue_creation() {
   local w out
   w="$(newwork)"
   erased_run "$w" 1103 sidebar
+  nightly_run "$w" 2103 2026-10-05 "$HOLDER"
   out="$(analyze "$w")"
   assert_eq "creates the exact title" "Flaky test: $HOLDER" "$(jq -r '.actions[0].create.title' <<< "$out")"
   assert_eq "and a new comment" "null" "$(jq -r '.actions[0].comment_id' <<< "$out")"
@@ -563,6 +575,7 @@ test_an_ambiguous_trait_match_falls_through_to_create() {
   build run "$w" --id 1104 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "11041|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/11041/retry-metrics.jsonl" 'TBDSharedTests.SuiteA/flaky()' passedOnRetry Tests/TBDSharedTests/Shared.swift
   build retry "$w/artifacts/11041/retry-metrics.jsonl" 'TBDSharedTests.SuiteB/flaky()' passedFirstTry Tests/TBDSharedTests/Shared.swift
+  retry_run "$w" 1114 c 'TBDSharedTests.SuiteA/flaky()' Tests/TBDSharedTests/Shared.swift
   printf 'Tests/TBDSharedTests/Shared.swift\tflaky\t601\n' > "$w/inventory.tsv"
   build issue "$w" --number 601 --title "flaky in Shared.swift"
   out="$(analyze "$w")"
@@ -575,6 +588,7 @@ test_a_shared_flaky_issue_gets_a_separate_per_test_issue() {
   w="$(newwork)"
   build run "$w" --id 1105 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "11051|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/11051/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
+  retry_run "$w" 1115 c 'TBDSharedTests.OtherTests/flaky()' Tests/TBDSharedTests/OtherTests.swift
   printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t512\nTests/TBDSharedTests/OtherTests.swift\tother\t512\n' > "$w/inventory.tsv"
   build issue "$w" --number 512 --title "OtherTests are flaky"
   out="$(analyze "$w")"
@@ -589,6 +603,7 @@ test_a_suite_level_flaky_issue_is_not_reused() {
   w="$(newwork)"
   build run "$w" --id 1106 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "11061|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/11061/retry-metrics.jsonl" 'TBDDaemonLiveTests.GitManagerTimeoutTests/hangs()' passedOnRetry Tests/TBDDaemonLiveTests/GitManagerTimeoutTests.swift
+  retry_run "$w" 1116 c 'TBDDaemonLiveTests.GitManagerTimeoutTests/hangs()' Tests/TBDDaemonLiveTests/GitManagerTimeoutTests.swift
   printf 'Tests/TBDDaemonLiveTests/GitManagerTimeoutTests.swift\thangs\t961\n' > "$w/inventory.tsv"
   build issue "$w" --number 961 --title "GitManagerTimeout flakes"
   out="$(analyze "$w")"
@@ -601,6 +616,7 @@ test_an_issue_holding_another_tests_ledger_is_not_reused() {
   w="$(newwork)"
   build run "$w" --id 1107 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "11071|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/11071/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
+  retry_run "$w" 1117 c 'TBDSharedTests.OtherTests/flaky()' Tests/TBDSharedTests/OtherTests.swift
   printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t602\n' > "$w/inventory.tsv"
   body="$(mktmpd)/ledger.md"
   build ledger-body "$body" '{"test_id": "TBDSharedTests.ElseTests/g()"}'
@@ -907,6 +923,7 @@ stub_world() {
     {match: "actions/runs/37517751216/artifacts", out: "{\"id\": 11438169230, \"name\": \"xunit-results\", \"created_at\": \"2026-10-06T19:34:34Z\", \"expired\": false}\n{\"id\": 11439214712, \"name\": \"xunit-results\", \"created_at\": \"2026-10-06T19:54:56Z\", \"expired\": false}\n"},
     {match: "actions/artifacts/11438169230/zip", file: $zip},
     {match: "issues\\?labels=flaky", out: ""},
+    {match: "issues\\?labels=flake-watchlist", out: ""},
     {match: "repos/cheapsteak/tbd/issues/499$", out: "{\"number\": 499, \"title\": \"Quarantine self-test\", \"state\": \"open\", \"labels\": []}"},
     {match: "issues/[0-9]+/comments\\?per_page", out: ""},
     {match: "search/issues", out: ""},
@@ -939,17 +956,20 @@ test_report_only_makes_no_write_calls() {
   assert_contains "mutation: applying unconditionally writes" "$(writes_in "$d/log")" "-X POST"
 }
 
-test_write_mode_creates_then_comments_with_the_app_token() {
+test_write_mode_puts_a_first_failure_on_a_new_watchlist_with_the_app_token() {
   local d out writes
   d="$(mktmpd)"; stub_world "$d"
   out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)"
   writes="$(writes_in "$d/log")"
-  assert_eq "label, issue, comment, in that order" \
+  assert_eq "label, watchlist issue, comment, in that order" \
     "app-token api -X POST repos/cheapsteak/tbd/labels --input -
 app-token api -X POST repos/cheapsteak/tbd/issues --input -
 app-token api -X POST repos/cheapsteak/tbd/issues/1000/comments --input -" "$writes"
-  assert_contains "the issue title is exact" "$(cat "$d/log")" "\"title\": \"Flaky test: $HOLDER\""
-  assert_contains "the comment opens with the sentinel" "$(cat "$d/log")" '"body": "<!-- flake-ledger v1 -->'
+  assert_contains "the label is the watchlist's" "$(cat "$d/log")" '"name": "flake-watchlist"'
+  assert_contains "the issue is the watchlist, under its own label" "$(cat "$d/log")" '"title": "Flake watchlist"'
+  assert_contains "and carries only that label" "$(cat "$d/log")" '"labels": ["flake-watchlist"]'
+  assert_lacks "no per-test issue for one failure" "$(cat "$d/log")" "\"title\": \"Flaky test: $HOLDER\""
+  assert_contains "the comment opens with the watchlist sentinel" "$(cat "$d/log")" '"body": "<!-- flake-watchlist v1 -->'
   assert_lacks "no read used the App token" "$(grep -v -- '-X ' "$d/log" | grep -v STDIN)" "app-token"
 }
 
@@ -973,20 +993,87 @@ test_an_api_error_leaves_the_ledger_unwritten() {
   assert_eq "mutation: swallowing gh errors exits 0" "0" "$rc"
 }
 
-test_apply_stops_at_the_first_failed_write() {
-  local d plan rc=0
-  d="$(mktmpd)"
-  jq -n '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"},{match: "issues/970/comments", exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
-  stub_gh "$d"
-  plan="$d/plan.json"
-  jq -n '{actions: [
+# Two issue actions after one watchlist comment edit; the first action's
+# comment write fails.
+APPLY_PLAN='{actions: [
     {test_id: "a/b()", issue: 970, create: null, add_label: true, reopen: false, reopen_body: null, comment_id: null, comment_body: "x", qualifies: false},
-    {test_id: "c/d()", issue: 971, create: null, add_label: false, reopen: false, reopen_body: null, comment_id: 5, comment_body: "y", qualifies: false}]}' > "$plan"
-  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$LEDGER" apply --plan "$plan" --repo "$REPO" > /dev/null 2>&1 || rc=$?
-  assert_eq "exit 2" "2" "$rc"
-  assert_lacks "the second issue is untouched" "$(cat "$d/log")" "comments/5"
+    {test_id: "c/d()", issue: 971, create: null, add_label: false, reopen: false, reopen_body: null, comment_id: 5, comment_body: "y", qualifies: false}],
+  watchlist: {issue: 900, create: null, add_label: false, writes: [{index: 0, comment_id: 901, body: "w", tests: 1}]}}'
+
+# apply_with DIR FAILING_ROUTE [LEDGER] [STDERR] -> apply's stdout+stderr; DIR/rc holds its exit code.
+apply_with() {
+  local d="$1" failing="$2" script="${3:-$LEDGER}" err="${4:-}" rc=0
+  jq -n --arg failing "$failing" --arg err "$err" '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: $failing, exit: 1, err: $err}, {match: "-X", out: "{}"}]' > "$d/routes.json"
+  stub_gh "$d"
+  jq -n "$APPLY_PLAN" > "$d/plan.json"
+  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$script" apply --plan "$d/plan.json" --repo "$REPO" 2>&1 || rc=$?
+  echo "$rc" > "$d/rc"
+}
+
+test_apply_keeps_going_past_a_failed_issue_write() {
+  local d out mutant
+  d="$(mktmpd)"
+  out="$(apply_with "$d" "issues/970/comments")"
+  assert_eq "exit 2 once every write was tried" "2" "$(cat "$d/rc")"
+  assert_contains "the issue after the failed one is still written" "$(cat "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/comments/5 "
+  assert_contains "the failed one is listed" "$out" "**Issue writes that failed: 1.**"
+  assert_contains "by its test" "$out" '`a/b()` (#970)'
   assert_lacks "an existing label is not created again" "$(cat "$d/log")" "-X POST repos/cheapsteak/tbd/labels "
   assert_contains "but the issue gets it" "$(cat "$d/log")" "-X POST repos/cheapsteak/tbd/issues/970/labels"
+  assert_eq "the watchlist is written before any issue" "issues/comments/901" \
+    "$(writes_in "$d/log" | grep -v '/labels ' | head -1 | grep -oE 'issues/comments/[0-9]+')"
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^            failed.append\(f"`\{action\[.test_id.\]\}` \(\{where\}\): \{error\}"\)$/            raise/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" > /dev/null
+  assert_lacks "mutation: stopping at the first failure leaves the next issue unwritten" "$(cat "$d/log")" "comments/5 "
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^    if not failed:$/    if True:/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" > /dev/null
+  assert_eq "mutation: ignoring the failures ends the run green" "0" "$(cat "$d/rc")"
+}
+
+test_a_rate_limit_or_bad_token_stops_the_issue_writes() {
+  local d out err mutant
+  for err in "gh: Bad credentials (HTTP 401)" "gh: API rate limit exceeded (HTTP 429)" "gh: You have exceeded a secondary rate limit (HTTP 403)"; do
+    d="$(mktmpd)"
+    out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "$err")"
+    assert_eq "[$err]: exit 2" "2" "$(cat "$d/rc")"
+    assert_lacks "[$err]: no write after it" "$(cat "$d/log")" "comments/5 "
+    assert_contains "[$err]: the rest are listed as not tried" "$out" "**Issue writes not tried: 1**"
+    assert_lacks "[$err]: and not as failed" "$out" "Issue writes that failed: 2"
+  done
+  d="$(mktmpd)"
+  out="$(apply_with "$d" "issues/970/comments" "$LEDGER" "gh: Unable to create comment because issue is locked (HTTP 403)")"
+  assert_contains "a 403 that is no rate limit concerns that issue alone" "$(cat "$d/log")" "comments/5 "
+  assert_contains "and says every other write was tried" "$out" "Every other issue write was tried."
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/^STOP_STATUSES = \(401, 429\)$/STOP_STATUSES = ()/' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: API rate limit exceeded (HTTP 429)" > /dev/null
+  assert_contains "mutation: writing on through a rate limit" "$(cat "$d/log")" "comments/5 "
+  d="$(mktmpd)"
+  mutant="$(mutant_of 's/ or \(error.status == 403 and error.rate_limited\)$//' "$LEDGER")"
+  apply_with "$d" "issues/970/comments" "$mutant/flake-ledger.py" "gh: You have exceeded a secondary rate limit (HTTP 403)" > /dev/null
+  assert_contains "mutation: writing on through a secondary rate limit" "$(cat "$d/log")" "comments/5 "
+}
+
+test_a_failed_write_after_a_create_names_the_new_issue() {
+  local d out rc=0
+  d="$(mktmpd)"
+  jq -n '[{match: "labels\\?per_page", out: "{\"name\": \"flaky\"}\n"}, {match: "-X POST repos/cheapsteak/tbd/issues --input", out: "{\"number\": 1234}"},
+          {match: "issues/1234/comments", exit: 1}, {match: "-X", out: "{}"}]' > "$d/routes.json"
+  stub_gh "$d"
+  jq -n '{actions: [{test_id: "a/b()", issue: null, create: {title: "Flaky test: a/b()", body: "b"}, add_label: false, reopen: false, reopen_body: null, comment_id: null, comment_body: "x", qualifies: true}]}' > "$d/plan.json"
+  out="$(FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=app-token python3 "$LEDGER" apply --plan "$d/plan.json" --repo "$REPO" 2>&1)" || rc=$?
+  assert_eq "exit 2" "2" "$rc"
+  assert_contains "the half-written issue is named by its number" "$out" '`a/b()` (#1234)'
+}
+
+test_a_failed_watchlist_write_stops_the_run_before_any_issue() {
+  local d
+  d="$(mktmpd)"
+  apply_with "$d" "issues/comments/901" > /dev/null
+  assert_eq "exit 2" "2" "$(cat "$d/rc")"
+  assert_eq "no issue write after it" "" "$(writes_in "$d/log" | grep -E 'issues/(970|comments/5)')"
 }
 
 test_fetch_maps_compare_status_to_ancestry() {
@@ -1020,6 +1107,470 @@ test_run_fetches_ancestry_for_a_closed_issue_and_reopens() {
   assert_contains "the report says it reopens" "$out" "reopens it as a recurrence"
   assert_contains "it reopened #970" "$(writes_in "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/970 --input -"
   assert_contains "and posted the reopen comment" "$(cat "$d/log")" "Reopened by the flake ledger"
+}
+
+# ============================================================================
+# the watchlist (spec §4.4)
+# ============================================================================
+
+# An old failure of TEST, outside every read window, as watchlist JSON.
+OLD_NIGHT='{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "night:2026-09-20", "at": "2026-09-20T11:00:00Z", "source": "nightly", "signature": "old night"}'
+
+# watched WORK TEST [NUMBER] [COMMENT_ID]: a bot watchlist whose one bot
+# comment holds TEST with OLD_NIGHT.
+watched() {
+  local work="$1" test="$2" number="${3:-900}" cid="${4:-901}" body
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "[{\"test_id\": \"$test\", \"failures\": [$OLD_NIGHT]}]"
+  build watchlist "$work" --number "$number" --comment "$cid|$BOT|Bot|$body"
+}
+
+test_a_test_below_the_threshold_goes_on_the_watchlist_only() {
+  local w out mutant
+  w="$(newwork)"
+  erased_run "$w" 3001 sidebar
+  out="$(analyze "$w")"
+  assert_eq "no per-test issue" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "one watchlist comment, on a watchlist to create" "1 Flake watchlist" "$(jq -r '"\(.watchlist.writes | length) \(.watchlist.create.title)"' <<< "$out")"
+  assert_contains "holding the test's failure" "$(watch_body "$out")" '"key":"3001:1:xunit-app-swift-testing.xml"'
+  mutant="$(mutant_of 's/^    if view is None and not summary\["qualifies"\]:$/    if False:/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: without the watchlist the first failure opens an issue" "Flaky test: $HOLDER" "$(jq -r '.actions[0].create.title' <<< "$out")"
+}
+
+test_a_second_place_opens_the_issue_and_keeps_the_entry_until_the_issue_holds_it() {
+  local w out mutant d writes body watchbody w2
+  w="$(newwork)"
+  watched "$w" "$HOLDER"
+  erased_run "$w" 3002 sidebar
+  out="$(analyze "$w")"
+  assert_eq "a new issue for the test, now qualified" "Flaky test: $HOLDER true" "$(jq -r '.actions[0] | "\(.create.title) \(.qualifies)"' <<< "$out")"
+  assert_contains "its ledger holds the watchlist's old failure" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"1:1:x"'
+  assert_contains "and the new one" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"3002:1:xunit-app-swift-testing.xml"'
+  assert_eq "the watchlist keeps the test this run, updated" "901 1 1" "$(jq -r '"\(.watchlist.writes[0].comment_id) \(.watchlist.writes[0].tests) \(.watchlist.tests)"' <<< "$out")"
+  assert_contains "with the new failure too" "$(watch_body "$out")" '"key":"3002:1:xunit-app-swift-testing.xml"'
+  assert_eq "the summary says it leaves next run" "true" "$(jq -r '.tests[0].leaves_watchlist_next_run' <<< "$out")"
+  mutant="$(mutant_of 's/^        state = replace\(watched, links=watched.links or links\)$/        state = fl.State(test_id=test, links=links)/' "$LEDGER")"
+  assert_eq "mutation: without the watchlist's history the second place is missed" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
+  mutant="$(mutant_of 's/^    pending = watched is not None and not .*$/    pending = False/' "$LEDGER")"
+  assert_eq "mutation: dropping the entry on promotion empties the watchlist before the issue exists" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+  # The next run reads the issue with that history in its ledger comment, and
+  # only then takes the test off the watchlist.
+  body="$(mktmpd)/ledger.md"; jq -r '.actions[0].comment_body' <<< "$out" > "$body"
+  watchbody="$(mktmpd)/watch.md"; watch_body "$out" > "$watchbody"
+  w2="$(newwork)"
+  erased_run "$w2" 3002 sidebar
+  build issue "$w2" --number 1000 --title "Flaky test: $HOLDER" --label flaky --comment "1001|$BOT|Bot|$body"
+  build watchlist "$w2" --number 900 --comment "901|$BOT|Bot|$watchbody"
+  out="$(analyze "$w2")"
+  assert_eq "next run: the issue holds the history, so the entry goes, and the issue needs no write" "0 901 0 0" \
+    "$(jq -r '"\(.watchlist.tests) \(.watchlist.writes[0].comment_id) \(.watchlist.writes[0].tests) \(.actions | length)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    pending = watched is not None and not .*$/    pending = watched is not None/' "$LEDGER")"
+  assert_eq "mutation: never confirming keeps the test on the watchlist for good" "1" "$(analyze "$w2" "$mutant" | jq '.watchlist.tests')"
+  # Write mode: the watchlist, still holding the test, before its new issue.
+  local entry; entry="$(mktmpd)/watch.md"
+  build watchlist-body "$entry" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}]"
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$entry")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "nightly.yml/runs", out: (({id: 2900, run_attempt: 1, conclusion: "failure", event: "schedule", head_branch: "main", head_sha: "ab", head_repository: {full_name: "cheapsteak/tbd"}, created_at: "2026-10-05T11:00:00Z", run_started_at: "2026-10-05T11:00:00Z"} | tojson) + "\n")},
+    {match: "actions/runs/2900/artifacts", out: ""}]')"
+  FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null
+  writes="$(writes_in "$d/log")"
+  assert_eq "label, the watchlist edit, then the test's issue and its ledger" \
+    "app-token api -X POST repos/cheapsteak/tbd/labels --input -
+app-token api -X PATCH repos/cheapsteak/tbd/issues/comments/901 --input -
+app-token api -X POST repos/cheapsteak/tbd/issues --input -
+app-token api -X POST repos/cheapsteak/tbd/issues/1000/comments --input -" "$writes"
+  assert_contains "the issue's ledger carries the old failure" "$(cat "$d/log")" '\"key\":\"1:1:x\"'
+}
+
+test_an_issue_without_the_watchlist_history_is_seeded_and_the_entry_kept() {
+  local w out body mutant
+  # A run created the issue, then its ledger comment write failed: the issue
+  # is found with no ledger comment.
+  w="$(newwork)"
+  watched "$w" "$HOLDER"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky
+  out="$(analyze "$w")"
+  assert_contains "the found issue gets the watchlist's history" "$(jq -r '.actions[] | select(.issue == 970) | .comment_body' <<< "$out")" '"key":"1:1:x"'
+  assert_eq "and the test stays on the watchlist until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
+  # Its ledger comment exists but lacks a failure the watchlist holds.
+  body="$(mktmpd)/ledger.md"
+  build ledger-body "$body" "{\"test_id\": \"$HOLDER\", \"failures\": [{\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-09-21T11:00:00Z\", \"source\": \"ci-xunit\"}]}"
+  w="$(newwork)"
+  watched "$w" "$HOLDER"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "971|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_contains "a ledger missing a watched failure gets it" "$(jq -r '.actions[] | select(.issue == 970) | .comment_body' <<< "$out")" '"key":"1:1:x"'
+  assert_eq "and the entry stays until a run reads it there" "1" "$(jq '.watchlist.tests' <<< "$out")"
+  mutant="$(mutant_of 's/^    return \{f.key for f in absorbed.failures\} == .*$/    return True/' "$LEDGER")"
+  assert_eq "mutation: trusting any ledger drops the entry before its failure is on the issue" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+}
+
+test_a_promoted_test_whose_issue_was_never_created_is_retried_without_a_new_failure() {
+  local w out body mutant
+  # The entry qualifies (two places) but no issue exists: the create failed,
+  # and its failures have since left the read window. It is 40 days old.
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT, {\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-08-29T11:00:00Z\", \"source\": \"ci-xunit\"}]}]"
+  w="$(newwork --now 2026-10-30T00:00:00Z)"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  out="$(analyze "$w")"
+  assert_eq "its issue is created again, from the entry, and the entry kept, not aged" "Flaky test: $HOLDER 1" \
+    "$(jq -r '"\(.actions[0].create.title) \(.watchlist.tests)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(mapping\) \| bound$/    planned = set(by_test) | set(mapping)/' "$LEDGER")"
+  assert_eq "mutation: planning only tests with new failures strands it" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
+  # fetch searches for its issue first, though the test did not fail this run.
+  local d entry
+  entry="$(mktmpd)/watch.md"
+  build watchlist-body "$entry" '[{"test_id": "TBDSharedTests.Q/q()", "failures": [{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "night:2026-09-20", "at": "2026-09-20T11:00:00Z", "source": "nightly"}, {"key": "2:1:x", "run_id": 2, "attempt": 1, "occurrence": "branch:x", "at": "2026-09-21T11:00:00Z", "source": "ci-xunit"}]}]'
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$entry")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+  ledger_run "$d" > /dev/null
+  assert_contains "fetch searches for the qualifying entry's issue" "$(grep search/issues "$d/log")" "TBDSharedTests.Q"
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$entry")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+  mutant="$(mutant_of 's/^    for test in sorted\(\(set\(by_test\) \| qualified\) - set\(mapping\)\):$/    for test in sorted(set(by_test) - set(mapping)):/' "$LEDGER")"
+  LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null
+  assert_lacks "mutation: searching only tests that failed this run could create a duplicate" "$(grep search/issues "$d/log")" "TBDSharedTests.Q"
+}
+
+test_an_entry_whose_trait_issue_serves_it_alone_is_not_aged() {
+  local w out body mutant
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" '[{"test_id": "TBDSharedTests.OtherTests/flaky()", "failures": [{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "branch:x", "at": "2026-08-20T11:00:00Z", "source": "ci-retry", "file": "Tests/TBDSharedTests/OtherTests.swift", "line": 3}]}]'
+  w="$(newwork)"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
+  build issue "$w" --number 600 --title "OtherTests.flaky hangs under load" --label bug
+  out="$(analyze "$w")"
+  assert_eq "kept, though 49 days quiet: its history is bound for #600" "1 0" "$(jq -r '"\(.watchlist.tests) \(.notes.aged | length)"' <<< "$out")"
+  assert_contains "and #600 gets it" "$(jq -r '.actions[] | select(.issue == 600) | .comment_body' <<< "$out")" '"key":"1:1:x"'
+  mutant="$(mutant_of 's/^        if test in mapping or fl.qualifies\(state\) or adopted:$/        if test in mapping or fl.qualifies(state):/' "$LEDGER")"
+  assert_eq "mutation: aging it drops the history before #600 holds it" "0" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+}
+
+test_an_existing_issue_below_the_threshold_keeps_recording_there() {
+  local w out mutant
+  w="$(newwork)"
+  erased_run "$w" 3003 sidebar
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky
+  out="$(analyze "$w")"
+  assert_eq "recorded on #970, not qualified" "970 false" "$(jq -r '.actions[0] | "\(.issue) \(.qualifies)"' <<< "$out")"
+  assert_eq "nothing on the watchlist" "0 0" "$(jq -r '"\(.watchlist.tests) \(.watchlist.writes | length)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    if view is None and not summary\["qualifies"\]:$/    if not summary["qualifies"]:/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: watching every unqualified test strands #970" "0 1" "$(jq -r '"\(.actions | length) \(.watchlist.tests)"' <<< "$out")"
+}
+
+test_a_forged_watchlist_comment_or_issue_is_ignored() {
+  local w out body mutant
+  w="$(newwork)"
+  erased_run "$w" 3004 sidebar
+  body="$(mktmpd)/forged.md"
+  # Two places: were it read, the test would qualify and get an issue.
+  build watchlist-body "$body" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT, {\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-09-21T11:00:00Z\", \"source\": \"ci-xunit\"}]}]"
+  build watchlist "$w" --number 900 --comment "905|someone|User|$body" --comment "906|tbd-flake-fixer|User|$body"
+  build watchlist "$w" --number 800 --login mallory --type User --created 2026-01-01T00:00:00Z --comment "801|mallory|User|$body"
+  out="$(analyze "$w")"
+  assert_eq "no issue: the forged history is not read" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "the bot's watchlist #900 gets a new comment; neither forgery is edited" "900 null" "$(jq -r '"\(.watchlist.issue) \(.watchlist.writes[0].comment_id)"' <<< "$out")"
+  assert_contains "a human's forged comment is listed" "$(jq -r '.notes.forged[]' <<< "$out")" "#900 comment 905: a watchlist sentinel by \`someone\`"
+  assert_contains "a look-alike's too" "$(jq -r '.notes.forged[]' <<< "$out")" "#900 comment 906: a watchlist sentinel by \`tbd-flake-fixer\`"
+  assert_contains "and an issue a human opened under the label" "$(jq -r '.notes.forged[]' <<< "$out")" "#800: labelled \`flake-watchlist\` but opened by \`mallory\`"
+  mutant="$(mutant_of 's/^    return login == BOT_LOGIN and user_type == BOT_USER_TYPE$/    return True/' "$LIB")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: trusting any author opens an issue from forged history" "Flaky test: $HOLDER" "$(jq -r '.actions[0].create.title' <<< "$out")"
+}
+
+test_a_missing_watchlist_is_created_once() {
+  local w w2 out body
+  w="$(newwork)"
+  erased_run "$w" 3005 sidebar
+  nightly_run "$w" 3006 2026-10-05 'TBDSharedTests.OtherTests/other()'
+  out="$(analyze "$w")"
+  assert_eq "one watchlist issue, one comment, both tests" "Flake watchlist 1 2" "$(jq -r '"\(.watchlist.create.title) \(.watchlist.writes | length) \(.watchlist.tests)"' <<< "$out")"
+  body="$w/wl-body.md"; watch_body "$out" > "$body"
+  w2="$(newwork)"
+  erased_run "$w2" 3005 sidebar
+  nightly_run "$w2" 3006 2026-10-05 'TBDSharedTests.OtherTests/other()'
+  build watchlist "$w2" --number 900 --comment "901|$BOT|Bot|$body"
+  out="$(analyze "$w2")"
+  assert_eq "once it exists: no second create, and no write for the same runs" "null 0 2" "$(jq -r '"\(.watchlist.create) \(.watchlist.writes | length) \(.watchlist.tests)"' <<< "$out")"
+}
+
+test_two_watchlists_use_the_oldest() {
+  local w out mutant
+  w="$(newwork)"
+  erased_run "$w" 3007 sidebar
+  build watchlist "$w" --number 900 --created 2026-10-01T00:00:00Z
+  build watchlist "$w" --number 905 --created 2026-09-01T00:00:00Z
+  out="$(analyze "$w")"
+  assert_eq "the oldest, #905, is written; no third is created" "905 null" "$(jq -r '"\(.watchlist.issue) \(.watchlist.create)"' <<< "$out")"
+  assert_contains "both are listed" "$(jq -r '.notes.duplicates[]' <<< "$out")" "watchlist issues #905, #900; using the oldest, #905"
+  mutant="$(mutant_of 's/^    mine.sort\(key=lambda i: \(i.get\("created_at"\) or "", int\(i\["number"\]\)\)\)$/    mine.sort(key=lambda i: int(i["number"]))/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: ordering by number writes to the newer one" "900" "$(jq -r '.watchlist.issue' <<< "$out")"
+}
+
+test_the_report_counts_issues_to_open_and_tests_on_the_watchlist() {
+  local w out report mutant
+  w="$(newwork)"
+  watched "$w" 'TBDSharedTests.Quiet/f()'
+  erased_run "$w" 3008 sidebar
+  nightly_run "$w" 3009 2026-10-05 "$HOLDER"
+  nightly_run "$w" 3010 2026-10-05 'TBDSharedTests.OtherTests/other()'
+  out="$(analyze "$w")"
+  report="$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))"
+  assert_contains "one per-test issue to open" "$report" "**Per-test issues to open: 1** (0 promoted from the watchlist)"
+  assert_contains "two tests on the watchlist, one new" "$report" "**Tests on the watchlist: 2** (1 new, 0 leaving it), in 1 comment(s); the watchlist issue: #900."
+  assert_contains "the sub-threshold test's line says where" "$report" "qualifies: no; the watchlist"
+  mutant="$(mutant_of 's/^    opening = \[t for t in tests if t\["create"\]\]$/    opening = tests/' "$LEDGER")"
+  assert_contains "mutation: counting every test overstates the issues" "$(python3 "$mutant/flake-ledger.py" report --plan <(printf '%s' "$out"))" "**Per-test issues to open: 2**"
+}
+
+test_a_test_left_in_two_watchlist_comments_is_kept_in_the_later_one() {
+  local w out early late mutant
+  w="$(newwork)"
+  early="$(mktmpd)/early.md"; late="$(mktmpd)/late.md"
+  build watchlist-body "$early" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}]"
+  build watchlist-body "$late" "[{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT, {\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"night:2026-09-20\", \"at\": \"2026-09-20T12:00:00Z\", \"source\": \"nightly\"}]}]"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$early" --comment "902|$BOT|Bot|$late"
+  out="$(analyze "$w")"
+  assert_eq "only the earlier comment is rewritten, now without the test" "901 0" "$(jq -r '.watchlist.writes | map("\(.comment_id) \(.tests)") | join(",")' <<< "$out")"
+  assert_eq "the test is held once" "1" "$(jq -r '.watchlist.tests' <<< "$out")"
+  assert_contains "and the merge is listed" "$(jq -r '.notes.duplicates[]' <<< "$out")" "in two watchlist comments; merged"
+  mutant="$(mutant_of 's/ if t in fitted and home\[t\] == i\] for i, \(_, tests, _\)/ if t in fitted] for i, (_, tests, _)/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: keeping every copy leaves the test in both" "901 1" "$(jq -r '.watchlist.writes | map("\(.comment_id) \(.tests)") | join(",")' <<< "$out")"
+}
+
+test_merging_two_copies_never_counts_a_folded_failure_twice() {
+  local script out mutant
+  script='
+import sys, importlib.util
+s = importlib.util.spec_from_file_location("fl_ledger", sys.argv[1] + "/flake-ledger.py"); m = importlib.util.module_from_spec(s); sys.modules["fl_ledger"] = m; s.loader.exec_module(m)
+fl = m.fl
+fs = [fl.Failure(key=f"{i}:1:x", run_id=i, attempt=1, occurrence="branch:a", at=f"2026-09-{1 + i * 2:02d}T11:00:00Z", source="ci-xunit") for i in range(11)]
+whole = fl.State(test_id="T/t()", failures=fs)
+folded = fl._fold(whole, 10)  # keys more than 8 days older than the newest are dropped
+print(fl.failure_count(m._merge_entries(folded, whole)), fl.failure_count(m._merge_entries(whole, folded)))
+'
+  out="$(python3 -c "$script" "$HERE")"
+  assert_eq "eleven failures, whichever copy is kept" "11 11" "$out"
+  mutant="$(mutant_of 's/^    cutoff = max\(\(f.last for f in keep.folded\), default=""\)$/    cutoff = ""/' "$LEDGER")"
+  assert_eq "mutation: merging by key alone re-adds folded failures" "1" "$(python3 -c "$script" "$mutant" | awk '{print ($1 > 11)}')"
+}
+
+test_an_unreadable_watchlist_comment_is_skipped_and_left_for_a_human() {
+  local w out broken quiet mutant rc=0
+  w="$(newwork)"
+  erased_run "$w" 3011 sidebar
+  build issue "$w" --number 970 --title "Flaky test: TBDSharedTests.OtherTests/other()" --label flaky
+  nightly_run "$w" 3012 2026-10-05 'TBDSharedTests.OtherTests/other()'
+  broken="$(mktmpd)/broken.md"
+  printf '%s\nhand-edited\n<!-- flake-watchlist-state\n{not json\nflake-watchlist-state -->\n' '<!-- flake-watchlist v1 -->' > "$broken"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$broken"
+  out="$(analyze "$w")"
+  assert_contains "listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 901"
+  assert_eq "the test without an issue starts a fresh entry, holding only this run's failure" "true 1" \
+    "$(jq -r --arg t "$HOLDER" '.tests[] | select(.test_id == $t) | "\(.watch) \(.failures)"' <<< "$out")"
+  assert_eq "written to a new comment on #900; the broken one is never edited" "900 null null 1" \
+    "$(jq -r '"\(.watchlist.issue) \(.watchlist.create) \([.watchlist.writes[].comment_id | tostring] | join(",")) \(.watchlist.tests)"' <<< "$out")"
+  assert_eq "a test with an issue is still recorded there" "970" "$(jq -r '.actions[].issue' <<< "$out")"
+  # A readable bot comment beside the broken one takes the new entry.
+  quiet="$(mktmpd)/quiet.md"
+  build watchlist-body "$quiet" "[{\"test_id\": \"TBDSharedTests.Quiet/f()\", \"failures\": [$OLD_NIGHT]}]"
+  w="$(newwork)"
+  erased_run "$w" 3011 sidebar
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$broken" --comment "902|$BOT|Bot|$quiet"
+  out="$(analyze "$w")"
+  assert_eq "the readable comment, never the broken one" "902 2" "$(jq -r '"\([.watchlist.writes[].comment_id] | join(",")) \(.watchlist.tests)"' <<< "$out")"
+  mutant="$(mutant_of 's/^        if states is None:$/        if False:/' "$LEDGER")"
+  analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without skipping it the whole run fails" "2" "$rc"
+}
+
+# aging_work [NOW] -> a work dir whose watchlist holds five tests: Old (last
+# failed 2026-09-01), Recent (2026-09-20), Folded (counts only, latest
+# 2026-09-20), HOLDER (2026-09-01, failing again on a branch this week), and
+# Pending (2026-09-01, with an issue found without its ledger comment).
+aging_work() {
+  local w body
+  w="$(newwork --now "${1:-2026-10-08T00:00:00Z}")"
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "$(jq -n --arg holder "$HOLDER" '
+    def f(at; occ): [{key: ("k" + at), run_id: 1, attempt: 1, occurrence: occ, at: at, source: "nightly"}];
+    [{test_id: "TBDSharedTests.Old/f()", failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")},
+     {test_id: "TBDSharedTests.Recent/f()", failures: f("2026-09-20T11:00:00Z"; "night:2026-09-20")},
+     {test_id: "TBDSharedTests.Folded/f()", failures: [], folded: [{occurrence: "branch:a", episode: 0, pre_fix: false, count: 5, first: "2026-08-01T11:00:00Z", last: "2026-09-20T11:00:00Z"}]},
+     {test_id: $holder, failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")},
+     {test_id: "TBDSharedTests.Pending/f()", failures: f("2026-09-01T11:00:00Z"; "night:2026-09-01")}]')"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$body"
+  build issue "$w" --number 975 --title "Flaky test: TBDSharedTests.Pending/f()" --label flaky
+  erased_run "$w" 3021 sidebar
+  printf '%s' "$w"
+}
+
+# The watchlist's tests after analyze, in order.
+watched_tests() { jq -r '[.watchlist.writes[].body | capture("flake-watchlist-state\n(?<j>.*)\nflake-watchlist-state"; "s").j | fromjson | .tests[].test_id] | join(",")' <<< "$1"; }
+
+test_a_watchlist_entry_with_no_failure_in_thirty_days_ages_out() {
+  local w out mutant
+  w="$(aging_work)"
+  out="$(analyze "$w")"
+  assert_eq "Old goes; Recent, Folded, the fresh HOLDER, and Pending stay" \
+    "TBDSharedTests.Folded/f(),$HOLDER,TBDSharedTests.Pending/f(),TBDSharedTests.Recent/f()" "$(watched_tests "$out")"
+  assert_contains "the aged test is listed" "$(jq -r '.notes.aged[]' <<< "$out")" "\`TBDSharedTests.Old/f()\`: no failure since 2026-09-01T11:00:00Z"
+  assert_eq "a test failing again after aging out starts fresh: one failure, on the watchlist, no issue" "true 1 null" \
+    "$(jq -r --arg t "$HOLDER" '(.tests[] | select(.test_id == $t) | "\(.watch) \(.failures)") + " " + ([.actions[] | select(.test_id == $t)][0].issue | tostring)' <<< "$out")"
+  assert_contains "the report has the section" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "**Aged off the watchlist (no failure in 30 days):**"
+  assert_lacks "exactly 30 days since the newest failure: aged" "$(watched_tests "$(analyze "$(aging_work 2026-10-20T11:00:00Z)")")" "Recent"
+  assert_contains "a second under 30 days: kept" "$(watched_tests "$(analyze "$(aging_work 2026-10-20T10:59:59Z)")")" "Recent"
+  out="$(analyze "$(aging_work 2026-10-25T00:00:00Z)")"
+  assert_eq "a later now ages Recent and Folded too; Pending, waiting on its issue, stays" "TBDSharedTests.Pending/f()" "$(watched_tests "$out")"
+  mutant="$(mutant_of 's/^WATCHLIST_AGE_OUT_DAYS = 30$/WATCHLIST_AGE_OUT_DAYS = 3000/' "$LIB")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: without aging HOLDER's old night and new branch qualify it for an issue" "Flaky test: $HOLDER" "$(jq -r --arg t "$HOLDER" '.actions[] | select(.test_id == $t) | .create.title' <<< "$out")"
+  mutant="$(mutant_of 's/ \+ \[f.last for f in state.folded\], default=""\)$/, default="")/' "$LIB")"
+  assert_lacks "mutation: ignoring folded counts ages an entry folded down to counts" "$(watched_tests "$(analyze "$w" "$mutant")")" "Folded"
+  mutant="$(mutant_of 's/^        if test not in exempt and \(not newest/        if (not newest/' "$LEDGER")"
+  assert_lacks "mutation: aging a test that has an issue drops its unconfirmed history" "$(watched_tests "$(analyze "$w" "$mutant")")" "Pending"
+}
+
+test_folding_keeps_the_newest_failure_time() {
+  local script mutant
+  script='
+fs = [m.Failure(key=f"{d}:1:x", run_id=d, attempt=1, occurrence="branch:a", at=f"2026-09-{d:02d}T11:00:00Z", source="ci-xunit") for d in (1, 9, 20, 5)]
+folded = m._fold(m.State(test_id="T/t()", failures=fs), 4)
+print(len(folded.failures), m.newest_failure_at(folded))
+'
+  assert_eq "every failure folded; the newest time survives" "0 2026-09-20T11:00:00Z" "$(py <<< "$script")"
+  mutant="$(mutant_of 's/last=max\(f.last, failure.at\)\)/last=f.last)/' "$LIB")"
+  assert_eq "mutation: a count that keeps its first time ages early" "0 2026-09-01T11:00:00Z" "$(py "$mutant" <<< "$script")"
+}
+
+test_a_new_test_fills_an_emptied_comment_first() {
+  local w out empty full mutant
+  w="$(newwork)"
+  empty="$(mktmpd)/empty.md"; full="$(mktmpd)/full.md"
+  build watchlist-body "$empty" '[]'
+  build watchlist-body "$full" "[{\"test_id\": \"TBDSharedTests.Quiet/f()\", \"failures\": [$OLD_NIGHT]}]"
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$empty" --comment "902|$BOT|Bot|$full"
+  erased_run "$w" 3013 sidebar
+  out="$(analyze "$w")"
+  assert_eq "the new test goes into the emptied first comment" "901" "$(jq -r '.watchlist.writes | map(.comment_id) | join(",")' <<< "$out")"
+  mutant="$(mutant_of 's/^        room = next\(.*$/        room = groups[-1]/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: appending to the last comment leaves the empty one unused" "902" "$(jq -r '.watchlist.writes | map(.comment_id) | join(",")' <<< "$out")"
+}
+
+# watch_routes ENTRY_OCCURRENCE LABELLED: stub routes for a bot watchlist #900
+# holding HOLDER with one failure at ENTRY_OCCURRENCE, found by its label when
+# LABELLED is true, else only by its title.
+watch_routes() {
+  local body; body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "[{\"test_id\": \"$HOLDER\", \"failures\": [{\"key\": \"1:1:x\", \"run_id\": 1, \"attempt\": 1, \"occurrence\": \"$1\", \"at\": \"2026-09-20T11:00:00Z\", \"source\": \"ci-xunit\"}]}]"
+  jq -n --arg body "$(cat "$body")" --arg bot "$BOT" --argjson labelled "$2" '
+    ({number: 900, title: "Flake watchlist", state: "open", labels: (if $labelled then [{name: "flake-watchlist"}] else [] end),
+      created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}}) as $issue | [
+    {match: "issues\\?labels=flake-watchlist", out: (if $labelled then ($issue | tojson) + "\n" else "" end)},
+    {match: "in:title \"Flake watchlist\"", out: (({incomplete: false, total: 1, items: [$issue]} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]'
+}
+
+test_a_watchlist_whose_label_was_removed_is_found_by_title() {
+  local d mutant
+  d="$(mktmpd)"; stub_world "$d" "$(watch_routes night:2026-09-20 false)"
+  FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null
+  assert_contains "the label is put back" "$(writes_in "$d/log")" "-X POST repos/cheapsteak/tbd/issues/900/labels"
+  assert_lacks "no second watchlist is created" "$(cat "$d/log")" '"title": "Flake watchlist"'
+  assert_contains "and the old history seeds the test's issue" "$(cat "$d/log")" '\"key\":\"1:1:x\"'
+  d="$(mktmpd)"; stub_world "$d" "$(watch_routes night:2026-09-20 false)"
+  mutant="$(mutant_of 's/^    if not any\(fl.trusted_author\(\(r.get\("user"\).*$/    if False:/' "$LEDGER")"
+  FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" --write > /dev/null
+  assert_contains "mutation: without the title fallback a fresh watchlist abandons the history" "$(cat "$d/log")" '"title": "Flake watchlist"'
+}
+
+test_a_watched_test_is_title_searched_only_when_it_may_qualify() {
+  local d mutant
+  # The stub run fails HOLDER on branch sidebar-groups-toggle: the same place.
+  d="$(mktmpd)"; stub_world "$d" "$(watch_routes branch:sidebar-groups-toggle true)"
+  ledger_run "$d" > /dev/null
+  assert_lacks "same place again: no search" "$(grep search/issues "$d/log")" "lockIsReacquirableAfterRelease"
+  d="$(mktmpd)"; stub_world "$d" "$(watch_routes night:2026-09-20 true)"
+  ledger_run "$d" > /dev/null
+  assert_contains "a second place: searched before its issue is created" "$(grep search/issues "$d/log")" "lockIsReacquirableAfterRelease"
+  d="$(mktmpd)"; stub_world "$d" "$(watch_routes branch:sidebar-groups-toggle true)"
+  mutant="$(mutant_of 's/^        if test in entries and not _may_qualify\(entries\[test\], by_test.get\(test, \[\]\)\):$/        if False:/' "$LEDGER")"
+  LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null
+  assert_contains "mutation: searching every watched test every run" "$(grep search/issues "$d/log")" "lockIsReacquirableAfterRelease"
+}
+
+# big_watchlist DIR N -> plan_watchlist's result for N tests, each with 20
+# long-signature failures on one branch, as JSON; DIR holds the scripts.
+BIG_WATCHLIST='
+import json, sys, importlib.util
+sys.path.insert(0, sys.argv[1])
+s = importlib.util.spec_from_file_location("fl_ledger", sys.argv[1] + "/flake-ledger.py"); m = importlib.util.module_from_spec(s); sys.modules["fl_ledger"] = m; s.loader.exec_module(m)
+fl = m.fl
+def entry(t):
+    fs = [fl.Failure(key=f"{t}:{i}:1:x", run_id=37000000000 + i, attempt=1, occurrence=f"branch:b{t}", at=f"2026-10-0{1 + i % 7}T11:00:00Z",
+                     source="ci-xunit", signature="Expectation failed: " + "x" * 280, head_sha="a" * 40) for i in range(20)]
+    return fl.State(test_id=f"TBDSharedTests.Suite{t:03d}/test{t:03d}()", failures=fs)
+entries = {e.test_id: e for e in (entry(t) for t in range(int(sys.argv[2])))}
+first = m.plan_watchlist(m.Watchlist(), entries, "cheapsteak/tbd")
+# The next run reads what the first wrote, and one new test arrives.
+slots = [(1000 + w["index"], [x.test_id for x in fl.parse_watchlist(w["body"], fl.BOT_LOGIN, "Bot")], w["body"]) for w in first["writes"]]
+read = {x.test_id: x for _, _, b in slots for x in fl.parse_watchlist(b, fl.BOT_LOGIN, "Bot")}
+read["TBDSharedTests.Zeta/z()"] = fl.State(test_id="TBDSharedTests.Zeta/z()", failures=entry(999).failures)
+second = m.plan_watchlist(m.Watchlist(number=900, slots=slots, entries=dict(read)), read, "cheapsteak/tbd")
+# Or the first test in the first comment fails 40 more times: that comment
+# overflows, and its last tests move forward through the others.
+grown = {x.test_id: x for _, _, b in slots for x in fl.parse_watchlist(b, fl.BOT_LOGIN, "Bot")}
+head = slots[0][1][0]
+more = [fl.Failure(key=f"g:{i}:1:x", run_id=38000000000 + i, attempt=1, occurrence=grown[head].failures[0].occurrence, at="2026-10-07T11:00:00Z",
+                   source="ci-xunit", signature="y" * 280, head_sha="a" * 40) for i in range(40)]
+grown[head], _ = fl.merge(grown[head], more)
+third = m.plan_watchlist(m.Watchlist(number=900, slots=slots, entries=dict(grown)), grown, "cheapsteak/tbd")
+moved_from = {t: i for i, (_, ts, _) in enumerate(slots) for t in ts}
+order = [w["index"] for w in third["writes"]]
+moves = [(w["index"], moved_from[x.test_id]) for w in third["writes"] for x in fl.parse_watchlist(w["body"], fl.BOT_LOGIN, "Bot")
+         if moved_from.get(x.test_id, w["index"]) != w["index"]]
+# Each moved test is written to its new comment before its old one.
+safe = all(order.index(new) < order.index(old) for new, old in moves if old in order)
+held = sorted(x.test_id for w in first["writes"] for x in fl.parse_watchlist(w["body"], fl.BOT_LOGIN, "Bot"))
+print(json.dumps({
+  "comments": len(first["writes"]),
+  "max": max(len(w["body"]) for w in first["writes"]),
+  "all_held": held == sorted(entries),
+  "second_ids": [w["comment_id"] for w in second["writes"]],
+  "third_moves": len(moves),
+  "third_safe": safe,
+}))
+'
+
+test_a_big_watchlist_splits_across_comments_under_the_body_limit() {
+  local out mutant
+  out="$(python3 -c "$BIG_WATCHLIST" "$HERE" 120)"
+  assert_eq "split across several comments" "true" "$(jq '.comments > 1' <<< "$out")"
+  assert_eq "each under GitHub's 65,536 characters, and the bot's 60,000" "true" "$(jq '.max <= 60000' <<< "$out")"
+  assert_eq "every test held exactly once" "true" "$(jq '.all_held' <<< "$out")"
+  assert_eq "a new test the next run writes only to the last comment, or a new one" "0 true" "$(jq -r --argjson last "$((1000 + $(jq ".comments" <<< "$out") - 1))" '"\([.second_ids[] | select(. != null and . != $last)] | length) \(.second_ids | length > 0)"' <<< "$out")"
+  assert_eq "a first comment that overflows moves tests forward" "true" "$(jq '.third_moves > 0' <<< "$out")"
+  assert_eq "each moved test is written to its new comment before its old one drops it" "true" "$(jq '.third_safe' <<< "$out")"
+  mutant="$(mutant_of 's/ else -w\["index"\]\)\)$/ else w["index"]))/' "$LEDGER")"
+  assert_eq "mutation: writing the first comment first could drop a moved test" "false" "$(python3 -c "$BIG_WATCHLIST" "$mutant" 120 | jq '.third_safe')"
+  mutant="$(mutant_of 's/^        while len\(groups\[i\]\) > 1 and len\(body_of\(groups\[i\]\)\) > fl.MAX_COMMENT_CHARS:$/        while False:/' "$LEDGER")"
+  local rc=0
+  python3 -c "$BIG_WATCHLIST" "$mutant" 120 > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without splitting, one comment overflows and the plan refuses" "1" "$rc"
 }
 
 # ============================================================================
@@ -1185,6 +1736,7 @@ trait_world() {
   local w; w="$(newwork)"
   build run "$w" --id 1701 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "17011|retry-metrics|2026-10-06T10:20:00Z"
   build retry "$w/artifacts/17011/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
+  retry_run "$w" 1717 c 'TBDSharedTests.OtherTests/flaky()' Tests/TBDSharedTests/OtherTests.swift
   nightly_run "$w" 2701 2026-10-05 "$HOLDER"
   printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
   build set "$w" fetch_notes.json "$1"
@@ -1198,10 +1750,10 @@ test_a_test_whose_trait_issue_is_gone_gets_its_own_issue() {
     out="$(analyze "$w")"
     assert_eq "HTTP $status: the test gets a fresh issue that links nothing, beside the other test" \
       "Flaky test: TBDSharedTests.OtherTests/flaky() false|$HOLDER" \
-      "$(jq -r '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600"))"][0] + "|" + ([.actions[].test_id | select(. != "TBDSharedTests.OtherTests/flaky()")] | join(","))' <<< "$out")"
+      "$(jq -r '[.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | "\(.create.title) \(.create.body | test("#600"))"][0] + "|" + ([.tests[].test_id | select(. != "TBDSharedTests.OtherTests/flaky()")] | join(","))' <<< "$out")"
     assert_contains "HTTP $status: the number is listed" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "#600 (HTTP $status): a failing test whose trait names it gets an issue of its own"
   done
-  mutant="$(mutant_of 's/^        if trait is not None and trait in ctx.gone_issues:$/        if False:/' "$LEDGER")"
+  mutant="$(mutant_of 's/ if trait is None or trait in ctx.gone_issues else trait$/ if trait is None else trait/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_contains "mutation: without the rule the new issue links a number that does not exist" \
     "$(jq -r '.actions[] | select(.test_id == "TBDSharedTests.OtherTests/flaky()") | .create.body' <<< "$out")" "#600"
