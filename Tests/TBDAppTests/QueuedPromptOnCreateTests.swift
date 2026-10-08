@@ -367,8 +367,10 @@ struct QueuedPromptOnCreateTests {
             state.submitQueuedPrompt(target, text: "  the thing I typed  ", submit: true)
 
             await waitUntil("alert") { state.alertMessage != nil }
-            // Trimmed exactly as the parking RPC would have carried it.
-            #expect(harness.saved.map(\.text) == ["the thing I typed"])
+            // Saved as typed; only blankness is judged on a trimmed copy.
+            #expect(harness.saved.map(\.text) == ["  the thing I typed  "])
+            // What parks is still the trimmed text.
+            #expect(harness.parked?.text == "the thing I typed")
             // The alert names the reason AND where the text went, so neither
             // fact can arrive without the other.
             #expect(state.alertMessage?.contains("not an agent") == true)
@@ -423,7 +425,7 @@ struct QueuedPromptOnCreateTests {
             #expect(harness.saved.count == 1)
             #expect(harness.saved.first?.repoID == repoID)
             #expect(harness.saved.first?.worktreeName == target.worktreeName)
-            #expect(harness.saved.first?.text == "keep me")
+            #expect(harness.saved.first?.text == "  keep me  ")
             #expect(state.alertRevealPath == Self.savedPath)
             #expect(state.alertMessage?.contains(Self.savedPath) == true)
             // The file holds the text, so the pasteboard is not touched — a
@@ -493,7 +495,7 @@ struct QueuedPromptOnCreateTests {
             #expect(harness.saved.count == 1)
             #expect(harness.saved.first?.repoID == repoID)
             #expect(harness.saved.first?.worktreeName == "brave-otter")
-            #expect(harness.saved.first?.text == "half-typed thought")
+            #expect(harness.saved.first?.text == "\n half-typed thought \n")
             #expect(harness.copied.isEmpty)
             #expect(state.alertRevealPath == Self.savedPath)
             #expect(state.alertMessage?.contains("Worktree creation failed") == true)

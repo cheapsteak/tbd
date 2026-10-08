@@ -53,7 +53,8 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(delta.creationFailed)
         #expect(path.hasPrefix(reposDir.path + "/" + (row.repoID?.uuidString ?? "") + "/unsent-prompts/"))
         #expect(path.hasSuffix("-brave-otter.md"))
-        #expect(try String(contentsOfFile: path, encoding: .utf8) == "fix the build\nthen open a PR\n")
+        // Written as parked: leading indentation is part of the message.
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == "  fix the build\nthen open a PR  \n")
         #expect(try await db.worktrees.getLocal(id: row.id) == nil)
     }
 
@@ -110,6 +111,20 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(files.count == 1)
         let path = dir.appendingPathComponent(try #require(files.first)).path
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "kept across a restart\n")
+    }
+
+    @Test func aParkedPromptInARepolessRowIsReportedLost() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let row = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/fcup-scratch-\(UUID())", tmuxServer: "srv")
+        try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "orphaned", submit: true)
+
+        let delta = await lifecycle.rollBackFailedCreate(
+            worktreeID: row.id, reposDir: reposDir, date: date)
+
+        #expect(delta.unsentPromptLost)
+        #expect(delta.unsentPromptPath == nil)
+        #expect(try await db.worktrees.get(id: row.id) == nil)
     }
 
     @Test func aParkOnAMissingRowIsRefused() async throws {

@@ -258,6 +258,9 @@ extension AppState {
     /// rollback either commits first, and is in what the daemon saves, or
     /// finds no row and is refused — landing in the refusal branch here.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
+        // Blankness is judged on a trimmed copy and the trimmed text is what
+        // parks, as before; a hand-back saves what the operator wrote,
+        // indentation included.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         // A submitted composer hands nothing off on failure, so it must stop
@@ -270,20 +273,20 @@ extension AppState {
                 // the prompt silently.
                 logger.error("Queued prompt not sent: worktree creation failed")
                 keepUnqueuedFirstMessage(
-                    trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                    text, repoID: target.repoID, worktreeName: target.worktreeName,
                     "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
                 do {
                     let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
                     if case .refused(let reason) = result {
                         keepUnqueuedFirstMessage(
-                            trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                            text, repoID: target.repoID, worktreeName: target.worktreeName,
                             "First message was not queued: \(reason)")
                     }
                 } catch {
                     logger.error("Failed to queue prompt: \(error, privacy: .public)")
                     keepUnqueuedFirstMessage(
-                        trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                        text, repoID: target.repoID, worktreeName: target.worktreeName,
                         "Failed to queue your first message: \(error.localizedDescription)")
                 }
             }
@@ -309,6 +312,8 @@ extension AppState {
     /// for a blank draft. A blank draft whose creation failed before the row
     /// existed raises nothing, as before.
     func keepUnsentDraftAfterFailedCreation(_ target: QueuedPromptTarget, draft: String) {
+        // Judged blank on a trimmed copy; saved as typed, so a leading
+        // indent (a code block, say) survives.
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let lateFailure = target.failureAfterCreate
         Task { @MainActor in
@@ -318,7 +323,7 @@ extension AppState {
             }
             logger.error("Unsent first message kept: worktree creation failed")
             keepUnqueuedFirstMessage(
-                trimmed, repoID: target.repoID, worktreeName: target.worktreeName,
+                draft, repoID: target.repoID, worktreeName: target.worktreeName,
                 lateFailure.map { "\($0) Your first message was not sent." }
                     ?? "Worktree creation failed — your first message was not sent.")
         }

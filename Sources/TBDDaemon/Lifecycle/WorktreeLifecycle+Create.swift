@@ -635,10 +635,16 @@ extension WorktreeLifecycle {
             logger.error("could not delete failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             deleted = nil
         }
+        // Blankness is judged on a trimmed copy; the file gets the text as
+        // parked, so a leading indent (a code block, say) survives.
         if let row = deleted,
-           let repoID = row.repoID,
-           let text = row.pendingPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !text.isEmpty {
+           let text = row.pendingPrompt,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let repoID = row.repoID else {
+                // No repo means no `repos/<repoID>/` to save under.
+                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): the row has no repo")
+                return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptLost: true)
+            }
             let base = reposDir ?? TBDConstants.reposDir
             let directory = base
                 .appendingPathComponent(repoID.uuidString)
