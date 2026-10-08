@@ -38,6 +38,7 @@ HOLDER='TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()'
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export FLAKE_SEARCH_PAUSE_S=0
+export FLAKE_WRITE_PAUSE_S=0
 unset GITHUB_STEP_SUMMARY FLAKE_WRITE_TOKEN
 
 FAIL=0
@@ -785,6 +786,32 @@ test_a_run_read_after_a_recurrence_lands_in_the_episode_it_happened_in() {
   out="$(analyze "$w" "$mutant")"
   assert_eq "mutation: considering only the current episode's fixes counts the late run in episode 2" "2" \
     "$(jq -r '.actions[0].comment_body' <<< "$out" | sed -n '/flake-ledger-state$/,$p' | sed -n 2p | jq '[.failures[] | select(.episode == 1 and (.pre_fix | not))] | length')"
+}
+
+test_a_later_fix_that_did_not_hold_opens_its_own_episode() {
+  local w out
+  w="$(newwork)"; issue_with_bot_pr "$w"
+  # Bot PR 990 merged first (f1); a human's closing commit f2 landed later.
+  build set "$w" pr_states.json '{"990": {"state": "MERGED", "merge_sha": "f1", "merged_at": "2026-10-03T00:00:00Z"}}'
+  build run "$w" --id 1601 --branch x --sha aaaa --attempt "1|2026-10-04T10:00:00Z|failure" --attempt "2|2026-10-04T11:00:00Z|success" \
+    --artifact "16011|xunit-results|2026-10-04T10:30:00Z"
+  mkdir -p "$w/artifacts/16011"; cp "$FIX/xunit/pass2-swift-testing.xml" "$w/artifacts/16011/"
+  erased_run "$w" 1602 y --sha bbbb
+  jq '.[0].closed_reason = "completed" | .[0].closing_fix = {sha: "f2", at: "2026-10-05T00:00:00Z", pr: null}' "$w/issues.json" > "$w/i.json" && mv "$w/i.json" "$w/issues.json"
+  build set "$w" ancestry.json '{"f1..aaaa": true, "f2..bbbb": true}'
+  out="$(analyze "$w")"
+  assert_eq "two fixes that did not hold, two new episodes" "2" "$(jq -r '.tests[0].episode' <<< "$out")"
+  local mutant
+  mutant="$(mutant_of 's/^            fixes = \[dict\(f, episode=new_episode\).*$/            fixes = state.fixes/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: without moving the later fix forward, its failure is folded into episode 2" "1" "$(jq -r '.tests[0].episode' <<< "$out")"
+}
+
+test_analyze_refuses_a_work_dir_fetch_did_not_finish() {
+  local w rc=0
+  w="$(newwork)"; rm "$w/issues.json"
+  analyze "$w" > /dev/null 2>&1 || rc=$?
+  assert_eq "a missing issues.json is exit 2, not 'no issues'" "2" "$rc"
 }
 
 test_a_trait_issue_with_an_unparsable_bot_comment_is_not_split() {

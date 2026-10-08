@@ -421,7 +421,7 @@ def _parse_json_block(body: str, begin: str, end: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _code(text: str) -> str:
+def code_span(text: str) -> str:
     """Inline code that no message can break out of. Inside a code span
     `@login` and `#123` neither notify nor link; angle brackets become
     look-alikes so no message can open or close an HTML comment."""
@@ -457,7 +457,7 @@ def _human(state: State, repo: str, rows: int) -> str:
     distinct = distinct_occurrences(state)
     lines = [
         SENTINEL,
-        f"### Flake ledger: {_code(state.test_id)}",
+        f"### Flake ledger: {code_span(state.test_id)}",
         "",
         f"**Failures:** {failure_count(state)} recorded in all. The current episode "
         f"(episode {state.episode + 1}) has {current_count(state)}, across {len(distinct)} "
@@ -469,12 +469,12 @@ def _human(state: State, repo: str, rows: int) -> str:
         lines += ["", f"The `.flaky(issue:)` trait on this test names {refs}, which is shared with other tests or covers a whole suite; this issue tracks this test alone."]
     if distinct:
         lines += ["", "**Nights and branches (current episode):**"]
-        lines += [f"- {_code(o)}" for o in sorted(distinct)]
+        lines += [f"- {code_span(o)}" for o in sorted(distinct)]
     if state.fixes:
         lines += ["", "**Fixes on record:**"]
         for fix in state.fixes:
             via = f"#{fix['pr']}" if fix.get("pr") else "a commit"
-            lines.append(f"- {_code(fix['sha'][:12])} via {via}, episode {fix['episode'] + 1}")
+            lines.append(f"- {code_span(fix['sha'][:12])} via {via}, episode {fix['episode'] + 1}")
     if state.prs:
         lines += ["", "**Bot PRs:**"]
         lines += [f"- #{p['number']}: {p['outcome']}" for p in state.prs]
@@ -487,10 +487,10 @@ def _human(state: State, repo: str, rows: int) -> str:
                 tags.append("pre-fix")
             if f.suite_issue:
                 tags.append(f"stress target #{f.suite_issue}")
-            sig = f" {_code(f.signature)}" if f.signature else ""
+            sig = f" {code_span(f.signature)}" if f.signature else ""
             lines.append(
                 f"- {f.at} [run {f.run_id}, attempt {f.attempt}]({run_url(repo, f.run_id, f.attempt)})"
-                f" {_code(f.occurrence)} ({', '.join(tags)}){sig}"
+                f" {code_span(f.occurrence)} ({', '.join(tags)}){sig}"
             )
         hidden = len(state.failures) - len(shown)
         if hidden:

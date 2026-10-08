@@ -86,6 +86,10 @@ LABEL_DESCRIPTION = "One flaky test, tracked by the flake ledger"
 # GitHub's search API allows about 30 requests a minute; title lookups pause
 # between calls so a first run with many new tests stays under it.
 SEARCH_PAUSE_S = float(os.environ.get("FLAKE_SEARCH_PAUSE_S", "2.5"))
+# GitHub's secondary limit on content creation is about 80 writes a minute.
+# The first enabled run may create many issues at once, so it writes one issue
+# (up to four writes) every three seconds.
+WRITE_PAUSE_S = float(os.environ.get("FLAKE_WRITE_PAUSE_S", "3"))
 
 # A nightly xunit file is `<target>-<iteration>.xml` or its `-swift-testing`
 # twin (`nightly-flake-stress.sh --xunit-dir`).
@@ -260,7 +264,7 @@ def failures_from_run(run: dict, work: Path, notes: Notes, files: dict[str, tupl
 
 
 def collect_failures(work: Path, repo: str, now: datetime, notes: Notes, targets: dict[str, int]) -> tuple[dict[str, list[fl.Failure]], dict[str, tuple[str, int | None]]]:
-    runs = _read_json(work / "runs.json", [])
+    runs = _require_json(work / "runs.json")
     by_test: dict[str, list[fl.Failure]] = {}
     files: dict[str, tuple[str, int | None]] = {}
     seen: set[tuple[str, str]] = set()
@@ -508,8 +512,13 @@ def classify(state: fl.State, new: list[fl.Failure], ctx: Context) -> tuple[fl.S
         if not contains:
             failure = replace(failure, episode=fix["episode"], pre_fix=True)
         elif fix["episode"] == state.episode:
-            state = replace(state, episode=state.episode + 1)
-            failure = replace(failure, episode=state.episode)
+            # Fixes that landed after this failure belong to the episode it
+            # opens, so a later failure containing one of them is that fix's
+            # own recurrence rather than more of this one.
+            new_episode = state.episode + 1
+            fixes = [dict(f, episode=new_episode) if parse_time(f["at"]) > moment else f for f in state.fixes]
+            state = replace(state, episode=new_episode, fixes=fixes)
+            failure = replace(failure, episode=new_episode)
             recurrences.append((failure, fix))
         else:
             failure = replace(failure, episode=fix["episode"] + 1)
@@ -522,7 +531,7 @@ def reopen_body(test: str, recurrences: list[tuple[fl.Failure, dict]], repo: str
     failure, fix = recurrences[-1]
     via = f"#{fix['pr']}" if fix.get("pr") else "a commit"
     return (
-        f"Reopened by the flake ledger: `{test}` failed again in "
+        f"Reopened by the flake ledger: {fl.code_span(test)} failed again in "
         f"[run {failure.run_id}, attempt {failure.attempt}]({fl.run_url(repo, failure.run_id, failure.attempt)}) "
         f"on `{failure.head_sha[:12]}`, a commit that contains the fix `{fix['sha'][:12]}` ({via}). "
         f"The fix did not hold; this starts episode {failure.episode + 1}."
@@ -531,7 +540,7 @@ def reopen_body(test: str, recurrences: list[tuple[fl.Failure, dict]], repo: str
 
 def creation_body(test: str, links: list[int]) -> str:
     lines = [
-        f"Tracks the flaky test `{test}`: one issue per test (docs/specs/2026-10-07-flake-autofix-design.md).",
+        f"Tracks the flaky test {fl.code_span(test)}: one issue per test (docs/specs/2026-10-07-flake-autofix-design.md).",
         "",
         "The flake ledger keeps this test's failure history in its comment below and edits it in place each run.",
     ]
@@ -620,7 +629,7 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     targets = read_targets(work)
     inventory = read_inventory(work)
     by_test, files = collect_failures(work, repo, now, notes, targets)
-    issues = load_issues(_read_json(work / "issues.json", []), notes)
+    issues = load_issues(_require_json(work / "issues.json"), notes)
     # A test's file is also known from its own history, so a trait on a test
     # that has not run a `.flaky` record this week still matches.
     for view in issues.values():
@@ -995,6 +1004,8 @@ def apply(plan: dict, repo: str) -> None:
             gh_write("api", "-X", "PATCH", f"repos/{repo}/issues/comments/{action['comment_id']}", payload={"body": action["comment_body"]})
         else:
             gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": action["comment_body"]})
+        if WRITE_PAUSE_S > 0:
+            time.sleep(WRITE_PAUSE_S)
 
 
 def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: int, days: int) -> str:
@@ -1047,6 +1058,14 @@ def report_red_run(repo: str, run_id: int, issue: int, now: datetime) -> str:
 def _read_json(path: Path, default):
     if not path.exists():
         return default
+    return json.loads(path.read_text())
+
+
+def _require_json(path: Path):
+    """A file `fetch` always writes. Missing means fetch did not finish, and
+    reading it as empty would plan duplicate issues."""
+    if not path.exists():
+        raise AnalysisError(f"{path} is missing; fetch did not finish")
     return json.loads(path.read_text())
 
 
@@ -1143,6 +1162,11 @@ def main(argv: list[str]) -> int:
             print(report_red_run(args.repo, args.run_id, args.issue, _now(args.now)))
     except (GhError, AnalysisError) as error:
         print(f"flake-ledger: {error}", file=sys.stderr)
+        return 2
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        # An answer or file in a shape this script does not expect (bad JSON
+        # included: JSONDecodeError is a ValueError) fails closed the same way.
+        print(f"flake-ledger: unexpected data: {type(error).__name__}: {error}", file=sys.stderr)
         return 2
     return 0
 
