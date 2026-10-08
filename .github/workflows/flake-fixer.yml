@@ -530,7 +530,6 @@ jobs:
           fi
           set -uo pipefail
           abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
-          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 1"; exit 1; fi
           # Only this step decides an abort; a leftover file is the session's.
           rm -f "$T/abort_reason"
           rc=0
@@ -549,7 +548,7 @@ jobs:
             || abort "The process snapshot changed during session 1."
           bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 1 started survived SIGKILL (exit $rc); nothing is verified with one alive."
-          # Checked again now that no session process is left to swap it after the check.
+          # Checked once no session process is left to swap it after the check.
           if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 1"; exit 1; fi
           # The verification tree – checkout, .git, .build – must be the one
           # the baseline ran in: the verifier runs its git and its build.
@@ -767,7 +766,6 @@ jobs:
           fi
           set -uo pipefail
           abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
-          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 2"; exit 1; fi
           # Only this step decides an abort; a leftover file is the session's.
           rm -f "$T/abort_reason"
           rc=0
@@ -786,7 +784,7 @@ jobs:
             || abort "The process snapshot changed during session 2."
           bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 2 started survived SIGKILL (exit $rc); nothing is verified with one alive."
-          # Checked again now that no session process is left to swap it after the check.
+          # Checked once no session process is left to swap it after the check.
           if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 2"; exit 1; fi
           [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$VT")" = "$VT_SUM" ] \
             || abort "The verification tree changed during session 2."
@@ -930,12 +928,12 @@ jobs:
             echo no-diff > "$T/outcome"
           fi
           echo "Outcome: $(cat "$T/outcome")" >> "$GITHUB_STEP_SUMMARY"
-          # What publish acts on, summed into a step output no later step can
+          # Every file publish reads, summed into a step output no later step can
           # rewrite. The upload below is a `uses:` step, which still runs in
           # whatever environment a session left, so publish checks the
           # artifact against these sums before it trusts it.
           sums=""
-          for f in outcome candidate.bundle head_sha verify/verdict.json; do
+          for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
             if [ -f "$T/$f" ]; then sums="$sums$f:$(shasum -a 256 < "$T/$f" | cut -d' ' -f1);"; else sums="$sums$f:-;"; fi
           done
           echo "sums=$sums" >> "$GITHUB_OUTPUT"
@@ -1027,7 +1025,7 @@ jobs:
 
       # The artifact must be what `fix` packaged: its upload ran in the
       # environment a session left. A mismatch, or no sums at all, discards
-      # the candidate, and the attempt is recorded `aborted` from the pick.
+      # the candidate and records the attempt `aborted`, saying why.
       - name: Check the candidate against the fix job's sums
         if: steps.picked.outputs.picked == 'true'
         env:
@@ -1037,12 +1035,14 @@ jobs:
           A="$RUNNER_TEMP/flakefix-candidate"
           [ -d "$A" ] || exit 0
           got=""
-          for f in outcome candidate.bundle head_sha verify/verdict.json; do
+          for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
             if [ -f "$A/$f" ]; then got="$got$f:$(shasum -a 256 < "$A/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
           done
           if [ "$got" != "$SUMS" ]; then
             echo "::error::the candidate artifact is not what the fix job packaged; it is discarded and the attempt recorded aborted"
-            rm -rf "$A"
+            rm -rf "$A"; mkdir -p "$A"
+            echo aborted > "$A/outcome"
+            echo "The candidate artifact did not match what the fix job packaged, so it was discarded unread." > "$A/abort_reason"
           fi
 
       # Runs whether or not the candidate arrived: without it, the attempt is

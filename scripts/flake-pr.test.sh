@@ -790,11 +790,9 @@ end_run() {
   step_script "$wf" "End session $i" | sed "s|\${{ runner.temp }}|$rt|g" > "$script"
   shell="$(step_shell "$wf" "End session $i")"
   [[ -n "$shell" ]] || shell='bash --noprofile --norc -eo pipefail {0}'
-  # What "Record the verifier's environment" would have recorded.
-  clean="$(printf '%s\0' "PATH=$PATH" "HOME=$HOME" "TMPDIR=$rt/tmp" "T=$t" \
-    "VS=$rt/flakefix-verifier-scripts" "VT=$rt/flakefix-verify" "FLAKEFIX_NOTES=$t/flakefix-notes.md" \
-    "FLAKE_VERIFY_PS=$rt/bin/ps-stub" "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
-    "GIT_CEILING_DIRECTORIES=$SCRATCH" | base64 | tr -d '\n')"
+  # The record "Record the verifier's environment" itself makes, run in the
+  # environment the job has before session 1.
+  clean="$(record_env "$wf" "$rt")" || return 1
   : > "$rt/out"; : > "$rt/summary"
   # shellcheck disable=SC2046,SC2086 # the sums and the step's shell are word lists on purpose
   (cd "$rt/ws" && env $(cat "$rt/sums") "$@" CLEAN_ENV="$clean" \
@@ -803,6 +801,30 @@ end_run() {
     GITHUB_OUTPUT="$rt/out" GITHUB_STEP_SUMMARY="$rt/summary" \
     ${shell/\{0\}/$script} > "$rt/log" 2>&1) || rc=$?
   echo "$rc"
+}
+
+# record_env FILE RT: run FILE's "Record the verifier's environment" step as
+# the job would before session 1, and print the record it outputs.
+record_env() {
+  local wf="$1" rt="$2" t="$2/flakefix"
+  step_script "$wf" "Record the verifier" > "$rt/record.sh"
+  : > "$rt/record-out"
+  env -i PATH="$PATH" HOME="$HOME" TMPDIR="$rt/tmp" T="$t" VS="$rt/flakefix-verifier-scripts" VT="$rt/flakefix-verify" \
+    FLAKEFIX_NOTES="$t/flakefix-notes.md" FLAKE_VERIFY_PS="$rt/bin/ps-stub" GIT_CEILING_DIRECTORIES="$SCRATCH" \
+    GITHUB_OUTPUT="$rt/record-out" bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
+  sed -n 's/^env=//p' "$rt/record-out"
+}
+
+test_the_record_restores_what_the_job_had_and_pins_git() {
+  local rt rec
+  rt="$(end_world 1)"
+  rec="$(record_env "$WORKFLOW" "$rt" | base64 -d | tr '\0' '\n')"
+  assert_contains "it keeps the job's paths" "$rec" "T=$rt/flakefix"
+  assert_contains "and PATH" "$rec" "PATH=$PATH"
+  assert_contains "it pins git to no global config" "$rec" "GIT_CONFIG_GLOBAL=/dev/null"
+  assert_contains "nor system config" "$rec" "GIT_CONFIG_NOSYSTEM=1"
+  assert_lacks "it leaves out the step's own output file" "$rec" "GITHUB_OUTPUT="
+  assert_eq "one line of output" "1" "$(grep -c '^env=' "$rt/record-out")"
 }
 
 # Whether the step left a passing verdict where publish reads it.
@@ -949,7 +971,7 @@ test_a_judge_without_a_quarantine_answer_still_judges() {
 publish_check_script() { step "$1" publish "Check the candidate against" | awk '/^        run: \|$/{p=1; next} p' | sed -E 's/^ {10}//'; }
 sums_of() {
   local f got=""
-  for f in outcome candidate.bundle head_sha verify/verdict.json; do
+  for f in outcome abort_reason candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
     if [[ -f "$1/$f" ]]; then got="$got$f:$(shasum -a 256 < "$1/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
   done
   printf '%s' "$got"
@@ -957,26 +979,38 @@ sums_of() {
 tampered_artifact_discarded() {
   local rt a sums
   rt="$(mktmpd)"; a="$rt/flakefix-candidate"; mkdir -p "$a/verify"
-  echo candidate > "$a/outcome"; echo bundle > "$a/candidate.bundle"; echo "$VERDICT_FAIL" > "$a/verify/verdict.json"
-  sums="$(sums_of "$a")"
+  local planted
   publish_check_script "$1" > "$rt/check.sh"
-  RUNNER_TEMP="$rt" SUMS="$sums" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
-  [[ -f "$a/verify/verdict.json" ]] || return 1  # an untouched artifact is kept
-  echo "$VERDICT_PASS" > "$a/verify/verdict.json"
-  RUNNER_TEMP="$rt" SUMS="$sums" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
-  [[ ! -e "$a" ]] || return 1
-  mkdir -p "$a"; echo x > "$a/outcome"
+  # Each file publish reads, changed after packaging: the verdict, the report
+  # under the PR's evidence heading, and the baseline numbers.
+  for planted in verify/verdict.json verify/verdict.md baseline/f ""; do
+    rm -rf "$a"; mkdir -p "$a/verify" "$a/baseline"
+    echo candidate > "$a/outcome"; echo bundle > "$a/candidate.bundle"; echo "$VERDICT_FAIL" > "$a/verify/verdict.json"
+    echo "3 of 20 failed" > "$a/verify/verdict.md"; echo 3 > "$a/baseline/f"; echo 20 > "$a/baseline/v"
+    sums="$(sums_of "$a")"
+    [[ -z "$planted" ]] || echo planted > "$a/$planted"
+    RUNNER_TEMP="$rt" SUMS="$sums" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
+    if [[ -z "$planted" ]]; then
+      [[ "$(cat "$a/outcome")" == candidate && -f "$a/candidate.bundle" ]] || return 1  # an untouched artifact is kept
+    else
+      [[ "$(cat "$a/outcome")" == aborted && ! -e "$a/verify" && ! -e "$a/candidate.bundle" ]] || return 1
+      grep -q "did not match what the fix job packaged" "$a/abort_reason" || return 1
+    fi
+  done
+  echo candidate > "$a/outcome"
   RUNNER_TEMP="$rt" SUMS="" bash "$rt/check.sh" > /dev/null 2>&1 || return 1
-  [[ ! -e "$a" ]]  # no sums at all: nothing is trusted
+  [[ "$(cat "$a/outcome")" == aborted ]]  # no sums at all: nothing is trusted
 }
 test_publish_discards_an_artifact_that_is_not_what_fix_packaged() {
-  check "a verdict changed after packaging is discarded" tampered_artifact_discarded \
+  check "a file changed after packaging discards the candidate" tampered_artifact_discarded \
     'if [ "$got" != "$SUMS" ]; then' 'if false; then'
   assert_contains "fix exports the sums" "$(job_block "$WORKFLOW" fix | sed -n 1,20p)" 'sums: ${{ steps.package.outputs.sums }}'
   assert_contains "publish reads them" "$(step "$WORKFLOW" publish "Check the candidate against")" 'SUMS: ${{ needs.fix.outputs.sums }}'
   local job pkg pub
-  pkg="$(step_script "$WORKFLOW" "Package the attempt" | grep -F 'shasum -a 256 <' | sed 's/^ *//')"
-  pub="$(publish_check_script "$WORKFLOW" | grep -F 'shasum -a 256 <' | sed 's/^ *//; s/\$A/$T/g; s/got/sums/g')"
+  pkg="$(step_script "$WORKFLOW" "Package the attempt" | grep -E 'shasum -a 256 <|for f in ' | sed 's/^ *//')"
+  pub="$(publish_check_script "$WORKFLOW" | grep -E 'shasum -a 256 <|for f in ' | sed 's/^ *//; s/\$A/$T/g; s/got/sums/g')"
+  assert_eq "over the same files" "$(sums_of /nonexistent | tr ';' '\n' | sed 's/:-$//' | tr '\n' ' ' | sed 's/ $//')" \
+    "$(sed -n 's/^for f in \(.*\); do$/\1/p' <<< "$pkg")"
   assert_eq "both sides sum the same way" "$pkg" "$pub"
   job="$(job_block "$WORKFLOW" publish)"
   assert_eq "and checks before it pushes" "0" "$(awk '/name: Check the candidate against/{c=NR} /name: Push, open the draft PR/{p=NR} END{print !(c && p && c < p)}' <<< "$job")"

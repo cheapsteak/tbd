@@ -850,9 +850,10 @@ session can rewrite, and checks the runner against it afterwards:
   variable or site directory reaches it.
 - **The artifact is checked against what was packaged.** The upload is a
   `uses:` step, which still runs in the environment a session left. So the
-  packaging step sums the files `publish` acts on – the outcome, the bundle,
-  its head, and the verdict – into a job output, and `publish` discards an
-  artifact that does not match and records the attempt `aborted`.
+  packaging step sums every file `publish` reads – the outcome, the bundle,
+  its head, the verdict and its report, the baseline numbers, the notes –
+  into a job output, and `publish` discards an artifact that does not match
+  and records the attempt `aborted`, saying the artifact did not match.
 - **Try 1's output is digested before session 2.** When session 2 makes no
   commit, try 1's verdict stands (§6.6). It is used only if it matches, byte
   for byte, the digest taken before session 2 started, and it is removed after
