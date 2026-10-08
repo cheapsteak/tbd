@@ -351,23 +351,31 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// legitimate cancel is indistinguishable from a git failure by status
     /// alone. Only the daemon knows which happened, so it says so here.
     public let creationFailed: Bool
+    /// Where the daemon saved the first message parked in this row, when a
+    /// failed creation deleted the row with the message in it
+    /// (`UnsentPromptFile`). Nil when nothing was parked, when the save
+    /// failed, and on every deliberate archive. Optional so payloads from a
+    /// daemon that predates it still decode.
+    public let unsentPromptPath: String?
 
-    public init(worktreeID: UUID, creationFailed: Bool = false) {
+    public init(worktreeID: UUID, creationFailed: Bool = false, unsentPromptPath: String? = nil) {
         self.worktreeID = worktreeID
         self.creationFailed = creationFailed
+        self.unsentPromptPath = unsentPromptPath
     }
 
     // Explicit decoding: a synthesized `init(from:)` ignores property defaults
     // and would throw `keyNotFound` against an older daemon that never sends
     // this key. Absent means "not a creation failure".
     private enum CodingKeys: String, CodingKey {
-        case worktreeID, creationFailed
+        case worktreeID, creationFailed, unsentPromptPath
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
         self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
+        self.unsentPromptPath = try c.decodeIfPresent(String.self, forKey: .unsentPromptPath)
     }
 }
 

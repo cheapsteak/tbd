@@ -391,8 +391,9 @@ public actor OrphanGC {
 
     /// Reclaims files under `~/tbd/repos/<repoID>/unsent-prompts/` older than
     /// `unsentPromptRetention` by modification date — the named reconciler for
-    /// the first messages the app writes there when a worktree creation fails
-    /// with a message composed for it.
+    /// the first messages written there when a worktree creation fails: by the
+    /// daemon for a message parked in the row it deletes, by the app for a
+    /// composer draft or a refused park.
     ///
     /// Under `gcEnabled` alone, with no flag of its own: each file is a copy
     /// the operator was told about (alert, path, pasteboard) when it was

@@ -1931,6 +1931,9 @@ final class AppState {
     /// asked to call something first.
     var queuedPromptTarget: QueuedPromptTarget? {
         didSet {
+            if let closed = oldValue, closed !== queuedPromptTarget {
+                composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== closed }
+            }
             if queuedPromptTarget == nil { advanceQueuedPromptBacklog() }
         }
     }
@@ -1942,29 +1945,13 @@ final class AppState {
     /// the operator can be left typing into a modal bound to the *previous*
     /// target. They queue instead.
     @ObservationIgnored var queuedPromptBacklog: [QueuedPromptTarget] = []
-    /// Composer targets whose daemon row exists but may still fail to finish
-    /// creating, keyed by the daemon's worktree ID. `worktree.create` returns
-    /// once the row exists, so the target resolves `.created` long before
-    /// `git worktree add` runs; a failure there arrives later as a
-    /// `.worktreeArchived(creationFailed: true)` delta, and this is how that
-    /// delta finds the composer it belongs to. Released when the row is seen
-    /// leaving `.creating`, when it is archived, or when an unscoped refresh
-    /// no longer lists it.
-    @ObservationIgnored var creationWatchTargets: [UUID: QueuedPromptTarget] = [:]
-    /// First messages handed to the daemon for a row that may still fail to
-    /// finish creating, keyed by the daemon's worktree ID. A failed creation
-    /// deletes the row and its `pending_prompt` with it, so this is the only
-    /// copy left to save. Released on the same terms as
-    /// `creationWatchTargets`, except while its parking RPC is in flight.
-    @ObservationIgnored var firstMessagesAwaitingCreation: [UUID: FirstMessageAwaitingCreation] = [:]
-    /// Watched rows a refresh has listed since the watch began. Only these
-    /// can be judged gone by their absence from a later list; see
-    /// `releaseCreationWatches`.
-    @ObservationIgnored var creationWatchesListed: Set<UUID> = []
-    /// Worktree IDs from recent creation-failure deltas, newest last, bounded
-    /// by `recentCreationFailureLimit`. Lets a `worktree.create` response
-    /// processed after its own failure delta see that the row is already gone.
-    @ObservationIgnored var recentCreationFailures: [UUID] = []
+    /// Composers on screen or queued, keyed by their daemon worktree ID once
+    /// `worktree.create` has returned it. `git worktree add` runs after that
+    /// return, so its failure arrives later as a
+    /// `.worktreeArchived(creationFailed: true)` delta, and this is how the
+    /// delta finds the composer whose draft would otherwise go with the row.
+    /// An entry leaves when its composer closes and on any archive of its row.
+    @ObservationIgnored var composerTargetsByWorktreeID: [UUID: QueuedPromptTarget] = [:]
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -2957,24 +2944,9 @@ final class AppState {
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
         // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
-        var failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
-        if delta.creationFailed, creationWatchTargets[delta.worktreeID] == nil,
-           firstMessagesAwaitingCreation[delta.worktreeID] == nil {
-            // Nothing is watching this row yet — its `worktree.create`
-            // response may still be on its way. Leave a note for it.
-            noteCreationFailure(delta.worktreeID)
-        }
-        // A first message composed for this row — parked, or still being typed
-        // — would otherwise vanish with it. When one is taken over, its own
-        // alert carries the failure, so the generic one stands down rather
-        // than stacking a second alert.
-        if handOffFirstMessage(
-            forArchivedWorktree: delta.worktreeID,
-            creationFailed: delta.creationFailed,
-            failureMessage: failureMessage
-        ) {
-            failureMessage = nil
-        }
+        let failureMessage = creationFailureAlert(
+            worktree, delta: delta,
+            composer: composerTargetsByWorktreeID.removeValue(forKey: delta.worktreeID))
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
@@ -2992,9 +2964,37 @@ final class AppState {
         // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
         // pre-session hook — arrives with creationFailed == false and must stay
         // silent, even though the row is `.creating` at this moment.
+        //
+        // Raised even when an open composer is about to save its draft: that
+        // composer's own alert replaces this one in the single alert slot, and
+        // if it has nothing to save this one is the only word of the failure.
         if let message = failureMessage {
-            showAlert(message, isError: true)
+            showAlert(message.text, isError: true, revealPath: message.revealPath)
         }
+    }
+
+    /// The alert for a creation-failure archive, and the composer side of it.
+    ///
+    /// Names the file the daemon saved the row's parked first message to, if
+    /// it saved one. Tells this row's composer the creation failed: an open
+    /// one saves its draft and closes, a queued one — never on screen, so
+    /// holding no draft — is dropped from the queue. A deliberate archive
+    /// (`creationFailed == false`) returns nil and leaves the composer alone.
+    private func creationFailureAlert(
+        _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
+    ) -> (text: String, revealPath: String?)? {
+        guard delta.creationFailed else { return nil }
+        let named = Self.creationFailureMessage(worktree, creationFailed: true)
+        guard let failure = named
+            ?? ((composer != nil || delta.unsentPromptPath != nil) ? "Worktree creation failed." : nil)
+        else { return nil }
+        if let composer {
+            composer.failAfterCreate(reason: failure)
+            queuedPromptBacklog.removeAll { $0 === composer }
+        }
+        guard let path = delta.unsentPromptPath else { return (failure, nil) }
+        let shown = (path as NSString).abbreviatingWithTildeInPath
+        return ("\(failure) Its first message was saved to \(shown).", path)
     }
 
     /// Returns a failure alert message when the daemon reported that this
@@ -3722,7 +3722,6 @@ final class AppState {
             // `.inFlight` until the daemon reports the row `.active` — this
             // periodic refresh is where that flip is observed.
             promoteRevivedWorktrees(observing: allWts)
-            releaseCreationWatches(observing: allWts, complete: repoID == nil)
 
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet

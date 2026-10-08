@@ -1,8 +1,6 @@
 import Foundation
 import Testing
-@testable import TBDApp
 import TBDShared
-import TestSupport
 
 /// `UnsentPromptFile` — where a first message that never reached its worktree
 /// is written. Tier 2: a real temp directory, a fixed date and time zone, so
@@ -16,7 +14,8 @@ struct UnsentPromptFileTests: ~Copyable {
     let root: URL
 
     init() {
-        root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdunsent"), isDirectory: true)
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbdunsent-\(UUID().uuidString)", isDirectory: true)
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }

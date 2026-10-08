@@ -196,14 +196,15 @@ public enum TBDConstants {
     }
 
     /// Name of the per-repo directory holding first messages that never
-    /// reached a worktree. Shared by the app, which writes into it, and
-    /// `OrphanGC`, which reclaims what ages out of it.
+    /// reached a worktree. Shared by the app and the daemon, which write into
+    /// it, and `OrphanGC`, which reclaims what ages out of it.
     public static let unsentPromptsDirName = "unsent-prompts"
 
     /// Directory holding a repo's unsent first messages:
-    /// `~/tbd/repos/<repoID>/unsent-prompts/`. The app writes one file here
-    /// when a worktree creation fails with a first message the operator
-    /// composed for it; `OrphanGC` reclaims files older than 30 days.
+    /// `~/tbd/repos/<repoID>/unsent-prompts/`. One file is written here (by
+    /// the daemon or the app, see `UnsentPromptFile`) when a worktree creation
+    /// fails with a first message composed for it; `OrphanGC` reclaims files
+    /// older than 30 days.
     /// Honors TBD_HOME.
     public static func unsentPromptsDir(repoID: UUID, environment: [String: String]) -> URL {
         reposDir(environment: environment)

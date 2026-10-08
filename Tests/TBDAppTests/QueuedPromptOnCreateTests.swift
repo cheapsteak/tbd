@@ -536,34 +536,42 @@ struct QueuedPromptOnCreateTests {
         return (target, created)
     }
 
-    private func failCreation(_ state: AppState, _ id: UUID, creationFailed: Bool = true) {
-        state.handleDelta(.worktreeArchived(
-            WorktreeIDDelta(worktreeID: id, creationFailed: creationFailed)))
+    private func archive(
+        _ state: AppState, _ id: UUID, creationFailed: Bool = true, unsentPromptPath: String? = nil
+    ) {
+        state.handleDelta(.worktreeArchived(WorktreeIDDelta(
+            worktreeID: id, creationFailed: creationFailed, unsentPromptPath: unsentPromptPath)))
     }
 
-    @Test("A parked first message is saved when git worktree add fails afterwards")
-    func parkedMessageIsSavedOnLateCreationFailure() async throws {
+    @Test("The failure alert names the file the daemon saved a parked message to")
+    func failureAlertNamesTheDaemonsFile() async throws {
         try await withAppState { state in
-            let repoID = UUID()
             let harness = Harness()
-            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: repoID)
+            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
             state.submitQueuedPrompt(target, text: "parked then lost", submit: true)
-            await waitUntil("parked") {
-                state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == false
-            }
-            #expect(harness.parked?.text == "parked then lost")
+            await waitUntil("parked") { harness.parked != nil }
+            let daemonPath = "/tmp/fake-home/repos/r/unsent-prompts/20260101-000000-late-fail.md"
 
-            failCreation(state, created.id)
+            archive(state, created.id, unsentPromptPath: daemonPath)
 
-            #expect(harness.saved.count == 1)
-            #expect(harness.saved.first?.text == "parked then lost")
-            #expect(harness.saved.first?.repoID == repoID)
-            // ONE alert: the failure and where the text went, together.
             #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
-            #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
-            #expect(state.alertRevealPath == Self.savedPath)
-            #expect(state.firstMessagesAwaitingCreation.isEmpty)
-            #expect(state.creationWatchTargets.isEmpty)
+            #expect(state.alertMessage?.contains("saved to \(daemonPath)") == true)
+            #expect(state.alertRevealPath == daemonPath)
+            // The daemon saved it; the app writes nothing of its own.
+            #expect(harness.saved.isEmpty)
+        }
+    }
+
+    @Test("Without a daemon path the failure alert offers no file")
+    func failureAlertWithoutAPathOffersNoFile() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (_, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+
+            archive(state, created.id)
+
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertRevealPath == nil)
         }
     }
 
@@ -573,70 +581,48 @@ struct QueuedPromptOnCreateTests {
             let repoID = UUID()
             let harness = Harness()
             let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: repoID)
-            target.composerOpened()
+            #expect(state.composerTargetsByWorktreeID[created.id] === target)
 
-            failCreation(state, created.id)
+            archive(state, created.id)
 
-            // The generic alert stands down for the open sheet, which will
-            // raise one alert of its own as it closes.
+            // The failure alert goes up at once; the composer's own alert,
+            // naming its draft, replaces it in the single slot.
             #expect(target.hasFailed)
             #expect(target.failureAfterCreate?.contains("Couldn't create worktree") == true)
-            #expect(state.alertMessage == nil)
-            #expect(state.creationWatchTargets.isEmpty)
+            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertRevealPath == nil)
+            #expect(state.composerTargetsByWorktreeID.isEmpty)
 
             // What the sheet does on seeing `hasFailed`.
-            #expect(QueuedPromptModal.shouldHandOffDraft(
-                creationFailed: target.hasFailed, submitted: false, handedOff: false))
+            #expect(QueuedPromptModal.shouldHandOffDraft(creationFailed: target.hasFailed, submitted: false))
             state.keepUnsentDraftAfterFailedCreation(target, draft: "half typed")
-            await waitUntil("alert") { state.alertMessage != nil }
+            await waitUntil("draft alert") { state.alertRevealPath != nil }
 
             #expect(harness.saved.map(\.text) == ["half typed"])
+            #expect(harness.saved.first?.repoID == repoID)
             #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
             #expect(state.alertMessage?.contains("saved to \(Self.savedPath)") == true)
             #expect(state.alertRevealPath == Self.savedPath)
         }
     }
 
-    @Test("An open composer with a blank draft still gets the failure alert")
-    func blankOpenDraftStillGetsTheFailureAlert() async throws {
+    @Test("A deliberate archive of a creating row does nothing to its composer")
+    func deliberateArchiveDoesNothing() async throws {
         try await withAppState { state in
             let harness = Harness()
             let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
-            target.composerOpened()
 
-            failCreation(state, created.id)
-            #expect(state.alertMessage == nil)
-            state.keepUnsentDraftAfterFailedCreation(target, draft: "   ")
-            await waitUntil("alert") { state.alertMessage != nil }
+            archive(state, created.id, creationFailed: false)
 
-            #expect(harness.saved.isEmpty)
-            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
-            #expect(state.alertRevealPath == nil)
-        }
-    }
-
-    @Test("A deliberate archive of a creating row saves nothing")
-    func deliberateArchiveSavesNothing() async throws {
-        try await withAppState { state in
-            let harness = Harness()
-            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
-            state.submitQueuedPrompt(target, text: "the operator archived this", submit: true)
-            await waitUntil("parked") {
-                state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == false
-            }
-
-            failCreation(state, created.id, creationFailed: false)
-
-            #expect(harness.saved.isEmpty)
             #expect(state.alertMessage == nil)
             #expect(target.hasFailed == false)
+            #expect(harness.saved.isEmpty)
             // Released all the same, so nothing leaks.
-            #expect(state.firstMessagesAwaitingCreation.isEmpty)
-            #expect(state.creationWatchTargets.isEmpty)
+            #expect(state.composerTargetsByWorktreeID.isEmpty)
         }
     }
 
-    @Test("A queued composer whose creation fails late is dropped, and the generic alert stands")
+    @Test("A queued composer whose creation fails late is dropped, and the failure alert shows")
     func backloggedTargetIsDroppedOnLateFailure() async throws {
         try await withAppState { state in
             let harness = Harness()
@@ -649,180 +635,68 @@ struct QueuedPromptOnCreateTests {
             state.createWorktree(repoID: repoID)
             let queued = try #require(state.queuedPromptBacklog.first)
             await waitUntil("created") { queued.resolution == .created(created.id) }
-            await waitUntil("swap") { state.findWorktree(id: created.id) != nil }
+            #expect(state.composerTargetsByWorktreeID[created.id] === queued)
 
-            failCreation(state, created.id)
+            archive(state, created.id)
 
             #expect(state.queuedPromptBacklog.isEmpty)
             #expect(queued.hasFailed)
-            #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
+            #expect(state.alertMessage?.contains("creat") == true)
             #expect(harness.saved.isEmpty)
         }
     }
 
-    @Test("A refresh releases finished rows, and judges absence only for rows it has listed")
-    func refreshReleasesFinishedCreationWatches() async {
-        await withAppState { state in
-            let harness = Harness()
-            let repoID = UUID()
-            arm(state, harness, created: daemonWorktree(repoID: repoID))
-            var active = daemonWorktree(repoID: repoID, name: "done")
-            active.status = .active
-            let creating = daemonWorktree(repoID: repoID, name: "still-creating")
-            let inFlightID = UUID()
-            let neverListedID = UUID()
-            func message(_ text: String, inFlight: Bool = false) -> FirstMessageAwaitingCreation {
-                FirstMessageAwaitingCreation(
-                    text: text, repoID: repoID, worktreeName: "n", parkingInFlight: inFlight)
-            }
-            let target = QueuedPromptTarget(placeholderID: UUID(), repoID: repoID, worktreeName: "n")
-            state.creationWatchTargets = [active.id: target, creating.id: target, neverListedID: target]
-            state.firstMessagesAwaitingCreation = [
-                active.id: message("a"), creating.id: message("vanished"),
-                inFlightID: message("i", inFlight: true), neverListedID: message("n"),
-            ]
-
-            // A finished row is released; a creating one is marked as seen.
-            state.releaseCreationWatches(observing: [active, creating], complete: false)
-            #expect(Set(state.creationWatchTargets.keys) == [creating.id, neverListedID])
-            #expect(Set(state.firstMessagesAwaitingCreation.keys) == [creating.id, inFlightID, neverListedID])
-
-            // A complete list without the never-listed row proves nothing: it
-            // may predate the row.
-            state.releaseCreationWatches(observing: [creating], complete: true)
-            #expect(Set(state.firstMessagesAwaitingCreation.keys) == [creating.id, inFlightID, neverListedID])
-            #expect(harness.saved.isEmpty)
-
-            // The listed row vanishing while creating is a failed creation:
-            // its text is saved, not dropped. Mid-RPC stays untouched.
-            state.releaseCreationWatches(observing: [], complete: true)
-            #expect(harness.saved.map(\.text) == ["vanished"])
-            #expect(state.alertMessage?.contains("disappeared before it finished creating") == true)
-            #expect(Set(state.firstMessagesAwaitingCreation.keys) == [inFlightID, neverListedID])
-            #expect(Set(state.creationWatchTargets.keys) == [neverListedID])
-        }
-    }
-
-    @Test("A stale list that predates the create does not release a live watch")
-    func staleListDoesNotReleaseALiveWatch() async throws {
+    @Test("Closing the composer stops tracking it")
+    func closingTheComposerReleasesItsEntry() async throws {
         try await withAppState { state in
             let harness = Harness()
             let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
-            state.submitQueuedPrompt(target, text: "survives a stale list", submit: true)
-            await waitUntil("parked") {
-                state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == false
-            }
+            #expect(state.composerTargetsByWorktreeID[created.id] === target)
 
-            // An unscoped list issued before the row was inserted.
-            state.releaseCreationWatches(observing: [], complete: true)
-            #expect(state.firstMessagesAwaitingCreation[created.id] != nil)
-            #expect(state.creationWatchTargets[created.id] === target)
-            #expect(harness.saved.isEmpty)
+            state.dismissPresentedPromptSheet()
+            #expect(state.composerTargetsByWorktreeID.isEmpty)
 
-            // So the failure delta that follows still finds the text.
-            failCreation(state, created.id)
-            #expect(harness.saved.map(\.text) == ["survives a stale list"])
-        }
-    }
-
-    @Test("A composer that is not taking the hand-off leaves the failure alert to the delta")
-    func closingComposerDoesNotSuppressTheFailureAlert() async throws {
-        try await withAppState { state in
-            let harness = Harness()
-            let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
-            target.composerOpened()
-            // Cancel, Escape or Send pressed just before the delta.
-            target.composerClosing()
-
-            failCreation(state, created.id)
-
-            #expect(target.hasFailed)
+            // Cancel discards by design: the failure alert still shows, and
+            // the closed composer is not told.
+            archive(state, created.id)
+            #expect(target.hasFailed == false)
             #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
         }
     }
 
-    @Test("A failure delta that beats the create response still reaches the composer")
-    func failureDeltaAheadOfCreateResponse() async throws {
-        try await withAppState { state in
-            let repoID = UUID()
-            let created = daemonWorktree(repoID: repoID, name: "late-fail")
-            let harness = Harness()
-            arm(state, harness, created: created)
-            state.worktreeCreator = { @MainActor _ in
-                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                    harness.createGate = c
-                }
-                return created
-            }
-            state.daemonCapabilities = capabilities(queuedPrompt: true)
-            state.createWorktree(repoID: repoID)
-            let target = try #require(state.queuedPromptTarget)
-            await waitUntil("create entered") { harness.createGate != nil }
-
-            failCreation(state, created.id)
-            #expect(state.recentCreationFailures == [created.id])
-
-            harness.createGate?.resume()
-            await waitUntil("resolved") { target.resolution != nil }
-
-            #expect(target.hasFailed)
-            #expect(state.creationWatchTargets.isEmpty)
-            #expect(state.recentCreationFailures.isEmpty)
-
-            // A submit after that does not park into the deleted row.
-            state.submitQueuedPrompt(target, text: "too late", submit: true)
-            await waitUntil("saved") { !harness.saved.isEmpty }
-            #expect(harness.parked == nil)
-            #expect(harness.saved.map(\.text) == ["too late"])
-        }
-    }
-
-    @Test("Remembered creation failures are bounded")
-    func recentCreationFailuresAreBounded() async {
-        await withAppState { state in
-            let ids = (0..<(AppState.recentCreationFailureLimit + 5)).map { _ in UUID() }
-            for id in ids { state.noteCreationFailure(id) }
-            #expect(state.recentCreationFailures == Array(ids.suffix(AppState.recentCreationFailureLimit)))
-        }
-    }
-
-    @Test("A failure delta during the parking RPC saves once and alerts once")
-    func failureDuringParkingRPCSavesOnce() async throws {
+    @Test("A park that races the failed creation's delete is saved once, by the app")
+    func parkRacingTheDeleteIsSavedOnce() async throws {
         try await withAppState { state in
             let harness = Harness()
             let (target, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
             var parkGate: CheckedContinuation<Void, Never>?
             state.pendingPromptSetter = { @MainActor _, _, _ in
                 await withCheckedContinuation { parkGate = $0 }
-                // The row is gone by now; the daemon refuses. Without the
-                // ownership check this would save and alert a second time.
+                // The row was deleted before the park reached it.
                 return .refused(reason: "no such worktree")
             }
             state.submitQueuedPrompt(target, text: "raced", submit: true)
             await waitUntil("parking entered") { parkGate != nil }
-            #expect(state.firstMessagesAwaitingCreation[created.id]?.parkingInFlight == true)
 
-            failCreation(state, created.id)
-            #expect(harness.saved.map(\.text) == ["raced"])
-            let alert = try #require(state.alertMessage)
-            #expect(alert.contains("Couldn't create worktree"))
-            state.alertMessage = nil
+            // Nothing was parked, so the daemon saved nothing.
+            archive(state, created.id)
+            #expect(harness.saved.isEmpty)
 
             parkGate?.resume()
+            await waitUntil("saved") { !harness.saved.isEmpty }
             await drain()
 
-            #expect(harness.saved.count == 1)
-            #expect(state.alertMessage == nil)
+            #expect(harness.saved.map(\.text) == ["raced"])
+            #expect(state.alertRevealPath == Self.savedPath)
         }
     }
 
-    @Test("The composer hands its draft off only on failure, once, and never after a submit")
+    @Test("The composer hands its draft off only on failure, and never after a submit")
     func shouldHandOffDraftBranches() {
-        #expect(QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: false, handedOff: false))
-        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: true, handedOff: false))
-        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: false, handedOff: true))
-        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: false, handedOff: false))
-        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: true, handedOff: false))
+        #expect(QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: false))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: true, submitted: true))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: false))
+        #expect(!QueuedPromptModal.shouldHandOffDraft(creationFailed: false, submitted: true))
     }
 
     @Test("Closing an alert clears its file, and a plain alert carries none")

@@ -1,26 +1,27 @@
 import Foundation
-import TBDShared
 
 /// Writes a first message that never reached its worktree to a file the
 /// operator can find again: `~/tbd/repos/<repoID>/unsent-prompts/
 /// <yyyyMMdd-HHmmss>-<worktree-name>.md`.
 ///
-/// Written only when creation or parking fails — never while the operator is
-/// typing — so the directory holds exactly the messages that were lost
-/// somewhere else. This file is the store; the pasteboard is used only when
-/// the write fails, because the next copy overwrites it.
+/// Written only when a creation fails — never while the operator is typing —
+/// so the directory holds exactly the messages that were lost somewhere else.
+/// Two writers share it: the daemon, for a message already parked in the row
+/// a failed creation deletes, and the app, for a draft still in the composer
+/// or a park the daemon refused. The pasteboard is the app's fallback only
+/// when the write fails, because the next copy overwrites it.
 ///
 /// `OrphanGC` is the named reconciler for the directory: it removes files
 /// older than 30 days under `gcEnabled`.
-enum UnsentPromptFile {
+public enum UnsentPromptFile {
     /// Longest worktree-name fragment a filename carries. Names are generated
     /// slugs or operator-typed display names; this keeps a pasted paragraph
     /// from producing a filename the filesystem refuses.
-    static let maxNameLength = 80
+    public static let maxNameLength = 80
 
     /// The `yyyyMMdd-HHmmss` stamp, in the operator's local time unless a
     /// test pins a zone.
-    static func timestamp(_ date: Date, timeZone: TimeZone = .current) -> String {
+    public static func timestamp(_ date: Date, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -34,7 +35,7 @@ enum UnsentPromptFile {
     /// becomes `-`, runs collapse, and leading or trailing `-`/`.` are dropped
     /// so the result can never be a dotfile or `..`. An empty result falls
     /// back to `worktree`.
-    static func sanitizedName(_ name: String) -> String {
+    public static func sanitizedName(_ name: String) -> String {
         var out = ""
         var lastWasDash = false
         for scalar in name.unicodeScalars {
@@ -58,7 +59,7 @@ enum UnsentPromptFile {
     /// the same second for the same name — gets `-2`, `-3`, … before `.md`.
     /// The no-overwrite check is the write itself (`.withoutOverwriting`), so
     /// a concurrent writer cannot slip in between a check and the write.
-    static func write(
+    public static func write(
         text: String,
         worktreeName: String,
         directory: URL,

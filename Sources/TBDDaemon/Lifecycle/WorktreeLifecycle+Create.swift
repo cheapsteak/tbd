@@ -228,7 +228,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -580,10 +580,55 @@ extension WorktreeLifecycle {
             return .ready
 
         } catch {
-            // On failure, delete the DB row
-            try? await db.worktrees.delete(id: worktreeID)
+            // On failure, delete the DB row — unless the caller rolls back
+            // itself, as `worktree.create` does to learn where the row's
+            // parked first message went (`rollBackFailedCreate`).
+            if rollBackOnFailure {
+                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+            }
             throw error
         }
+    }
+
+    /// Delete the row of a creation that failed, saving any first message
+    /// parked in it first, and return the archive delta that reports the
+    /// failure.
+    ///
+    /// The app parks a first message against the row as soon as
+    /// `worktree.create` returns, which is before `git worktree add` runs. A
+    /// failure there deletes the row and its `pending_prompt` with it, so the
+    /// daemon — the only side that still has the text — writes it to
+    /// `~/tbd/repos/<repoID>/unsent-prompts/` (`UnsentPromptFile`) and names
+    /// the file in the delta. A blank or absent prompt writes nothing. A
+    /// failed write is logged and leaves the path nil: the row is deleted
+    /// either way, because a creation that failed must not linger as a
+    /// `.creating` row.
+    ///
+    /// `reposDir` and `date` are test seams; production resolves them from
+    /// `TBDConstants` (honoring `TBD_HOME`) and the lifecycle's date seam.
+    func rollBackFailedCreate(
+        worktreeID: UUID, reposDir: URL? = nil, date: Date? = nil
+    ) async -> WorktreeIDDelta {
+        var savedPath: String?
+        if let row = try? await db.worktrees.getLocal(id: worktreeID),
+           let repoID = row.repoID,
+           let text = row.pendingPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            let base = reposDir ?? TBDConstants.reposDir
+            let directory = base
+                .appendingPathComponent(repoID.uuidString)
+                .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
+            do {
+                savedPath = try UnsentPromptFile.write(
+                    text: text, worktreeName: row.displayName,
+                    directory: directory, date: date ?? now())
+                logger.info("saved parked first message of failed create \(worktreeID, privacy: .public) to \(savedPath ?? "", privacy: .public)")
+            } catch {
+                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        try? await db.worktrees.delete(id: worktreeID)
+        return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptPath: savedPath)
     }
 
     /// Creates an initial Notes tab and appends it to the tab order (last; the
