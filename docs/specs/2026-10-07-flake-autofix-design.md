@@ -263,8 +263,10 @@ no two jobs ever edit the same comment:
 - **`publish`** appends an entry to the attempt comment for every `fix` run
   that picked a target, with the `fix` run's ID and start time, the `main` SHA,
   the session's notes, and one outcome:
-  - `aborted` – the job ended before producing a candidate artifact (§8);
-  - `no-diff` – the session made no commits;
+  - `aborted` – the job ended before producing a candidate artifact (§8),
+    or a fixer session failed and left no commit, which the entry marks
+    `session_failed` because nothing reached the verifier;
+  - `no-diff` – a session that finished made no commits;
   - `push-refused` – GitHub rejected the push (§8);
   - `pr-opened` – with the PR number, the scope, `N`, the false-pass
     probability or `unknown`, whether the evidence was weak (§6.5), whether a
@@ -417,6 +419,14 @@ list of open PRs, and chooses at most one test. A test is **eligible** when:
     once the ledger has recorded a failure after that attempt's start. Without
     that condition the bot would retry the same test every night on the same
     evidence;
+  - `aborted` marked `session_failed` – eligible at once: an outage, an
+    expired token, or a crashed session says nothing about the test, so
+    waiting for a new failure would only lock the test out. Once: if the
+    attempt before it was also a session failure, with no failure recorded
+    after that one's start, the test waits for a new failure like any other
+    abort. A session that ran out of turns or time also counts as failed, and
+    the same bound keeps one that does so on every try from holding every
+    night's slot;
   - `pr-opened` with no close recorded yet – not eligible; the open-PR check
     above also covers it;
   - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
@@ -799,25 +809,94 @@ verdict's path:
 - **The package definition** – `Package.swift` and `Package.resolved`, which
   decide what is built, which test targets exist, and which dependency and
   plugin code runs during the build.
+- **The build directories** – `.build/` and `.swiftpm/`. Both are gitignored,
+  so a tracked file under them was forced in, and checking it out would write
+  over the verification tree's warm build, which the verifier keeps between
+  runs. The verifier refuses to apply such a candidate at all, before touching
+  the tree. The refusal is the candidate's own failure, like one that does not
+  build: the try fails with that reason and the paths listed as protected,
+  and a second try may follow. The entries here make sure nothing carrying
+  one could reach a passing verdict another way.
+
+The diff is read NUL-separated, so every name arrives verbatim, and matched
+ignoring case, because the runner's filesystem folds case. A name that is not
+printable ASCII is treated as protected: the filesystem may normalize Unicode,
+so no glob can say which file it really is. Failing closed costs at most a
+draft that a human reads. The build-directory refusal does not fail closed:
+its patterns are ASCII, which no normalization produces from other
+characters, so a non-ASCII name elsewhere is applied and then flagged here.
 
 A candidate that touches any protected file is "not eligible for ready"
 whatever the stress result. The bot may still have changed it for a good
 reason, so the PR is opened as usual and stays a draft, and its body names the
 protected files touched and says a human must judge the change.
 
-The verifier runs on the runner the session used, as the same user. **Leftover
-processes are ended by PID, never by name.** Immediately before each session
-starts, the job records the full process list. After the session ends, it
-lists processes again and sends `SIGTERM`, then `SIGKILL`, to every PID that is
-new since the snapshot, except the current step's own ancestry. A process the
-session detached is new by PID however it renamed or re-parented itself, so
-the snapshot catches it where a tree walk would not. If any new PID is still
-alive after the kill, the attempt aborts and `publish` records `aborted`. The
-clean tree and the kill keep the session's working state and processes out of
-the verdict; they do not stop a session that tampers with files elsewhere on
-the runner before it ends. That is why the verdict alone never promotes: the
-PR's own `test.yml` run on a fresh runner must also be green (§7), and a human
-reviews and merges.
+The verifier runs on the runner the session used, as the same user, so every
+file on that runner and every variable a later step inherits is within the
+session's reach. The job therefore carries what the verifier relies on across
+each session as a step output taken before the session starts, which no
+session can rewrite, and checks the runner against it afterwards:
+
+- **Leftover processes are ended by PID, never by name.** Immediately before
+  each session starts, the job records the full process list. After the
+  session ends, it lists processes again and sends `SIGTERM`, then `SIGKILL`,
+  to every PID that is new since the snapshot, except the current step's own
+  ancestry. A process the session detached is new by PID however it renamed or
+  re-parented itself, so the snapshot catches it where a tree walk would not.
+  The kill runs from a private copy of the verifier's scripts, checked against
+  their fingerprint first, and every check below runs after it, once nothing
+  of the session is left to undo an edit.
+- **The verifier's scripts are checked, not trusted.** The copy of `main`'s
+  scripts is fingerprinted before session 1 – every path, file content and
+  symlink target – and checked again after each session.
+- **So is the verification tree.** The verifier runs that tree's `git` and
+  its build, so a hook or an `fsmonitor` command in its `.git/config`, or a
+  replaced product in its `.build`, would speak for the candidate. Before each
+  session the job takes a digest of the whole tree – checkout, `.git` and
+  `.build` – over every path, file content, symlink target and permission bit,
+  and after the session it takes the digest again. Checking rather than
+  re-creating the tree keeps its warm `.build`: a fresh clone gives every
+  source a new modification time, and SwiftPM then rebuilds from cold, about
+  19.5 minutes (§9) against the 5-minute rebuild allowance `B` inside an
+  allotment. The digest is cheap by comparison; it took 3.5 seconds over a
+  4.4 GB `.build` on a development machine.
+- **The verifier's environment is the one recorded before session 1.** A
+  session can append to `$GITHUB_ENV` and `$GITHUB_PATH`, and the runner hands
+  both to every later step: `BASH_ENV`, `PYTHONPATH`, `DYLD_*`, a `PATH` entry
+  ahead of `git`, or new values for the job's own paths. So the job records
+  its environment as a step output just before session 1, pinning `git` to no
+  global or system config, and every later `run:` step runs under `bash -p`,
+  which reads no `BASH_ENV` or `ENV` and imports no exported function, then
+  re-runs itself under `env -i` with only the variables its own `env:` sets
+  and the record. `env -i` rather than `unset`, because an entry such as
+  `BASH_FUNC_x%%` is no shell variable, so `unset` cannot remove it, and every
+  child `bash` would import it. A path a `with:` or `working-directory:` names
+  comes from the `runner.temp` context, never from `env`. The verifier's own
+  Python – the judge and the digest – runs isolated (`-I -S`), so no `PYTHON*`
+  variable or site directory reaches it.
+- **The artifact is checked against what was packaged.** The upload is a
+  `uses:` step, which still runs in the environment a session left. So the
+  packaging step sums every file `publish` reads – the outcome, the bundle,
+  its head, the verdict and its report, the baseline numbers, the notes –
+  into a job output, and `publish` discards an artifact that does not match
+  and records the attempt `aborted`, saying the artifact did not match.
+- **Try 1's output is digested before session 2.** When session 2 makes no
+  commit, try 1's verdict stands (§6.6). It is used only if it matches, byte
+  for byte, the digest taken before session 2 started, and it is removed after
+  session 2 either way, so a verdict session 2 wrote there is never read.
+
+If any check fails, or a new PID is still alive after the kill, the attempt
+aborts and `publish` records `aborted`. These checks keep the session's working
+state, processes and environment out of the verdict, and the verifier's own
+scripts and tree unchanged. They are best-effort against a session that shares
+the runner and its user: they close the cheap paths, not every path. They do
+not stop a session that replaces tools elsewhere on the runner before it ends
+– a Homebrew binary such as `python3` or `bash`, a Python site directory that
+the test runner's Python still reads, a `launchd` job – or that uses the
+runner's passwordless `sudo`. Nor do they cover the candidate's own tests,
+which run during the stress loop as the same user; those are in the diff a
+human reviews. That is why the verdict alone never promotes: the PR's own `test.yml`
+run on a fresh runner must also be green (§7), and a human reviews and merges.
 
 ### 6.5 What a clean run means
 
@@ -870,7 +949,9 @@ An attempt allows two tries:
    session's notes and the verifier's iteration log.
 4. The verifier runs again, at the same scope and the same `N`. Pass or fail, the attempt goes
    to §7, which opens the PR either way and marks it eligible for ready only on
-   a pass.
+   a pass. If the second session made no new commit, the candidate is the
+   first try's, and so is its verdict: it is not stressed again, because a
+   chance pass would only overwrite a failure already observed.
 
 ## 7. PR lifecycle
 
@@ -959,9 +1040,17 @@ Transitions, each owned by the PR driver:
   ends red without starting a session.
 - **The build fails before the session starts.** No attempt; the job ends red.
   `main` is expected to build, so this is a CI problem, not a flake.
-- **The session fails** – it errors, times out, or exhausts its turns. Whatever
-  commits it made still go to the verifier; with none, the attempt ends with a
-  comment on the issue.
+- **The session fails** – it errors, times out, or exhausts its turns, or
+  never gets going (an expired token, an API outage). Its step continues on
+  error, so the job reads each session step's own outcome and the action's
+  reported conclusion. Whatever commits a failed session made still go to the
+  verifier. With none, the attempt is not `no-diff`: it is recorded `aborted`,
+  marked `session_failed`, with a reason naming the session and how it
+  failed, and the picker may retry the test the next night (§5). Whatever the
+  outcome – a failed second session leaves the first try's candidate – the
+  `fix` job ends red after uploading its artifact, so an outage shows. An
+  action that reports no conclusion counts as failed, so a change to its
+  outputs shows the same way.
 - **The candidate does not build.** The verifier fails it like any other
   failing stress run, and the second try gets the build log.
 - **The stress run fails on both tries.** The draft PR stays open with
@@ -1026,8 +1115,10 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
     seconds is 8.3);
   - two sessions, capped at 60 minutes each – 120 minutes;
-  - checkouts, ending the session's processes, the bundle, the artifact
-    upload, and API calls – 20 minutes (not measured).
+  - checkouts, ending the session's processes, the verification tree's
+    digest before and after each session (§6.4), the bundle, the artifact
+    upload, and API calls – 20 minutes (not measured on CI; one digest of a
+    4.4 GB `.build` took 3.5 seconds on a development machine).
 
   That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
   verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
@@ -1212,7 +1303,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
-  `merged`), with and without a later failure; a recurrence after `merged`
+  `merged`), with and without a later failure; a `session_failed` abort,
+  retried at once, and two in a row with no failure between, which wait; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, no ledger
   comment, a ledger comment from a login other than the bot's, an unparsable
@@ -1243,7 +1335,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   absent from the xunit output; a `passedOnRetry` record; another test failing
   at pass scope while the target passes; and a diff touching a protected file,
   one case per entry in the protected list, each marked not eligible for ready
-  even with a clean stress run.
+  even with a clean stress run; a protected name holding a quote and a
+  non-ASCII byte, a non-ASCII name outside every glob, and a protected name in
+  another case, each flagged; a candidate that force-adds a file under
+  `.build/`, refused before the warm build is touched and judged a failure
+  with that reason; and a non-ASCII name elsewhere, which is applied.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier
@@ -1253,7 +1349,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   `issues: write` to no other job.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
   head that moved after verification; the attempt entry `publish` writes for
-  each outcome, including `aborted` when no artifact exists; a weak-evidence
+  each outcome, including `aborted` when no artifact exists, and a failed
+  session with no commit packaged as `aborted` marked `session_failed`,
+  never as `no-diff`; a weak-evidence
   candidate, which gets the status clause, the label, and numbers at the top
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that

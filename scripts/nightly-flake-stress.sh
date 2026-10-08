@@ -203,12 +203,13 @@ filter_form_of() {
   printf '%s.%s/%s' "$module" "$(printf '%s' "$rest" | tr . /)" "$name"
 }
 
-# `^` + the filter form with every ERE metacharacter escaped. No `$` anchor: it
-# is unverified that SwiftPM's matcher honours one against a test ID, and an
-# over-match is harmless because the verifier counts only the exact ID.
+# `^<form>(/|$)`, the filter form with every ERE metacharacter escaped (spec
+# §6.4). The start anchor stops a match inside a longer ID; the trailing group
+# stops `testFoo` (an XCTest name, which has no `()`) from also matching
+# `testFooBar`, while still allowing a trailing source-location component.
 # (Not named `test_…`: the harness runs every function with that prefix.)
 exact_id_filter() {
-  printf '^%s' "$(filter_form_of "$1" | sed -e 's/[][\.^$*+?(){}|]/\\&/g')"
+  printf '^%s(/|$)' "$(filter_form_of "$1" | sed -e 's/[][\.^$*+?(){}|]/\\&/g')"
 }
 
 # The TARGETS-format line for `--test ID`: that test alone, floor 1.

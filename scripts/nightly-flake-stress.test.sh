@@ -554,27 +554,36 @@ test_filter_form_converts_the_xunit_id() {
 
 test_exact_id_filter_escapes_the_id() {
   assert_eq "parens and dots escaped, anchored at start" \
-    '^TBDSharedTests\.HolderLockTests/lockIsReacquirableAfterRelease\(\)' \
+    '^TBDSharedTests\.HolderLockTests/lockIsReacquirableAfterRelease\(\)(/|$)' \
     "$(exact_id_filter 'TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()')"
-  assert_eq "argument labels survive" '^M\.S/f\(x:\)' "$(exact_id_filter 'M.S/f(x:)')"
-  assert_eq "a nested suite is escaped in its filter form" '^M\.A/B/f\(\)' "$(exact_id_filter 'M.A.B/f()')"
-  assert_eq "a suite-less test too" '^M\.f\(\)' "$(exact_id_filter 'M/f()')"
+  assert_eq "argument labels survive" '^M\.S/f\(x:\)(/|$)' "$(exact_id_filter 'M.S/f(x:)')"
+  assert_eq "a nested suite is escaped in its filter form" '^M\.A/B/f\(\)(/|$)' "$(exact_id_filter 'M.A.B/f()')"
+  assert_eq "a suite-less test too" '^M\.f\(\)(/|$)' "$(exact_id_filter 'M/f()')"
   # The escaped filter must match exactly the filter form, as an ERE.
   local re; re="$(exact_id_filter 'M.S/f(x:)')"
   assert_eq "the filter matches its own test" "yes" "$([[ 'M.S/f(x:)' =~ $re ]] && echo yes || echo no)"
   assert_eq "and not a test whose dot is another character" "no" "$([[ 'MxS/f(x:)' =~ $re ]] && echo yes || echo no)"
+  # The trailing group (spec §6.4): an XCTest name has no `()` to end it.
+  re="$(exact_id_filter 'M.S/testFoo')"
+  assert_eq "an XCTest name matches itself" "yes" "$([[ 'M.S/testFoo' =~ $re ]] && echo yes || echo no)"
+  assert_eq "and a trailing component" "yes" "$([[ 'M.S/testFoo/File.swift:12:3' =~ $re ]] && echo yes || echo no)"
+  assert_eq "but not a test whose name extends it" "no" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
   # MUTATION: stop escaping `(`, and the filter is no longer the ID.
   local mutant
   mutant="$(mutant_of 's/\+\?\(/+?/')"
   assert_eq "mutation: without the ( escape the filter changes" \
-    '^M\.S/f(x:\)' "$(bash -c "source '$mutant'; exact_id_filter 'M.S/f(x:)'")"
+    '^M\.S/f(x:\)(/|$)' "$(bash -c "source '$mutant'; exact_id_filter 'M.S/f(x:)'")"
+  # MUTATION: drop the trailing group, and testFooBar matches.
+  mutant="$(mutant_of "s/printf '\\^%s\\(\\/\\|\\\$\\)'/printf '^%s'/")"
+  re="$(bash -c "source '$mutant'; exact_id_filter 'M.S/testFoo'")"
+  assert_eq "mutation: without the trailing group testFooBar matches" "yes" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
 }
 
 test_test_mode_floor_is_one() {
   local spec; spec="$(adhoc_test_spec 'M.S/f()')"
   assert_eq "floor 1" "1" "$(spec_field "$spec" 3)"
-  assert_contains "filter built from the ID" "$spec" '--filter ^M\.S/f\(\)'
-  assert_eq "no parallelism flag of its own" "--filter ^M\\.S/f\\(\\)" "$(spec_field "$spec" 2)"
+  assert_contains "filter built from the ID" "$spec" '--filter ^M\.S/f\(\)(/|$)'
+  assert_eq "no parallelism flag of its own" '--filter ^M\.S/f\(\)(/|$)' "$(spec_field "$spec" 2)"
   adhoc_test_spec 'M.S/f()' > /dev/null
   assert_eq "test scope uses the ordinary iteration deadline" "$ITERATION_DEADLINE_S" "$(iteration_deadline_for 1)"
 }
