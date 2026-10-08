@@ -217,6 +217,10 @@ jobs:
       # that socket — still no egress, and it self-skips on runners, which
       # have no `claude` installed.
       #
+      # The flake bot's harnesses (`flake-*.test.sh`) are the same shape: pure
+      # Python and bash over fixtures cut from real CI artifacts, with a stub
+      # `gh` supplied through `FLAKE_GH_CMD`.
+      #
       # `cache-save-policy.test.sh` is the odd one out in what it reads: it
       # extracts two pieces of THIS file — the cache-save decision step's shell
       # and the save step's `if:` — and drives the first against fixture repos.
@@ -242,6 +246,7 @@ jobs:
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
+          bash scripts/flake-ledger.test.sh
           bash scripts/restart-guard-lib.test.sh
           bash scripts/ci/first-party-wipe-needed.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
