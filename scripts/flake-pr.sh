@@ -254,7 +254,8 @@ cmd_open() {
 
 # promote: mark the draft ready once its own CI passed on the head the verifier
 # passed (spec §7). Two events start it, so whichever lands last promotes:
-#   --branch B --conclusion C --event E   a Test run on B completed (C, E)
+#   --branch B --conclusion C --event E --run-id ID --run-created-at T
+#                                         Test run ID on B completed (C, E)
 #   --from-status                         the bot set flakefix/stress on --sha;
 #                                         the PR is found from the commit
 # Both are judged on the same facts. Reads with the job token in GH_TOKEN; the
@@ -264,7 +265,7 @@ cmd_open() {
 # or skipped, 2 on a failed read or malformed input, which leaves the PR a
 # draft.
 cmd_promote() {
-  local repo="" branch="" sha="" conclusion="" event="" from_status=""
+  local repo="" branch="" sha="" conclusion="" event="" run_id="" created="" from_status=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo) repo="${2:-}"; shift 2 ;;
@@ -272,18 +273,21 @@ cmd_promote() {
       --sha) sha="${2:-}"; shift 2 ;;
       --conclusion) conclusion="${2:-}"; shift 2 ;;
       --event) event="${2:-}"; shift 2 ;;
+      --run-id) run_id="${2:-}"; shift 2 ;;
+      --run-created-at) created="${2:-}"; shift 2 ;;
       --from-status) from_status=1; shift ;;
       *) die "promote: unknown argument $1" ;;
     esac
   done
-  local trigger=(--trigger test-run --conclusion "$conclusion" --event "$event")
+  local trigger=(--trigger test-run --conclusion "$conclusion" --event "$event" --run-id "$run_id" --run-created-at "$created")
   if [[ -n "$from_status" ]]; then
-    [[ -n "$repo" && -n "$sha" && -z "$branch$conclusion$event" ]] \
-      || die "promote --from-status: --repo and --sha are required, and --branch, --conclusion and --event are not taken"
+    [[ -n "$repo" && -n "$sha" && -z "$branch$conclusion$event$run_id$created" ]] \
+      || die "promote --from-status: --repo and --sha are required, and no Test run's facts are taken"
     trigger=(--trigger status)
   else
-    [[ -n "$repo" && -n "$branch" && -n "$sha" && -n "$conclusion" && -n "$event" ]] \
-      || die "promote: --repo, --branch, --sha, --conclusion and --event are required"
+    [[ -n "$repo" && -n "$branch" && -n "$sha" && -n "$conclusion" && -n "$event" && -n "$created" ]] \
+      || die "promote: --repo, --branch, --sha, --conclusion, --event, --run-id and --run-created-at are required"
+    [[ "$run_id" =~ ^[0-9]+$ ]] || die "promote: --run-id is not a run id"
   fi
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "promote: --sha is not a commit id"
   if [[ -n "$from_status" ]]; then
@@ -349,7 +353,7 @@ main() {
     promote-decide)
       [[ "${1:-}" == --facts && -n "${2:-}" ]] || die "usage: $0 promote-decide --facts F"
       py promote-decide --facts "$2" ;;
-    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --sha S (--branch B --conclusion C --event E | --from-status) | promote-decide --facts F}" ;;
+    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --sha S (--branch B --conclusion C --event E --run-id ID --run-created-at T | --from-status) | promote-decide --facts F}" ;;
   esac
 }
 

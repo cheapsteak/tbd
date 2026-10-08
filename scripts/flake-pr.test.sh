@@ -1183,7 +1183,7 @@ promote() {
   if [[ "${PMODE:-}" == status ]]; then
     how=(--from-status)
   else
-    how=(--branch "$PBRANCH" --conclusion "${3:-success}" --event "${4:-pull_request}")
+    how=(--branch "$PBRANCH" --conclusion "${3:-success}" --event "${4:-pull_request}" --run-id 500 --run-created-at 2026-10-08T06:30:00Z)
   fi
   (cd "$d" && GH_TOKEN=job-token APP_TOKEN=app-token FLAKE_GH_CMD="$d/gh" \
     bash "$dir/flake-pr.sh" promote --repo "$REPO" --sha "$PSHA" "${how[@]}") > "$d/out" 2>&1 || rc=$?
@@ -1224,7 +1224,8 @@ test_promote_uses_the_app_token_for_ready() {
 }
 
 test_a_red_run_does_not_promote() {
-  skips "a red run" 's/if facts\["run_conclusion"\] != "success":/if False:/' . . . failure
+  # The triggering run's own conclusion becomes its entry among the head's runs.
+  skips "a red run" 's/if latest\["status"\] != "completed" or latest\["conclusion"\] != "success":/if False:/' . . . failure
 }
 
 test_a_run_that_is_not_the_prs_own_ci_does_not_promote() {
@@ -1354,15 +1355,32 @@ test_a_status_landing_after_the_test_run_promotes() {
 }
 
 test_a_status_landing_before_the_test_run_completes_skips() {
-  local mode d
-  for mode in status test-run; do
-    PW_RUNS='.[0].status = "in_progress" | .[0].conclusion = null' PMODE="$mode" \
-      skips "a Test run still running ($mode)" 's/if latest\["status"\] != "completed" or latest\["conclusion"\] != "success":/if False:/'
-  done
+  local d mutant
+  PW_RUNS='.[0].status = "in_progress" | .[0].conclusion = null' PMODE=status \
+    skips "a Test run still running" 's/if latest\["status"\] != "completed" or latest\["conclusion"\] != "success":/if False:/'
+  # Under the Test trigger a newer run on the same head (a re-run) decides.
+  PW_RUNS='[.[0], (.[0] | .id = 501 | .status = "in_progress" | .conclusion = null | .created_at = "2026-10-08T07:00:00Z")]' \
+    skips "a newer Test run still running" 's/if latest\["status"\] != "completed" or latest\["conclusion"\] != "success":/if False:/'
   d="$(PW_RUNS='[]' pworld)"
   assert_eq "no Test run on the head: exit 0" "0" "$(PMODE=status promote "$d")"
   assert_eq "no Test run on the head: stays a draft" "no" "$(promoted "$d")"
   assert_contains "no Test run on the head: says why" "$(cat "$d/out")" "has not run on the head"
+}
+
+# The run that started a test-run promote is known from its event; a listing
+# that has not caught up with its completion must not hold the PR back.
+test_the_triggering_run_counts_even_when_the_listing_lags() {
+  local d mutant lag='.[0].status = "in_progress" | .[0].conclusion = null'
+  d="$(PW_RUNS="$lag" pworld)"
+  promote "$d" > /dev/null
+  assert_eq "a lagging listing: promoted" "yes" "$(promoted "$d")"
+  d="$(PW_RUNS='[]' pworld)"
+  promote "$d" > /dev/null
+  assert_eq "a listing without the run: promoted" "yes" "$(promoted "$d")"
+  mutant="$(mutant_of 's/        if trigger != "status":$/        if False:/' "$PR_PY")"
+  d="$(PW_RUNS="$lag" pworld)"
+  promote "$d" "$mutant" > /dev/null
+  assert_eq "mutation: trusting the listing alone leaves it a draft" "no" "$(promoted "$d")"
 }
 
 test_only_the_prs_own_test_run_counts() {

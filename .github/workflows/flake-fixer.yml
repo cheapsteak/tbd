@@ -1260,6 +1260,8 @@ jobs:
           SHA: ${{ github.event.workflow_run.head_sha }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
           STATUS_SHA: ${{ github.event.sha }}
         run: |
           set -euo pipefail
@@ -1267,5 +1269,5 @@ jobs:
             bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --sha "$STATUS_SHA" --from-status
           else
             bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
-              --conclusion "$CONCLUSION" --event "$RUN_EVENT"
+              --conclusion "$CONCLUSION" --event "$RUN_EVENT" --run-id "$RUN_ID" --run-created-at "$RUN_CREATED_AT"
           fi

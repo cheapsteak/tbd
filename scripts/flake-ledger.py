@@ -1178,9 +1178,6 @@ def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: 
         if not runs:
             return "none"
         for run in runs:
-            seen += 1
-            if seen > max_runs:
-                return "none"
             # Only runs before this one. An earlier run need not be completed:
             # its `ledger` job may have failed while its own `ledger-notice`
             # job still runs, and that red must still count.
@@ -1188,8 +1185,14 @@ def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: 
                 continue
             if parse_time(run["created_at"]) < horizon:
                 return "none"
+            # Only a trigger that can start `ledger` counts toward the bound:
+            # every commit status in the repository starts a run of this
+            # workflow (`promote`'s trigger), and those must not use it up.
             if run.get("event") not in ("workflow_run", "workflow_dispatch"):
                 continue
+            seen += 1
+            if seen > max_runs:
+                return "none"
             for job in gh_lines("api", "--paginate", f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100", "--jq", ".jobs[]"):
                 if job.get("name") == LEDGER_JOB and job.get("conclusion") in ("success", "failure"):
                     return job["conclusion"]

@@ -1019,14 +1019,19 @@ Transitions, each owned by the PR driver:
     and skips when there is none, or more than one. GitHub offers no filter
     on `status`, so every commit status in the repository starts a run of
     the workflow; for any other context, every job is skipped without a
-    runner.
+    runner. Those runs must not crowd the `ledger` job's look-back for its
+    previous conclusion (§8), so that look-back counts only runs a `ledger`
+    trigger started.
 
   Either way, `promote` marks the PR ready for review only if all of these
   hold for the head SHA: the newest of the PR's own (`pull_request`)
   `test.yml` runs on that SHA, on its branch and from this repository, has
   completed with `success`; the SHA carries `flakefix/stress` = `success`
   (the newest such status the bot set on it); and the SHA is still the PR's
-  head. A human push to the branch moves the head to an unverified SHA, so
+  head. Under the Test trigger, the run that started `promote` enters that
+  list as its own event describes it, because the runs listing may not yet
+  show it completed; a newer run in the listing, such as a re-run still
+  going, still decides. A human push to the branch moves the head to an unverified SHA, so
   the bot never promotes over a human's work. The PR must also still be the
   bot's open draft from this repository, and none of its changed files, read
   from GitHub and matched against `main`'s protected list (§6.4), may be
@@ -1399,7 +1404,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier
-  attempt, and an earlier run still in progress counts; a note posted with the
+  attempt, and an earlier run still in progress counts; runs a commit status
+  started do not use up the look-back's bound; a note posted with the
   job token says so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
   back to the job token when the App token is missing, and grants
   `issues: write` to no other job.
@@ -1413,7 +1419,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   another branch name) or two of them, each skipped cleanly; a human's
   return to draft, which holds the PR under either trigger, and the bot's
   own, which does not; the job's `if:` naming both triggers and the
-  status's context and state; the attempt entry `publish` writes for
+  status's context and state; a Test-triggered promote whose run the runs
+  listing still shows in progress, or does not list, which promotes; the
+  attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists, and a failed
   session with no commit packaged as `aborted` marked `session_failed`,
   never as `no-diff`; a weak-evidence

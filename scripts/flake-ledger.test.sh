@@ -1087,6 +1087,19 @@ test_a_rerun_attempt_counts_its_own_earlier_attempt() {
   assert_eq "mutation: ignoring the earlier attempt posts again" "success" "$out"
 }
 
+# Every commit status starts a run of this workflow (promote's trigger); a
+# flood of them must not push the last ledger run past the bound.
+test_previous_ledger_conclusion_bound_counts_only_ledger_triggers() {
+  local d mutant
+  d="$(mktmpd)"
+  runs_world "$d" "[$(run_entry 499 status), $(run_entry 498 status), $(run_entry 497 workflow_run)]" 497=failure
+  assert_eq "status runs do not use up the bound" "failure" \
+    "$(FLAKE_GH_CMD="$d/gh" python3 "$LEDGER" previous-ledger-conclusion --repo "$REPO" --run-id 500 --max-runs 1 --now 2026-10-08T00:00:00Z)"
+  mutant="$(mutant_of 's/^            if run.get\("event"\) not in \("workflow_run", "workflow_dispatch"\):$/            if run.get("event") not in ("workflow_run", "workflow_dispatch") and (seen := seen + 1) > 0:/' "$LEDGER")"
+  assert_eq "mutation: counting status runs reads the previous red as none" "none" \
+    "$(FLAKE_GH_CMD="$d/gh" python3 "$mutant/flake-ledger.py" previous-ledger-conclusion --repo "$REPO" --run-id 500 --max-runs 1 --now 2026-10-08T00:00:00Z)"
+}
+
 test_previous_ledger_conclusion_is_none_when_no_ledger_ran() {
   local d
   d="$(mktmpd)"
