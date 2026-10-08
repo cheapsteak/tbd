@@ -9,12 +9,12 @@
 #
 # WHAT THIS CANNOT TELL YOU, stated here because the report repeats it and the
 # tracking issue repeats it again: CI is ~4 cores on an otherwise idle runner.
-# #503's reproduction regime is loadavg ~150 on a 12-core box shared by four
-# agents. A zero-failure night is NOT evidence that any of these flakes is
-# fixed — it is one sample from a much gentler regime. The word "fixed" does not
-# appear in this script's output by design; the numbers it reports are
-# iterations, observed loadavg, and core count, so a reader can judge the regime
-# for themselves.
+# The GitManagerTimeout flake's reproduction regime (#503, continued in #961) is
+# loadavg ~150 on a 12-core box shared by four agents. A zero-failure night is
+# NOT evidence that any of these flakes is fixed — it is one sample from a much
+# gentler regime. The word "fixed" does not appear in this script's output by
+# design; the numbers it reports are iterations, observed loadavg, and core
+# count, so a reader can judge the regime for themselves.
 #
 # Usage:
 #   scripts/nightly-flake-stress.sh [--iterations N] [--spinners K]
@@ -87,9 +87,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # iteration on a box whose owner lowered that bound.
 TARGETS=(
   "ControlModeInputHealth|--parallel --filter ControlModeInputHealthTests|5|494|control-mode input health: two contention races"
-  "GitManagerTimeout|--no-parallel --filter ^TBDDaemonLiveTests\\.GitManagerTimeoutTests|3|503|60s hang at ~1/22 under heavy load, mechanism unknown"
+  "GitManagerTimeout|--no-parallel --filter ^TBDDaemonLiveTests\\.GitManagerTimeoutTests|3|961|60s hang under load: polled clock handshake starved (#870 moved it to EventDrivenTestClock)"
   "AppearanceDebounce|--parallel --filter AppearanceDebounceTests|4|496|clock-driven wedge: megaYield at background QoS"
-  "FastPassWhole|--parallel --skip ^TBDDaemonLiveTests\\.|3000|503|#503's actual reproduction shape: whole fast pass under load"
+  "FastPassWhole|--parallel --skip ^TBDDaemonLiveTests\\.|3000|962|whole fast pass under load: catch-all until failures are split per test"
 )
 
 DEFAULT_ITERATIONS=10
@@ -127,7 +127,8 @@ SWIFT_DEADLINE_GRACE_S=30
 # on the merits before it is wrong on any deadline:
 #
 #   THIS HARNESS MEASURES LOCAL FLAKINESS UNDER CONTENTION. That is its entire
-#   purpose: reproduce #503's regime — spinners pinning the cores, several agents'
+#   purpose: reproduce the regime the GitManagerTimeout flake (#503, continued in
+#   #961) was characterised in — spinners pinning the cores, several agents'
 #   compiles queueing on the machine-global lock — and see which suites come apart
 #   under it. An iteration that leaves the local queue and gets its verdict from a
 #   quiet CI runner measures NOTHING this program was built to measure, and it

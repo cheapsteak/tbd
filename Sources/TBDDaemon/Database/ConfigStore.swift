@@ -13,8 +13,17 @@ private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config
 /// `holder_hibernation_enabled`. Holder-ness is a transport property, not a
 /// separate opt-in: each of those legs now derives from the subsystem flag it
 /// belongs to (`gc_enabled`, `auto_hibernate_enabled`) or runs unconditionally,
-/// so nothing reads the columns. They stay in the schema because a landed
-/// migration is never edited and GRDB ignores columns a record does not name.
+/// so nothing reads the columns.
+///
+/// `transcript_composer_enabled` and `remote_transcript_enabled` are absent
+/// for a different reason: the transcript composer and the remote session
+/// transcript have no gate. The composer's UI, the `terminal.completions`
+/// probe, attachment writes and the attachments GC leg run unconditionally, as
+/// do `remote.transcriptSync`, the remote transcript pane and the remote
+/// composer, so nothing reads either column.
+///
+/// Every one of these columns stays in the schema because a landed migration is
+/// never edited and GRDB ignores columns a record does not name.
 struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "config"
 
@@ -125,16 +134,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
-    /// The live-transcript message composer's gate. **Genuinely tri-state**,
-    /// same shape as `gc_retained_transcripts_enabled`: the
-    /// `20260905120000_config_transcript_composer` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.transcriptComposerEnabledDefault`, never through
-    /// `?? false`.
-    var transcript_composer_enabled: Bool?
     /// Gate for routing pty-holder sessions through the TBD model proxy.
-    /// **Genuinely tri-state**, same shape as `transcript_composer_enabled`: the
-    /// `20260907215724_config_model_proxy` migration carries no SQL default, so
+    /// **Genuinely tri-state**, same shape as `gc_retained_transcripts_enabled`:
+    /// the `20260907215724_config_model_proxy` migration carries no SQL default, so
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.modelProxyDefault`, never through `?? false`.
     var model_proxy_enabled: Bool?
@@ -148,14 +150,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// callers act on is `Config.transcriptStreamingEffective`, the conjunction
     /// with `modelProxyEnabled`.
     var transcript_streaming_enabled: Bool?
-    /// Gate for the remote session transcript — `remote.transcriptSync`, the
-    /// remote pane and its composer. **Genuinely tri-state**, same shape as
-    /// `transcript_composer_enabled`: the
-    /// `20260924120000_config_remote_transcript_enabled` migration carries no
-    /// SQL default, so `nil` here means "never chose" rather than "off".
-    /// Resolve it through `Config.remoteTranscriptEnabledDefault`, never
-    /// through `?? false`.
-    var remote_transcript_enabled: Bool?
     /// The loopback port this TBD home's model proxy binds, or nil if none has
     /// been minted. **Not a flag**, exactly like `holder_owner_token`: NULL
     /// means "not yet minted", and the mint is the conditional UPDATE in
@@ -234,10 +228,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
-    /// - Parameter transcriptComposerDefault: same shape once more, for
-    ///   `transcript_composer_enabled` — the live-transcript composer's gate,
-    ///   which is one switch for the composer UI, its completions probe,
-    ///   attachment writes and the attachments GC leg together.
     /// - Parameter modelProxyDefault: same shape once more, for
     ///   `model_proxy_enabled` — the gate on routing a session's Messages API
     ///   traffic through the loopback model proxy.
@@ -246,8 +236,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   provisional assistant row. Resolved here on its own; what callers act
     ///   on is `Config.transcriptStreamingEffective`, its conjunction with the
     ///   proxy flag.
-    /// - Parameter remoteTranscriptDefault: same shape once more, for
-    ///   `remote_transcript_enabled` — the remote session transcript's gate.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -267,10 +255,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
-        transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
-        remoteTranscriptDefault: Bool = Config.remoteTranscriptEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault,
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault
@@ -349,9 +335,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // gate — NOT `?? false`.
             gcRetainedTranscriptsEnabled:
                 gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
-            // And once more, for the composer's gate — NOT `?? false`.
-            transcriptComposerEnabled:
-                transcript_composer_enabled ?? transcriptComposerDefault,
             // Same reasoning once more, for the update mode — NOT `?? .off`.
             // The `flatMap` covers the second way a value can be absent: a
             // string no `UpdateMode` case matches is as unusable as NULL, so it
@@ -376,9 +359,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // readable as the two separate choices it records.
         config.transcriptStreamingEnabled =
             transcript_streaming_enabled ?? transcriptStreamingDefault
-        // And once more, for the remote transcript's gate — NOT `?? false`.
-        config.remoteTranscriptEnabled =
-            remote_transcript_enabled ?? remoteTranscriptDefault
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
@@ -855,35 +835,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_retained_transcripts_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the transcript-composer gate (default OFF, soaking). It gates the
-    /// composer UI, the completions probe, attachment writes and the attachments
-    /// GC leg together — one switch, because a half-enabled composer would leave
-    /// the feature broken in one of its four states rather than absent.
-    /// The column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    public func setTranscriptComposerEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET transcript_composer_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the remote-transcript gate (default OFF, soaking). It gates
-    /// `remote.transcriptSync`, the remote transcript pane and — with
-    /// `transcript_composer_enabled` — the remote composer. The column is
-    /// written on every call, because writing either value is the explicit
-    /// gesture that lifts it out of NULL forever after.
-    public func setRemoteTranscriptEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET remote_transcript_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

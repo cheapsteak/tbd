@@ -124,7 +124,7 @@ final class ComposerHarness {
         let terminal = terminal?(worktree.id) ?? Self.runningTerminal(worktreeID: worktree.id)
         self.terminal = terminal
         state = ComposerState.resolve(
-            terminal: terminal, isRemoteWorktree: false, composerEnabled: true)
+            terminal: terminal, isRemoteWorktree: false)
 
         self.backdrop = backdrop
         scratchDirectory = URL(

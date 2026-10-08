@@ -68,12 +68,14 @@ struct PRStatusPresentationTests {
         #expect(presentation?.colorSemantic == .nonMergeable)
     }
 
-    @Test("closed PRs use red closed icon")
+    @Test("closed PRs use gray closed icon, distinct from failing CI")
     func closedPresentation() {
         let presentation = PRStatusPresentation.make(for: PRStatus(number: 8, url: "https://example.com/8", state: .closed))
+        let failing = PRStatusPresentation.make(for: PRStatus(number: 9, url: "https://example.com/9", state: .checksFailed))
 
         #expect(presentation?.glyph == .asset("git-pull-request-closed"))
-        #expect(presentation?.colorSemantic == .nonMergeable)
+        #expect(presentation?.colorSemantic == .closed)
+        #expect(presentation?.colorSemantic != failing?.colorSemantic)
     }
 
     // MARK: - Merge-queue bus (the mergeQueuePosition gate)

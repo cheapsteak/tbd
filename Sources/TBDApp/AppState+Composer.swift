@@ -62,14 +62,6 @@ extension AppState {
         releaseSessionStartWaiters(terminalID: terminalID)
     }
 
-    /// Whether the daemon reports the composer as enabled. False until
-    /// capabilities have been fetched, which is the conservative reading: a
-    /// composer that flashed in and then disappeared would be worse than one that
-    /// appeared a moment late.
-    var transcriptComposerEnabled: Bool {
-        daemonCapabilities?.transcriptComposerEnabled ?? false
-    }
-
     /// Fetch this terminal's completion inventory. nil on any failure — the menu
     /// shows its loading row and then simply has nothing to offer, which is a
     /// smaller loss than an error banner over a text field.

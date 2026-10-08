@@ -1295,7 +1295,7 @@ private struct FilePanelDivider: View {
         Color.clear
             .frame(width: 8)
             .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
-            .cursor(.resizeLeftRight)
+            .pointerStyle(.columnResize)
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in

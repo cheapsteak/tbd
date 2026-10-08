@@ -982,10 +982,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
-            case RPCMethod.configSetTranscriptComposerEnabled:
-                return try await handleConfigSetTranscriptComposerEnabled(request.paramsData)
-            case RPCMethod.configSetRemoteTranscriptEnabled:
-                return try await handleConfigSetRemoteTranscriptEnabled(request.paramsData)
             case RPCMethod.configSetModelProxyEnabled:
                 return try await handleConfigSetModelProxyEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
@@ -1078,8 +1074,7 @@ public final class RPCRouter: Sendable {
             // unable to start a holder, and with the flag on that combination
             // falls back to tmux silently. Reported so Settings can say so
             // instead of offering a switch that would change nothing.
-            ptyHolderSupported: holderRegistry?.canSpawn == true,
-            transcriptComposerEnabled: config.transcriptComposerEnabled)
+            ptyHolderSupported: holderRegistry?.canSpawn == true)
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces
         // "unable to type-check this expression in reasonable time" — so the
@@ -1089,7 +1084,6 @@ public final class RPCRouter: Sendable {
         // streaming on with the proxy off streams nothing, and the app should
         // not have to re-derive that.
         result.transcriptStreamingEnabled = config.transcriptStreamingEffective
-        result.remoteTranscriptEnabled = config.remoteTranscriptEnabled
         // One actor hop for all three, so a port and a version cannot come
         // from either side of a proxy replacement. With no supervisor wired
         // they keep their initializer defaults — false, nil, nil — which is the

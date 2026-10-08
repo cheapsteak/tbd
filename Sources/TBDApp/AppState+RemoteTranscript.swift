@@ -27,15 +27,13 @@ extension AppState {
     /// Whether the window toolbar offers the Transcript toggle for `selection`.
     func remoteSessionShowsTranscriptToggle(_ selection: RemoteSessionSelection) -> Bool {
         RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: remoteProviderCapabilities(for: selection),
-            featureEnabled: remoteTranscriptEnabled)
+            capabilities: remoteProviderCapabilities(for: selection))
     }
 
     /// Whether `selection`'s detail pane shows the transcript half of its split.
     func remoteSessionShowsTranscriptPane(_ selection: RemoteSessionSelection) -> Bool {
         RemoteSessionDetailGates.showsTranscriptPane(
             capabilities: remoteProviderCapabilities(for: selection),
-            featureEnabled: remoteTranscriptEnabled,
             open: remoteTranscriptOpen)
     }
 
@@ -53,15 +51,11 @@ extension AppState {
     }
 
     /// What the transcript pane's composer offers for `selection`: hidden
-    /// unless the provider declares `send-submit` and both
-    /// `remote_transcript_enabled` and `transcript_composer_enabled` are on;
-    /// otherwise running, blocked or exited from the provider's own report.
+    /// unless the provider declares `send-submit`; otherwise running, blocked or exited from the provider's own report.
     func remoteComposerState(for selection: RemoteSessionSelection) -> RemoteComposerState {
         RemoteComposerState.resolve(
             capabilities: remoteProviderCapabilities(for: selection),
-            session: remoteSessionPayload(for: selection),
-            remoteTranscriptEnabled: remoteTranscriptEnabled,
-            composerEnabled: transcriptComposerEnabled)
+            session: remoteSessionPayload(for: selection))
     }
 
     // MARK: - Sync drivers
@@ -82,30 +76,5 @@ extension AppState {
     /// a composer send succeeded. A no-op when no pane for it is on screen.
     func requestRemoteTranscriptSync(_ selection: RemoteSessionSelection) {
         remoteTranscriptSyncDrivers[selection]?.driver?.syncNow()
-    }
-
-    // MARK: - Settings
-
-    /// Help text for the Settings toggle. A stored constant so it is
-    /// assertable.
-    static let remoteTranscriptHelp = """
-        Adds a Transcript pane beside a remote session's terminal, for \
-        providers that can serve one. With the message composer also on, it \
-        can send messages to the session too. Off by default (soaking).
-        """
-
-    /// Persist `remote_transcript_enabled`, then re-fetch capabilities so the
-    /// Settings toggle and every remote pane reflect the daemon's persisted
-    /// state. No restart in either direction.
-    func setRemoteTranscriptEnabled(_ enabled: Bool) async {
-        do {
-            try await remoteTranscriptFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set remote transcript: \(error, privacy: .public)")
-            showAlert(
-                "Failed to set the remote transcript: \(error.localizedDescription)",
-                isError: true)
-        }
     }
 }

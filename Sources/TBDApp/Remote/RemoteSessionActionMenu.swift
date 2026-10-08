@@ -182,10 +182,13 @@ enum RemoteSessionActionMenu {
             }
         }
         // Only where the pane shows a send footer: with a live attached
-        // terminal, typing goes straight into it and needs no menu item.
+        // terminal, typing goes straight into it and needs no menu item. The
+        // menu is composed without the detail pane's transcript state, so the
+        // transcript composer is not consulted here.
         if RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: false, snapshotFresh: snapshotFresh,
-            hasLiveAttachedPane: capabilities.contains(attachCapability) && !liveAttachUnavailable) {
+            hasLiveAttachedPane: capabilities.contains(attachCapability) && !liveAttachUnavailable,
+            transcriptComposerTakesInput: false) {
             actions.append(Action(kind: .sendText, title: sendTextLabel))
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))

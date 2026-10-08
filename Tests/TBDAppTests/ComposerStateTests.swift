@@ -31,19 +31,12 @@ struct ComposerStateTests {
     }
 
     private func resolve(
-        _ terminal: Terminal?, remote: Bool = false, enabled: Bool = true
+        _ terminal: Terminal?, remote: Bool = false
     ) -> ComposerState {
-        ComposerState.resolve(
-            terminal: terminal, isRemoteWorktree: remote, composerEnabled: enabled)
+        ComposerState.resolve(terminal: terminal, isRemoteWorktree: remote)
     }
 
     // MARK: - Hidden
-
-    /// The flag is the outermost gate: with it off the pane renders exactly as it
-    /// did before.
-    @Test func theFlagOffHidesIt() {
-        #expect(resolve(terminal(), enabled: false) == .hidden)
-    }
 
     @Test func codexAndShellTerminalsHaveNone() {
         #expect(resolve(terminal(kind: .codex)) == .hidden)

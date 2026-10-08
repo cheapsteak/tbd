@@ -770,9 +770,7 @@ struct TerminalCompletions: AsyncParsableCommand {
         abstract: "Show the slash commands, skills and subagents this session knows",
         discussion: """
             Asks the session's OWN Claude Code binary, so a command that binary \
-            has and another version does not is listed correctly. Requires the \
-            transcript composer to be enabled (Settings → General, next to \
-            "Live transcript pane").
+            has and another version does not is listed correctly.
 
             `source` says which mechanism answered: `probe` means the binary \
             itself, `scan` means a filesystem read of the same directories, \

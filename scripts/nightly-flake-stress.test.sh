@@ -420,14 +420,14 @@ test_every_target_names_an_issue_and_a_floor() {
 }
 
 test_targets_reference_only_open_ledger_issues() {
-  # The issues this loop comments on are #494, #503 and #496 — stated in the PR
+  # The issues this loop comments on are #494, #961, #496 and #962 — stated in the PR
   # and asserted here so the two cannot drift apart silently.
   local spec issue seen=""
   for spec in "${TARGETS[@]}"; do
     issue="$(printf '%s' "$spec" | cut -d'|' -f4)"
     case " $seen " in *" $issue "*) ;; *) seen="$seen $issue" ;; esac
   done
-  assert_eq "the loop attaches to exactly the documented issue set" " 494 503 496" "$seen"
+  assert_eq "the loop attaches to exactly the documented issue set" " 494 961 496 962" "$seen"
 }
 
 # ---------------------------------------------------------------------------

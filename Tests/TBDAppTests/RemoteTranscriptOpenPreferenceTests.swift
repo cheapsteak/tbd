@@ -56,8 +56,8 @@ struct RemoteTranscriptOpenPreferenceTests {
         }
     }
 
-    @Test("the transcript flag reads off until the daemon's capabilities say otherwise")
-    func flagFollowsDaemonCapabilities() {
+    @Test("the toggle and pane follow the provider's transcript.read alone")
+    func transcriptFollowsTheProviderCapability() {
         withIsolatedDefaults { defaults in
             let state = AppState(userDefaults: defaults)
             let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
@@ -69,22 +69,19 @@ struct RemoteTranscriptOpenPreferenceTests {
                 health: .ok, errorMessage: nil,
                 remediationLabel: nil, remediationCommand: nil)]
 
-            // Unfetched capabilities read as the shipped default (off).
-            #expect(state.remoteTranscriptEnabled == false)
-            #expect(state.remoteSessionShowsTranscriptToggle(selection) == false)
-            #expect(state.remoteSessionShowsTranscriptPane(selection) == false)
-
-            var off = DaemonCapabilitiesResult(controlModeEnabled: false)
-            off.remoteTranscriptEnabled = false
-            state.daemonCapabilities = off
-            #expect(state.remoteSessionShowsTranscriptToggle(selection) == false)
-
-            var on = DaemonCapabilitiesResult(controlModeEnabled: false)
-            on.remoteTranscriptEnabled = true
-            state.daemonCapabilities = on
-            #expect(state.remoteTranscriptEnabled == true)
+            // No daemon capabilities fetched: nothing on the daemon side gates it.
+            #expect(state.daemonCapabilities == nil)
             #expect(state.remoteSessionShowsTranscriptToggle(selection) == true)
             #expect(state.remoteSessionShowsTranscriptPane(selection) == true)
+
+            state.remoteProviders = [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/nonexistent"),
+                describe: ProviderDescribe(
+                    contractVersions: [1], name: "acme", capabilities: ["attach"]),
+                health: .ok, errorMessage: nil,
+                remediationLabel: nil, remediationCommand: nil)]
+            #expect(state.remoteSessionShowsTranscriptToggle(selection) == false)
+            #expect(state.remoteSessionShowsTranscriptPane(selection) == false)
         }
     }
 }
