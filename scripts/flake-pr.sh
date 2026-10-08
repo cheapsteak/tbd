@@ -4,10 +4,12 @@
 #
 # `open` runs in the `publish` job, on ubuntu, after `fix` has ended on its own
 # runner. `promote` (below `open`) runs in the `promote` job when the PR's own
-# `test.yml` run completes. Neither runs a model. Every write it makes — the push, the PR, the
-# commit status, labels, issue comments, the attempt record — uses the
-# tbd-flake-fixer App token in APP_TOKEN, because a PR opened or pushed with the
-# default GITHUB_TOKEN starts no workflows (§7).
+# `test.yml` run completes or the bot sets its `flakefix/stress` status.
+# Neither runs a model. Every write it makes — the push, the PR, the commit
+# status, labels, issue comments, the attempt record — uses the
+# tbd-flake-fixer App token in APP_TOKEN, because a PR opened, pushed or given
+# a status with the default GITHUB_TOKEN starts no workflows (§7). The status
+# `open` sets with the App token is what starts the status-triggered promote.
 #
 # Usage, with cwd in a checkout of this repository holding the base commit:
 #   APP_TOKEN=… scripts/flake-pr.sh open --pick-dir P --attempt-dir A --repo R
@@ -251,13 +253,19 @@ cmd_open() {
 }
 
 # promote: mark the draft ready once its own CI passed on the head the verifier
-# passed (spec §7). Reads with the job token in GH_TOKEN; the writes, the ready
-# (and the weak label, if publish never added it), use the App token, because
-# a ready_for_review raised by GITHUB_TOKEN starts no claude-review. It writes
-# no ledger or attempt state (§4.4). Exit 0 promoted or skipped, 2 on a failed
-# read or malformed input, which leaves the PR a draft.
+# passed (spec §7). Two events start it, so whichever lands last promotes:
+#   --branch B --conclusion C --event E --run-id ID --run-created-at T
+#                                         Test run ID on B completed (C, E)
+#   --from-status                         the bot set flakefix/stress on --sha;
+#                                         the PR is found from the commit
+# Both are judged on the same facts. Reads with the job token in GH_TOKEN; the
+# writes, the ready (and the weak label, if publish never added it), use the
+# App token, because a ready_for_review raised by GITHUB_TOKEN starts no
+# claude-review. It writes no ledger or attempt state (§4.4). Exit 0 promoted
+# or skipped, 2 on a failed read or malformed input, which leaves the PR a
+# draft.
 cmd_promote() {
-  local repo="" branch="" sha="" conclusion="" event=""
+  local repo="" branch="" sha="" conclusion="" event="" run_id="" created="" from_status=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo) repo="${2:-}"; shift 2 ;;
@@ -265,12 +273,30 @@ cmd_promote() {
       --sha) sha="${2:-}"; shift 2 ;;
       --conclusion) conclusion="${2:-}"; shift 2 ;;
       --event) event="${2:-}"; shift 2 ;;
+      --run-id) run_id="${2:-}"; shift 2 ;;
+      --run-created-at) created="${2:-}"; shift 2 ;;
+      --from-status) from_status=1; shift ;;
       *) die "promote: unknown argument $1" ;;
     esac
   done
-  [[ -n "$repo" && -n "$branch" && -n "$sha" && -n "$conclusion" && -n "$event" ]] \
-    || die "promote: --repo, --branch, --sha, --conclusion and --event are required"
+  local trigger=(--trigger test-run --conclusion "$conclusion" --event "$event" --run-id "$run_id" --run-created-at "$created")
+  if [[ -n "$from_status" ]]; then
+    [[ -n "$repo" && -n "$sha" && -z "$branch$conclusion$event$run_id$created" ]] \
+      || die "promote --from-status: --repo and --sha are required, and no Test run's facts are taken"
+    trigger=(--trigger status)
+  else
+    [[ -n "$repo" && -n "$branch" && -n "$sha" && -n "$conclusion" && -n "$event" && -n "$created" ]] \
+      || die "promote: --repo, --branch, --sha, --conclusion, --event, --run-id and --run-created-at are required"
+    [[ "$run_id" =~ ^[0-9]+$ ]] || die "promote: --run-id is not a run id"
+  fi
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "promote: --sha is not a commit id"
+  if [[ -n "$from_status" ]]; then
+    branch="$(py promote-resolve --repo "$repo" --sha "$sha")" || die "cannot find the PR whose head is $sha"
+    if [[ -z "$branch" ]]; then
+      echo "flake-pr: SKIP no one open flakefix/issue-<N> PR from $repo has $sha at its head"
+      return 0
+    fi
+  fi
   # The branch reaches a URL; nothing but the bot's own names goes further.
   if [[ ! "$branch" =~ ^flakefix/issue-[0-9]+$ ]]; then
     echo "flake-pr: SKIP $branch is not a flakefix/issue-<N> branch"
@@ -282,8 +308,8 @@ cmd_promote() {
   PROMOTE_WORK="$(mktemp -d "${TMPDIR:-/tmp}/flake-pr-promote.XXXXXX")" || die "cannot create a temporary directory"
   trap 'rm -rf "$PROMOTE_WORK"' EXIT
   facts="$PROMOTE_WORK/facts.json"; files="$PROMOTE_WORK/files"; protected="$PROMOTE_WORK/protected"
-  py promote-facts --repo "$repo" --branch "$branch" --sha "$sha" --conclusion "$conclusion" \
-    --event "$event" --out "$facts" || die "cannot read the promotion facts"
+  py promote-facts --repo "$repo" --branch "$branch" --sha "$sha" "${trigger[@]}" \
+    --out "$facts" || die "cannot read the promotion facts"
   # Through files, not pipes: a failed listing must not read as an empty one.
   jq -j '.files[] | (.filename, (.previous_filename // empty)) | . + "\u0000"' "$facts" > "$files" \
     || die "cannot list the PR's files"
@@ -327,7 +353,7 @@ main() {
     promote-decide)
       [[ "${1:-}" == --facts && -n "${2:-}" ]] || die "usage: $0 promote-decide --facts F"
       py promote-decide --facts "$2" ;;
-    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --branch B --sha S --conclusion C --event E | promote-decide --facts F}" ;;
+    *) die "usage: $0 {open --pick-dir P --attempt-dir A --repo R | promote --repo R --sha S (--branch B --conclusion C --event E --run-id ID --run-created-at T | --from-status) | promote-decide --facts F}" ;;
   esac
 }
 

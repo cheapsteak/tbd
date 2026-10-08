@@ -13,7 +13,9 @@ name: Flake fixer
 #     and an attempt record, with the App token, on a runner no model touched
 #     (§7);
 #   - `promote` marks that draft ready for review once the PR's own `test.yml`
-#     run passes on the head the verifier passed (§7).
+#     run passes on the head the verifier passed (§7). The run's completion and
+#     the bot's `flakefix/stress` status each start it, so whichever lands last
+#     promotes.
 #
 # OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
 # 'true', the ledger runs report-only: it computes everything, writes it to the
@@ -33,8 +35,8 @@ name: Flake fixer
 # comment on the tracking issue is the only issue write the job token makes,
 # and `ledger-notice` is the only job whose token may write issues.
 #
-# `workflow_run` and `schedule` fire only from this file as it exists on
-# `main`, so nothing here runs before merge.
+# `workflow_run`, `status` and `schedule` fire only from this file as it exists
+# on `main`, so nothing here runs before merge.
 
 on:
   # §3, §9: one attempt a night, early in the UTC day, so the fix job's
@@ -42,14 +44,26 @@ on:
   schedule:
     - cron: '0 6 * * *'
   # Nightly completions start `ledger`; Test completions on a flakefix/issue-<N>
-  # PR start `promote`. The branch filter keeps every other PR's Test runs from
-  # starting a run of this file: Nightly runs on main, and only the bot pushes
-  # flakefix/issue-<N>. A Test run on main still starts one, all of whose jobs
-  # are skipped without a runner.
+  # PR start `promote`. The branch filter matches the triggering run's head
+  # branch and serves both workflows:
+  #   - Nightly: only a run on main wakes the ledger. Its schedule always runs
+  #     on main; a Nightly dispatched on another branch tests unmerged code,
+  #     which the ledger discards anyway (flake-ledger.py), so there is
+  #     nothing for it to wake for.
+  #   - Test: only the bot's flakefix/issue-<N> PRs can be promoted, so no
+  #     other PR's Test runs start a run of this file. A Test run on main
+  #     (its push trigger) still starts one, all of whose jobs are skipped
+  #     without a runner.
   workflow_run:
     workflows: [Nightly, Test]
     types: [completed]
     branches: [main, 'flakefix/issue-*']
+  # The bot's `flakefix/stress` status also starts `promote` (§7), for a status
+  # that lands after the PR's Test run completed. `publish` sets it with the
+  # App token; one set with GITHUB_TOKEN would start nothing. `status` takes
+  # no filter, so every commit status in the repository starts a run of this
+  # file; for any other context, all its jobs are skipped without a runner.
+  status:
   workflow_dispatch:
     inputs:
       job:
@@ -1163,23 +1177,30 @@ jobs:
             --attempt-dir "$RUNNER_TEMP/flakefix-candidate" --repo "$GITHUB_REPOSITORY"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # promote: when a flakefix/issue-<N> PR's own `test.yml` run completes, mark
-  # the draft ready for review if the run passed on the head the verifier
-  # passed (§7). Weak evidence is promoted too, carrying its label and status
-  # text (§6.5). It writes no ledger or attempt state (§4.4); a skip changes
-  # nothing.
+  # promote: when a flakefix/issue-<N> PR's own `test.yml` run completes, or
+  # the bot sets `flakefix/stress` = success on a flakefix/issue-<N> commit,
+  # mark the draft ready for review if the PR's own Test run passed on the
+  # head the verifier passed (§7). Whichever of the two lands last promotes;
+  # the first skips. Weak evidence is promoted too, carrying its label and
+  # status text (§6.5). A PR a human returned to draft is held and never
+  # promoted again. It writes no ledger or attempt state (§4.4); a skip
+  # changes nothing.
   promote:
     name: promote
     if: >-
       vars.FLAKE_FIXER_ENABLED == 'true' &&
       github.repository == 'cheapsteak/tbd' &&
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.name == 'Test' &&
-      startsWith(github.event.workflow_run.path, '.github/workflows/test.yml') &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.name == 'Test' &&
+        startsWith(github.event.workflow_run.path, '.github/workflows/test.yml') &&
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
+        github.event.workflow_run.head_repository.full_name == github.repository) ||
+       (github.event_name == 'status' &&
+        github.event.context == 'flakefix/stress' &&
+        github.event.state == 'success' &&
+        contains(toJSON(github.event.branches.*.name), '"flakefix/issue-')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # No concurrency group. Each promote decides for its own run's head SHA,
@@ -1190,10 +1211,14 @@ jobs:
     # The job token reads; the ready (and a missing weak label) uses the App
     # token, because a ready_for_review raised by GITHUB_TOKEN starts no
     # claude-review (§7).
+    # `actions: read` lists the PR's Test runs on the head; `issues: read`,
+    # its timeline (who returned it to draft).
     permissions:
       contents: read
       pull-requests: read
       statuses: read
+      actions: read
+      issues: read
     steps:
       # main's scripts, never the candidate's: the protected list promote
       # checks against is main's.
@@ -1223,16 +1248,26 @@ jobs:
           fi
 
       # The branch is attacker-adjacent text: it reaches the script through
-      # env, never as an expression inside `run:`.
+      # env, never as an expression inside `run:`. A status names a commit,
+      # not a branch: the script finds the one open bot PR whose head it is,
+      # and skips when there is none.
       - name: Promote if verified
         env:
           GH_TOKEN: ${{ github.token }}
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          TRIGGER: ${{ github.event_name }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          STATUS_SHA: ${{ github.event.sha }}
         run: |
           set -euo pipefail
-          bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
-            --conclusion "$CONCLUSION" --event "$RUN_EVENT"
+          if [ "$TRIGGER" = status ]; then
+            bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --sha "$STATUS_SHA" --from-status
+          else
+            bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
+              --conclusion "$CONCLUSION" --event "$RUN_EVENT" --run-id "$RUN_ID" --run-created-at "$RUN_CREATED_AT"
+          fi
