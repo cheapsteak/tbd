@@ -48,8 +48,9 @@ assert_eq()       { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAI
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/flake-ledger-test.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
-SEQ=0
-mktmpd() { SEQ=$((SEQ + 1)); mkdir -p "$SCRATCH/d$SEQ"; printf '%s' "$SCRATCH/d$SEQ"; }
+# A fresh directory per call. Every caller is a `$(...)` subshell, so a counter
+# kept in a shell variable would never advance and every case would share one.
+mktmpd() { mktemp -d "$SCRATCH/d.XXXXXX"; }
 
 # mutant_of SED_EXPR FILE -> a directory holding both scripts, FILE edited.
 mutant_of() {
@@ -870,6 +871,7 @@ for route in json.load(open(os.path.join(here, "routes.json"))):
             sys.stdout.buffer.write(open(route["file"], "rb").read())
         else:
             sys.stdout.write(route.get("out", ""))
+        sys.stderr.write(route.get("err", ""))
         sys.exit(route.get("exit", 0))
 sys.stderr.write(f"stub gh: no route for {args}\n")
 sys.exit(99)
@@ -1094,6 +1096,141 @@ test_a_red_first_ever_run_posts() {
   d="$(mktmpd)"; runs_world "$d" "[]"
   red_run "$d" > /dev/null
   assert_contains "posted" "$(writes_in "$d/log")" "issues/519/comments"
+}
+
+# ============================================================================
+# fetch: a definite "does not exist" skips one test; anything else fails closed
+# ============================================================================
+
+NOT_FOUND=$'gh: Not Found (HTTP 404)\n'
+
+test_a_trait_naming_a_missing_issue_skips_only_that_issue_in_fetch() {
+  local d out rc=0 mutant
+  # The stub root's one quarantine, the self-test's, names #499.
+  d="$(mktmpd)"; stub_world "$d" "$(jq -n --arg e "$NOT_FOUND" '[{match: "repos/cheapsteak/tbd/issues/499$", exit: 1, err: $e}]')"
+  out="$(ledger_run "$d")" || rc=$?
+  assert_eq "a 404 does not fail the run" "0" "$rc"
+  assert_contains "the missing issue is listed" "$out" "#499, named by a \`.flaky(issue:)\` trait: GitHub says it does not exist"
+  assert_contains "and the failing test is still reported" "$out" "$HOLDER"
+  d="$(mktmpd)"; stub_world "$d" '[{"match": "repos/cheapsteak/tbd/issues/499$", "exit": 1, "err": "gh: Server Error (HTTP 502)\n"}]'
+  rc=0; ledger_run "$d" > /dev/null || rc=$?
+  assert_eq "a 502 still fails closed" "2" "$rc"
+  d="$(mktmpd)"; stub_world "$d" "$(jq -n --arg e "$NOT_FOUND" '[{match: "repos/cheapsteak/tbd/issues/499$", exit: 1, err: $e}]')"
+  mutant="$(mutant_of 's/^ISSUE_GONE_STATUSES = .*$/ISSUE_GONE_STATUSES = ()/' "$LEDGER")"
+  rc=0; LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null || rc=$?
+  assert_eq "mutation: without the 404 rule the whole run fails" "2" "$rc"
+}
+
+test_a_test_whose_trait_issue_is_missing_is_skipped_and_the_rest_planned() {
+  local w out mutant
+  w="$(newwork)"
+  build run "$w" --id 1701 --branch b --attempt "1|2026-10-06T10:00:00Z|success" --artifact "17011|retry-metrics|2026-10-06T10:20:00Z"
+  build retry "$w/artifacts/17011/retry-metrics.jsonl" 'TBDSharedTests.OtherTests/flaky()' passedOnRetry Tests/TBDSharedTests/OtherTests.swift
+  nightly_run "$w" 2701 2026-10-05 "$HOLDER"
+  printf 'Tests/TBDSharedTests/OtherTests.swift\tflaky\t600\n' > "$w/inventory.tsv"
+  build set "$w" fetch_notes.json '{"gone_issues": [600]}'
+  out="$(analyze "$w")"
+  assert_eq "only the other test is planned" "$HOLDER" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")"
+  assert_contains "the skipped test is listed with its reason" "$(jq -r '.notes.skipped[]' <<< "$out")" "\`TBDSharedTests.OtherTests/flaky()\`: its \`.flaky(issue: 600)\` names #600, which GitHub says does not exist; skipped"
+  assert_contains "and the report shows it" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "Skipped (every other test was still planned)"
+  mutant="$(mutant_of 's/^        if trait is not None and trait in ctx.gone_issues:$/        if False:/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_contains "mutation: without the skip a second issue is created for it" "$(jq -r '[.actions[].test_id] | join(",")' <<< "$out")" "OtherTests/flaky()"
+}
+
+test_a_compare_404_skips_only_that_test() {
+  local d out rc=0 mutant routes
+  local issue='{"number": 970, "title": "Flaky test: '"$HOLDER"'", "state": "closed", "labels": [{"name": "flaky"}]}'
+  local close='{"data": {"repository": {"issue": {"timelineItems": {"nodes": [{"createdAt": "2026-10-05T12:00:00Z", "stateReason": "COMPLETED", "closer": {"__typename": "PullRequest", "number": 960, "merged": true, "mergedAt": "2026-10-05T12:00:00Z", "mergeCommit": {"oid": "9609609"}}}]}}}}}'
+  routes="$(jq -n --arg issue "$issue" --arg close "$close" --arg e "$NOT_FOUND" '[
+    {match: "issues\\?labels=flaky", out: ($issue + "\n")},
+    {match: "issues/970/comments\\?per_page", out: ""},
+    {match: "graphql", out: $close},
+    {match: "compare/9609609\\.\\.\\.538ba7eb", exit: 1, err: $e}]')"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)" || rc=$?
+  assert_eq "a 404 from compare does not fail the run" "0" "$rc"
+  assert_contains "the test is listed as skipped" "$out" "\`$HOLDER\`: GitHub could not compare the fix with the failing commit (9609609..538ba7eb)"
+  assert_eq "and nothing is written for it" "" "$(writes_in "$d/log")"
+  d="$(mktmpd)"; stub_world "$d" "$(jq '(.[] | select(.match | startswith("compare"))) |= (.err = "gh: Server Error (HTTP 500)\n")' <<< "$routes")"
+  rc=0; FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write > /dev/null || rc=$?
+  assert_eq "a 500 still fails closed" "2" "$rc"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  mutant="$(mutant_of 's/^COMPARE_GONE_STATUSES = .*$/COMPARE_GONE_STATUSES = ()/' "$LEDGER")"
+  rc=0; FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" --write > /dev/null || rc=$?
+  assert_eq "mutation: without the 404 rule the whole run fails" "2" "$rc"
+}
+
+# search_page ISSUE_JSON... -> one `--jq` page line as `_search_title` asks for it.
+search_page() { jq -cn --argjson items "[$(IFS=,; printf '%s' "$*")]" '{incomplete: false, total: 2, items: $items}'; }
+
+test_the_title_search_reads_every_page() {
+  local d out mutant routes page1 page2
+  page1="$(search_page '{"number": 1500, "title": "Flaky test: something else", "state": "open", "labels": []}')"
+  page2="$(search_page "{\"number\": 970, \"title\": \"Flaky test: $HOLDER\", \"state\": \"open\", \"labels\": []}")"
+  # The stub answers both pages only to a paginated call, as gh does.
+  routes="$(jq -n --arg both "$page1"$'\n'"$page2"$'\n' --arg one "$page1"$'\n' '[
+    {match: "--paginate -X GET search/issues", out: $both},
+    {match: "search/issues", out: $one}]')"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  out="$(ledger_run "$d")"
+  assert_contains "the issue on page 2 is found, not duplicated" "$out" "#970 (open)"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  mutant="$(mutant_of 's/^        "api", "--paginate", "-X", "GET", "search\/issues",$/        "api", "-X", "GET", "search\/issues",/' "$LEDGER")"
+  out="$(LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d")"
+  assert_contains "mutation: reading one page plans a duplicate" "$out" "a new issue"
+}
+
+test_the_title_search_fails_closed_on_an_incomplete_answer() {
+  local d rc=0 mutant routes
+  routes="$(jq -n '[{match: "search/issues", out: "{\"incomplete\": true, \"total\": 0, \"items\": []}\n"}]')"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  ledger_run "$d" > /dev/null || rc=$?
+  assert_eq "an incomplete search is exit 2, not 'no issue'" "2" "$rc"
+  d="$(mktmpd)"; stub_world "$d" "$routes"
+  mutant="$(mutant_of 's/^        if page.get\("incomplete"\):$/        if False:/' "$LEDGER")"
+  rc=0; LEDGER_UNDER_TEST="$mutant/flake-ledger.py" ledger_run "$d" > /dev/null || rc=$?
+  assert_eq "mutation: trusting it exits 0" "0" "$rc"
+}
+
+test_the_title_search_keeps_a_quote_from_ending_the_phrase() {
+  local d out mutant script
+  d="$(mktmpd)"
+  jq -n '[{match: "search/issues", out: ""}]' > "$d/routes.json"; stub_gh "$d"
+  script='
+import sys, importlib.util
+s = importlib.util.spec_from_file_location("fl_ledger", sys.argv[1]); m = importlib.util.module_from_spec(s); sys.modules["fl_ledger"] = m; s.loader.exec_module(m)
+m._search_title("cheapsteak/tbd", "Flaky test: M.S/f(\"a\")")
+'
+  FLAKE_GH_CMD="$d/gh" python3 -c "$script" "$LEDGER"
+  out="$(grep search/issues "$d/log")"
+  assert_contains "the inner quotes are spaces, so the phrase is the whole title" "$out" 'in:title "Flaky test: M.S/f( a )"'
+  : > "$d/log"
+  mutant="$(mutant_of "s/^    phrase = title.replace\\('\"', \" \"\\)\$/    phrase = title/" "$LEDGER")"
+  FLAKE_GH_CMD="$d/gh" python3 -c "$script" "$mutant/flake-ledger.py"
+  assert_contains "mutation: unescaped, the first inner quote ends the phrase" "$(grep search/issues "$d/log")" 'in:title "Flaky test: M.S/f("a")"'
+}
+
+# ============================================================================
+# analyze: artifacts it could not read are listed
+# ============================================================================
+
+test_expired_and_missing_artifacts_are_listed() {
+  local w out mutant
+  w="$(newwork)"
+  erased_run "$w" 1801 sidebar --artifact "18012|retry-metrics|2026-10-06T19:34:00Z"
+  jq '(.[] | select(.run_id == 1801) | .artifacts[]) |= (.expired = true)' "$w/runs.json" > "$w/r.json" && mv "$w/r.json" "$w/runs.json"
+  build run "$w" --id 1802 --branch b --attempt "1|2026-10-06T19:16:42Z|failure" --attempt "2|2026-10-06T19:35:23Z|success"
+  build run "$w" --id 1803 --workflow nightly --branch main --attempt "1|2026-10-05T11:00:00Z|failure"
+  out="$(analyze "$w")"
+  assert_contains "an expired xunit artifact" "$(jq -r '.notes.unavailable[]' <<< "$out")" "run 1801: \`xunit-results\` artifact 18011 has expired"
+  assert_contains "an expired retry-metrics artifact" "$(jq -r '.notes.unavailable[]' <<< "$out")" "run 1801: \`retry-metrics\` artifact 18012 has expired"
+  assert_contains "a rerun-erased run with no attempt-1 xunit" "$(jq -r '.notes.unavailable[]' <<< "$out")" "run 1802: attempt 1 failed and a rerun passed"
+  assert_contains "a nightly with none" "$(jq -r '.notes.unavailable[]' <<< "$out")" "nightly run 1803: no \`nightly-xunit\` artifact"
+  assert_contains "the report has the section" "$(python3 "$LEDGER" report --plan <(printf '%s' "$out"))" "Artifacts not read (expired, or never uploaded)"
+  mutant="$(mutant_of 's/^        notes.unavailable.extend\(artifact_gaps\(run\)\)$/        pass/' "$LEDGER")"
+  out="$(analyze "$w" "$mutant")"
+  assert_eq "mutation: without the listing they vanish silently" "0" "$(jq '.notes.unavailable | length' <<< "$out")"
 }
 
 # ============================================================================
