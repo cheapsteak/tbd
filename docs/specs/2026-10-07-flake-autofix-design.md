@@ -1410,7 +1410,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   back to the job token when the App token is missing, and grants
   `issues: write` to no other job.
 - **`flake-pr.test.sh`** – promotion's conditions (§7), each failing alone,
-  under both triggers; a head that moved after verification; a status that
+  under the Test trigger, and under the status trigger the conditions that
+  trigger adds or reaches differently (the Test run, the hold, the PR's
+  resolution); a head that moved after verification; a status that
   lands after the PR's Test run (promoted) and one that lands while the run
   is still going (skipped, under either trigger); a newer red Test run over
   an older green one; a Test run that is not the PR's own – a `push` run,

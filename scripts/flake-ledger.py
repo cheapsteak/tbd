@@ -1185,9 +1185,12 @@ def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: 
                 continue
             if parse_time(run["created_at"]) < horizon:
                 return "none"
-            # Only a trigger that can start `ledger` counts toward the bound:
-            # every commit status in the repository starts a run of this
-            # workflow (`promote`'s trigger), and those must not use it up.
+            # Only a run of an event that can start `ledger` counts toward the
+            # bound: every commit status in the repository starts a run of
+            # this workflow (`promote`'s trigger), and those must not use it
+            # up. They are still paged past, inside the horizon. Test
+            # completions arrive as `workflow_run` too and still count, as
+            # they always did.
             if run.get("event") not in ("workflow_run", "workflow_dispatch"):
                 continue
             seen += 1
