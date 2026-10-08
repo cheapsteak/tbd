@@ -195,6 +195,7 @@ final class AppStateEmissionTracker {
         _ = state.revivingArchived
         _ = state.alertMessage
         _ = state.alertIsError
+        _ = state.alertRevealPath
         _ = state.tmuxExecutableResolution
         _ = state.savedTmuxExecutablePath
         _ = state.isTmuxLocationPromptPresented
@@ -318,6 +319,7 @@ final class AppStateEmissionTracker {
         "revivingArchived",
         "alertMessage",
         "alertIsError",
+        "alertRevealPath",
         "tmuxExecutableResolution",
         "savedTmuxExecutablePath",
         "isTmuxLocationPromptPresented",
