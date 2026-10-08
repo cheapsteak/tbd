@@ -222,7 +222,7 @@ adhoc_test_spec() {
 # and the three args that do not decide which tests run or how dropped:
 # `--fingerprint` (it guards the developer's home directories) and the
 # `--xunit-output` pair (this script adds its own). `check_pass_table` compares
-# this table with the invocations parsed out of `test.yml`, and the `lint` job
+# this table with the invocations parsed out of `test.yml`, and the `plans-guard` job
 # runs that check, so a CI pass that changes without this table changing fails.
 CI_PASSES=(
   "fast-pass-daemon-a|1200|--parallel --filter ^TBDDaemonTests\\.[A-O]"

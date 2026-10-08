@@ -582,7 +582,7 @@ places it. `TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()`,
 the #960 test, is in fast pass 2. `--pass-of` (§6.4) holds the four filters,
 parallelism flags, and floors as data, and its harness checks that data
 against the `watched-test-pass.sh` invocations in `test.yml`, so a change to a
-CI pass that the verifier does not follow fails the `lint` job. The verifier
+CI pass that the verifier does not follow fails the `plans-guard` job. The verifier
 omits only CI's `--fingerprint`, which guards the developer's home directories
 and does not change which tests run or how.
 
@@ -1155,7 +1155,7 @@ file. The placement battery from `docs/theory-placement.md` agrees:
 
 Each script follows the repository's harness pattern: the logic that decides
 is a pure function of input files, proven against fixtures with no network, and
-its `*.test.sh` harness runs in the ubuntu step of the `lint` job beside
+its `*.test.sh` harness runs in the ubuntu `plans-guard` job beside
 `nightly-flake-stress.test.sh`. GitHub access goes through a `gh` stand-in
 supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 `AUDIT_GH_CMD`.
