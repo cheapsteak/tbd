@@ -50,7 +50,7 @@ PUSH_ERROR_LINES=15
 # evidence, and a PR closed later has no attempt to tie its close to. So die
 # records `pr-opened` when a PR exists and `aborted` otherwise, once (a failed
 # record does not record again), then exits 2 so the run goes red.
-ISSUE="" PR="" POST_PUSH="" RECORDING=""
+ISSUE="" PR="" POST_PUSH="" RECORDING="" REUSED=""
 die() {
   echo "flake-pr: $*" >&2
   if [[ -n "$ISSUE" && -z "$RECORDING" ]]; then
@@ -163,7 +163,7 @@ cmd_open() {
       record aborted --reason "An open PR (#$(jq -r '.[0].number' <<< "$open")) already uses $branch at another commit; nothing was pushed over it."
       return 0
     fi
-    PR="$(jq -r '.[0].number' <<< "$open")"; POST_PUSH=1
+    PR="$(jq -r '.[0].number' <<< "$open")"; POST_PUSH=1; REUSED=1
     echo "flake-pr: PR #$PR already carries $head (a re-run); reusing it"
   fi
 
@@ -218,7 +218,8 @@ cmd_open() {
     -f description="$description" -f target_url="$run_url" > /dev/null || die "cannot set the status on $head"
   echo "flake-pr: flakefix/stress = $state ($description)"
 
-  if [[ "$(jq -r .verdict "$ATTEMPT/verify/verdict.json")" != pass ]]; then
+  # A re-run that found its PR already open posted this comment the first time.
+  if [[ "$(jq -r .verdict "$ATTEMPT/verify/verdict.json")" != pass && -z "$REUSED" ]]; then
     local lines; lines="$(mktemp "${TMPDIR:-/tmp}/flake-pr-lines.XXXXXX")"
     { [[ -s "$ATTEMPT/verify/protected.txt" ]] && { echo "Protected files touched:"; cat "$ATTEMPT/verify/protected.txt"; echo; }
       head -60 "$ATTEMPT/verify/failing-lines.txt" 2>/dev/null; } > "$lines"

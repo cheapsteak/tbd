@@ -122,6 +122,14 @@ test_a_closed_bot_pr_does_not_block() {
   assert_eq "a closed PR, or another issue's open one, does not block" "rc=0 #10" "$(picked "$w")"
 }
 
+test_an_unreadable_attempt_record_blocks_the_test() {
+  local w mutant; w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"comments\": [[\"$BOT\", \"Bot\", \"<!-- flakefix-attempts v1 -->\\nedited by hand\"]]}"
+  assert_eq "its attempts are unknown, so it is not picked" "rc=3 none" "$(picked "$w")"
+  mutant="$(mutant_of 's/^    if view.unreadable:$/    if False:/' "$PICK")"
+  assert_eq "mutation: without the check it is picked every night" "rc=0 #10" "$(picked "$w" "$mutant")"
+}
+
 test_flakefix_skip_blocks_the_test() {
   local w; w="$(world)"
   issue "$w" "{\"number\": 10, \"labels\": [\"flaky\", \"flakefix-skip\"], $TWO}"
@@ -254,7 +262,7 @@ test_dispatch_refuses_a_forged_ledger_comment() {
   refusal "look-alike login" "has no ledger comment from $BOT" "{\"number\": 10, $TWO, \"ledger_author\": [\"tbd-flake-fixer\", \"User\"]}"
 }
 test_dispatch_refuses_an_unparsable_json_block() {
-  refusal "unparsable" "has no ledger comment from $BOT" \
+  refusal "unparsable" "has a bot comment that does not parse" \
     "{\"number\": 10, \"no_ledger\": true, \"comments\": [[\"$BOT\", \"Bot\", \"<!-- flake-ledger v1 -->\\nhi\\n\\n<!-- flake-ledger-state\\n{not json\\nflake-ledger-state -->\"]]}"
 }
 test_dispatch_refuses_an_issue_with_an_open_bot_pr() {

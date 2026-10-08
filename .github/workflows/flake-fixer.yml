@@ -353,12 +353,12 @@ jobs:
 
       - name: Build the session tree (warm)
         if: steps.pick.outputs.attempted == 'true'
-        timeout-minutes: 20
+        timeout-minutes: 15
         run: scripts/swift-safe build --build-tests
 
       - name: Build the verification tree (cold)
         if: steps.pick.outputs.attempted == 'true'
-        timeout-minutes: 30
+        timeout-minutes: 22
         working-directory: ${{ env.VT }}
         run: '"$VS/scripts/swift-safe" build --build-tests'
 
@@ -368,7 +368,7 @@ jobs:
       - name: Pre-fix baseline and N (verification tree)
         id: baseline
         if: steps.pick.outputs.attempted == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 10
         working-directory: ${{ env.VT }}
         env:
           TEST_ID: ${{ steps.pick.outputs.test_id }}
@@ -491,14 +491,19 @@ jobs:
             || abort "The process snapshot changed during session 1."
           bash "$own/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 1 started survived SIGKILL (exit $rc); nothing is verified with one alive."
-          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
           # Results the session could have planted: only the verifier writes these.
           rm -rf "$T/verify" "$T/verify-1"
           # The session could reach these files; put back what was measured.
+          # Each is removed first, so a symlink the session left cannot carry
+          # the write somewhere else, such as into the verifier copy.
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then abort "The attempt directory was replaced by a symlink during session 1."; fi
+          rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
+          mkdir "$T/baseline" || abort "Cannot reset the measured records."
           printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
           printf '%s\n' "$BASELINE_V" > "$T/baseline/v"; printf '%s\n' "$BASELINE_MD" > "$T/baseline/baseline.md"
           printf '%s\n' "$QUARANTINED" > "$T/quarantined"; printf '%s\n' "$PLAN" > "$T/plan.json"
           printf '%s\n' "$BASE" > "$T/pick/base_sha"
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
           base="$BASE"
           n="$(git rev-list --count "$base"..HEAD)" || abort "Cannot count session 1's commits."
           echo "commits=$n" >> "$GITHUB_OUTPUT"
@@ -507,6 +512,7 @@ jobs:
             git bundle create -q "$T/candidate.bundle" "$base"..HEAD
             git rev-parse HEAD > "$T/head_sha"
           fi
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Session 1 left $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
 
       # The stress run may outlive its allotment; the judge, not this step's
@@ -514,7 +520,9 @@ jobs:
       - name: Stress try 1 (verification tree)
         if: steps.pick.outputs.attempted == 'true' && steps.c1.outputs.commits != '0'
         continue-on-error: true
-        timeout-minutes: 30
+        # The allotment R (§9): an overrun ends the run, and the judge fails
+        # it as truncated.
+        timeout-minutes: 24
         working-directory: ${{ env.VT }}
         env:
           TEST_ID: ${{ steps.pick.outputs.test_id }}
@@ -617,6 +625,7 @@ jobs:
         env:
           VS_SUM: ${{ steps.vsfp.outputs.sum }}
           SNAP_SUM: ${{ steps.snap2.outputs.sum }}
+          TRY1_HEAD: ${{ steps.c1.outputs.head }}
           BASE: ${{ steps.layout.outputs.base }}
           SCOPE: ${{ steps.baseline.outputs.scope }}
           BASELINE_F: ${{ steps.baseline.outputs.f }}
@@ -644,28 +653,44 @@ jobs:
             || abort "The process snapshot changed during session 2."
           bash "$own/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
           [ "$rc" = 0 ] || abort "A process session 2 started survived SIGKILL (exit $rc); nothing is verified with one alive."
-          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
           # Results the session could have planted: only the verifier writes these.
           rm -rf "$T/verify"
           # The session could reach these files; put back what was measured.
+          # Each is removed first, so a symlink the session left cannot carry
+          # the write somewhere else, such as into the verifier copy.
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then abort "The attempt directory was replaced by a symlink during session 2."; fi
+          rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
+          mkdir "$T/baseline" || abort "Cannot reset the measured records."
           printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
           printf '%s\n' "$BASELINE_V" > "$T/baseline/v"; printf '%s\n' "$BASELINE_MD" > "$T/baseline/baseline.md"
           printf '%s\n' "$QUARANTINED" > "$T/quarantined"; printf '%s\n' "$PLAN" > "$T/plan.json"
           printf '%s\n' "$BASE" > "$T/pick/base_sha"
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
           base="$BASE"
           n="$(git rev-list --count "$base"..HEAD)" || abort "Cannot count the sessions' commits."
-          echo "commits=$n" >> "$GITHUB_OUTPUT"
           rm -f "$T/candidate.bundle" "$T/head_sha"
           if [ "$n" != 0 ]; then
             git bundle create -q "$T/candidate.bundle" "$base"..HEAD
             git rev-parse HEAD > "$T/head_sha"
           fi
-          echo "After session 2 the branch holds $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(git rev-parse HEAD)" = "$TRY1_HEAD" ]; then
+            # Session 2 changed nothing: the candidate is try 1's, and so is
+            # its verdict. Stressing it again could only let a chance pass
+            # overwrite a failure already observed.
+            mv "$T/verify-1" "$T/verify" || abort "Cannot restore try 1's verdict."
+            echo "commits=0" >> "$GITHUB_OUTPUT"
+            echo "Session 2 made no new commit; try 1's verdict stands." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "commits=$n" >> "$GITHUB_OUTPUT"
+            echo "After session 2 the branch holds $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Stress try 2 (verification tree)
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
         continue-on-error: true
-        timeout-minutes: 30
+        # The allotment R (§9): an overrun ends the run, and the judge fails
+        # it as truncated.
+        timeout-minutes: 24
         working-directory: ${{ env.VT }}
         env:
           TEST_ID: ${{ steps.pick.outputs.test_id }}
@@ -713,6 +738,10 @@ jobs:
       # copy lives outside $T and is not uploaded.
       - name: Package the attempt
         if: always() && steps.pick.outputs.attempted == 'true'
+        env:
+          C1: ${{ steps.c1.outcome }}
+          TRY2: ${{ steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' }}
+          C2: ${{ steps.c2.outcome }}
         run: |
           set -uo pipefail
           if [ -f "$T/abort_reason" ]; then
@@ -720,6 +749,11 @@ jobs:
           elif [ ! -f "$T/plan.json" ]; then
             echo "The job ended before the baseline finished (a failed build or step)." > "$T/abort_reason"
             echo aborted > "$T/outcome"
+          elif [ "$C1" != success ] || { [ "$TRY2" = true ] && [ "$C2" != success ]; }; then
+            # Timed out, cancelled, or a step failed before a session's commits
+            # were collected: whatever is on disk is not a finished attempt.
+            echo "The job ended before a session's commits were collected (a timeout, a cancellation, or a failed step)." > "$T/abort_reason"
+            echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
           elif [ -f "$T/candidate.bundle" ]; then
             echo candidate > "$T/outcome"
           else
@@ -747,10 +781,12 @@ jobs:
     if: always() && vars.FLAKE_FIXER_ENABLED == 'true' && github.repository == 'cheapsteak/tbd' && needs.fix.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # The attempt comment sits on the issues the ledger writes; one writer at
-    # a time.
+    # Its own group, not the ledger's: GitHub cancels a pending job when a
+    # newer one queues in the same group, and a cancelled publish would record
+    # nothing. It writes only the attempt comment and its own comments, never
+    # the ledger comment or an issue, so the two cannot collide.
     concurrency:
-      group: flake-ledger-state
+      group: flake-fixer-publish
       cancel-in-progress: false
     # The job token reads nothing it needs; every write uses the App token.
     permissions:

@@ -479,6 +479,26 @@ test_an_unparsable_pr_url_is_found_by_branch() {
   assert_eq "the attempt is tied to the PR on the branch" "pr-opened 88" "$(recorded "$d" | jq -r '"\(.outcome) \(.pr)"')"
 }
 
+test_session_text_closes_and_mentions_nothing() {
+  local d body; d="$(world)"; routes "$d"
+  printf 'Fixed it. fixes #519, closes https://github.com/%s/issues/412\n' "$REPO" > "$d/attempt/flakefix-notes.md"
+  printf 'Result: pass. resolves #77\n' > "$d/attempt/verify/verdict.md"
+  publish "$d" > /dev/null
+  body="$(awk '/pr create/{on=1; next} on && /^  STDIN /{sub(/^  STDIN /, ""); print; next} on{exit}' "$d/log")"
+  assert_contains "the bot's own closing reference stays" "$body" "Fixes #10"
+  assert_lacks "a session's does not" "$body" "fixes #519"
+  assert_lacks "nor an issue URL" "$body" "issues/412"
+  assert_lacks "nor one in the verdict text" "$body" "resolves #77"
+}
+
+test_a_rerun_on_its_open_pr_posts_no_second_comment() {
+  local d; d="$(world "$FAILED")"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$(cat "$d/attempt/head_sha")\"}]"
+  publish "$d" > /dev/null
+  assert_lacks "no duplicate failure comment" "$(logged "$d")" "not eligible for ready"
+  assert_eq "the attempt is still recorded" "pr-opened 77" "$(recorded "$d" | jq -r '"\(.outcome) \(.pr)"')"
+}
+
 test_the_run_link_comes_from_the_pick() {
   local d; d="$(world "$FAILED")"; routes "$d"
   echo "https://attacker.example/x" > "$d/attempt/run_url"
@@ -641,8 +661,8 @@ ended_before_verify() {
 }
 test_session_processes_are_ended_before_each_verify() { check "processes end, from a checked private copy, between each session and its verify" ended_before_verify 'cp "$T/procs-before-2" "$own/procs-before"' 'true'; }
 
-publish_group() { job_block "$1" publish | grep -q 'group: flake-ledger-state'; }
-test_publish_shares_the_ledger_concurrency_group() { check "publish shares the ledger's group" publish_group 'group: flake-ledger-state' 'group: other' all; }
+publish_group() { job_block "$1" publish | grep -q 'group: flake-fixer-publish'; }
+test_publish_has_its_own_concurrency_group() { check "publish queues in its own group, where no ledger run can cancel it" publish_group 'group: flake-fixer-publish' 'group: flake-ledger-state'; }
 
 publish_always() {
   local job open
@@ -687,6 +707,30 @@ test_the_verifier_fingerprint_sees_edits_new_files_and_symlinks() {
   assert_eq "a copy fingerprints the same as its source" "$d" "$(e="$(mktmpd)"; cp -R "$vs/." "$e/"; bash -c "$fn"'; fingerprint "$1"' _ "$e")"
 }
 
+
+package_needs_collected_commits() {
+  local block
+  block="$(step "$1" fix "Package the attempt")"
+  grep -qF 'C1: ${{ steps.c1.outcome }}' <<< "$block" && grep -qF '[ "$C1" != success ]' <<< "$block"
+}
+test_no_diff_needs_session_one_collected() { check "no-diff only once session 1's commits were collected" package_needs_collected_commits '[ "$C1" != success ]' '[ "$C1" = never ]'; }
+
+unchanged_try2_keeps_try1() {
+  local block
+  block="$(step "$1" fix "End session 2")"
+  grep -qF '[ "$(git rev-parse HEAD)" = "$TRY1_HEAD" ]' <<< "$block" &&
+    grep -qF 'mv "$T/verify-1" "$T/verify"' <<< "$block" && grep -qF 'echo "commits=0"' <<< "$block"
+}
+test_an_unchanged_second_try_keeps_the_first_verdict() { check "an unchanged try 2 is not stressed again" unchanged_try2_keeps_try1 'mv "$T/verify-1" "$T/verify"' 'true'; }
+
+restores_without_following_links() {
+  local i block
+  for i in 1 2; do
+    block="$(step "$1" fix "End session $i")"
+    awk '/rm -rf "\$T\/baseline" "\$T\/plan.json"/{r=NR} /> "\$T\/plan.json"/{w=NR} END{exit !(r && w && r < w)}' <<< "$block" || return 1
+  done
+}
+test_measured_records_are_restored_without_following_links() { check "records are removed before they are rewritten" restores_without_following_links 'rm -rf "$T/baseline" "$T/plan.json"' 'true "$T/baseline" "$T/plan.json"' all; }
 
 bot_login_checked() { step "$1" publish "Check the App token's bot login" | grep -q 'scripts/flake_lib.py check-app-slug'; }
 test_publish_checks_the_app_login() { check "publish checks the App's login" bot_login_checked 'scripts/flake_lib.py check-app-slug' 'echo x' all; }

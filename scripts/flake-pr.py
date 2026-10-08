@@ -33,6 +33,7 @@ import argparse
 from dataclasses import asdict, fields
 import json
 from pathlib import Path
+import re
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -77,10 +78,14 @@ def read_text(path: Path) -> str:
 
 
 def sanitize(text: str) -> str:
-    """Session-written text, made safe to post: it cannot open an HTML comment
-    (and so cannot hide text or spell a state sentinel), and `@login` does not
-    notify anyone."""
-    return text.replace("<!--", "&lt;!--").replace("@", "@​")
+    """Session- or candidate-written text, made safe to post. It cannot open an
+    HTML comment (and so cannot hide text or spell a state sentinel), `@login`
+    notifies no one, and `#123` or an issue URL is no reference, so a closing
+    keyword in it ("fixes #519") closes nothing when the PR merges."""
+    zw = "\u200b"
+    text = text.replace("<!--", "&lt;!--").replace("@", "@" + zw)
+    text = re.sub(r"#(?=\d)", "#" + zw, text)
+    return re.sub(r"/(issues|pull)/(?=\d)", lambda m: f"/{m.group(1)}/{zw}", text)
 
 
 def pct(x: float) -> str:
@@ -169,7 +174,7 @@ def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
     ]
     if not verdict.get("weak"):
         out += [f"Numbers: {numbers_line(verdict)}.", ""]
-    out += [read_text(attempt / "verify" / "verdict.md").strip(), ""]
+    out += [sanitize(read_text(attempt / "verify" / "verdict.md").strip()), ""]
     run_url = read_text(attempt / "run_url").strip()
     if run_url:
         out += [f"Fix run: {run_url}"]

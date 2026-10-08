@@ -6,8 +6,9 @@ the `flaky` issues' ledger and attempt comments and the bot's `flakefix/*`
 PRs, and chooses at most one test. Deterministic; no model.
 
     fetch --repo R --out-dir D [--issue N]
-        writes D/issues.json (every `flaky` issue, open or closed, with its
-        sentinel comments and their authors; plus issue N when given) and
+        writes D/issues.json (every open `flaky` issue, the only kind the picker
+        can choose, with its sentinel comments and their authors; plus issue N
+        when given, open or not, so a refusal can name its state) and
         D/prs.json (every PR whose head is `flakefix/issue-*`). Reads only.
         Exit 2 on any `gh` failure: a read failure is never "nothing there".
     pick --issues F --prs F --repo R --out-dir D [--issue N] [--root DIR]
@@ -71,7 +72,7 @@ def fetch(repo: str, out: Path, issue: int | None) -> None:
     raws = {
         int(i["number"]): i
         for i in ledger.gh_lines(
-            "api", "--paginate", f"repos/{repo}/issues?labels={fl.FLAKY_LABEL}&state=all&per_page=100",
+            "api", "--paginate", f"repos/{repo}/issues?labels={fl.FLAKY_LABEL}&state=open&per_page=100",
             "--jq", ".[] | select(.pull_request == null)",
         )
     }
@@ -141,6 +142,10 @@ def open_bot_pr(number: int, prs: list[dict]) -> int | None:
 
 def eligible(view, prs: list[dict]) -> tuple[bool, str]:
     state = view.ledger
+    if view.unreadable:
+        # The bot's own comment does not parse: its attempts are unknown, and
+        # the ledger leaves such an issue alone too.
+        return False, "a bot comment does not parse"
     if state is None:
         return False, "no ledger state"
     if not fl.qualifies(state):
@@ -177,6 +182,8 @@ def check_dispatch(views: dict, number: int, prs: list[dict]):
         raise Refused(f"issue #{number} is not open")
     if fl.FLAKY_LABEL not in view.labels:
         raise Refused(f"issue #{number} is not labelled {fl.FLAKY_LABEL}")
+    if view.unreadable:
+        raise Refused(f"issue #{number} has a bot comment that does not parse; its attempt history is unknown")
     if view.ledger is None:
         raise Refused(f"issue #{number} has no ledger comment from {fl.BOT_LOGIN} whose JSON block parses and names a test ID")
     pr = open_bot_pr(number, prs)
