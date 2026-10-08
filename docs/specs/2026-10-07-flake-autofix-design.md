@@ -1009,14 +1009,18 @@ Transitions, each owned by the PR driver:
     branch of this repository, from a `pull_request` run that concluded
     `success`. The usual order: `publish` sets the status seconds after
     opening the PR, long before its CI finishes.
-  - **A `flakefix/stress` = `success` status** (`status`) on a commit one of
-    whose branches is `flakefix/issue-<N>`. This covers a status that lands
-    after the PR's run completed – a re-run `publish`, say. `publish` sets the
-    status with the App token, which is what lets it start a workflow at
-    all; a status set with `GITHUB_TOKEN` would start none. A status names a
-    commit, not a PR, so `promote` finds the one open PR from this
-    repository on a `flakefix/issue-<N>` branch whose head is that commit,
-    and skips when there is none, or more than one. GitHub offers no filter
+  - **A `flakefix/stress` = `success` status** (`status`) on any commit.
+    This covers a status that lands after the PR's run completed – a re-run
+    `publish`, say. `publish` sets the status with the App token, which is
+    what lets it start a workflow at all; a status set with `GITHUB_TOKEN`
+    would start none. A status names a commit, not a PR, so `promote` finds
+    the one open PR from this repository on a `flakefix/issue-<N>` branch
+    whose head is that commit, and skips when there is none, or more than
+    one. The job does not pre-filter on the event's `branches` list: GitHub
+    caps that list at 10 branches, so a commit on more could hide its
+    `flakefix/issue-<N>` branch and the status would be dropped silently,
+    while the lookup from the commit is exact and costs one runner for a
+    status the bot sets at most once per attempt. GitHub offers no filter
     on `status`, so every commit status in the repository starts a run of
     the workflow; for any other context, every job is skipped without a
     runner. Those runs must not crowd the `ledger` job's look-back for its
@@ -1421,7 +1425,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   another branch name) or two of them, each skipped cleanly; a human's
   return to draft, which holds the PR under either trigger, and the bot's
   own, which does not; the job's `if:` naming both triggers and the
-  status's context and state; a Test-triggered promote whose run the runs
+  status's context and state, and not filtering on the status's capped
+  branch list; a Test-triggered promote whose run the runs
   listing still shows in progress, or does not list, which promotes; the
   attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists, and a failed

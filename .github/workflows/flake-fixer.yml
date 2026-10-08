@@ -1185,6 +1185,10 @@ jobs:
   # status text (§6.5). A PR a human returned to draft is held and never
   # promoted again. It writes no ledger or attempt state (§4.4); a skip
   # changes nothing.
+  # The status leg does not filter on the event's `branches`: GitHub lists at
+  # most 10 branches there, so a commit on more could hide its flakefix/issue-
+  # branch. `promote --from-status` resolves the PR from the commit itself and
+  # skips cleanly when there is none.
   promote:
     name: promote
     if: >-
@@ -1199,8 +1203,7 @@ jobs:
         github.event.workflow_run.head_repository.full_name == github.repository) ||
        (github.event_name == 'status' &&
         github.event.context == 'flakefix/stress' &&
-        github.event.state == 'success' &&
-        contains(toJSON(github.event.branches.*.name), '"flakefix/issue-')))
+        github.event.state == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # No concurrency group. Each promote decides for its own run's head SHA,
