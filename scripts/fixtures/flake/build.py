@@ -45,14 +45,10 @@ def _save(path: Path, value) -> None:
 
 
 def _state(payload: dict) -> fl.State:
-    return fl.State(
-        test_id=payload["test_id"],
-        episode=payload.get("episode", 0),
-        failures=[fl.Failure(**f) for f in payload.get("failures", [])],
-        fixes=payload.get("fixes", []),
-        prs=payload.get("prs", []),
-        links=payload.get("links", []),
-    )
+    state = fl._state_from_payload(payload)
+    if state is None:
+        raise SystemExit(f"build.py: not a state: {payload}")
+    return state
 
 
 def main(argv: list[str]) -> int:
@@ -169,7 +165,7 @@ def main(argv: list[str]) -> int:
             comments.append({"id": int(ident), "login": login, "type": kind, "body": Path(body_file).read_text()})
         found = _load(Path(a.work) / "watchlist.json")
         found.append({"number": a.number, "title": fl.WATCHLIST_TITLE, "state": "OPEN", "login": a.login,
-                      "type": a.type, "created_at": a.created, "comments": comments})
+                      "type": a.type, "created_at": a.created, "labels": [fl.WATCHLIST_LABEL], "comments": comments})
         _save(Path(a.work) / "watchlist.json", found)
         return 0
     if command == "ledger-body":

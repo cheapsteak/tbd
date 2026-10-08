@@ -414,6 +414,10 @@ class Watchlist:
     number: int | None = None
     slots: list[tuple[int, list[str], str]] = field(default_factory=list)  # (comment id, tests, body)
     entries: dict[str, fl.State] = field(default_factory=dict)
+    # A bot watchlist comment does not parse: the tests it holds are unknown.
+    unreadable: bool = False
+    # The watchlist was found by title, its label gone: the label is restored.
+    add_label: bool = False
 
 
 def _merge_entries(first: fl.State, second: fl.State) -> fl.State:
@@ -443,7 +447,7 @@ def load_watchlist(raw: list[dict], notes: Notes) -> Watchlist:
         notes.duplicates.append(
             f"watchlist issues {', '.join('#' + str(i['number']) for i in mine)}; using the oldest, #{chosen['number']}, and leaving the others unread"
         )
-    watch = Watchlist(number=int(chosen["number"]))
+    watch = Watchlist(number=int(chosen["number"]), add_label=fl.WATCHLIST_LABEL not in chosen.get("labels", [fl.WATCHLIST_LABEL]))
     for comment in sorted(chosen.get("comments", []), key=lambda c: c["id"]):
         body, login, kind = comment.get("body") or "", comment.get("login"), comment.get("type")
         if not body.startswith(fl.WATCHLIST_SENTINEL):
@@ -453,7 +457,11 @@ def load_watchlist(raw: list[dict], notes: Notes) -> Watchlist:
             continue
         states = fl.parse_watchlist(body, login, kind)
         if states is None:
-            notes.unreadable.append(f"#{watch.number} comment {comment['id']}: the bot's own watchlist comment does not parse; it is left untouched")
+            notes.unreadable.append(
+                f"#{watch.number} comment {comment['id']}: the bot's own watchlist comment does not parse; the watchlist "
+                "and every test without an issue of its own are left untouched"
+            )
+            watch.unreadable = True
             continue
         for state in states:
             if state.test_id in watch.entries:
@@ -789,27 +797,32 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     return action, summary, None
 
 
-def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) -> dict:
+def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str, write: bool = True) -> dict:
     """The watchlist's writes (spec §4.4). Each test keeps the comment it is
-    in; a test new to the watchlist joins the last one. A comment over the
-    body limit hands its last tests, in test-ID order, to the next comment,
-    and the last overflows into a new one, so tests only ever move forward.
-    The writes go new comments first, then the existing ones last first: every
-    moved test is written to its new comment before its old one drops it, so a run that dies midway leaves it
-    in two comments (merged on the next read), never in none. A comment left
-    empty is edited to say so and reused, never deleted.
+    in – the last one, if a run that died midway left it in two. A test new
+    to the watchlist joins the first comment with room for it, else the last.
+    A comment over the body limit hands its last tests, in test-ID order, to
+    the next comment, and the last overflows into a new one, so tests only
+    ever move forward. The writes go new comments first, then the existing
+    ones last first: every moved test is written to its new comment before
+    its old one drops it, so a run that dies midway leaves it in two comments
+    (merged on the next read, and kept in the later one), never in none. A
+    comment left empty is edited to say so and reused, never deleted.
 
     Each entry is first degraded as a ledger comment is (`fl.fit`), to a
     budget that lets it fit in a comment alone."""
     fitted = {t: fl.fit(s, repo, fl.WATCHLIST_ENTRY_CHARS)[0] for t, s in entries.items()}
-    groups = [[t for t in tests if t in fitted] for _, tests, _ in watch.slots]
-    placed = {t for g in groups for t in g}
+    home = {t: i for i, (_, tests, _) in enumerate(watch.slots) for t in tests}
+    groups = [[t for t in tests if t in fitted and home[t] == i] for i, (_, tests, _) in enumerate(watch.slots)]
     if not groups:
         groups = [[]]
-    groups[-1].extend(sorted(set(fitted) - placed))
 
     def body_of(group: list[str]) -> str:
         return fl.render_watchlist([fitted[t] for t in group], repo)
+
+    for test in sorted(set(fitted) - set(home)):
+        room = next((g for g in groups if len(body_of(g + [test])) <= fl.MAX_COMMENT_CHARS), groups[-1])
+        room.append(test)
 
     i = 0
     while i < len(groups):
@@ -823,7 +836,7 @@ def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) ->
         i += 1
 
     writes = []
-    for index, group in enumerate(groups):
+    for index, group in enumerate(groups if write else []):
         comment_id, existing = (watch.slots[index][0], watch.slots[index][2]) if index < len(watch.slots) else (None, None)
         if comment_id is None and not group:
             continue
@@ -837,10 +850,11 @@ def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) ->
     create = None
     if watch.number is None and writes:
         create = {"title": fl.WATCHLIST_TITLE, "body": watchlist_issue_body()}
-    before = set(watch.entries)
+    before = set(watch.entries) if write else set()
     return {
         "issue": watch.number,
         "create": create,
+        "add_label": write and watch.add_label,
         "writes": writes,
         "tests": len(fitted),
         "added": len(set(fitted) - before),
@@ -905,6 +919,12 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     on_watch = {t: s for t, s in watch.entries.items() if t not in by_test and t not in mapping}
     for test in sorted(set(by_test) | set(mapping)):
         watched = watch.entries.get(test)
+        if test not in mapping and watch.unreadable:
+            # Its history may be in the unreadable comment: a fresh entry or
+            # issue would split it, as for an unreadable ledger comment.
+            if watched is not None:
+                on_watch[test] = watched
+            continue
         if test in mapping and issues[mapping[test]].unreadable:
             if watched is not None:
                 on_watch[test] = watched
@@ -923,7 +943,7 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     return {
         "repo": repo,
         "actions": actions,
-        "watchlist": plan_watchlist(watch, on_watch, repo),
+        "watchlist": plan_watchlist(watch, on_watch, repo) if not watch.unreadable else plan_watchlist(watch, {}, repo, write=False),
         "tests": tests,
         "notes": notes.__dict__,
         "missing_ancestry": sorted(ctx.missing),
@@ -1140,8 +1160,16 @@ def _sentinel_comments(repo: str, number: int, sentinels: tuple[str, ...]) -> li
 def _fetch_watchlist(repo: str) -> list[dict]:
     """Every issue labelled `flake-watchlist`, open or closed, with its author;
     the comments only of those the bot opened, the only ones `analyze` reads."""
+    raws = gh_lines("api", "--paginate", f"repos/{repo}/issues?labels={fl.WATCHLIST_LABEL}&state=all&per_page=100", "--jq", ".[] | select(.pull_request == null)")
+    if not any(fl.trusted_author((r.get("user") or {}).get("login"), (r.get("user") or {}).get("type")) for r in raws):
+        # Its label removed by hand: found by its exact title and the bot's
+        # authorship, so its history is not abandoned for a fresh one.
+        raws += [
+            hit for hit in _search_title(repo, fl.WATCHLIST_TITLE)
+            if hit.get("title") == fl.WATCHLIST_TITLE and hit.get("pull_request") is None
+        ]
     found = []
-    for raw in gh_lines("api", "--paginate", f"repos/{repo}/issues?labels={fl.WATCHLIST_LABEL}&state=all&per_page=100", "--jq", ".[] | select(.pull_request == null)"):
+    for raw in raws:
         user = raw.get("user") or {}
         item = {
             "number": int(raw["number"]),
@@ -1150,6 +1178,7 @@ def _fetch_watchlist(repo: str) -> list[dict]:
             "login": user.get("login"),
             "type": user.get("type"),
             "created_at": raw.get("created_at") or "",
+            "labels": [label["name"] if isinstance(label, dict) else label for label in raw.get("labels", [])],
             "comments": [],
         }
         if fl.trusted_author(item["login"], item["type"]):
@@ -1261,9 +1290,13 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     _write_json(work / "fetch_notes.json", {"gone_issues": gone_issues})
     notes = Notes()
     by_test, _ = collect_failures(work, repo, now, notes, read_targets(work))
-    watched = set(load_watchlist(watchlist, Notes()).entries)
-    mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test) | watched, Notes())
+    entries = load_watchlist(watchlist, Notes()).entries
+    mapping = map_tests_to_issues(load_issues(list(issues.values()), Notes()), set(by_test) | set(entries), Notes())
     for test in sorted(set(by_test) - set(mapping)):
+        if test in entries and not _may_qualify(entries[test], by_test[test]):
+            # Searched when it first failed, and again only once it may
+            # qualify: a test that stays on the watchlist creates nothing.
+            continue
         title = fl.issue_title(test)
         for hit in _search_title(repo, title):
             if hit.get("title") == title and int(hit["number"]) not in issues:
@@ -1285,6 +1318,14 @@ def fetch(work: Path, repo: str, root: Path, now: datetime) -> None:
     _write_json(work / "ancestry_unresolved.json", [])
     if not (work / "ancestry.json").exists():
         _write_json(work / "ancestry.json", {})
+
+
+def _may_qualify(watched: fl.State, new: list[fl.Failure]) -> bool:
+    """Whether a watchlisted test may qualify this run: an over-estimate
+    (every failure counted, whatever its episode), so a test that does
+    qualify is always searched for before its issue is created."""
+    places = {f.occurrence for f in watched.failures} | {f.occurrence for f in watched.folded} | {f.occurrence for f in new}
+    return len(places) >= fl.QUALIFY_DISTINCT_OCCURRENCES or watched.episode > 0
 
 
 def _search_title(repo: str, title: str) -> list[dict]:
@@ -1381,7 +1422,7 @@ def apply(plan: dict, repo: str) -> None:
     labels = set()
     if any(a["create"] or a["add_label"] for a in actions):
         labels.add(fl.FLAKY_LABEL)
-    if watch["create"]:
+    if watch["create"] or watch.get("add_label"):
         labels.add(fl.WATCHLIST_LABEL)
     if labels:
         _ensure_labels(repo, labels)
@@ -1400,9 +1441,11 @@ def apply(plan: dict, repo: str) -> None:
         else:
             gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": action["comment_body"]})
         _pause()
-    if not watch["writes"]:
+    if not watch["writes"] and not watch.get("add_label"):
         return
     number = watch["issue"]
+    if watch.get("add_label"):
+        gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/labels", payload={"labels": [fl.WATCHLIST_LABEL]})
     if watch["create"]:
         created = gh_write("api", "-X", "POST", f"repos/{repo}/issues", payload={**watch["create"], "labels": [fl.WATCHLIST_LABEL]})
         number = int(created["number"])

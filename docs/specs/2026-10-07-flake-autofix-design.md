@@ -285,8 +285,11 @@ lookup below nor the picker (§5) ever reads it as a test's issue. It holds ever
 test that has a recorded failure, no issue of its own, and does not qualify.
 The ledger finds it by label and authorship: the oldest issue under the label
 that the bot itself opened, open or closed. An issue under the label opened by
-anyone else is not the watchlist, and the summary lists it. If none exists the
-ledger creates it, once, the first time a test needs it. If two bot-opened
+anyone else is not the watchlist, and the summary lists it. When no bot-opened
+issue carries the label, the ledger searches for the exact title among the
+bot's issues before concluding there is none, and puts the label back on one it
+finds, so a label removed by hand does not abandon the history. If none exists
+the ledger creates it, once, the first time a test needs it. If two bot-opened
 ones exist, it uses the oldest and leaves the other unread, and the summary
 lists both.
 
@@ -301,20 +304,26 @@ the ledger splits the watchlist across as many comments as it needs, each kept
 under the same 60,000 it keeps a ledger comment under:
 
 - **Placement** – a test stays in the comment it is in. A test new to the
-  watchlist joins the last comment. A comment that grows past the limit hands
-  its last tests, in test-ID order, to the next comment, and the last one
-  overflows into a new comment, so tests only ever move forward.
+  watchlist joins the first comment with room for it, else the last. A comment
+  that grows past the limit hands its last tests, in test-ID order, to the
+  next comment, and the last one overflows into a new comment, so tests only
+  ever move forward.
 - **Write order** – new comments first, then existing ones from the last to
   the first. Every test that moves is written to its new comment before its
   old one drops it, so a run that dies midway leaves a test in two comments,
-  which the next read merges by merge key, and never in none.
-- **Bounded count** – a comment left empty is edited to say so and reused,
-  never deleted, so the number of comments is the most the watchlist has ever
-  needed. Entries are not aged out: the watchlist is bounded by the number of
-  tests in the suite.
+  never in none. The next read merges the two by merge key and keeps the test
+  in the later comment, which the forward-only moves make its new home.
+- **Reuse** – a comment left empty is edited to say so and reused, never
+  deleted, and new tests fill the first comment with room, so emptied comments
+  take new entries before any new comment is opened. Entries are not aged
+  out: a test leaves the watchlist only by qualifying, so the watchlist grows
+  with every test ID that has ever failed once, a renamed or deleted test's
+  included.
 - **Trust** – only the bot's own comments are state, as for ledger comments
-  (below). A bot comment that does not parse is left untouched, takes no
-  tests, and is listed in the summary.
+  (below). A bot comment that does not parse may hold any test's history, so,
+  as with an unparsable ledger comment, the run leaves it alone: it writes no
+  watchlist comment and plans nothing for a test without an issue of its own,
+  and the summary lists the comment. Tests with issues are recorded as usual.
 
 **Leaving the watchlist.** When a watchlisted test fails in a second distinct
 place it qualifies, and the ledger opens its issue, seeded with the full
@@ -324,6 +333,12 @@ that dies between the two leaves the test on both; the next run finds the
 issue (by its `flaky` label, or by title), merges the watchlist entry into it
 by merge key, and drops the entry. Nothing else takes a test off the
 watchlist.
+
+The exact-title search (step 1 below) runs for a test's first failure and,
+once it is on the watchlist, only in a run where its recorded and new
+failures span two places and so may qualify: a test that stays on the
+watchlist creates nothing, and searching every watched test every run would
+spend GitHub's search limit for nothing.
 
 **Who records each attempt outcome.** Every outcome the picker (§5) depends
 on is written as structured state by a job that runs no model, so the picker
@@ -1447,7 +1462,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   counts of issues to open and tests watched; and a watchlist too big for one
   comment, split under the body limit with every test held once, a new test
   touching only the last comment, and a test moved by an overflow written to
-  its new comment before its old one.
+  its new comment before its old one; a test left in two comments, kept in
+  the later; a new test filling an emptied comment first; an unparsable
+  watchlist comment, which leaves the watchlist and every test without an
+  issue alone; a watchlist whose label was removed, found by title and
+  relabelled; and a watched test title-searched only when it may qualify.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
