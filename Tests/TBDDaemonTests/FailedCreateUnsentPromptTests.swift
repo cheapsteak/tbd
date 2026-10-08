@@ -92,6 +92,25 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "x", submit: true) == false)
     }
 
+    /// Startup recovery deletes a `.creating` row whose checkout never
+    /// appeared; the first message parked in it is saved, not deleted with it.
+    @Test func recoveryOfAStrandedRowSavesItsParkedPrompt() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let row = try await makeCreatingRow(db)
+        try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: "kept across a restart", submit: true)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        #expect(try await db.worktrees.get(id: row.id) == nil)
+        let repoID = try #require(row.repoID)
+        let dir = reposDir.appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+        let files = try fm.contentsOfDirectory(atPath: dir.path)
+        #expect(files.count == 1)
+        let path = dir.appendingPathComponent(try #require(files.first)).path
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == "kept across a restart\n")
+    }
+
     @Test func aParkOnAMissingRowIsRefused() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setQueuedPrompt(true)
