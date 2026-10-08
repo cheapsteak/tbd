@@ -311,8 +311,12 @@ under the same 60,000 it keeps a ledger comment under:
 - **Write order** – new comments first, then existing ones from the last to
   the first. Every test that moves is written to its new comment before its
   old one drops it, so a run that dies midway leaves a test in two comments,
-  never in none. The next read merges the two by merge key and keeps the test
-  in the later comment, which the forward-only moves make its new home.
+  never in none. The next read merges the two and keeps the test in the later
+  comment, which the forward-only moves make its new home. The merge keeps the
+  fuller copy and adds the other's failures that are newer than anything the
+  fuller one folded into a count, by merge key, so a failure one copy folded
+  after its key aged out is never counted twice. The same merge brings a
+  watchlist entry into an issue's ledger.
 - **Reuse** – a comment left empty is edited to say so and reused, never
   deleted, and new tests fill the first comment with room, so emptied comments
   take new entries before any new comment is opened. Entries are not aged

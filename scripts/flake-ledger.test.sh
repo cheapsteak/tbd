@@ -1211,6 +1211,23 @@ test_a_test_left_in_two_watchlist_comments_is_kept_in_the_later_one() {
   assert_eq "mutation: keeping every copy leaves the test in both" "901 1" "$(jq -r '.watchlist.writes | map("\(.comment_id) \(.tests)") | join(",")' <<< "$out")"
 }
 
+test_merging_two_copies_never_counts_a_folded_failure_twice() {
+  local script out mutant
+  script='
+import sys, importlib.util
+s = importlib.util.spec_from_file_location("fl_ledger", sys.argv[1] + "/flake-ledger.py"); m = importlib.util.module_from_spec(s); sys.modules["fl_ledger"] = m; s.loader.exec_module(m)
+fl = m.fl
+fs = [fl.Failure(key=f"{i}:1:x", run_id=i, attempt=1, occurrence="branch:a", at=f"2026-09-{1 + i * 2:02d}T11:00:00Z", source="ci-xunit") for i in range(11)]
+whole = fl.State(test_id="T/t()", failures=fs)
+folded = fl._fold(whole, 10)  # keys more than 8 days older than the newest are dropped
+print(fl.failure_count(m._merge_entries(folded, whole)), fl.failure_count(m._merge_entries(whole, folded)))
+'
+  out="$(python3 -c "$script" "$HERE")"
+  assert_eq "eleven failures, whichever copy is kept" "11 11" "$out"
+  mutant="$(mutant_of 's/^    cutoff = max\(\(f.last for f in keep.folded\), default=""\)$/    cutoff = ""/' "$LEDGER")"
+  assert_eq "mutation: merging by key alone re-adds folded failures" "1" "$(python3 -c "$script" "$mutant" | awk '{print ($1 > 11)}')"
+}
+
 test_an_unreadable_watchlist_comment_leaves_unissued_tests_alone() {
   local w out broken mutant
   w="$(newwork)"

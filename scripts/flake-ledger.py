@@ -420,13 +420,22 @@ class Watchlist:
     add_label: bool = False
 
 
+def _absorb(keep: fl.State, other: fl.State) -> fl.State:
+    """`keep` plus `other`'s failures that `keep` does not hold. Both copies
+    descend from one history, so a failure no newer than the last one `keep`
+    folded into a count is already counted there, even once its merge key
+    has aged out of `folded_keys`; only newer ones are added, by merge key."""
+    cutoff = max((f.last for f in keep.folded), default="")
+    merged, _ = fl.merge(keep, [f for f in other.failures if f.at > cutoff])
+    return merged
+
+
 def _merge_entries(first: fl.State, second: fl.State) -> fl.State:
     """One test found in two watchlist comments: a run that died between
     writing a test's new comment and its old one. Keep the fuller entry and
-    add the other's failures by merge key."""
+    add the other's failures it lacks (`_absorb`)."""
     keep, other = (first, second) if fl.failure_count(first) >= fl.failure_count(second) else (second, first)
-    merged, _ = fl.merge(keep, other.failures)
-    return merged
+    return _absorb(keep, other)
 
 
 def load_watchlist(raw: list[dict], notes: Notes) -> Watchlist:
@@ -734,7 +743,7 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
         if watched is not None:
             # A run that seeded the issue from the watchlist died before
             # taking the test off it: the issue already holds this history.
-            state, _ = fl.merge(state, watched.failures)
+            state = _absorb(state, watched)
     elif watched is not None:
         # The watchlist holds the test's history: it seeds a new issue, or
         # an issue found without a ledger comment yet (one a run created and
@@ -850,8 +859,9 @@ def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str, wr
     create = None
     if watch.number is None and writes:
         create = {"title": fl.WATCHLIST_TITLE, "body": watchlist_issue_body()}
-    before = set(watch.entries) if write else set()
+    before = set(watch.entries)
     return {
+        "held": not write,
         "issue": watch.number,
         "create": create,
         "add_label": write and watch.add_label,
@@ -943,7 +953,7 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
     return {
         "repo": repo,
         "actions": actions,
-        "watchlist": plan_watchlist(watch, on_watch, repo) if not watch.unreadable else plan_watchlist(watch, {}, repo, write=False),
+        "watchlist": plan_watchlist(watch, on_watch, repo, write=not watch.unreadable),
         "tests": tests,
         "notes": notes.__dict__,
         "missing_ancestry": sorted(ctx.missing),
@@ -989,6 +999,8 @@ def report(plan: dict, write: bool) -> str:
             f"{len(t['distinct'])} distinct places in episode {t['episode'] + 1}, "
             f"qualifies: {'yes' if t['qualifies'] else 'no'}; {where}{extra}"
         )
+    if watch.get("held"):
+        lines += ["", "**The watchlist is held:** one of its bot comments does not parse (below), so it is not written, and no test without an issue of its own is planned this run."]
     watch_writes = len(watch["writes"]) + (1 if watch["create"] else 0)
     lines += ["", f"Planned issue writes: {len(plan['actions'])} per-test issue(s), and {watch_writes} on the watchlist."]
     for title, key in (
@@ -1169,7 +1181,7 @@ def _fetch_watchlist(repo: str) -> list[dict]:
             if hit.get("title") == fl.WATCHLIST_TITLE and hit.get("pull_request") is None
         ]
     found = []
-    for raw in raws:
+    for raw in {int(r["number"]): r for r in raws}.values():
         user = raw.get("user") or {}
         item = {
             "number": int(raw["number"]),
