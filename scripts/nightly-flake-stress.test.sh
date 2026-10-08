@@ -703,6 +703,11 @@ test_the_quiet_pass_runs_without_induced_load() {
   assert_eq "fast pass with --no-load: none" "off" "$(should_induce_load 0 && echo on || echo off)"
   adhoc_test_spec 'TBDDaemonTests.HolderTests/a()' > /dev/null
   assert_eq "test alone: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
+  # Test scope loads whatever pass the test is in: a quiet-pass test alone,
+  # right after its pass turned load off, still gets spinners.
+  pass_spec_of 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()' > /dev/null
+  adhoc_test_spec 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()' > /dev/null
+  assert_eq "a live-suite test alone: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
   ADHOC_INDUCE_LOAD=1
   assert_eq "a TARGETS run: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
 }

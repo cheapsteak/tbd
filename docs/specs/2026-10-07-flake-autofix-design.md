@@ -565,7 +565,8 @@ Their filters partition the package with no gap and no overlap:
 - **Fast pass 2** – `--parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`,
   floor 1900: every other target.
 - **Quiet pass** – `--no-parallel --filter '^TBDDaemonLiveTests\.'`, floor 35:
-  the tier-3 live suites, serially, on an otherwise idle machine.
+  the tier-3 live suites, serially, on an otherwise idle machine. The verifier
+  runs it the same way, without induced load (§6.4).
 
 A test ID maps to its pass by applying those same regexes to the form
 SwiftPM's `--filter` and `--skip` actually match, not to the xunit classname.
@@ -592,7 +593,9 @@ baseline chose.
 
 Before the session starts, the verifier runs the target test alone for 20
 iterations on `main`, in the verification tree (§6.1), with the same
-retry-metrics wiring as a verifier run (§6.4). Each iteration is classified:
+retry-metrics wiring as a verifier run (§6.4). It runs at test scope, so under
+induced load, whichever CI pass the target belongs to (§6.4). Each iteration is
+classified:
 
 - **Reproduction** – the target test failed in the xunit output; or the target
   is quarantined with `.flaky` on `main` and its record says `passedOnRetry`
@@ -685,11 +688,21 @@ the session's own account of its results is recorded but never consulted.
 
 Both keep everything else the harness already does – the outer per-iteration
 deadline, the remote-verification valve forced off, and the verdict built from
-the summary line, the floor, and the exit code together – and both apply
-induced CPU load, with spinners captured by PID, with one exception: the
-quiet pass runs **without** induced load. It exists to run the tier-3 live
-suites serially on an idle machine, so loading it would test a regime CI never
-runs them in.
+the summary line, the floor, and the exit code together. Load follows the
+scope:
+
+- **`--pass-of`, the quiet pass** – runs **without** induced load. The quiet
+  pass exists to run the tier-3 live suites serially on an idle machine, so
+  loading it would test a regime CI never runs them in.
+- **`--pass-of`, a fast pass** – runs under induced CPU load, with spinners
+  captured by PID.
+- **`--test`** – runs under induced load whichever pass the test belongs to,
+  a tier-3 live test included. Test scope takes the test out of its pass, so
+  its CI regime is not what it reproduces; load is what lets a timing flake
+  show alone. The baseline (§6.3) runs this way too.
+
+A caller's `--no-load` turns load off in every mode; the verifier never
+passes it.
 
 The verifier runs the chosen mode on the candidate tree and passes only when all
 of these hold, at that scope:
@@ -1228,8 +1241,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   each of the four passes – including suites starting with `A`, `O`, and `P`,
   a nested suite, the suite-less `TBDDaemonTests.nilPreferredKeepsOrder()`
   (pass 1b), and `TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()`
-  (pass 2) – check that the quiet pass starts no load spinners, and check the
-  pass table against the
+  (pass 2) – check that `--pass-of` for the quiet pass starts no load
+  spinners while a fast pass and `--test`, a live-suite test included, start
+  them, and check the pass table against the
   `watched-test-pass.sh` invocations parsed from `test.yml`, so a fixture
   `test.yml` with a changed filter or floor makes the check fail.
 
