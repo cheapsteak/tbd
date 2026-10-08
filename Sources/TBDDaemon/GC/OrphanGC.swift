@@ -386,11 +386,12 @@ public actor OrphanGC {
 
     // MARK: - Unsent first messages
 
-    /// How long an unsent first message is kept before the sweep reclaims it.
+    /// How long an unsent first message is kept before the sweep reclaims it:
+    /// 30 days. The root `CLAUDE.md` OrphanGC entry states the same figure.
     static let unsentPromptRetention: TimeInterval = 30 * 24 * 60 * 60
 
     /// Reclaims files under `~/tbd/repos/<repoID>/unsent-prompts/` older than
-    /// `unsentPromptRetention` by modification date — the named reconciler for
+    /// `unsentPromptRetention` (30 days) by modification date — the named reconciler for
     /// the first messages written there when a worktree creation fails: by the
     /// daemon for a message parked in the row it deletes, by the app for a
     /// composer draft or a refused park.
