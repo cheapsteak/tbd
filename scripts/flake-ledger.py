@@ -27,6 +27,9 @@ It is deterministic and runs no model. Subcommands:
     previous-ledger-conclusion --repo R --run-id ID
         `success`, `failure`, or `none`: the `ledger` job's conclusion in the
         most recent earlier run of this workflow that ran it (spec §8).
+    report-red-run --repo R --run-id ID --issue N [--job-token]
+        the tracking-issue comment for the first red `ledger` run after a
+        green one (spec §8), written with `$FLAKE_WRITE_TOKEN`.
 
 FAIL CLOSED. Any `gh` failure raises and the command exits 2 having written
 nothing more. A read failure is never treated as "nothing there", because an
@@ -1157,10 +1160,15 @@ def previous_ledger_conclusion(repo: str, run_id: int, now: datetime, max_runs: 
     return "none"
 
 
-def report_red_run(repo: str, run_id: int, issue: int, now: datetime) -> str:
+def report_red_run(repo: str, run_id: int, issue: int, now: datetime, job_token: bool = False) -> str:
     """Spec §8: one comment on the tracking issue for the first red `ledger`
     run after a green one, and nothing for later consecutive reds. "After a
-    green one" is read from GitHub, not from stored state."""
+    green one" is read from GitHub, not from stored state.
+
+    The comment is written with `$FLAKE_WRITE_TOKEN`: the App token when the
+    workflow has one whose login checked out, otherwise the workflow's job
+    token (`job_token`) – in report-only mode, or when minting the App token
+    failed. This comment is the one write the job token ever makes."""
     previous = previous_ledger_conclusion(repo, run_id, now, max_runs=300, days=8)
     if previous == "failure":
         return "the previous ledger run was also red; not commenting again"
@@ -1169,6 +1177,11 @@ def report_red_run(repo: str, run_id: int, issue: int, now: datetime) -> str:
         f"The flake ledger's `ledger` job failed: {url}. It wrote nothing after the failure, "
         "and the next green run converges. Later consecutive red runs post nothing here."
     )
+    if job_token:
+        body += (
+            " Posted with the workflow's job token: the ledger is in report-only mode, "
+            "or the tbd-flake-fixer App token could not be minted or failed its login check."
+        )
     gh_write("api", "-X", "POST", f"repos/{repo}/issues/{issue}/comments", payload={"body": body})
     return f"posted to #{issue} (previous ledger run: {previous})"
 
@@ -1256,6 +1269,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--run-id", required=True, type=int)
     p.add_argument("--issue", required=True, type=int)
     p.add_argument("--now")
+    p.add_argument("--job-token", action="store_true", help="FLAKE_WRITE_TOKEN is the workflow's job token, not the App's")
     args = parser.parse_args(argv)
     try:
         if args.command == "fetch":
@@ -1280,7 +1294,7 @@ def main(argv: list[str]) -> int:
         elif args.command == "previous-ledger-conclusion":
             print(previous_ledger_conclusion(args.repo, args.run_id, _now(args.now), args.max_runs, args.days))
         elif args.command == "report-red-run":
-            print(report_red_run(args.repo, args.run_id, args.issue, _now(args.now)))
+            print(report_red_run(args.repo, args.run_id, args.issue, _now(args.now), args.job_token))
     except (GhError, AnalysisError) as error:
         print(f"flake-ledger: {error}", file=sys.stderr)
         return 2

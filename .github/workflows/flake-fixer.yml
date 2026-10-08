@@ -7,14 +7,20 @@ name: Flake fixer
 #
 # OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
 # 'true', the ledger runs report-only: it computes everything, writes it to the
-# job summary, and makes no write call to GitHub (§4.5). Report-only needs no
-# App token. With FLAKE_FIXER_ENABLED 'true' the job first reclaims orphaned
-# flakefix/* branches (§11).
+# job summary, and writes no issue (§4.5). Report-only needs no App token. With
+# FLAKE_FIXER_ENABLED 'true' the job first reclaims orphaned flakefix/*
+# branches (§11).
 #
-# ONLY THE BOT'S OWN COMMENTS ARE STATE (§4.4). Every issue write uses the
+# ONLY THE BOT'S OWN COMMENTS ARE STATE (§4.4). Every ledger write uses the
 # tbd-flake-fixer App's token, so its comments are authored by
 # `tbd-flake-fixer[bot]`, and the step after minting checks that the App's slug
 # names exactly the login the readers trust (`flake_lib.BOT_LOGIN`).
+#
+# A RED LEDGER RUN IS REPORTED IN EITHER MODE (§8), by `ledger-notice`. Without
+# an App token whose login checked out – report-only mode, or a mint that
+# failed – it posts with the job token, as github-actions[bot]. That one
+# comment on the tracking issue is the only write the job token ever makes,
+# and `ledger-notice` is the only job whose token may write issues.
 #
 # `workflow_run` fires only from this file as it exists on `main`, so nothing
 # here runs before merge.
@@ -63,7 +69,6 @@ jobs:
       pull-requests: read
       actions: read
     env:
-      TRACKING_ISSUE: '519'
       LEDGER_ENABLED: ${{ vars.FLAKE_LEDGER_ENABLED == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -120,17 +125,65 @@ jobs:
             python3 scripts/flake-ledger.py run --repo "$GITHUB_REPOSITORY" --work-dir "$RUNNER_TEMP/flake-ledger"
           fi
 
-      # §8: one comment on the tracking issue for the first red run after a
-      # green one. It needs the App token, so report-only mode, which mints
-      # none, stays silent in public; the red run is its signal. It also needs
-      # the login check to have passed: a token from the wrong App must write
-      # nothing at all.
-      - name: Report the first red ledger run after a green one
-        if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.bot-login.outcome == 'success'
+  # §8: one comment on the tracking issue for the first red `ledger` run after
+  # a green one, and nothing for later consecutive reds. A job of its own so
+  # that only it holds `issues: write` on the job token: the `ledger` job, which
+  # runs the whole ledger, cannot write an issue with it.
+  ledger-notice:
+    name: ledger-notice
+    needs: ledger
+    if: always() && github.repository == 'cheapsteak/tbd' && needs.ledger.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    env:
+      TRACKING_ISSUE: '519'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # With the ledger on, the comment comes from the bot like every other
+      # ledger write. A mint that fails, or a token from the wrong App, falls
+      # back to the job token rather than leaving the red run unreported.
+      - name: Mint the App token for the notice
+        id: notice-app-token
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+
+      - name: Check the notice token's bot login
+        id: notice-bot-login
+        if: steps.notice-app-token.outcome == 'success'
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
-          FLAKE_WRITE_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.notice-app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          python3 scripts/flake-ledger.py report-red-run --repo "$GITHUB_REPOSITORY" \
-            --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE"
+          expected="$(python3 scripts/flake_lib.py bot-login)"
+          if [ "${APP_SLUG}[bot]" != "$expected" ]; then
+            echo "::warning::the App token belongs to '${APP_SLUG}[bot]', not '$expected'; the notice uses the job token"
+            exit 1
+          fi
+
+      - name: Report the first red ledger run after a green one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.notice-app-token.outputs.token }}
+          JOB_TOKEN: ${{ github.token }}
+          USE_APP_TOKEN: ${{ steps.notice-bot-login.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          if [ "$USE_APP_TOKEN" = "true" ]; then
+            FLAKE_WRITE_TOKEN="$APP_TOKEN" python3 scripts/flake-ledger.py report-red-run \
+              --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE"
+          else
+            FLAKE_WRITE_TOKEN="$JOB_TOKEN" python3 scripts/flake-ledger.py report-red-run \
+              --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --issue "$TRACKING_ISSUE" --job-token
+          fi

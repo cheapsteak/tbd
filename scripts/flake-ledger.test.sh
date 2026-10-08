@@ -1098,6 +1098,24 @@ test_a_red_first_ever_run_posts() {
   assert_contains "posted" "$(writes_in "$d/log")" "issues/519/comments"
 }
 
+test_a_red_run_posted_with_the_job_token_says_so() {
+  local d mutant
+  d="$(mktmpd)"; runs_world "$d" "[$(run_entry 499 workflow_run)]" 499=success
+  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=job-token python3 "$LEDGER" report-red-run --repo "$REPO" --run-id 500 --issue 519 --now 2026-10-08T00:00:00Z --job-token > /dev/null
+  assert_contains "posted to #519 with the token it was given" "$(writes_in "$d/log")" "job-token api -X POST repos/cheapsteak/tbd/issues/519/comments"
+  assert_contains "and the comment says which token and why" "$(cat "$d/log")" "Posted with the workflow's job token"
+  d="$(mktmpd)"; runs_world "$d" "[$(run_entry 499 workflow_run)]" 499=success
+  red_run "$d" > /dev/null
+  assert_lacks "with the App token it does not" "$(cat "$d/log")" "job token"
+  d="$(mktmpd)"; runs_world "$d" "[$(run_entry 499 workflow_run)]" 499=failure
+  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=job-token python3 "$LEDGER" report-red-run --repo "$REPO" --run-id 500 --issue 519 --now 2026-10-08T00:00:00Z --job-token > /dev/null
+  assert_eq "a second red in a row posts nothing, whichever token" "" "$(writes_in "$d/log")"
+  d="$(mktmpd)"; runs_world "$d" "[$(run_entry 499 workflow_run)]" 499=success
+  mutant="$(mutant_of 's/^    if job_token:$/    if False:/' "$LEDGER")"
+  FLAKE_GH_CMD="$d/gh" FLAKE_WRITE_TOKEN=job-token python3 "$mutant/flake-ledger.py" report-red-run --repo "$REPO" --run-id 500 --issue 519 --now 2026-10-08T00:00:00Z --job-token > /dev/null
+  assert_lacks "mutation: without the clause the job-token comment is silent about it" "$(cat "$d/log")" "job token"
+}
+
 # ============================================================================
 # fetch: a definite "does not exist" skips one test; anything else fails closed
 # ============================================================================
@@ -1256,7 +1274,6 @@ test_ledger_writes_only_when_its_flag_is_true() {
   assert_eq "exactly one --write" "1" "$(grep -c -- '--write' <<< "$block")"
   assert_contains "the App token is minted only under it" "$(step_block "$WORKFLOW" "Mint the tbd-flake-fixer App token")" "if: vars.FLAKE_LEDGER_ENABLED == 'true'"
   assert_contains "and its slug is checked against the trusted login" "$(step_block "$WORKFLOW" "Check the App token's bot login")" 'scripts/flake_lib.py bot-login'
-  assert_contains "the tracking comment needs the flag and a token whose login checked out" "$(step_block "$WORKFLOW" "Report the first red")" "if: failure() && vars.FLAKE_LEDGER_ENABLED == 'true' && steps.bot-login.outcome == 'success'"
   assert_contains "the reclaimer cannot stop the ledger" "$(step_block "$WORKFLOW" "Reclaim flakefix/")" "continue-on-error: true"
 }
 
@@ -1284,6 +1301,47 @@ test_ledger_requires_this_repository_and_its_triggers() {
   assert_contains "or on dispatch with job: ledger" "$job" "inputs.job == 'ledger'"
   assert_contains "the dispatch input is a required choice" "$(cat "$WORKFLOW")" "options: [ledger, fix]"
   assert_contains "one concurrency group for ledger writes" "$(cat "$WORKFLOW")" "group: flake-ledger-state"
+}
+
+# job_block FILE NAME: the lines of the job NAME, up to the next job.
+job_block() {
+  awk -v name="$2" '
+    /^  [a-z][a-z_-]*:$/ { inside = ($0 == "  " name ":") }
+    inside { print }
+  ' "$1"
+}
+
+# The job token may write issues only in `ledger-notice`, and reaches
+# FLAKE_WRITE_TOKEN only on its job-token branch, which says so.
+check_job_token_writes_only_the_notice() {
+  local file="$1"
+  [[ "$(grep -c '^      issues: write$' "$file")" == 1 ]] || return 1
+  job_block "$file" ledger-notice | grep -q '^      issues: write$' || return 1
+  job_block "$file" ledger | grep -q '^      issues: read$' || return 1
+  [[ "$(grep -c 'FLAKE_WRITE_TOKEN="\$JOB_TOKEN"' "$file")" == 1 ]] || return 1
+  grep -A1 'FLAKE_WRITE_TOKEN="\$JOB_TOKEN"' "$file" | grep -q -- '--job-token' || return 1
+  ! grep -q 'FLAKE_WRITE_TOKEN: \${{ github.token }}' "$file"
+}
+
+test_a_red_ledger_run_is_reported_in_either_mode() {
+  local job copy rc=0
+  job="$(job_block "$WORKFLOW" ledger-notice)"
+  assert_contains "it follows the ledger job" "$job" "needs: ledger"
+  assert_contains "and runs when it failed, in this repository, whatever the flag" "$job" "if: always() && github.repository == 'cheapsteak/tbd' && needs.ledger.result == 'failure'"
+  assert_lacks "the job itself is not gated on the ledger flag" "$(grep '^    if:' <<< "$job")" "FLAKE_LEDGER_ENABLED"
+  assert_contains "a failed mint does not stop the notice" "$(step_block "$WORKFLOW" "Mint the App token for the notice")" "continue-on-error: true"
+  assert_contains "the App token only under the flag" "$(step_block "$WORKFLOW" "Mint the App token for the notice")" "if: vars.FLAKE_LEDGER_ENABLED == 'true'"
+  assert_contains "and only once its login checked out" "$(step_block "$WORKFLOW" "Report the first red")" "USE_APP_TOKEN: \${{ steps.notice-bot-login.outcome == 'success' }}"
+  assert_lacks "the ledger job no longer posts it" "$(job_block "$WORKFLOW" ledger)" "report-red-run"
+  check_job_token_writes_only_the_notice "$WORKFLOW" || rc=$?
+  assert_eq "the job token writes only the notice" "0" "$rc"
+  copy="$(mktmpd)/flake-fixer.yml"
+  awk '/^  ledger:$/{l=1} /^  ledger-notice:$/{l=0} l && /^      issues: read$/{sub(/read/, "write")} {print}' "$WORKFLOW" > "$copy"
+  rc=0; check_job_token_writes_only_the_notice "$copy" || rc=$?
+  assert_eq "mutation: issues: write on the ledger job fails the check" "1" "$rc"
+  sed 's/ --job-token$//' "$WORKFLOW" > "$copy"
+  rc=0; check_job_token_writes_only_the_notice "$copy" || rc=$?
+  assert_eq "mutation: a job-token post that does not say so fails the check" "1" "$rc"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do

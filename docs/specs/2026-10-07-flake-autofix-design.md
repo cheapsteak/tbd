@@ -389,6 +389,14 @@ With the ledger flag off (§10), the ledger computes everything and writes it to
 the job summary instead of to issues. That lets its counts be checked against
 the issues humans have filed before it writes anything public.
 
+Report-only mode mints no App token and writes no flake issue, but a red
+`ledger` run is still reported: the failure note to the tracking issue (§8)
+posts in either mode. Without the App token it posts with the workflow's job
+token (`github.token`), so it appears as `github-actions[bot]`. A report-only
+soak whose job fails every night would otherwise fail unnoticed, which is the
+one outcome the soak exists to rule out. That comment is the only write the
+job token ever makes.
+
 ## 5. Picking a target
 
 The picker reads the open and closed `flaky` issues' ledger comments and the
@@ -904,10 +912,17 @@ Transitions, each owned by the PR driver:
   first red run after a green one the job posts one comment to the nightly
   tracking issue, #519 (`TRACKING_ISSUE` in `nightly.yml`), and nothing on
   later consecutive reds. "After a green one" comes from GitHub, not from
-  stored state: a final step that runs on failure asks the Actions API for the
-  conclusion of the `ledger` job in the most recent earlier completed run of
-  this workflow that ran it, and posts only if that conclusion was `success` or
-  there is no such run.
+  stored state: a job that runs when `ledger` fails, `ledger-notice`, asks the
+  Actions API for the conclusion of the `ledger` job in the most recent earlier
+  completed run of this workflow that ran it, and posts only if that conclusion
+  was `success` or there is no such run.
+
+  The note posts in report-only mode too (§4.5). Its token is the App token
+  when the ledger flag is on, the mint succeeds, and the App's login checks out
+  (§4.4); otherwise – report-only mode, a mint that failed, or a token from the
+  wrong App – it is the workflow's job token, and the comment says so. The job
+  token writes nothing else: `ledger-notice` is the only job whose token may
+  write issues, and the `ledger` job's token can only read them.
 - **The picker cannot read the ledger.** No attempt that night. The `fix` job
   ends red without starting a session.
 - **The build fails before the session starts.** No attempt; the job ends red.
@@ -1076,7 +1091,8 @@ Four more things the bot creates need no reclaimer, each for a stated reason:
   unreachable with the commit when its branch is reclaimed.
 - **Comments** – one ledger comment and one attempt comment per issue, each
   edited in place, plus a reopen comment per recurrence and the attempt
-  comments `publish` posts. They live on issues, which are records (above).
+  comments `publish` posts, and one note on the tracking issue per streak of
+  red `ledger` runs (§8). They live on issues, which are records (above).
 
 ## 12. Placement
 
@@ -1165,7 +1181,10 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   even with a clean stress run.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
-  not, and a red first-ever run does.
+  not, and a red first-ever run does; a note posted with the job token says
+  so; and the workflow runs `ledger-notice` whatever the ledger flag, falls
+  back to the job token when the App token is missing, and grants
+  `issues: write` to no other job.
 - **`flake-pr.test.sh`** – promotion's three conditions, each failing alone; a
   head that moved after verification; the attempt entry `publish` writes for
   each outcome, including `aborted` when no artifact exists; a weak-evidence
