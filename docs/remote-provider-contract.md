@@ -192,7 +192,7 @@ A provider MAY include a `transcript` object on the Session object summarizing t
 
 The hint is a change signal and nothing more. A caller compares it with the hint it last recorded to decide whether a session's transcript is worth fetching, and MUST NOT derive a `transcript read` cursor from it; cursors come only from the `transcript read` envelope. A provider that reports a hint SHOULD keep it current on every `list` and `events` sighting, since a stale hint reads as nothing having changed.
 
-TBD reads the hint only when its user has turned on background transcript sync, and only for a provider that declares both `transcript.read` and `transcript.tail`. It then fetches a session's transcript when the hint changes, without waiting for anyone to open it. A provider that omits the hint is fully conformant: its transcripts are fetched only while someone is looking at them.
+TBD acts on the hint only when its user has turned on background transcript sync, and only for a provider that declares both `transcript.read` and `transcript.tail`; otherwise it only records it. It then fetches a session's transcript when the hint changes, without waiting for anyone to open it. A provider that omits the hint is fully conformant: its transcripts are fetched only while someone is looking at them.
 
 Like `pending_question` and `peer_messaging` above, this field is optional and **no capability gates it**: it rides on the Session object returned by verbs that already exist (`create`, `list`, `events`), so it follows the response-field forward-compatibility rule in Versioning below.
 
