@@ -223,6 +223,80 @@ struct DeletionQueueCollectorTests {
         #expect(FileManager.default.fileExists(atPath: f.worktree + "/notes.txt"))
     }
 
+    @Test func keepsADirtyWorktreeWhoseBirthTimePredatesItsArchive() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // A worktree restored or moved into the archived path keeps an older
+        // creation date, so the "recreated" heuristic passes it. A modified
+        // tracked file must still stop the reap.
+        let tracked = try #require(
+            try FileManager.default.contentsOfDirectory(atPath: f.worktree)
+                .first { !$0.hasPrefix(".") })
+        try "edited\n".write(
+            toFile: f.worktree + "/" + tracked, atomically: true, encoding: .utf8)
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(60)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "dirty"))
+        #expect(try String(contentsOfFile: f.worktree + "/" + tracked, encoding: .utf8) == "edited\n")
+    }
+
+    @Test func keepsAWorktreeHoldingAnUntrackedFile() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        try "scratch\n".write(
+            toFile: f.worktree + "/untracked.txt", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "dirty"))
+    }
+
+    @Test func stillReapsAWorktreeHoldingOnlyAnIgnoredFile() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // Ignore rules live in the shared info/exclude so the tree itself
+        // stays clean; build output is not work and must not block a reclaim.
+        let infoDir = f.repo + "/.git/info"
+        try FileManager.default.createDirectory(
+            atPath: infoDir, withIntermediateDirectories: true)
+        try "*.log\n".write(
+            toFile: infoDir + "/exclude", atomically: true, encoding: .utf8)
+        try "noise\n".write(
+            toFile: f.worktree + "/build.log", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0) == .reap)
+    }
+
+    @Test func keepsAWorktreeWhoseStatusCannotBeRead() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // No seam needed: break the worktree's admin dir so `git status`
+        // fails while the `.git` file still resolves under `.git/worktrees/`,
+        // which is all the linkage gate checks. Nothing proved the tree
+        // clean, so it stays.
+        try FileManager.default.removeItem(atPath: f.repo + "/.git/worktrees/wt/HEAD")
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "status-unknown"))
+    }
+
     @Test func stillReapsAWorktreeThatPredatesItsArchive() async throws {
         let f = try await makeLinkedWorktree()
         defer { try? FileManager.default.removeItem(at: f.tmp) }
