@@ -3,10 +3,12 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The boot reconcile for an install that combined a watch mode with the
-/// pty-holder transport on a daemon older than the gate: the mode is turned
-/// off once, the user is told why, and the runner is not started. Every other
-/// combination re-applies the persisted mode unchanged.
+/// The boot reconcile for an install that carries a watch mode while the
+/// pty-holder hazard is live — one that combined the two on a daemon older
+/// than the gate, or one that never touched the holder toggle and picked the
+/// graduated default up: the mode is turned off once, the user is told why,
+/// and the runner is not started. Every other combination, including a daemon
+/// that cannot start a holder at all, re-applies the persisted mode unchanged.
 @Suite("Nightwatch/holder boot reconcile")
 struct NightwatchHolderBootReconcileTests {
 
