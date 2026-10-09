@@ -27,4 +27,31 @@ struct HolderInputTimingTests {
             deadline, every held injection lands between the paste's markers.
             """)
     }
+
+    /// The read-side bound carries no safety invariant — nothing holds a screen
+    /// request the way the app holds an injection — but it does sit on the
+    /// critical path of every holder send to an open tab, where neither
+    /// write-side bound does. Pinning it under both is how a later tuning pass
+    /// is stopped from quietly putting a multi-second wait in front of every
+    /// composed message.
+    ///
+    /// Asserts the **production constants**, like the test above.
+    @Test("The screen pull's bound is shorter than both write-side bounds")
+    func screenPullBoundIsShorterThanTheWriteSideBounds() {
+        #expect(
+            HolderInputTiming.screenPullBound < HolderInputTiming.pasteHoldBound,
+            """
+            the screen pull is consulted before every holder send composes, so \
+            \(HolderInputTiming.screenPullBound) is latency a user waits for; \
+            \(HolderInputTiming.pasteHoldBound) is a fail-safe margin on a write that \
+            loses nothing by waiting.
+            """)
+        #expect(
+            HolderInputTiming.screenPullBound < HolderInputTiming.injectionAckDeadline,
+            """
+            a supervision nudge to an open tab pays the pull's \
+            \(HolderInputTiming.screenPullBound) and then, in the worst case, the ack's \
+            \(HolderInputTiming.injectionAckDeadline) as well.
+            """)
+    }
 }

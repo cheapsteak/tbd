@@ -16,6 +16,13 @@ import Foundation
 /// ordered channel and reuse the same tagged sub-format, with their own
 /// header type.
 ///
+/// `.screenRequest` (daemon → app) and `.screenReply` (app → daemon) are the
+/// read direction of the same arrangement: the daemon asks the store that
+/// currently holds a session's pty what is on its screen, and the app answers
+/// from its live SwiftTerm. They carry JSON and no raw bytes, so they use
+/// `.injectionAck`'s plain-JSON payload shape rather than the tagged
+/// sub-format.
+///
 /// **Adding a case here is cheap in both directions.** Both receive loops
 /// return an unrecognized type byte rather than desyncing (see
 /// `SidecarFrameScanner.append` and the `SidecarFrameType(rawValue:)` guards
@@ -29,6 +36,8 @@ public enum SidecarFrameType: UInt8, Sendable {
     case paste = 3
     case injection = 4
     case injectionAck = 5
+    case screenRequest = 6
+    case screenReply = 7
 }
 
 /// Header prefixing every app → daemon input frame: identifies which pane the
@@ -73,6 +82,127 @@ public struct SidecarInjectionAck: Codable, Sendable, Equatable {
     public init(injectionID: UUID, written: Bool) {
         self.injectionID = injectionID
         self.written = written
+    }
+}
+
+/// The daemon asking whichever store holds a session's pty what is on its
+/// screen.
+///
+/// `terminalID` names the session and is the frame's own address: the app
+/// verifies it against the panel it is about to read rather than inferring the
+/// subject from panel state, exactly as it does for an injection. `requestID`
+/// is the correlation token the answering `SidecarScreenReply` carries back, so
+/// a reply that arrives after its request's bound can be recognized as late
+/// instead of mistaken for a current answer.
+///
+/// **The depth is capped by the daemon, not chosen by the reader.** A viewer's
+/// SwiftTerm can retain far more scrollback than the daemon's emulator does, so
+/// forwarding a reader's `--lines N` verbatim would make the same question
+/// answer differently depending on who happened to be looking at the session —
+/// a contract that varies by observer. The initializer therefore takes the
+/// daemon's own retained depth and clamps to it, so the cap cannot be forgotten
+/// at a call site: whatever a reader asks for, what comes back is bounded by
+/// what the daemon would have been able to answer itself.
+public struct SidecarScreenRequest: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let requestID: UUID
+    /// How many lines of scrollback-plus-viewport to project, already clamped.
+    /// Zero means a modes-only reading: the projection's own `maxLines <= 0`
+    /// arm yields no lines, so the app walks nothing and the reply is a few
+    /// hundred bytes.
+    public let lines: Int
+    /// Whether the reply should also carry a styled capture — SGR intact — for
+    /// Closed Terminals history. A typed screen structurally cannot carry one,
+    /// because its whitelist forbids ESC.
+    public let wantStyledCapture: Bool
+    /// How deep that styled capture goes. The daemon's retained depth, for the
+    /// same reason `lines` is capped to it.
+    public let styledScrollbackLines: Int
+
+    /// - Parameter requestedLines: what the reader asked for. Clamped to
+    ///   `retainedScrollbackLines` and floored at zero.
+    /// - Parameter retainedScrollbackLines: the daemon's own retained
+    ///   scrollback depth for this session — `HolderReader.scrollbackLines`
+    ///   at every production call site. Passed in rather than imported
+    ///   because the depth is the daemon's business and this module has no
+    ///   emulator in it.
+    public init(
+        terminalID: UUID,
+        requestID: UUID,
+        requestedLines: Int,
+        retainedScrollbackLines: Int,
+        wantStyledCapture: Bool
+    ) {
+        self.terminalID = terminalID
+        self.requestID = requestID
+        let retained = max(0, retainedScrollbackLines)
+        self.lines = min(max(0, requestedLines), retained)
+        self.wantStyledCapture = wantStyledCapture
+        self.styledScrollbackLines = retained
+    }
+}
+
+/// The app's answer to one screen request.
+///
+/// Exactly one of `screen` and `unavailable` is set, and **a reply is sent on
+/// every path.** A request the app cannot answer is answered with a named
+/// refusal rather than with silence, so the daemon falls back immediately
+/// instead of burning its bound on an answer that was never coming — the same
+/// discipline, and the same reasoning, as an injection ack's `written: false`:
+/// a knowable synchronous refusal reported truthfully is what makes an answer
+/// trustworthy.
+///
+/// `terminalID` rides beside `requestID` because the sidecar is one app-wide
+/// connection carrying frames for every session: a reply whose session
+/// disagrees with the request it claims to answer is a misaddressed reply, and
+/// the daemon can only see that if the reply says which session it is about.
+public struct SidecarScreenReply: Codable, Sendable, Equatable {
+    /// Why a viewer could not answer. Each case is a refusal the app knows
+    /// synchronously; a condition it cannot see is left to the daemon's bound.
+    public enum Unavailable: String, Codable, Sendable, CaseIterable {
+        /// No panel in this app claims that session, so nothing here holds its
+        /// pty. The daemon's own emulator is the live store after all.
+        case noPanel
+        /// A panel claims the session but its terminal is gone — torn down, or
+        /// never attached — so there is no grid to project.
+        case noTerminal
+        /// A panel answered and the projection failed. Distinct from
+        /// `noTerminal` because it is a bug here rather than a state the
+        /// session is in.
+        case projectionFailed
+    }
+
+    public let requestID: UUID
+    public let terminalID: UUID
+    public let screen: ViewerScreenPayload?
+    /// The styled capture, when one was asked for and could be produced.
+    /// `\n`-joined with an SGR reset appended, the way the daemon's own
+    /// `closedTerminalCapture` answers, so Closed Terminals history records one
+    /// shape whichever store produced it.
+    public let styledCapture: String?
+    public let unavailable: Unavailable?
+
+    /// An answer.
+    public init(
+        requestID: UUID,
+        terminalID: UUID,
+        screen: ViewerScreenPayload,
+        styledCapture: String? = nil
+    ) {
+        self.requestID = requestID
+        self.terminalID = terminalID
+        self.screen = screen
+        self.styledCapture = styledCapture
+        self.unavailable = nil
+    }
+
+    /// A named refusal.
+    public init(requestID: UUID, terminalID: UUID, unavailable: Unavailable) {
+        self.requestID = requestID
+        self.terminalID = terminalID
+        self.screen = nil
+        self.styledCapture = nil
+        self.unavailable = unavailable
     }
 }
 
@@ -228,6 +358,38 @@ public enum SidecarFrameCodec {
             throw SidecarFramingError.undecodableHeader
         }
         return ack
+    }
+
+    /// Encode a daemon → app `.screenRequest` frame. JSON alone, like
+    /// `.injectionAck`: there are no raw bytes to carry, so it does not use the
+    /// tagged sub-format.
+    public static func encodeScreenRequest(_ request: SidecarScreenRequest) throws -> Data {
+        encode(type: .screenRequest, payload: try JSONEncoder().encode(request))
+    }
+
+    /// Decode a `.screenRequest` frame's payload.
+    public static func decodeScreenRequest(payload: Data) throws -> SidecarScreenRequest {
+        guard
+            let request = try? JSONDecoder().decode(SidecarScreenRequest.self, from: payload)
+        else {
+            throw SidecarFramingError.undecodableHeader
+        }
+        return request
+    }
+
+    /// Encode an app → daemon `.screenReply` frame. JSON alone, for the same
+    /// reason as the request: the screen's lines are text in the JSON, not a
+    /// byte tail.
+    public static func encodeScreenReply(_ reply: SidecarScreenReply) throws -> Data {
+        encode(type: .screenReply, payload: try JSONEncoder().encode(reply))
+    }
+
+    /// Decode a `.screenReply` frame's payload.
+    public static func decodeScreenReply(payload: Data) throws -> SidecarScreenReply {
+        guard let reply = try? JSONDecoder().decode(SidecarScreenReply.self, from: payload) else {
+            throw SidecarFramingError.undecodableHeader
+        }
+        return reply
     }
 }
 

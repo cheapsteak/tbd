@@ -350,9 +350,16 @@ final class FDSidecarClient: @unchecked Sendable {
                     handleFDVend(headerPayload: frame.payload, fd: rxFD)
                 case .injection:
                     handleInjection(payload: frame.payload)
-                case .input, .paste, .injectionAck:
-                    // The daemon must never send input, paste or ack frames —
-                    // those directions are app → daemon only.
+                case .screenRequest:
+                    // The screen pull's answering half is not wired here yet.
+                    // Dropping the frame is exactly what a peer built before
+                    // the case existed would do, and the daemon's bound covers
+                    // an answer that never comes — so a request that reaches
+                    // this build costs a log line and nothing else.
+                    logger.error("sidecar: screen request arrived with no handler installed, dropping")
+                case .input, .paste, .injectionAck, .screenReply:
+                    // The daemon must never send input, paste, ack or screen
+                    // reply frames — those directions are app → daemon only.
                     logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
