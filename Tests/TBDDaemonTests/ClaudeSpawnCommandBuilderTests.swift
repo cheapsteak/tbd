@@ -103,6 +103,40 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.command.hasSuffix(" 'do the thing'"))
     }
 
+    @Test("fresh + initial prompt file — the shell reads the prompt, the command stays short")
+    func freshWithInitialPromptFile() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            initialPromptFilePath: "/var/packets/it's a packet.txt",
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: ""
+        )
+        // The path is shell-escaped like any other argument, and the file is
+        // read by the launching shell: tmux rejects a spawn command over about
+        // 16 KiB, so a large prompt must not ride in the command itself.
+        #expect(r.command == "claude --session-id sid --dangerously-skip-permissions \"$(cat '/var/packets/it'\\''s a packet.txt')\"")
+    }
+
+    @Test("an inline initial prompt wins over a prompt file path")
+    func inlineInitialPromptWinsOverFile() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: "do the thing",
+            initialPromptFilePath: "/var/packets/ignored.txt",
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: ""
+        )
+        #expect(r.command.hasSuffix(" 'do the thing'"))
+        #expect(!r.command.contains("ignored.txt"))
+    }
+
     @Test("resume + initial prompt — argv delivery is atomic with the respawn")
     func resumeWithInitialPrompt() {
         let r = ClaudeSpawnCommandBuilder.build(

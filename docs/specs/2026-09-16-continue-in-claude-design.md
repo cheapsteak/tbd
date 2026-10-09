@@ -55,7 +55,7 @@ this change.
 ## Continuation packet
 
 `CodexContinuationPacketBuilder` reads the rollout as newline-delimited JSON and produces
-one UTF-8 string. It never calls a model and never writes a handoff file. Given the same
+one UTF-8 string. It never calls a model and writes nothing itself. Given the same
 rollout bytes and git-status bytes, it produces the same packet bytes.
 
 ### Size and selection
@@ -158,6 +158,23 @@ results never enter the packet. These rules reduce accidental disclosure but do 
 to recognize every secret a user might write in ordinary prose; the packet warns that its
 source rollout is the complete authority.
 
+### Delivering the packet
+
+The packet reaches Claude as its initial prompt, but not as a command-line argument. tmux
+packs a whole `respawn-window` command into one client message and refuses a longer one
+with "command too long": on tmux 3.6a a 16,013-byte shell command was accepted and a
+17,013-byte one was refused. A packet of up to 64 KiB would fail for any sizeable session,
+after Codex had already been fenced for replacement.
+
+The daemon therefore stages the packet in an owner-only file under the runtime directory,
+named for the terminal and a per-request id, and the Claude command carries only
+`"$(cat <path>)"`, which the launching shell expands. The handler removes the file when the
+transaction ends on any path: success means Claude is already running with the prompt read,
+and failure means the Claude shell is being replaced by the Codex rollback. Staging is the
+last preparation step, so a failed preparation never leaves a file behind. The file is a
+launch detail, not a handoff artifact: nothing reads it after launch, and the source
+rollout pointer stays the durable record.
+
 ## Preparation
 
 All fallible work that can finish while Codex remains live happens before interruption:
@@ -186,7 +203,8 @@ All fallible work that can finish while Codex remains live happens before interr
    `ClaudeTrustSeeder`, `ClaudeHookOverlay`, `PluginDirWriter`,
    `ClaudeProfileConfigDirManager`, `EnvOverrideResolver`, and
    `ClaudeSpawnCommandBuilder` exactly as an ordinary fresh Claude terminal does. The
-   packet is the builder's `initialPrompt`; Claude receives no Codex resume claim.
+   packet is staged in a launch file that the command reads (see "Delivering the packet");
+   Claude receives no Codex resume claim.
 7. Prepare the source rollback command through `CodexLaunchPreparation`,
    `CodexSpawnCommandBuilder`, the source thread ID, the existing Codex home, and the
    ordinary Codex environment-routing path.
@@ -374,6 +392,11 @@ existing alert path.
   reasoning content and exercises credential assignments, authorization values, private
   keys, credentialed URLs, service-token prefixes, and git-status redaction.
 - A content-free rollout and a failed git-status command fail packet preparation.
+- A packet well over the tmux command limit reaches Claude through a launch file: the
+  recorded `respawn-window` argv stays under 15,000 bytes without the packet text, the
+  staged file holds the packet while Claude starts, and the file is gone once the
+  transaction ends. Stale launch files are pruned, fresh and unrelated files are kept, and
+  staged files are owner-only.
 
 ### Daemon and transaction tests
 
@@ -443,9 +466,13 @@ operation unchanged once enabled.
 
 Continue creates no new kind of durable resource:
 
-- It creates no packet file, mapping table, terminal row, tab, steady-state tmux window,
-  ref, worktree, or background job. Transport recovery calls the existing window-recreation
-  path rather than adding a new creation mechanism.
+- It creates no mapping table, terminal row, tab, steady-state tmux window, ref, worktree,
+  or background job. Transport recovery calls the existing window-recreation path rather
+  than adding a new creation mechanism.
+- The staged launch file is the one new resource, and it lives for one transaction. The
+  handler removes it on every path out; if the daemon dies mid-transaction, the
+  `RPCRouter.reconcilePendingContinueInClaude` pass that recovers that transaction's pending
+  row also removes packet files older than one hour, far longer than a transaction runs.
 - The source rollout is an existing Codex resource and stays under existing transcript
   retention. The destination Claude transcript is the ordinary transcript of the process
   already covered by terminal reconciliation and transcript retention.
@@ -458,11 +485,11 @@ Continue creates no new kind of durable resource:
 - Readiness entries are in-memory and bounded by their injected-clock deadlines; durable
   pending row state, not an in-memory waiter, drives recovery after daemon restart.
 
-No new durable resource owner is required. The post-socket
+No new reconciler is required. The post-socket
 `RPCRouter.reconcilePendingContinueInClaude` recovery pass consumes the pending state that
 the ordinary lifecycle reconciler preserves and repairs the existing terminal row/window
-ownership. It runs at startup and with existing orphan maintenance; it does not introduce a
-new timer or a new kind of resource.
+ownership and reclaims stale launch files. It runs at startup and with existing orphan
+maintenance; it does not introduce a new timer.
 
 ## Tradeoffs and rejected alternatives
 
@@ -476,8 +503,13 @@ new timer or a new kind of resource.
 - **Pretend resume** — rejected because Claude session IDs cannot address Codex rollouts.
   The packet states that it is a handoff.
 - **Persist a packet file or source-to-destination mapping** — rejected because the packet
-  is needed once, the source pointer suffices, and another durable artifact would need
-  lifecycle and orphan policy.
+  is needed once, the source pointer suffices, and a lasting artifact would need lifecycle
+  and orphan policy. Only the per-transaction launch file exists.
+- **Packet as a command-line argument** — rejected because tmux refuses a spawn command over
+  about 16 KiB, which a full packet exceeds.
+- **Cap the packet below the tmux limit** — rejected because shell escaping can multiply a
+  packet's size and the command already carries a system prompt, so a safe cap would
+  discard most of the history the packet exists to carry.
 - **Change the row before launch without a pending fence** — rejected because a failed
   spawn would leave the row naming Claude while Codex or no agent was running.
 - **Change the row only after an unfenced launch** — rejected because Claude's
@@ -488,6 +520,6 @@ new timer or a new kind of resource.
 
 ## Not built
 
-No Claude import API, model summarizer, full tool-result replay, packet file, mapping table,
-sibling tab, force option, holder-transport replacement, feature flag, config migration,
-new background timer, or new reconciler.
+No Claude import API, model summarizer, full tool-result replay, persistent packet file,
+mapping table, sibling tab, force option, holder-transport replacement, feature flag,
+config migration, new background timer, or new reconciler.

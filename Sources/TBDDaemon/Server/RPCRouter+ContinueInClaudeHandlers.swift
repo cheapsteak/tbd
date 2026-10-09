@@ -49,6 +49,74 @@ private struct ContinueInClaudeError: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+/// The continuation packet staged as a file for the launching shell to read.
+///
+/// The packet can run to `CodexContinuationPacketBuilder.promptByteLimit`
+/// (64 KiB), but tmux packs a whole `respawn-window` command into one client
+/// message of about 16 KiB and rejects a longer one with "command too long".
+/// Carrying the packet as an argument would therefore fail for any sizeable
+/// session, after Codex had already been fenced for replacement. The command
+/// carries only `"$(cat <path>)"` instead.
+///
+/// Reclamation: the handler removes the file when the transaction ends, on
+/// every path (success means Claude is already running with the prompt read;
+/// failure means the Claude shell is being replaced by the Codex rollback).
+/// A daemon crash mid-transaction can leave one behind, and
+/// `reconcilePendingContinueInClaude` — the same pass that recovers that
+/// transaction's pending row, at startup and hourly — sweeps any older than
+/// `staleAge`, which is far longer than a transaction can run.
+enum ContinuationPacketFile {
+    static let prefix = "continue-in-claude-packet-"
+    static let suffix = ".txt"
+    static let staleAge: TimeInterval = 3600
+
+    /// Writes `packet` to a fresh owner-only file and returns its path. The
+    /// name carries a per-request id, so two overlapping requests for one
+    /// terminal can never remove each other's file.
+    static func write(
+        _ packet: String,
+        terminalID: UUID,
+        directory: URL = TBDConstants.runtimeDir
+    ) throws -> String {
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let name = "\(prefix)\(terminalID.uuidString.lowercased())-"
+            + "\(UUID().uuidString.lowercased())\(suffix)"
+        let path = directory.appendingPathComponent(name).path
+        guard FileManager.default.createFile(
+            atPath: path,
+            contents: Data(packet.utf8),
+            attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return path
+    }
+
+    static func remove(path: String) {
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// Removes packet files last modified more than `staleAge` before `now`.
+    static func pruneStale(
+        directory: URL = TBDConstants.runtimeDir,
+        now: Date = Date()
+    ) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: directory.path) else {
+            return
+        }
+        for entry in entries where entry.hasPrefix(prefix) && entry.hasSuffix(suffix) {
+            let path = directory.appendingPathComponent(entry).path
+            guard let modified = (try? fm.attributesOfItem(atPath: path))?[.modificationDate]
+                    as? Date,
+                  now.timeIntervalSince(modified) > staleAge else { continue }
+            try? fm.removeItem(atPath: path)
+            continueInClaudeLogger.info(
+                "Pruned stale continuation packet \(entry, privacy: .public)")
+        }
+    }
+}
+
 private struct PreparedContinueInClaude: Sendable {
     let source: Terminal
     let sourceSnapshot: TerminalContinueInClaudeSnapshot
@@ -57,6 +125,9 @@ private struct PreparedContinueInClaude: Sendable {
     let profileID: UUID?
     let freshClaudeSessionID: String
     let claudeCommand: String
+    /// The staged continuation packet `claudeCommand` reads at launch; removed
+    /// by `handleTerminalContinueInClaude` when the transaction ends.
+    let packetFilePath: String
     let claudeEnv: [String: String]
     let claudeSensitiveEnv: [String: String]
     let codexCommand: String
@@ -81,6 +152,10 @@ extension RPCRouter {
         } catch {
             return RPCResponse(error: "Could not prepare Continue in Claude: \(error.localizedDescription)")
         }
+        // Every path out of this handler ends the transaction: success means
+        // Claude is running (its shell read the file at launch), failure means
+        // the Claude shell is being replaced by the Codex rollback.
+        defer { ContinuationPacketFile.remove(path: prepared.packetFilePath) }
 
         let actuationID = try await beginActuation(
             .terminalContinueInClaude,
@@ -253,11 +328,22 @@ extension RPCRouter {
             isResume: false,
             scratchInstructions: config?.scratchInstructions,
             scratchRenamePrompt: config?.scratchRenamePrompt)
+        // Staged last: nothing below throws, so a failed preparation never
+        // leaves the file behind (the handler removes it once prepare returns).
+        let packetFilePath: String
+        do {
+            packetFilePath = try ContinuationPacketFile.write(
+                packet, terminalID: source.id)
+        } catch {
+            throw ContinueInClaudeError(
+                "Could not stage the continuation packet: \(error.localizedDescription)")
+        }
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
             appendSystemPrompt: appendPrompt,
-            initialPrompt: packet,
+            initialPrompt: nil,
+            initialPromptFilePath: packetFilePath,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,
@@ -307,6 +393,7 @@ extension RPCRouter {
             profileID: resolvedProfile?.profileID,
             freshClaudeSessionID: freshClaudeSessionID,
             claudeCommand: claudeSpawn.command,
+            packetFilePath: packetFilePath,
             claudeEnv: claudeEnv,
             claudeSensitiveEnv: claudeSensitiveEnv,
             codexCommand: codexCommand,
@@ -473,6 +560,9 @@ extension RPCRouter {
     /// Retry every durable nonparked Codex+pending row. Called once after the
     /// socket begins accepting SessionStart hooks and on orphan maintenance.
     func reconcilePendingContinueInClaude() async {
+        // Reclaims packet files a crashed transaction left behind; see
+        // `ContinuationPacketFile`.
+        ContinuationPacketFile.pruneStale()
         guard let candidates = try? await db.terminals.listPendingCodexContinuations()
         else { return }
         for candidate in candidates {

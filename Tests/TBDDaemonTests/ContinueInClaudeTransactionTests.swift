@@ -221,6 +221,80 @@ struct ContinueInClaudeTransactionTests {
         #expect(replacement == updated)
     }
 
+    @Test("a packet far over tmux's command limit travels as a file and is reclaimed")
+    func largePacketTravelsAsFile() async throws {
+        // tmux rejects a respawn-window command over about 16 KiB ("command
+        // too long"), so a sizeable packet must not ride in the command.
+        let marker = "LARGE-PACKET-MARKER"
+        let fixture = try await makeRPCFixture(
+            ownsPane: true,
+            userMessage: marker + String(repeating: "x", count: 30_000))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: fixture.terminal.id))
+        let responseTask = Task { await fixture.router.handle(request) }
+        let pending = try await waitForPending(
+            terminalID: fixture.terminal.id, in: fixture.db)
+        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
+            in: fixture.recorder))
+
+        let lastRespawn = fixture.recorder.commands.last { $0.contains("respawn-window") }
+        let respawn = try #require(lastRespawn)
+        let shellCommand = try #require(respawn.last)
+        let argvBytes = respawn.reduce(0) { $0 + $1.utf8.count }
+        #expect(argvBytes < 15_000,
+                "respawn argv is too large for tmux: \(argvBytes) bytes")
+        #expect(!shellCommand.contains(marker))
+        let afterCat = try #require(
+            shellCommand.components(separatedBy: "\"$(cat '").last)
+        let packetPath = try #require(afterCat.components(separatedBy: "')\"").first)
+        let staged = try String(contentsOfFile: packetPath, encoding: .utf8)
+        #expect(staged.contains(marker))
+        #expect(staged.utf8.count > 20_000)
+
+        let hook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: freshSessionID,
+                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: pending))
+        #expect((await fixture.router.handle(hook)).success)
+        #expect((await responseTask.value).success)
+        #expect(!FileManager.default.fileExists(atPath: packetPath))
+    }
+
+    @Test("stale continuation packets are pruned and fresh ones are kept")
+    func stalePacketFilesArePruned() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("packet-prune-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stalePath = try ContinuationPacketFile.write(
+            "old", terminalID: UUID(), directory: directory)
+        let freshPath = try ContinuationPacketFile.write(
+            "new", terminalID: UUID(), directory: directory)
+        let unrelated = directory.appendingPathComponent("unrelated.txt")
+        try "keep".write(to: unrelated, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-2 * ContinuationPacketFile.staleAge)],
+            ofItemAtPath: stalePath)
+
+        ContinuationPacketFile.pruneStale(directory: directory)
+
+        #expect(!FileManager.default.fileExists(atPath: stalePath))
+        #expect(FileManager.default.fileExists(atPath: freshPath))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+        let mode = try #require(
+            try FileManager.default.attributesOfItem(atPath: freshPath)[.posixPermissions]
+                as? NSNumber)
+        #expect(mode.intValue & 0o077 == 0, "packet files must be owner-only")
+    }
+
     @Test("strict pane ownership refusal clears the fence without respawning")
     func rpcOwnershipFenceLeavesCodexUntouched() async throws {
         let fixture = try await makeRPCFixture(ownsPane: false)
@@ -641,7 +715,8 @@ struct ContinueInClaudeTransactionTests {
         paneWindowID: String = "@source",
         paneProbeThrows: Bool = false,
         sourceWindowID: String = "@source",
-        paneTargetOverride: PaneSendTarget? = nil
+        paneTargetOverride: PaneSendTarget? = nil,
+        userMessage: String = "Continue the task."
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
@@ -653,7 +728,7 @@ struct ContinueInClaudeTransactionTests {
             {"type":"session_meta","payload":{"id":"codex-thread","cwd":\(json(root.path))}}
             """
         let userMessage = """
-            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue the task."}]}}
+            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":\(json(userMessage))}]}}
             """
         let lifecycleClose = """
             {"type":"event_msg","payload":{"type":"task_complete","turn_id":"ready-turn","started_at":1,"last_agent_message":"Ready."}}
