@@ -769,15 +769,90 @@ the process table — the same argument as every other resource here.
   persist independently, so adoption would buy a mystery-session UI and
   little else, and it cuts against the database-is-intent model the other
   reconcilers already follow.
-- **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains two sweeps:
-  unlink socket files (and their sibling lock files) with no listening
-  process behind them, and re-run the holder-versus-database check between
+- **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains three sweeps:
+  unlink socket files (and their sibling lock and log files) with no listening
+  process behind them, unlink the lock-and-log residue of a session whose
+  socket is already gone, and re-run the holder-versus-database check between
   startup reconciles. The socket sweep is mandatory, not hygienic: a
   SIGKILLed holder cannot unlink its own socket, and the tmux precedent on
   this machine was ~7,100 dead socket files, because tmux unlinks lazily on
   rebind and nothing ever rebound. The lock file leaks only as an empty
   file — the kernel released its lock when the holder died — so it is swept
-  for tidiness on the same pass rather than needing its own reclaimer.
+  with the socket on the same pass rather than needing its own reclaimer.
+
+  **The rendezvous sweep has two arms, because the socket is not always the
+  file left behind.** The socket arm decides on a `<uuid>.sock` and unlinks its
+  `<uuid>.lock` and `<uuid>.log` siblings along with it. But a holder that
+  exits cleanly unlinks its own socket, and so does the socket arm itself, so
+  the pair left in either case has no socket for that arm to decide on and
+  survives every later sweep — measured on a development machine, 557 such
+  pairs against 53 live sockets. The socket-less arm reclaims that pair, under
+  `gcEnabled` like every other holder leg and with no switch of its own
+  (`2026-09-07-holder-flag-consolidation-design.md`).
+
+  Its gates, in order, each failing toward keeping:
+
+  - **No sibling socket** — established from the same directory listing the
+    pair is enumerated from, and re-checked immediately before the unlink. A
+    socket at that path means the socket arm's gates are the ones that apply,
+    and this arm never unlinks a socket itself.
+  - **Age** — the pair's newest file must be older than the GC grace window,
+    the same window and constant the socket arm uses and for the same race:
+    a sweep runs on demand from RPC handlers, so it can land between a spawner
+    creating the lock and the holder binding its socket, and reaping there
+    would unlink the lock of a session being born. Newest file rather than
+    oldest, so a week-old lock beside a log written a second ago is kept, and
+    a date that cannot be read counts as too young to touch.
+  - **No session row** — read once for the whole phase, with a failed read
+    skipping the phase rather than proceeding on an empty set, which would
+    read as "nothing is claimed". This gate asks whether TBD still knows the
+    session; it is not what protects a spawn in flight, for the reason below.
+  - **The lock is free** — the same non-blocking acquisition the socket arm
+    makes, released on the same line, so no window is left in which the sweep
+    is the holder of record.
+
+  **Why unlinking a lock is safe here, when unlinking a held lock is the
+  hazard the rendezvous layout is built around.** `HolderLock` leaves its file
+  behind on release precisely because unlinking a lock somebody holds lets a
+  racing spawner create and lock a *different* file at the same path — two
+  holders for one session. The socket arm stays out of that race by anchoring
+  every unlink to a socket it has already proven dead. The socket-less arm has
+  no such anchor, and **the creation lock is what bounds it.** The flock is
+  taken by the spawner before the lock file has any sibling, travels to the
+  holder as an inherited descriptor on the same open file description, and is
+  released only when the holder dies — so a spawn is lock-held at every instant
+  of itself, and a pair whose lock is free is a pair no spawn is behind.
+
+  Two things about the other gates follow from that, and stating them the other
+  way round would be wrong:
+
+  - **The row gate is not the spawn guard.** A new session's holder is spawned
+    before its row is written, so mid-spawn a UUID legitimately has a lock, a
+    log and no row. What the row covers is the wake and respawn paths, where
+    the row precedes the holder, and the far more common case of a session TBD
+    has finished with.
+  - **The grace window is reinforcement, not the bound.** It is user-settable
+    with no floor, so an argument that leaned on it would be an argument a
+    configuration change could remove. At its default it makes the only
+    remaining coincidence — a spawn beginning for a UUID whose residue is
+    already an hour old — one the spawn path does not produce, since a spawn
+    mints a fresh UUID that has no residue at all.
+
+  The residual, stated rather than papered over: `lockIsHeld` can read a free
+  lock an instant before a spawner takes it, and the unlink then lands on a
+  file that spawner holds. It cannot be closed with `flock` — holding the lock
+  across the unlink only moves the hazard, leaving a waiting spawner to lock an
+  unlinked inode — and it is accepted on the coincidence argument above. The
+  same probe also, for one syscall pair, holds a lock a concurrent
+  `HolderLock.acquire` would then refuse as `alreadyHeld`; that surfaces as a
+  visible spawn failure rather than as two holders, and it is a property the
+  socket arm's identical probe already has.
+
+  Reclamation is by unlink rather than quarantine, as on the socket arm. A lock
+  file is empty by construction, and a holder log's only value is postmortem,
+  spent long before a pair is old enough to reach this gate. There is nothing a
+  `tbd gc restore` could put back, so no `ReapRecord` is written and the sweep
+  counts one reclamation per session rather than one per file.
 - **`AgentReaper`** gains a holder-transport leg. Its existing sweep
   enumerates children of tmux server pids and structurally cannot see a
   child re-parented to launchd, so for holder-transport sessions it sweeps by

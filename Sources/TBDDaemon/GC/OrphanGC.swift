@@ -354,6 +354,13 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
+        // After the socket arm, deliberately: anything that arm reclaimed took
+        // its lock and log with it, so this one only ever sees residue the
+        // socket arm structurally cannot reach.
+        await reclaimHolderRendezvousOrphanPairs(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
         await reclaimModelProxyFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
@@ -946,6 +953,77 @@ public actor OrphanGC {
                 // one holder's residue, and `reaped` is what the sweep reports
                 // as things reclaimed. No `ReapRecord` is written — these files
                 // are unlinked, not quarantined, and there is nothing a
+                // `tbd gc restore` could put back.
+                reaped += 1
+            }
+        }
+    }
+
+    /// Unlinks the `<uuid>.lock` and `<uuid>.log` a holder left behind with no
+    /// `<uuid>.sock` beside them — the socket-less arm of the same reconciler
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation").
+    ///
+    /// A holder that exits cleanly unlinks its own socket, and a sweep that
+    /// reaped a socket for it already did. Either way the pair that is left has
+    /// no socket for the phase above to decide on, so without this one it
+    /// survives every sweep forever: measured on a development machine, 557
+    /// such pairs against 53 live sockets.
+    ///
+    /// Runs under `gcEnabled`, with no flag of its own, exactly like the socket
+    /// arm and for the same reason — holder-ness is a transport property, not a
+    /// separate opt-in (`docs/specs/2026-09-07-holder-flag-consolidation-design.md`).
+    /// `dryRun` bypasses `gcEnabled` as it does everywhere in `sweep`.
+    ///
+    /// **This phase reads rows, where the socket arm deliberately does not.**
+    /// The socket arm anchors every unlink to a socket it has proven dead; this
+    /// one has no such anchor, so it asks whether TBD still knows the session
+    /// at all. A failed read skips the phase rather than proceeding on an empty
+    /// set, which would read as "nothing is claimed".
+    ///
+    /// The row is not what makes the arm safe against a spawn in flight — a
+    /// fresh spawn's row is written *after* its holder — and the collector's
+    /// own doc comment carries that argument, which rests on the creation lock.
+    /// Rows are read once, before any gate; a row that commits during the phase
+    /// belongs to a session whose lock is held for the whole spawn, which the
+    /// collector's last gate reads.
+    private func reclaimHolderRendezvousOrphanPairs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = holderRendezvousCollector.orphanPairCandidates()
+        guard !candidates.isEmpty else { return }
+
+        guard let terminals = try? await db.terminals.list() else {
+            logger.error("""
+            gc: session rows unreadable this sweep — skipping the holder-rendezvous-pair phase
+            """)
+            planned.append("KEEP rows-unreadable holder-rendezvous-pair phase")
+            return
+        }
+        let claimed = Set(terminals.map(\.id))
+
+        for pair in candidates {
+            switch holderRendezvousCollector.decideOrphanPair(
+                pair, graceSeconds: config.gcGraceSeconds, claimedSessionIDs: claimed
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(pair.lockPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(pair.lockPath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP holder-rendezvous-pair \(pair.lockPath)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                let removed = holderRendezvousCollector.reapOrphanPair(pair)
+                if removed.isEmpty {
+                    planned.append("KEEP unlink-failed \(pair.lockPath)")
+                    continue
+                }
+                // Counted once per session, as the socket arm counts its
+                // triple: the files are one holder's residue. No `ReapRecord` —
+                // these are unlinked, not quarantined, and there is nothing a
                 // `tbd gc restore` could put back.
                 reaped += 1
             }
