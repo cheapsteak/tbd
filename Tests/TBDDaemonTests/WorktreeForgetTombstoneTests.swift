@@ -6,14 +6,15 @@ import Testing
 @testable import TBDShared
 
 /// The forget-tombstone feature: `forget` inserts a `forgotten_worktree` row
-/// keyed by path, and reconcile skips tombstoned paths in its re-adopt pass —
-/// so forgetting a worktree under a TBD-managed prefix finally sticks.
+/// keyed by path, and reconcile skips tombstoned paths in its unmanaged-tree
+/// report. Reconcile never inserts a row for such a path either way; the
+/// tombstone decides only whether the path is reported.
 ///
-/// Branch coverage for the new gating conditional in reconcile:
-///   - tombstone present  → path NOT re-adopted (the bug this feature fixes).
-///   - tombstone absent   → path IS adopted (ungated behavior intact).
+///   - tombstone present  → no row, no report.
+///   - tombstone absent   → no row, reported (the report is a log line, so
+///     these tests pin the no-row half; the directory is left untouched).
 /// Plus the escape hatch: adopt/create at a tombstoned path clears the
-/// tombstone, restoring normal reconcile behavior.
+/// tombstone.
 ///
 /// Uses `createTestRepoResolvingSymlinks` throughout: reconcile compares DB
 /// paths against `git worktree list` output, which reports realpath()-resolved
@@ -28,8 +29,8 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     )
 }
 
-/// The bug this feature fixes: a forgotten worktree under a TBD-managed prefix
-/// must NOT be resurrected by the next reconcile pass.
+/// A forgotten worktree under a TBD-managed prefix gets no row from the next
+/// reconcile pass.
 @Test func testForgetSticksThroughReconcileForManagedPrefix() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -39,7 +40,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Created under the repo's worktreeRoot override → an acceptable prefix
-    // for reconcile's re-adopt pass.
+    // for reconcile's unmanaged-tree report.
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
@@ -47,21 +48,21 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     #expect(try await db.forgottenWorktrees.contains(path: wt.localPath),
             "forget must insert a tombstone for the worktree path")
 
-    // The directory is still on disk AND still registered with git — exactly
-    // the situation that used to make reconcile resurrect the row.
+    // The directory is still on disk AND still registered with git.
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
     #expect(!active.contains { $0.localPath == wt.localPath },
-            "reconcile must not re-adopt a tombstoned path")
+            "reconcile must not give a tombstoned path a row")
     let all = try await db.worktrees.list()
     #expect(!all.contains { $0.localPath == wt.localPath },
             "no row (any status) may be re-created for a tombstoned path")
 }
 
-/// Ungated branch: a plain untracked git worktree under the managed prefix
-/// (no tombstone) must still be adopted by reconcile.
-@Test func testReconcileStillAdoptsUntombstonedWorktree() async throws {
+/// A plain `git worktree add` under the managed prefix (no tombstone, no row)
+/// is reported by reconcile, never adopted: no row of any status, and the
+/// directory and its files are untouched.
+@Test func testReconcileDoesNotAdoptPlainWorktreeUnderManagedPrefix() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -76,17 +77,50 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     )
     let wtPath = (base as NSString).appendingPathComponent("stray")
     try await shell("git worktree add -b stray-branch '\(wtPath)'", at: repoDir)
+    let uncommitted = (wtPath as NSString).appendingPathComponent("uncommitted.txt")
+    try "work in progress".write(toFile: uncommitted, atomically: true, encoding: .utf8)
+
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+    // A second pass must not change the answer.
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+
+    let all = try await db.worktrees.list()
+    #expect(!all.contains { $0.localPath == wtPath },
+            "reconcile must not give a plain git worktree a row, whatever its status")
+    #expect(FileManager.default.fileExists(atPath: wtPath), "the directory must be left in place")
+    #expect(try String(contentsOfFile: uncommitted, encoding: .utf8) == "work in progress",
+            "files in the unmanaged tree must be untouched")
+    #expect(!(try await db.forgottenWorktrees.contains(path: wtPath)),
+            "reporting a tree must not tombstone it")
+}
+
+/// A tombstoned path that is a plain git worktree (no row ever existed) is
+/// skipped silently and given no row.
+@Test func testReconcileDoesNotAdoptTombstonedPlainWorktree() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = makeLifecycle(db: db)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    let base = try #require(repo.worktreeRoot)
+    try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+    let wtPath = (base as NSString).appendingPathComponent("forgotten-stray")
+    try await shell("git worktree add -b forgotten-stray-branch '\(wtPath)'", at: repoDir)
+    try await db.forgottenWorktrees.insert(path: wtPath, repoID: repo.id)
 
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
-    let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(active.contains { $0.localPath == wtPath },
-            "reconcile must still adopt untombstoned worktrees under the managed prefix")
+    #expect(!(try await db.worktrees.list()).contains { $0.localPath == wtPath })
+    #expect(FileManager.default.fileExists(atPath: wtPath))
+    #expect(try await db.forgottenWorktrees.contains(path: wtPath),
+            "reconcile must leave the tombstone in place")
 }
 
 /// Escape hatch (adopt): deliberately re-adopting a forgotten path clears the
-/// tombstone, and reconcile treats the path normally again afterwards.
-@Test func testAdoptClearsTombstoneAndReconcileResumes() async throws {
+/// tombstone.
+@Test func testAdoptClearsTombstone() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -103,15 +137,6 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     #expect(outcome.worktree.localPath == wt.localPath)
     #expect(!(try await db.forgottenWorktrees.contains(path: wt.localPath)),
             "adopt must clear the forget tombstone for its path")
-
-    // Back to normal: with the tombstone gone, reconcile re-adopts the path
-    // after its row disappears (proves the skip was tombstone-driven, not
-    // some other latent state).
-    try await db.worktrees.delete(id: outcome.worktree.id)
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
-    let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(active.contains { $0.localPath == wt.localPath },
-            "after the tombstone is cleared, reconcile behavior is back to normal")
 }
 
 /// Escape hatch (create): creating a worktree at a tombstoned path clears the

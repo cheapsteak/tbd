@@ -638,33 +638,53 @@ extension WorktreeLifecycle {
             deleted = nil
             lost = true
         }
-        // Blankness is judged on a trimmed copy; the file gets the text as
-        // parked, so a leading indent (a code block, say) survives.
-        if let row = deleted,
-           let text = row.pendingPrompt,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let repoID = row.repoID else {
-                // No repo means no `repos/<repoID>/` to save under.
-                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): the row has no repo")
-                return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptLost: true)
-            }
-            let base = reposDir ?? TBDConstants.reposDir
-            let directory = base
-                .appendingPathComponent(repoID.uuidString)
-                .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
-            do {
-                savedPath = try UnsentPromptFile.write(
-                    text: text, worktreeName: row.displayName,
-                    directory: directory, date: date ?? now())
-                logger.info("saved parked first message of failed create \(worktreeID, privacy: .public) to \(savedPath ?? "", privacy: .public)")
-            } catch {
-                lost = true
-                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
+        if let row = deleted {
+            let saved = saveParkedFirstMessage(of: row, reposDir: reposDir, date: date)
+            savedPath = saved.path
+            lost = lost || saved.lost
         }
         return WorktreeIDDelta(
             worktreeID: worktreeID, creationFailed: true,
             unsentPromptPath: savedPath, unsentPromptLost: lost)
+    }
+
+    /// Write the first message parked in `row` to
+    /// `~/tbd/repos/<repoID>/unsent-prompts/` (`UnsentPromptFile`) and report
+    /// where it went. A blank or absent prompt writes nothing and reports
+    /// neither a path nor a loss. A failed write, or a row with no repo to save
+    /// under, is logged and reported as `lost`.
+    ///
+    /// This only saves: it neither clears the column nor deletes the row.
+    /// `rollBackFailedCreate` deletes the row it read this from, and startup
+    /// recovery's activation of a terminal-less row clears the column itself.
+    func saveParkedFirstMessage(
+        of row: Worktree, reposDir: URL? = nil, date: Date? = nil
+    ) -> (path: String?, lost: Bool) {
+        // Blankness is judged on a trimmed copy; the file gets the text as
+        // parked, so a leading indent (a code block, say) survives.
+        guard let text = row.pendingPrompt,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, false)
+        }
+        guard let repoID = row.repoID else {
+            // No repo means no `repos/<repoID>/` to save under.
+            logger.error("could not save parked first message of \(row.id, privacy: .public): the row has no repo")
+            return (nil, true)
+        }
+        let base = reposDir ?? TBDConstants.reposDir
+        let directory = base
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
+        do {
+            let savedPath = try UnsentPromptFile.write(
+                text: text, worktreeName: row.displayName,
+                directory: directory, date: date ?? now())
+            logger.info("saved parked first message of \(row.id, privacy: .public) to \(savedPath, privacy: .public)")
+            return (savedPath, false)
+        } catch {
+            logger.error("could not save parked first message of \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return (nil, true)
+        }
     }
 
     /// Creates an initial Notes tab and appends it to the tab order (last; the
