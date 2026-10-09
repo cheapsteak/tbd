@@ -677,6 +677,42 @@ import Testing
         #expect(leftover == nil)
     }
 
+    /// A fork-PR checkout whose create then fails is re-adopted with its
+    /// foreign-head stamp, so folder trust is still never pre-answered for it.
+    @Test func aFailedForkPullRequestCreateReadoptsStamped() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
+            pullRequestHeads: [7]
+        )
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        // git reports realpath()-resolved paths; the row's path must match them
+        // for adoption to find the checkout in `git worktree list`.
+        let resolvedHost = hostDir.resolvingSymlinksInPath()
+        let resolvedRepo = repoDir.resolvingSymlinksInPath()
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: resolvedHost, repoDir: resolvedRepo)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            useExistingBranch: true, prNumber: 7
+        )
+        try await failTheFinalStatusFlip(db)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true,
+                existingBranchRef: "pr-7", checkoutPRHead: true
+            )
+        }
+
+        let atPath = try await db.worktrees.list().filter { $0.localPath == pending.localPath }
+        #expect(atPath.count == 1, "expected exactly one row at the checkout: \(atPath)")
+        #expect(atPath.first?.status == .active)
+        #expect(atPath.first?.foreignHead == true,
+                "a fork checkout was re-adopted without its foreign-head stamp")
+    }
+
     /// A failure DURING `git worktree add` made no checkout, so nothing is
     /// adopted, and a foreign directory sitting at the row's path is left
     /// alone and untracked.
