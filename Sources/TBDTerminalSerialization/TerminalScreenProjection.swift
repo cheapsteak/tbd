@@ -1,6 +1,10 @@
 import Foundation
 import SwiftTerm
-import TBDShared
+// Scoped, not a whole-module import: `TBDShared.Terminal` is the DB row model
+// and `SwiftTerm.Terminal` is the emulator, and this file is about the second.
+// Naming the one type it needs keeps every bare `Terminal` here meaning the
+// emulator — the same rule `HolderReader` follows for the same collision.
+import struct TBDShared.TerminalScreen
 
 /// Everything a `TerminalScreen` needs that can be read from a grid, and
 /// nothing that cannot.

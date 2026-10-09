@@ -2,7 +2,11 @@ import Foundation
 import SwiftTerm
 import Testing
 
-@testable import TBDShared
+// Scoped, for the reason `TerminalScreenProjection` itself imports this way:
+// `TBDShared.Terminal` is the DB row model and `SwiftTerm.Terminal` is the
+// emulator, and every bare `Terminal` below is the emulator.
+import struct TBDShared.TerminalScreen
+
 @testable import TBDTerminalSerialization
 
 /// The shared projection must produce exactly what the daemon's private walk
