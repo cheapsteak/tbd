@@ -471,12 +471,13 @@ main_moves() {
   git -C "$d/seed" add -A && git -C "$d/seed" commit -q -m "main moves: $path" && git -C "$d/seed" push -q origin HEAD:main 2>/dev/null
 }
 
-# github_gate D [ONCE]: a pre-receive hook refusing, as GitHub refuses an App
-# without the `workflows` permission, a branch whose .github/workflows/ files
-# differ from main's – whoever's commits made the difference. With ONCE, only
-# the first push is refused, as when main moved between the fetch and the push.
+# github_gate D [ONCE [RESET]]: a pre-receive hook refusing, as GitHub refuses
+# an App without the `workflows` permission, a branch whose .github/workflows/
+# files differ from main's – whoever's commits made the difference. With ONCE,
+# only the first push is refused, as when main moved between the fetch and
+# the push; with RESET, that refusal also moves main to the commit RESET.
 github_gate() {
-  local d="$1" once="${2:-}"
+  local d="$1" once="${2:-}" reset="${3:-}"
   printf '%s\n' "$WF_REFUSAL" > "$d/reject-message"
   : > "$d/pushes"
   cat > "$d/origin.git/hooks/pre-receive" <<EOF
@@ -487,6 +488,10 @@ while read -r old new ref; do
   if [[ -n "$once" && "\$(wc -l < "$d/pushes")" -eq 1 ]] \\
       || [[ -z "$once" && -n "\$(git diff --name-only refs/heads/main "\$new" -- .github/workflows/)" ]]; then
     cat "$d/reject-message" >&2
+    if [[ -n "$reset" ]]; then
+      env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\
+        git update-ref refs/heads/main "$reset"
+    fi
     exit 1
   fi
 done
@@ -545,7 +550,7 @@ test_main_workflows_moving_replays_a_clean_candidate_onto_main() {
   d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
   publish "$d" "$mutant" > /dev/null
   assert_eq "mutation: a status on the candidate misses the PR's head" "$(cat "$d/attempt/head_sha")" "$(status_sha "$d")"
-  mutant="$(mutant_of 's/^      if workflows_moved; then$/      if false; then/' "$PR_SH")"
+  mutant="$(mutant_of 's/^  if workflows_moved; then$/  if false; then/' "$PR_SH")"
   d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
   publish "$d" "$mutant" > /dev/null
   assert_eq "mutation: without the check the first push is refused" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
@@ -616,6 +621,21 @@ test_a_workflow_refusal_of_a_clean_candidate_is_retried_then_aborted() {
   d="$(world)"; routes "$d"; github_gate "$d" once
   publish "$d" "$mutant" > /dev/null
   assert_contains "mutation: replaying regardless claims a workflow change that never happened" "$(status_desc "$d")" "replayed"
+  # main's workflow change was reverted between the replay and the push: the
+  # retry pushes the candidate itself, not the stale replay.
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  assert_eq "main reverted under the push: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/^    PUSHED="\$head" NEW_BASE=""$/    true/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the reset it re-pushes the stale replay" "different" \
+    "$([[ "$(remote_head "$d")" == "$(cat "$d/attempt/head_sha")" ]] && echo same || echo different)"
 }
 
 test_a_candidate_touching_workflows_is_never_replayed() {

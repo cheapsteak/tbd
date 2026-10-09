@@ -145,13 +145,13 @@ def _status(verdict: dict) -> tuple[str, str]:
                 text += f"; {WEAK_CLAUSE}: bound unknown"
             else:
                 text += f"; {WEAK_CLAUSE}: a no-op would pass {pct(verdict['false_pass'])} of the time"
-        return "success", text[:STATUS_MAX]
+        return "success", text
     if v == "ineligible":
         text = "not eligible for ready, a human must judge: touches " + ", ".join(verdict.get("protected") or [])
-        return "failure", fit(text)
+        return "failure", text
     reasons = verdict.get("reasons") or ["the stress run failed"]
     text = f"stress failed: target failed in {verdict.get('target_failures', 0)} of {verdict.get('iterations')} runs; {reasons[0]}"
-    return "failure", fit(text)
+    return "failure", text
 
 
 # --- the PR body -------------------------------------------------------------------------

@@ -1161,9 +1161,9 @@ Transitions, each owned by the PR driver:
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA, described as "no failure
   observed in N runs", followed by the weak-evidence clause when the evidence
-  is weak (§6.5), then the replay note when the candidate was replayed. A
-  description longer than GitHub's 140 characters is cut at the end, so the
-  cut falls on the replay note, which the PR body carries whole, and never
+  is weak (§6.5), then the replay note when the candidate was replayed. The
+  description is composed whole and then cut once at GitHub's 140
+  characters, so the cut falls on the replay note, which the PR body carries whole, and never
   on the weak-evidence clause `promote` reads back. On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
@@ -1319,9 +1319,10 @@ Transitions, each owned by the PR driver:
 - **The push is refused as a workflow change, though the candidate changes
   no workflow file.** `main` moved again between the fetch and the push.
   Such a refusal is never read as the fix needing a workflow change: the
-  driver fetches `main` again, replays onto it if its workflow files moved
-  from the base – and otherwise pushes the same commit, so no PR claims a
-  replay that never happened – and pushes once more. A
+  driver fetches `main` again and judges it afresh: it replays onto it if
+  its workflow files moved from the base, and otherwise pushes the
+  candidate itself – never a replay onto a `main` that has since moved on,
+  and no PR claims a replay that never happened. A
   second refusal pushes nothing, records `aborted`, marked `publish_raced`,
   with GitHub's message, and ends the run red so a human sees it.
 - **The push is rejected** for any other reason. A candidate that changes
@@ -1691,7 +1692,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   that touches a workflow file, pushed once as it is and recorded
   `push-refused`; a fetch of `main` that fails, recorded `aborted` and
   `publish_raced`; a refusal with `main`'s workflows unmoved, re-pushed as
-  it is with no replay note; and a re-run that finds its PR open on the
+  it is with no replay note, and one during which `main` reverted its
+  workflow change, which pushes the candidate itself rather than the
+  earlier replay; and a re-run that finds its PR open on the
   replay, which reuses it, and on a replay a human amended, which it
   leaves alone.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1; the

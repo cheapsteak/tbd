@@ -27,10 +27,10 @@
 #                 publish_raced when `main` moved during the run and the
 #                 candidate could not be replayed onto it (below)
 #   no-diff       the session made no commits; its notes go on the issue
-#   push-refused  GitHub rejected the push; a rejection of a candidate whose
-#                 own commits touch .github/workflows/ (the App has no
-#                 `workflows` permission) is told apart from any other in the
-#                 issue comment
+#   push-refused  GitHub rejected the push; a rejection of a candidate that
+#                 changes .github/workflows/ (the App has no `workflows`
+#                 permission) is told apart from any other in the issue
+#                 comment
 #   pr-opened     a draft PR, its `flakefix/stress` status, and the verdict
 #
 # THE BRANCH. `flakefix/issue-<N>` is one name per test. The picker only picks
@@ -45,8 +45,9 @@
 # .github/workflows/ files differ from `main`'s, even when the branch's own
 # commits never touch them: a candidate built on a `main` that has since
 # changed a workflow reads to GitHub as a workflow edit. So before pushing, a
-# candidate whose commits touch no workflow file is checked against `main` as
-# it is now; if `main`'s workflow files moved since the run's base, its
+# candidate whose tree leaves the base's workflow files as they were (judged
+# on the tree, as GitHub judges the push) is checked against `main` as it is
+# now; if `main`'s workflow files moved since the run's base, its
 # commits are replayed onto the new `main` (cherry-pick -x, author and
 # committer kept) and that is what is pushed, given the stress status, and
 # promoted. A replay that conflicts pushes nothing and records `aborted`,
@@ -149,8 +150,22 @@ fetch_main() {
 workflows_moved() {
   local rc=0
   git diff --quiet "$base" "$MAIN_NOW" -- "$WORKFLOWS_DIR" || rc=$?
-  [[ "$rc" -le 1 ]] || die "cannot compare main's workflow files with $base"
+  [[ "$rc" -le 1 ]] || { RACED_DIE=1; die "cannot compare main's workflow files with $base"; }
   [[ "$rc" -eq 1 ]]
+}
+
+# sync_to_main: fetch `main`; when its workflow files moved from the base,
+# replay the candidate onto it, and otherwise push the candidate itself. Sets
+# PUSHED and NEW_BASE; returns 1, with REPLAY_ERROR, when the replay does not
+# apply.
+sync_to_main() {
+  fetch_main
+  if workflows_moved; then
+    replay_onto "$MAIN_NOW" || return 1
+    echo "flake-pr: main's workflow files changed during the run; replayed the candidate onto ${MAIN_NOW:0:12} as $PUSHED"
+  else
+    PUSHED="$head" NEW_BASE=""
+  fi
 }
 
 # replay_onto ONTO: the candidate's commits, base..head, cherry-picked in order
@@ -194,9 +209,13 @@ replay_onto() {
 # amended is someone else's. Sets PUSHED and NEW_BASE when it is.
 is_replay_of_head() {
   local sha="$1" tip onto
-  git_auth fetch -q "$remote" "refs/heads/$branch" 2>/dev/null || return 1
-  tip="$(git rev-parse FETCH_HEAD)" || return 1
+  # A branch not at SHA is not this PR's head as listed; one that is must be
+  # fetchable, so a failure from here on is a publishing failure.
+  tip="$(git_auth ls-remote "$remote" "refs/heads/$branch" | awk '{print $1}')" \
+    || { RACED_DIE=1; die "cannot read $branch on the remote"; }
   [[ "$tip" == "$sha" ]] || return 1
+  git_auth fetch -q "$remote" "refs/heads/$branch" || { RACED_DIE=1; die "cannot fetch $branch"; }
+  [[ "$(git rev-parse FETCH_HEAD)" == "$sha" ]] || return 1
   git log -1 --format=%B "$sha" | grep -qxF "(cherry picked from commit $head)" || return 1
   onto="$(git rev-parse -q --verify "$sha~$commits_n^{commit}")" || return 1
   if replay_onto "$onto" && [[ "$PUSHED" == "$sha" ]]; then
@@ -323,15 +342,10 @@ cmd_open() {
     # is replayed onto `main` as it is now, or GitHub refuses it as a
     # workflow edit. One that touches workflow files itself is pushed as it
     # is: no replay makes that push acceptable.
-    if [[ -z "$touches_workflows" ]]; then
-      fetch_main
-      if workflows_moved; then
-        if ! replay_onto "$MAIN_NOW"; then
-          raced "main's workflow files changed during the run (${base:0:12} to ${MAIN_NOW:0:12}), so the candidate had to be replayed onto main, and the replay did not apply; nothing was pushed. $REPLAY_ERROR"
-          return 0
-        fi
-        echo "flake-pr: main's workflow files changed during the run; replayed the candidate onto ${MAIN_NOW:0:12} as $PUSHED"
-      fi
+    local lost="main's workflow files changed during the run, so the candidate had to be replayed onto main, and the replay did not apply; nothing was pushed."
+    if [[ -z "$touches_workflows" ]] && ! sync_to_main; then
+      raced "$lost (${base:0:12} to ${MAIN_NOW:0:12}) $REPLAY_ERROR"
+      return 0
     fi
     push_branch || rc=$?
     # A workflow refusal of a candidate that touches no workflow file: `main`
@@ -340,13 +354,9 @@ cmd_open() {
     # `aborted` and goes red.
     if [[ "$rc" -ne 0 && -z "$touches_workflows" ]] && grep -qiE "$WORKFLOW_REFUSAL" "$err"; then
       echo "flake-pr: GitHub refused the push as a workflow change though the candidate touches no workflow file; checking main again"
-      fetch_main
-      if workflows_moved; then
-        if ! replay_onto "$MAIN_NOW"; then
-          raced "GitHub refused the push as a workflow change though the candidate touches no workflow file, so main had moved; the replay onto ${MAIN_NOW:0:12} did not apply, and nothing was pushed. $REPLAY_ERROR"
-          return 0
-        fi
-        echo "flake-pr: replayed the candidate onto ${MAIN_NOW:0:12} as $PUSHED"
+      if ! sync_to_main; then
+        raced "GitHub refused the push as a workflow change though the candidate changes no workflow file; $lost (${base:0:12} to ${MAIN_NOW:0:12}) $REPLAY_ERROR"
+        return 0
       fi
       rc=0
       push_branch || rc=$?
