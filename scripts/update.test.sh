@@ -1410,6 +1410,42 @@ test_wake_batches_and_paces() {
     assert_eq "every session is actually woken once" "7" "$(wc -l < "$state/wake.log" | tr -d ' ')"
 }
 
+# The handover starts the new daemon as a background child of this same shell,
+# and the wake step runs after it. Waking must wait for its own wakes only: a
+# wait that also covered the daemon would never return, and the run would hold
+# the update lock for as long as the daemon lives.
+test_wake_ignores_other_background_children() {
+    local state out
+    state="$TEST_TMP/wake-daemon-state"
+    mkdir -p "$state" "$TEST_TMP/wake-bin"
+    mkstub_tbd "$TEST_TMP/wake-bin"
+    : > "$state/wake.log"
+
+    out="$(
+        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/wake-bin:$PATH"
+        OPT_AUTO=false
+        WAKE_STAGGER_SECONDS=0
+        # Stands in for the daemon. Bounded so a regression fails slowly rather
+        # than hanging the suite.
+        sleep 20 &
+        daemon=$!
+        started=$SECONDS
+        wake_terminals t1 t2
+        printf 'elapsed=%s woken=%s failed=%s\n' "$((SECONDS - started))" "$WAKE_WOKEN" "$WAKE_FAILED"
+        kill "$daemon" 2>/dev/null
+        wait "$daemon" 2>/dev/null
+    )"
+
+    assert_contains "both sessions are counted as woken" "woken=2 failed=0" "$out"
+    local elapsed
+    elapsed="$(printf '%s' "$out" | sed -n 's/.*elapsed=\([0-9]*\).*/\1/p')"
+    if [ -n "$elapsed" ] && [ "$elapsed" -lt 10 ]; then
+        pass "the wake returns without waiting for the daemon (${elapsed}s)"
+    else
+        fail "the wake returns without waiting for the daemon (took ${elapsed:-?}s)"
+    fi
+}
+
 test_wake_counts_failures() {
     local state out
     state="$TEST_TMP/wake-fail-state"
@@ -2511,6 +2547,7 @@ test_app_stage_seeds_the_tmux_fallback
 test_wake_candidate_filter
 test_wake_batches_and_paces
 test_wake_counts_failures
+test_wake_ignores_other_background_children
 test_wake_stagger_separates_batches
 test_no_wake_and_wake_only
 test_terminals_are_collected_across_worktrees
