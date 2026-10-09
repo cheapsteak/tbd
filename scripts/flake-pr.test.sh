@@ -822,9 +822,18 @@ skipped_session_is_no_failure() {
     grep -q "before a session's commits were collected" "$rt/flakefix/abort_reason" &&
     ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
 }
+# The same for session 2: a step that prepares try 2 failed, so it was skipped.
+skipped_session_two_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=success TRY2=true C2=skipped S1=success S1_CONCLUSION=success S2=skipped S2_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
 test_a_session_that_never_ran_is_not_a_failed_session() {
   check "a skipped session is no failed session" skipped_session_is_no_failure \
     'if [ "$S1" != skipped ] && { [ "$S1" != success ]' 'if { [ "$S1" != success ]'
+  check "nor a skipped session 2" skipped_session_two_is_no_failure \
+    '[ "$TRY2" = true ] && [ "$S2" != skipped ] && {' '[ "$TRY2" = true ] && {'
 }
 
 test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
@@ -941,7 +950,7 @@ record_env() {
   : > "$rt/record-out"
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="$rt/tmp" T="$t" VS="$rt/flakefix-verifier-scripts" VT="$rt/flakefix-verify" \
     FLAKEFIX_NOTES="$t/flakefix-notes.md" FLAKE_VERIFY_PS="$rt/bin/ps-stub" GIT_CEILING_DIRECTORIES="$SCRATCH" \
-    GITHUB_OUTPUT="$rt/record-out" /bin/bash --noprofile --norc -eo pipefail "$rt/record.sh" > /dev/null 2>&1 || return 1
+    GITHUB_OUTPUT="$rt/record-out" /bin/bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
   sed -n 's/^env=//p' "$rt/record-out"
 }
 

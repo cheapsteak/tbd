@@ -1628,10 +1628,13 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   and every shell script those steps run, it checks `bash -n` under 3.2; a
   `case` inside `$( … )` or a process substitution whose patterns lack the
   leading `(`, which 3.2 ends at the first pattern's `)` and parses only when
-  it runs, so `-n` cannot see it; and constructs 3.2 lacks (associative
-  arrays, `mapfile`, case conversion, `|&`, `;&`, and the like). It runs the
-  environment record, the preamble that restores it, and the packaging step
-  under 3.2. A step naming a script it does not check fails it, and under
+  it runs, so `-n` cannot see it; constructs 3.2 lacks (associative arrays,
+  `mapfile`, case conversion, `|&`, `;&`, and the like); and an array that can
+  be empty expanded without a guard under `set -u`, which 3.2 reads as
+  unbound – a site that cannot be reached empty carries a `# non-empty:`
+  comment saying why. It runs the environment record, the preamble that
+  restores it, and the packaging step under 3.2. A script that a macOS step,
+  or a script it checks, runs and that it does not check fails it, and under
   `$CI` it fails rather than skips without a bash 3.2.
 
 Every harness must prove it can fail: each case that expects a finding runs

@@ -312,7 +312,7 @@ pass_table_from_workflow() {
     args="${args//\'/}"
     read -r -a parts <<< "$args"
     kept=(); skip_next=0
-    for tok in "${parts[@]}"; do
+    for tok in ${parts[@]+"${parts[@]}"}; do
       if [[ "$skip_next" -eq 1 ]]; then skip_next=0; continue; fi
       case "$tok" in
         --fingerprint|--experimental-xunit-message-failure) ;;
@@ -320,7 +320,7 @@ pass_table_from_workflow() {
         *) kept+=("$tok") ;;
       esac
     done
-    printf '%s|%s|%s\n' "$name" "$floor" "${kept[*]}"
+    printf '%s|%s|%s\n' "$name" "$floor" "${kept[*]:-}"
   done < <(awk '
     /^[ \t]*scripts\/ci\/watched-test-pass\.sh/ { acc = ""; on = 1 }
     on {
@@ -385,7 +385,7 @@ start_spinners() {
     yes > /dev/null 2>&1 &
     SPINNER_PIDS+=("$!")          # captured at spawn — the only reliable handle
   done
-  echo "load: started ${#SPINNER_PIDS[@]} spinner(s) [pids: ${SPINNER_PIDS[*]}]"
+  echo "load: started ${#SPINNER_PIDS[@]} spinner(s) [pids: ${SPINNER_PIDS[*]:-}]"
 }
 
 stop_spinners() {
@@ -671,7 +671,7 @@ run_target() {
     echo "Signatures:"
     echo
     local s
-    for s in "${signatures[@]}"; do echo "$s"; done
+    for s in "${signatures[@]}"; do echo "$s"; done  # non-empty: every failing iteration adds one
     echo
     echo "> This is one night's sample from CI's regime (a few idle cores), not the"
     echo "> regime this flake was characterised in (loadavg ~150 on 12 shared cores)."

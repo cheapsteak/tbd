@@ -17,6 +17,8 @@
 #     and the step fails at run time – the failure 37845177223 hit;
 #   - constructs bash 3.2 does not have (associative arrays, `mapfile`,
 #     `${v,,}`, `|&`, `;&`, `[[ -v`, negative subscripts, …);
+#   - an array that can be empty, expanded bare under `set -u`, which 3.2
+#     reads as unbound (a site that cannot be empty says `# non-empty: why`);
 #   - and it RUNS, under 3.2, the steps every later step depends on: the
 #     environment record, the clean-environment preamble that restores it, and
 #     the step that packages the attempt.
@@ -37,8 +39,10 @@ WORKFLOW="$ROOT/.github/workflows/flake-fixer.yml"
 BASH32="${FLAKE_BASH32:-/bin/bash}"
 
 # The shell scripts the macOS steps run, directly or through flake-verify.sh
-# and test.sh. A macOS step naming a scripts/*.sh not listed here fails the
-# coverage case, so a new one cannot go unchecked.
+# and test.sh. A macOS step naming a scripts/*.sh not listed here, or a listed
+# script running one by its own directory (`$SCRIPT_DIR/x.sh`, `scripts/x.sh`,
+# `$HERE/x.sh`), fails the coverage case. A script reached any other way –
+# a path built at run time – is not seen.
 MACOS_SCRIPTS=(
   flake-verify.sh
   nightly-flake-stress.sh
@@ -61,8 +65,8 @@ fi
 echo "bash under test: $("$BASH32" -c 'echo "$BASH_VERSION"')"
 
 FAIL=0
+assert_contains() { if [[ "$2" == *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: output lacks [$3]"; FAIL=1; fi; }
 assert_eq()       { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: [$2] != [$3]"; FAIL=1; fi; }
-assert_contains() { if [[ "$2" == *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: output lacks [$3]"; echo "$2" | sed 's/^/       /' | head -30; FAIL=1; fi; }
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/flake-bash32-test.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -155,8 +159,8 @@ class Scan:
             j += 2 if self.s[j] == "\\" else 1
         return min(j + 1, self.n)
 
-    def arith(self, i):  # at `$((`
-        depth, j = 0, i + 1
+    def arith(self, i):  # at `$((` or a bare `((`
+        depth, j = 0, i + (self.s[i] == "$")
         while j < self.n:
             depth += {"(": 1, ")": -1}.get(self.s[j], 0)
             j += 1
@@ -204,14 +208,16 @@ class Scan:
             elif c == "#" and self.word_start(i):
                 j = self.s.find("\n", i); j = self.n if j < 0 else j
                 self.blank(i, j); i = j
-            elif self.s.startswith("<<", i) and not self.s.startswith("<<<", i):
+            elif self.s.startswith("<<<", i):
+                i += 3  # a here-string, not a heredoc
+            elif self.s.startswith("<<", i):
                 m = re.match(r"<<(-?)\s*(['\"]?)([A-Za-z_][\w]*)\2", self.s[i:])
                 if m:
                     self.heredocs.append((m.group(3), m.group(1) == "-")); i += m.end()
                 else:
                     i += 2
-            elif self.s.startswith("$((", i):
-                i = self.arith(i)
+            elif self.s.startswith("$((", i) or (self.s.startswith("((", i) and self.word_start(i)):
+                i = self.arith(i)  # where `<<` is a shift, not a heredoc
             elif self.s.startswith("$(", i) or ((c in "<>") and self.s.startswith("(", i + 1)):
                 i = self.subst(i)
             elif c == "(":
@@ -258,6 +264,29 @@ NEWER = [
      "a shopt option bash 3.2 does not have"),
 ]
 
+def empty_arrays(p, s, sc, raw):
+    """Bash before 4.4 reads "${a[@]}" or ${a[*]} of an EMPTY array as unbound
+    under `set -u`, and the script dies. Flagged: an array the script sets to
+    `()` after it turns on nounset, expanded without the `${a[@]+"${a[@]}"}`
+    or `${a[*]:-}` guard. A site that cannot be reached empty says so with a
+    trailing `# non-empty: <why>` comment, and so does an array's `=()` line
+    for an array that is never empty where it is expanded."""
+    nounset = re.search(r"^\s*set\s+-[A-Za-z]*u|^\s*set\s+-o\s+nounset", sc.code, re.M)
+    if not nounset:
+        return []
+    empty = {m.group(1) for m in re.finditer(r"(?<![\w$])([A-Za-z_]\w*)=\(\)", sc.code)
+             if m.start() > nounset.start() and "# non-empty:" not in raw[s.count("\n", 0, m.start())]}
+    found = []
+    for no, text in enumerate(sc.quoted.split("\n"), 1):
+        if "# non-empty:" in raw[no - 1]:
+            continue
+        for m in re.finditer(r"\$\{([A-Za-z_]\w*)\[[@*]\]\}", text):
+            guarded = text[max(0, m.start() - 2):m.start()] in ('+"', "+'") or text[max(0, m.start() - 1):m.start()] == "+"
+            if m.group(1) in empty and not guarded:
+                found.append(f"{p}:{no}: ${{{m.group(1)}[@]}} of an array that can be empty, under set -u: "
+                             f"bash 3.2 calls it unbound. Guard it, or mark the line `# non-empty: <why>`: {raw[no - 1].strip()}")
+    return found
+
 def check(paths):
     findings = []
     for p in paths:
@@ -271,10 +300,12 @@ def check(paths):
                 line = s.count("\n", 0, a) + 1
                 findings.append(f"{p}:{line}: a `case` inside {s[a:a+2]} … ): bash 3.2 ends the substitution "
                                 "at its first pattern's `)`. Write each pattern as `(pat)`, or move the case into a function.")
+        raw = s.split("\n")
         for no, text in enumerate(sc.quoted.split("\n"), 1):
             for rx, why in NEWER:
                 if re.search(rx, text):
-                    findings.append(f"{p}:{no}: {why}: {s.split(chr(10))[no - 1].strip()}")
+                    findings.append(f"{p}:{no}: {why}: {raw[no - 1].strip()}")
+        findings += empty_arrays(p, s, sc, raw)
     print("\n".join(findings))
     return 1 if findings else 0
 
@@ -285,9 +316,17 @@ if __name__ == "__main__":
         sys.exit(check(sys.argv[2:]))
 PY
 
-# extract FILE: the macOS run: scripts of FILE, in a fresh directory; prints
-# the index (file, job, step), tab-separated.
-extract() { local d; d="$(mktmpd)"; python3 "$LINT" extract "$1" "$d" > "$d/index" && cat "$d/index"; }
+# extract FILE: the macOS run: scripts of FILE, in a directory of their own;
+# prints the index (file, job, step), tab-separated. Once per file: every
+# mutant is a file of its own, and the workflow is read once for all checks.
+extract() {
+  local d
+  d="$SCRATCH/x-$(printf '%s' "$1" | shasum | cut -c1-16)"
+  if [[ ! -f "$d/index" ]]; then
+    mkdir -p "$d" && python3 "$LINT" extract "$1" "$d" > "$d/index.tmp" && mv "$d/index.tmp" "$d/index" || return 1
+  fi
+  cat "$d/index"
+}
 
 # mutated OLD NEW: a copy of the workflow with the first literal OLD replaced
 # by NEW. Python rather than sed: BSD sed has no `\n` in a replacement.
@@ -393,12 +432,57 @@ SH
   assert_eq "quoted text, comments and a balanced case are clean" "" "$out"
   "$BASH32" "$f" > /dev/null 2>&1
   assert_eq "and the fixture itself runs under bash 3.2" "0" "$?"
+  # A here-string or a shift is no heredoc: what follows is still read.
+  cat > "$f" <<'SH'
+read -r x <<< word
+(( y = 1 << 2 ))
+declare -A m=()
+SH
+  out="$(python3 "$LINT" check "$f")"
+  assert_eq "a here-string or a shift hides nothing after it" "1" "$(grep -c 'associative' <<< "$out")"
 }
 
+# An array that can be empty, expanded bare under `set -u`: bash 3.2 dies.
+test_no_bare_expansion_of_an_array_that_can_be_empty() {
+  local f out
+  f="$SCRATCH/empty.sh"
+  cat > "$f" <<'SH'
+set -uo pipefail
+a=()
+echo "${a[@]}"
+SH
+  out="$(python3 "$LINT" check "$f")"
+  assert_contains "flagged" "$out" "can be empty"
+  "$BASH32" "$f" > /dev/null 2>&1
+  assert_eq "and bash 3.2 does die of it" "1" "$?"
+  cat > "$f" <<'SH'
+set -uo pipefail
+a=()
+echo ${a[@]+"${a[@]}"} "${a[*]:-}"
+[[ ${#a[@]} -gt 0 ]] && echo "${a[@]}"  # non-empty: inside the length check
+b=()  # non-empty: filled below
+b+=(x)
+echo "${b[@]}"
+SH
+  out="$(python3 "$LINT" check "$f")"
+  assert_eq "guarded or marked: clean" "" "$out"
+  "$BASH32" "$f" > /dev/null 2>&1
+  assert_eq "and it runs under bash 3.2" "0" "$?"
+}
+
+# macos_scripts_listed FILE [DIR]: every scripts/*.sh a macOS step of FILE
+# names, and every script one of MACOS_SCRIPTS (read from DIR) runs by its own
+# directory, is in MACOS_SCRIPTS.
 macos_scripts_listed() {
-  local index named n missing=0
+  local index named n f dir="${2:-$HERE}" missing=0
   index="$(extract "$1")" || return 2
-  named="$(cut -f1 <<< "$index" | xargs cat | grep -v '^ *#' | grep -oE 'scripts/[A-Za-z0-9_.-]+\.sh' | sed 's|^scripts/||' | sort -u)"
+  named="$({
+    cut -f1 <<< "$index" | xargs cat | grep -v '^ *#' | grep -oE 'scripts/[A-Za-z0-9_./-]+\.sh' | sed 's|^scripts/||'
+    for f in "${MACOS_SCRIPTS[@]}"; do
+      grep -v '^ *#' "$dir/$f" | grep -oE '(scripts/|\$SCRIPT_DIR/|\$\{SCRIPT_DIR\}/|\$HERE/)[A-Za-z0-9_./-]+\.sh' |
+        sed -E 's#^(scripts/|\$SCRIPT_DIR/|\$\{SCRIPT_DIR\}/|\$HERE/)##'
+    done
+  } | sort -u)"
   [[ -n "$named" ]] || return 2
   while IFS= read -r n; do
     [[ " ${MACOS_SCRIPTS[*]} " == *" $n "* ]] || { echo "a macOS step runs scripts/$n, which this harness does not check"; missing=1; }
@@ -407,7 +491,14 @@ macos_scripts_listed() {
 }
 test_every_script_a_macos_step_runs_is_checked() {
   check "every scripts/*.sh a macOS step names is in MACOS_SCRIPTS" macos_scripts_listed \
-    '        run: bash scripts/repair-spm-workspace.sh' '        run: bash scripts/repair-spm-workspace.sh && bash scripts/remote-verify.test.sh'
+    '        run: bash scripts/repair-spm-workspace.sh' '        run: bash scripts/repair-spm-workspace.sh && bash scripts/ci/new-step.sh'
+  # And one a listed script runs itself.
+  local d f rc=0
+  d="$(mktmpd)"
+  for f in "${MACOS_SCRIPTS[@]}"; do cp "$HERE/$f" "$d/"; done
+  printf '%s\n' 'bash "$SCRIPT_DIR/new-helper.sh"' >> "$d/flake-verify.sh"
+  macos_scripts_listed "$WORKFLOW" "$d" > /dev/null || rc=$?
+  assert_eq "mutation: a script flake-verify.sh runs itself must be listed too" "1" "$rc"
 }
 
 # ============================================================================
@@ -415,12 +506,13 @@ test_every_script_a_macos_step_runs_is_checked() {
 # ============================================================================
 
 # record FILE OUT: run FILE's "Record the verifier's environment" step under
-# 3.2 as the runner's default shell runs it; the step's output goes to OUT.
+# 3.2 as the runner runs a step with no `shell:` (`bash -e {0}`); the step's
+# output goes to OUT.
 record() {
   local index; index="$(extract "$1")"
   : > "$2"
   env -i PATH="$PATH" HOME="$HOME" T=/t VS=/vs VT=/vt GITHUB_OUTPUT="$2" \
-    "$BASH32" --noprofile --norc -eo pipefail "$(script_of "$index" "Record the verifier")"
+    "$BASH32" -e "$(script_of "$index" "Record the verifier")"
 }
 record_runs() {
   local out="$SCRATCH/record-out" rec
