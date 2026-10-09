@@ -440,6 +440,73 @@ struct HolderScreenPullTests {
         #expect(await answer.value == .answered(sent, styledCapture: nil))
     }
 
+    /// The window `failEveryRequest` cannot see: a connection that ended
+    /// before the send returned its epoch leaves a pending entry with no stamp
+    /// for the sweep to match, so it would otherwise sit out the whole bound
+    /// before answering `.timedOut` — a correct answer arrived at slowly.
+    /// `lastEndedEpoch` closes it, and epochs being monotonic is what makes one
+    /// `UInt64` enough.
+    ///
+    /// Driven deterministically rather than by racing the stamp: the loss is
+    /// recorded first, and the send then answers with that same ended epoch.
+    /// The clock never advances, so a puller without the guard hangs out to the
+    /// suite's bound instead of passing.
+    @Test("a request sent on an already-ended connection answers at once")
+    func sendOnAnEndedEpochAnswersAtOnce() async throws {
+        let harness = Harness()
+        harness.epoch = 5
+        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+
+        pull.connectionLost(epoch: 5)
+        // A real gate, not a scheduling guess: `connectionLost` is
+        // fire-and-forget, so the ended-epoch mark lands on its own turn and a
+        // pull issued before it would see nothing.
+        try await waitFor("the connection loss to be recorded") {
+            await pull.connectionsLostObserved == 1
+        }
+
+        let answer = await pull.pull(
+            terminalID: UUID(), lines: 50, retainedScrollbackLines: 5_000,
+            wantStyledCapture: false)
+
+        guard case .undeliverable = answer else {
+            throw UnexpectedAnswer(expected: ".undeliverable", actual: answer)
+        }
+        #expect(await pull.timedOutPullsObserved == 0,
+                "a request on a dead connection must not spend the bound")
+    }
+
+    /// The discriminating other half: a loss on an *earlier* epoch must not
+    /// refuse a request sent on a later one, or every reconnect would poison
+    /// the pulls made after it.
+    @Test("a request sent on a newer connection survives an older epoch's loss")
+    func sendOnANewerEpochSurvivesAnOlderLoss() async throws {
+        let harness = Harness()
+        harness.epoch = 6
+        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let terminalID = UUID()
+
+        pull.connectionLost(epoch: 5)
+        try await waitFor("the older connection's loss to be recorded") {
+            await pull.connectionsLostObserved == 1
+        }
+
+        let answer = Task {
+            await pull.pull(
+                terminalID: terminalID, lines: 50, retainedScrollbackLines: 5_000,
+                wantStyledCapture: false)
+        }
+        try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
+        let request = try harness.decodeRequest()
+
+        let sent = Self.payload()
+        pull.record(
+            SidecarScreenReply(
+                requestID: request.requestID, terminalID: terminalID, screen: sent),
+            epoch: 6)
+        #expect(await answer.value == .answered(sent, styledCapture: nil))
+    }
+
     /// No sidecar at all is an immediate answer, not a wait. The clock never
     /// advances, so a puller that fell through to the bound would hang.
     @Test("A sidecar that cannot carry the frame answers at once")

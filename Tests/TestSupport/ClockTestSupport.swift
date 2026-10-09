@@ -219,9 +219,20 @@ public extension TestClock {
     /// Non-throwing: a missing sleeper is reported via `Issue.record` at the
     /// caller's source location rather than thrown, so call sites stay free of
     /// `try` noise.
+    ///
+    /// `timeout` is ``waitForSuspension(timeout:pollInterval:sourceLocation:)``'s
+    /// hang guard, passed through, the way
+    /// `EventDrivenTestClock.requireAdvanceWhenArmed(by:timeout:)` passes its
+    /// own. Ordinary call sites take the 45 s default, which is one leg of the
+    /// triple derived on ``clockDriven``; a suite whose arming has been seen
+    /// starving belongs on `EventDrivenTestClock` instead. The exception is a
+    /// call site where this polled probe is itself the thing under test, which
+    /// cannot migrate without ceasing to test it: `ClockTestSupportTests`
+    /// passes ``TestDeadlines/saturatedPass`` there.
     func advanceWhenSuspended(by duration: Duration,
+                              timeout: Swift.Duration = .seconds(45),
                               sourceLocation: SourceLocation = #_sourceLocation) async {
-        await waitForSuspension(sourceLocation: sourceLocation)
+        await waitForSuspension(timeout: timeout, sourceLocation: sourceLocation)
         await advance(by: duration)
     }
 

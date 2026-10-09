@@ -54,4 +54,22 @@ struct HolderInputTimingTests {
             \(HolderInputTiming.injectionAckDeadline) as well.
             """)
     }
+
+    /// The disposal bound is spent inside a close the user is watching, where
+    /// the read bound is spent in front of an answer nobody watches render. It
+    /// carries no safety invariant either — an expiry costs a capture and the
+    /// entry is written regardless — so what is pinned is that it stays the
+    /// tighter of the two.
+    ///
+    /// Asserts the **production constants**, like the tests above.
+    @Test("the disposal pull's bound is tighter than the read pull's")
+    func closedTerminalBoundIsTighterThanTheReadBound() {
+        #expect(
+            HolderInputTiming.closedTerminalPullBound < HolderInputTiming.screenPullBound,
+            """
+            a dispose waits \(HolderInputTiming.closedTerminalPullBound) while a window is \
+            closing, where \(HolderInputTiming.screenPullBound) is spent in front of an RPC \
+            answer nobody is watching render.
+            """)
+    }
 }

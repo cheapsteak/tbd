@@ -1241,7 +1241,8 @@ public actor DeskSessionManager: DeskSessionManaging {
             for t in terminals {
                 if t.transport == .holder {
                     await WorktreeLifecycle.recordHolderClosedTerminal(
-                        t, registry: lifecycle.holderRegistry, history: db.terminalHistory)
+                        t, registry: lifecycle.holderRegistry,
+                        resolver: lifecycle.holderScreenResolver, history: db.terminalHistory)
                     if let failure = await lifecycle.disposeHolder(for: t) {
                         logger.warning(
                             "Watch Desk close left a holder running: \(failure, privacy: .public)")

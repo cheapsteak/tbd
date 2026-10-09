@@ -168,6 +168,14 @@ public struct WorktreeLifecycle: Sendable {
     /// dup of a session's pty master and steal bytes from each other.
     var holderRegistry: HolderRegistry?
 
+    /// Which of the transport's two stores answers a machine read, wired
+    /// post-construction by `Daemon.swift` the way `holderRegistry` is. `nil`
+    /// in mock mode, in a tmux-only daemon, and in every test that does not
+    /// exercise the pull — and a disposal then captures from the daemon's own
+    /// reader alone, which is what every history-keeping teardown did before
+    /// a viewer could be asked.
+    var holderScreenResolver: HolderScreenResolver?
+
     /// The daemon's `ModelProxySupervisor`, wired post-construction by
     /// `Daemon.swift` the way `holderRegistry` is. `nil` in mock mode and in
     /// every test that does not exercise the proxy, where a holder spawn simply
@@ -402,36 +410,57 @@ public struct WorktreeLifecycle: Sendable {
     /// close — and never the hard-delete paths (forget, recovery, scratch
     /// delete), which wipe the worktree's history right after.
     ///
-    /// **Must run before the holder is disposed**: the capture is read from the
-    /// daemon's reader, and disposal releases it. Never throws and never
-    /// blocks the teardown — a failed write is logged inside the store.
+    /// **Must run before the holder is disposed**: the capture comes from
+    /// whichever store is still holding the session, and disposal releases the
+    /// daemon's reader and ends the viewer's attach. Never throws and never
+    /// blocks the teardown beyond the pull's bound — a failed write is logged
+    /// inside the store.
     ///
-    /// Live versus suspended is the reader's own answer
-    /// (`HolderReader.closedTerminalCapture`), read from its drain state:
+    /// Which store answers is `HolderScreenResolver`'s decision, taken from the
+    /// reader-count census and nowhere else:
     ///
-    /// - **Draining** — the daemon's emulator is the live store, so the entry
-    ///   carries its retained scrollback plus viewport.
-    /// - **Suspended** (a viewer holds the pty), mid-transition, released, or
-    ///   no registry — the entry is written without a capture. A screen frozen
-    ///   at attach time must never be presented as the final screen. The
-    ///   viewed-tab capture waits on the viewer-answered screen pull (#851).
+    /// - **The daemon is reading** — its emulator is the live store, so the
+    ///   entry carries its retained scrollback plus viewport and **no frame
+    ///   goes to the app**.
+    /// - **A viewer is reading** — the daemon's emulator has been frozen since
+    ///   the attach, and a screen frozen at attach time must never be presented
+    ///   as a session's final one. The viewer is asked for its own styled
+    ///   capture instead, bounded by
+    ///   `HolderInputTiming.closedTerminalPullBound`.
+    /// - **Nobody is reading**, mid-transition, no registry, or a pull that
+    ///   expires, is refused or cannot be delivered — the entry is written
+    ///   without a capture. Losing the screen text is the price of never
+    ///   presenting a stale one as final, and a dispose is never held up or
+    ///   failed by an answer that does not come.
     ///
     /// Either way the entry carries the row's Claude session id, which is all
     /// `terminalHistory.revive` needs to resume a Claude tab.
     static func recordHolderClosedTerminal(
-        _ terminal: Terminal, registry: HolderRegistry?, history: TerminalHistoryStore
+        _ terminal: Terminal, registry: HolderRegistry?, resolver: HolderScreenResolver?,
+        history: TerminalHistoryStore
     ) async {
         let reader = await registry?.reader(for: terminal.id)
-        await recordHolderClosedTerminal(terminal, reader: reader, history: history)
+        await recordHolderClosedTerminal(
+            terminal, reader: reader, resolver: resolver, history: history)
     }
 
-    /// The same, given the reader directly — the seam the two branches are
-    /// tested through, since a registry publishes a reader only for a real
-    /// holder.
+    /// The same, given the reader directly — the seam the branches are tested
+    /// through, since a registry publishes a reader only for a real holder.
     static func recordHolderClosedTerminal(
-        _ terminal: Terminal, reader: HolderReader?, history: TerminalHistoryStore
+        _ terminal: Terminal, reader: HolderReader?, resolver: HolderScreenResolver?,
+        history: TerminalHistoryStore
     ) async {
-        let capture = await reader?.closedTerminalCapture()
+        // The daemon's own store, deferred: the resolver evaluates it only on
+        // the paths where it is the answer, so an attached session does not
+        // render an emulator nobody will read.
+        let daemonCapture = { await reader?.closedTerminalCapture() }
+        let capture: String?
+        if let resolver {
+            capture = await resolver.closedTerminalCapture(
+                terminalID: terminal.id, daemonCapture: daemonCapture)
+        } else {
+            capture = await daemonCapture()
+        }
         await history.recordOnClose(terminal: terminal, capture: capture)
     }
 }

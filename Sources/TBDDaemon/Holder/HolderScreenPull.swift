@@ -40,6 +40,10 @@ import os
 /// seconds either, and those are exactly the moments supervision most wants to
 /// act — so the read must not be the thing that blocks it.
 ///
+/// It is the default rather than the rule: a caller whose wait is spent
+/// somewhere costlier can tighten it per request, and the disposal path does,
+/// because its wait sits inside a window the user is watching close.
+///
 /// ## Overlapping pulls are independent
 ///
 /// Two pulls for one session each get their own `requestID`, their own
@@ -49,6 +53,21 @@ import os
 /// observation, and the whole point of that field is that it describes *this*
 /// answer. Memory is bounded without a cap, because every pending entry lives
 /// at most one bound.
+///
+/// ## The counters can misattribute, and the answers cannot
+///
+/// `record` and `connectionLost` are both `nonisolated` and both hand their
+/// work to an unordered `Task`, because their caller is the sidecar's receive
+/// thread and has nothing to await on. So a reply immediately followed by that
+/// connection ending can be processed in either order. **Every outcome is safe
+/// either way** — whichever lands first resolves the request, and the second
+/// finds nothing to resolve — but the two land in different buckets: the same
+/// event can be counted as an answer or as a late reply depending on a
+/// scheduling order nothing here controls. A soak reading
+/// `answeredPullsObserved` against `lateRepliesObserved` should therefore read
+/// a reconnect's worth of requests as approximate. Ordering the pair would mean
+/// serializing the receive thread's two sinks through a queue of their own,
+/// which is a mechanism for a miscount rather than for a wrong answer.
 actor HolderScreenPull {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holderScreenPull")
 
@@ -78,6 +97,10 @@ actor HolderScreenPull {
         /// send has not yet returned one. A reply cannot arrive before the
         /// frame is on the wire, so nil means "necessarily this connection".
         var epoch: UInt64?
+        /// What this request's caller is willing to wait — its own, not the
+        /// puller's, because two callers on this one path spend their wait in
+        /// different places (`HolderInputTiming`).
+        let bound: Duration
         var boundTask: Task<Void, Never>?
         let continuation: CheckedContinuation<Answer, Never>
     }
@@ -93,6 +116,22 @@ actor HolderScreenPull {
     /// request it answers, and one that matches nothing can be recognized as
     /// late.
     private var pending: [UUID: Pending] = [:]
+
+    /// The highest sidecar connection epoch known to have ended.
+    ///
+    /// Closes the one window `failEveryRequest` cannot see: a connection that
+    /// ends between `sendFrame` returning an epoch and that epoch being stamped
+    /// onto the pending entry. The sweep matches on the stamp, so such a
+    /// request would sit unmatched and resolve `.timedOut` a whole bound later
+    /// — a correct answer arrived at slowly, on a path that now has callers
+    /// waiting on it. `dispatch` compares the epoch it was just handed against
+    /// this and resolves at once instead.
+    ///
+    /// **One `UInt64`, not a set, because epochs are monotonic.**
+    /// `ConnectionEpochBox.advance()` only ever increments, so "this epoch has
+    /// ended" is `epoch <= lastEndedEpoch` — no accumulating collection, and
+    /// nothing to bound.
+    private var lastEndedEpoch: UInt64 = 0
 
     /// A reply arrived for a request that was no longer waiting, or arrived on
     /// a connection the request was not sent on.
@@ -115,6 +154,14 @@ actor HolderScreenPull {
     private(set) var answeredPullsObserved = 0
     private(set) var timedOutPullsObserved = 0
 
+    /// How many sidecar connections have ended under this puller.
+    ///
+    /// Part of the same soak picture — a run whose timed-out pulls cluster
+    /// around reconnects is a different story from one where the app is merely
+    /// slow — and the gate a test needs to know the ended-epoch mark has
+    /// landed, since `connectionLost` is fire-and-forget by design.
+    private(set) var connectionsLostObserved = 0
+
     init(
         sendFrame: @escaping @Sendable (Data) async throws -> UInt64,
         bound: Duration = HolderInputTiming.screenPullBound,
@@ -136,6 +183,12 @@ actor HolderScreenPull {
     ///   the session.
     /// - Parameter wantStyledCapture: whether the reply should also carry the
     ///   SGR-intact capture Closed Terminals history records.
+    /// - Parameter bound: how long *this* caller waits, defaulting to the
+    ///   puller's own. An override rather than a second puller because there
+    ///   is one reply sink and one pending map; what differs between callers is
+    ///   the wait, not the protocol. The disposal path takes a tighter one
+    ///   (`HolderInputTiming.closedTerminalPullBound`) because its wait is
+    ///   spent inside a window closing.
     ///
     /// **The request is registered before it is sent**, which is the one place
     /// this departs from the courier's order and it is a correctness point
@@ -146,7 +199,8 @@ actor HolderScreenPull {
     /// impossible, and costs a pending entry that the send's own failure path
     /// resolves.
     func pull(
-        terminalID: UUID, lines: Int, retainedScrollbackLines: Int, wantStyledCapture: Bool
+        terminalID: UUID, lines: Int, retainedScrollbackLines: Int, wantStyledCapture: Bool,
+        bound: Duration? = nil
     ) async -> Answer {
         let requestID = UUID()
         let request = SidecarScreenRequest(
@@ -167,7 +221,8 @@ actor HolderScreenPull {
         }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Answer, Never>) in
             pending[requestID] = Pending(
-                terminalID: terminalID, epoch: nil, boundTask: nil, continuation: continuation)
+                terminalID: terminalID, epoch: nil, bound: bound ?? self.bound,
+                boundTask: nil, continuation: continuation)
             // Inherits this actor's isolation, so the send, the epoch stamp and
             // the bound all land on the same executor `record` does and no two
             // of them can resolve one waiter.
@@ -216,8 +271,23 @@ actor HolderScreenPull {
         // Already resolved — the connection ended, or a reply raced in while
         // the send was in flight. Either way there is nothing left to arm.
         guard pending[requestID] != nil else { return }
+        // The connection this went out on has already ended, and the sweep ran
+        // before there was a stamp to match. Answered now rather than at the
+        // bound: nothing on a dead connection is ever coming back, and a
+        // caller waiting on the answer should not pay for the race.
+        guard epoch > lastEndedEpoch else {
+            resolve(
+                requestID,
+                with: .undeliverable("""
+                    the app sidecar connection carrying the screen request for session \
+                    \(terminalID.uuidString) ended before it was answered
+                    """))
+            return
+        }
         pending[requestID]?.epoch = epoch
-        let boundTask = Task { [clock, bound] in
+        // This request's own bound, which the caller may have tightened.
+        let bound = pending[requestID]?.bound ?? self.bound
+        let boundTask = Task { [clock] in
             // Non-throwing on cancellation: `try?` swallows the
             // `CancellationError`, and the guard then stops a cancelled bound
             // from expiring a request that was answered.
@@ -278,6 +348,11 @@ actor HolderScreenPull {
     }
 
     private func failEveryRequest(onEpoch epoch: UInt64) {
+        // Recorded before the sweep, so a request whose send has not yet
+        // returned an epoch is caught by `dispatch`'s own check rather than
+        // waiting out the bound unmatched.
+        lastEndedEpoch = max(lastEndedEpoch, epoch)
+        connectionsLostObserved += 1
         for (requestID, entry) in pending where entry.epoch == epoch {
             resolve(
                 requestID,
@@ -294,7 +369,7 @@ actor HolderScreenPull {
         Self.logger.info("""
             no viewer answered the screen request for session \
             \(entry.terminalID.uuidString, privacy: .public) within \
-            \(String(describing: self.bound), privacy: .public); answering from the daemon's own \
+            \(String(describing: entry.bound), privacy: .public); answering from the daemon's own \
             emulator instead
             """)
         entry.continuation.resume(returning: .timedOut)

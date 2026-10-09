@@ -609,8 +609,11 @@ actor HolderReader {
     /// nothing can suspend the reader between the check and the walk. A reader
     /// suspended for an attach holds the screen as it stood when the viewer
     /// arrived; presenting that as the session's final screen would be a
-    /// confident wrong answer, so it gives none. The final screen of a *viewed*
-    /// tab waits on the viewer-answered screen pull (issue #851).
+    /// confident wrong answer, so it gives none. A *viewed* tab's final screen
+    /// comes from the viewer holding its pty instead:
+    /// `HolderScreenResolver.closedTerminalCapture` routes a disposal to
+    /// whichever store is live, and this answers for the half of that decision
+    /// where the daemon is the one reading.
     ///
     /// Not `snapshotPreamble`: that stream opens with a reset prelude that
     /// erases the display and the scrollback, which is right for a viewer being

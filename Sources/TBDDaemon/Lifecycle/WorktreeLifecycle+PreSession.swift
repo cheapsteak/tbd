@@ -673,7 +673,8 @@ extension WorktreeLifecycle {
             // source for the pids while it can be read.
             if let terminal {
                 await Self.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
                 await abandonHookHolder(
                     terminalID: terminal.id,
                     holderPID: terminal.holderPID,

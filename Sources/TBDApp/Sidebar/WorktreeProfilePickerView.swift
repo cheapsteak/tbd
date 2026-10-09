@@ -623,10 +623,11 @@ struct WorktreeProfilePickerView: View {
     ///
     /// Reserved for `.oauth`, as it was before token profiles reached this row
     /// at all: a signed-in profile with no snapshot is genuinely awaiting its
-    /// first cadence poll, which lands within ~90 seconds. A token profile is
-    /// deliberately off that cadence — it probes after a session goes idle —
-    /// so a skeleton there would promise numbers that may not arrive until
-    /// some session finishes a turn, or at all if nobody spawns on it.
+    /// first cadence poll, which lands within ~90 seconds. A token profile
+    /// joins that cadence only while account balancing is on — otherwise it
+    /// probes after a session goes idle — so a skeleton there could promise
+    /// numbers that may not arrive until some session finishes a turn, or at
+    /// all if nobody spawns on it.
     nonisolated static func claudeRowShowsSkeleton(kind: CredentialKind,
                                                    usageNote: String?,
                                                    snapshot: ProfileUsageSnapshot?) -> Bool {

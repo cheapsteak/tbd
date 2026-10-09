@@ -944,7 +944,10 @@ or date box. This file is the whole shared surface:
   sleep nobody advances. See "Population is the scheduler" above for the
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
-- `await clock.advanceWhenSuspended(by:)` — the one you want by default.
+- `await clock.advanceWhenSuspended(by:)` — the one you want by default. Its
+  `timeout:` passes through to `waitForSuspension`, and is left at the 45 s
+  default except where the polled probe is itself under test
+  (`ClockTestSupportTests`, which passes `TestDeadlines.saturatedPass`).
 - `await clock.waitForSuspension()` — the same wait without advancing. Each
   `checkSuspension()` probe is raced against what is left of `timeout`, because
   its megaYield can go unscheduled for minutes under saturation and the guard is

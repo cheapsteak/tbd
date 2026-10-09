@@ -75,6 +75,10 @@ public struct ModelProfileResolver: Sendable {
     /// §6.1). Nil surfaces nothing; the daemon always passes its single
     /// shared instance, so the once-per-profile latch holds across spawns.
     let staleAlerts: StaleAccountAlerts?
+    /// Surfaces a balanced pick that found nothing eligible and fell back
+    /// (design §6.3). Nil surfaces nothing; the daemon always passes its
+    /// single shared instance, so the per-episode latch holds across spawns.
+    let fallbackAlerts: BalancingFallbackAlerts?
     let now: @Sendable () -> Date
 
     public init(
@@ -85,6 +89,7 @@ public struct ModelProfileResolver: Sendable {
         candidateSource: ProfilePoolCandidateSource? = nil,
         reservations: ProfilePickReservations? = nil,
         staleAlerts: StaleAccountAlerts? = nil,
+        fallbackAlerts: BalancingFallbackAlerts? = nil,
         now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.profiles = profiles
@@ -94,6 +99,7 @@ public struct ModelProfileResolver: Sendable {
         self.candidateSource = candidateSource
         self.reservations = reservations
         self.staleAlerts = staleAlerts
+        self.fallbackAlerts = fallbackAlerts
         self.now = now
     }
 
@@ -238,6 +244,7 @@ public struct ModelProfileResolver: Sendable {
         if balance, cfg.profileBalancingEnabled, let source = candidateSource {
             // Balancing is enabled and we have a source: build candidates and ask the picker.
             var reservationID: UUID?
+            let policy = cfg.profileBalancingPolicy
             do {
                 let candidates: [ProfilePoolCandidate]
                 let decision: ProfilePoolDecision
@@ -249,7 +256,7 @@ public struct ModelProfileResolver: Sendable {
                     // terminal row exists.
                     let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
                     let outcome = await reservations.pickAndReserve(
-                        candidates: stored, pickTime: pickTime)
+                        candidates: stored, pickTime: pickTime, policy: policy)
                     candidates = outcome.candidates
                     decision = outcome.decision
                     reservationID = outcome.reservationID
@@ -258,17 +265,28 @@ public struct ModelProfileResolver: Sendable {
                     decision = ProfilePoolPicker.pick(
                         candidates: candidates,
                         excludingAccountKeys: [],
-                        now: pickTime
+                        now: pickTime,
+                        policy: policy
                     )
                 }
 
                 // Tell the person about any account skipped for a stale
-                // reading. It never throws, and a failed post only logs.
+                // reading, and about a fallback. Neither throws, and a failed
+                // post only logs.
+                let profileName: @Sendable (UUID) async -> String? = { [profiles] id in
+                    try? await profiles.get(id: id)?.name
+                }
                 if let staleAlerts {
                     await staleAlerts.observe(
                         candidates: candidates, decision: decision,
                         worktreeID: worktreeID, now: pickTime,
-                        profileName: { [profiles] id in try? await profiles.get(id: id)?.name })
+                        profileName: profileName)
+                }
+                if let fallbackAlerts {
+                    await fallbackAlerts.observe(
+                        candidates: candidates, decision: decision, policy: policy,
+                        worktreeID: worktreeID, now: pickTime,
+                        profileName: profileName)
                 }
 
                 if let chosenID = decision.chosen {
@@ -318,8 +336,20 @@ public struct ModelProfileResolver: Sendable {
                         return resolved.withReservation(reservationID)
                     }
                     logger.warning("balanced pick \(chosenID, privacy: .public) did not load; falling back to default")
+                } else if let fallback = decision.fallback {
+                    // Nothing was eligible, but some account in the pool was
+                    // turned away only for its reading: place the session on
+                    // the least bad of those rather than on whatever the
+                    // global default happens to be, which may be the fullest
+                    // account of all. Never silent — `fallbackAlerts` tells
+                    // the person, and this logs every one.
+                    if let resolved = try await loadResolved(id: fallback.profileID) {
+                        logger.warning("balancing found no eligible candidate; fell back to profile \(fallback.profileID, privacy: .public) (\(String(describing: fallback.reason), privacy: .public)) under a \(policy.usageCeilingPercent)% ceiling")
+                        return resolved.withReservation(reservationID)
+                    }
+                    logger.warning("balancing fallback \(fallback.profileID, privacy: .public) did not load; falling back to default")
                 } else {
-                    logger.info("balancing found no eligible candidate; falling back to default")
+                    logger.info("balancing found no candidate in the pool; falling back to default")
                 }
             } catch {
                 // Either the candidate source or loading the chosen profile

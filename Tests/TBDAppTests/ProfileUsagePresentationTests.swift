@@ -1077,7 +1077,7 @@ struct ResetClockTextTests {
 struct CadenceRelativeStalenessTests {
     /// A single shared threshold cannot serve both cadences. Signed-in
     /// profiles are swept every ~90s, so five minutes means several misses;
-    /// token profiles refresh on a five-minute activity floor, so the same
+    /// token profiles refresh on a five-minute cadence, so the same
     /// five minutes would flag every one of them the instant it was fetched.
     @Test func staleThresholdIsCadenceRelative() {
         #expect(ProfileUsagePresentation.staleAge(forKind: .oauth) == 300)

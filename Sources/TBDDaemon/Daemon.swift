@@ -849,7 +849,8 @@ public final class Daemon: Sendable {
         // One reservation ledger for the whole daemon: the lifecycle and the
         // router hold copies of this resolver, and a balanced pick is only
         // atomic across spawns that share the same ledger. The stale-account
-        // latch is shared the same way, so it holds to once across spawns.
+        // and fallback latches are shared the same way, so each holds to once
+        // across spawns.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
@@ -857,6 +858,8 @@ public final class Daemon: Sendable {
             candidateSource: profilePoolCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs)),
+            fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
         let pendingQuestions = PendingQuestionStore()
@@ -1010,6 +1013,28 @@ public final class Daemon: Sendable {
                 })
         }
 
+        // Which store answers a machine read, decided in one place. The census
+        // ledger (`ptyReader`) is the routing fact and the reader is the
+        // daemon's own store; the pull reaches a viewer's. Built from the
+        // registry, so it exists exactly when a holder session can.
+        let holderScreenResolver: HolderScreenResolver? = holderRegistry.map { registry in
+            HolderScreenResolver(
+                ptyReader: { terminalID in
+                    await registry.ptyReader(for: terminalID)
+                },
+                daemonStore: { terminalID in
+                    guard let reader = await registry.reader(for: terminalID) else { return nil }
+                    return HolderDaemonStore(
+                        screen: { maxLines in try await reader.screen(maxLines: maxLines) },
+                        // A `nonisolated let` on the reader, read here rather
+                        // than taken from the viewer's reply: a viewer's
+                        // emulator was seeded by this reader's attach preamble
+                        // and can carry no provenance the reader lacked.
+                        observedChildFromStart: reader.observedChildFromStart)
+                },
+                pull: holderScreenPull)
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1018,6 +1043,10 @@ public final class Daemon: Sendable {
         )
         lifecycle.controlMode = controlModeBridge
         lifecycle.holderRegistry = holderRegistry
+        // The history-keeping teardowns go through the resolver so a viewed
+        // tab's Closed Terminals entry carries the screen the person was
+        // looking at rather than the one frozen at their attach.
+        lifecycle.holderScreenResolver = holderScreenResolver
         lifecycle.modelProxySupervisor = modelProxySupervisor
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed
@@ -1181,6 +1210,7 @@ public final class Daemon: Sendable {
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
         rpcRouter.holderInjectionCourier = holderInjectionCourier
+        rpcRouter.holderScreenResolver = holderScreenResolver
         // One supervisor across the router, the lifecycle and the coordinator,
         // for the registry's reason: two would each try to own one home's
         // `proxy.lock`, and `daemon.capabilities` would report a proxy no
@@ -1875,6 +1905,11 @@ public final class Daemon: Sendable {
                 tokenFetcher: TokenProfileUsageFetcher(),
                 profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
                 broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) },
+                // Token profiles join the cadence only while balancing is on:
+                // their probe is billed, and balancing is what routes on it.
+                tokenCadenceEnabled: { [database] in
+                    (try? await database.config.get().profileBalancingEnabled) ?? false
+                },
                 loadPersisted: { [database] in
                     (try? await database.oauthUsageSnapshots.loadAll()) ?? [:]
                 },
@@ -1887,11 +1922,12 @@ public final class Daemon: Sendable {
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller
-            // Token profiles are kept off the 90s cadence because their usage
-            // probe is a real billed request; they refresh when a session using
-            // them finishes a turn instead. The store detects the edge (both of
-            // its activity writers commit it); this is the one place it is
-            // wired to a consumer.
+            // Token profiles probe at most every five minutes on the cadence,
+            // and only while balancing is on, because their usage probe is a
+            // real billed request; a session using one that finishes a turn
+            // refreshes it too, under the same floor. The store detects the
+            // edge (both of its activity writers commit it); this is the one
+            // place it is wired to a consumer.
             database.terminals.activityTransitions.onSessionBecameIdle { [weak oauthPoller] profileID in
                 Task { await oauthPoller?.noteSessionBecameIdle(profileID: profileID) }
             }

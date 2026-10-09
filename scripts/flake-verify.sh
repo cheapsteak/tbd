@@ -33,10 +33,23 @@
 #       prints protected paths the candidate changed; exit 1 if any, 2 on error.
 #   flake-verify.sh protected-in                          (cwd: anywhere; pure)
 #       the same for NUL-separated paths on stdin.
+#   flake-verify.sh target-change --test ID --base SHA --notes F
+#       prints, as JSON, whether the candidate renamed, moved or retired the
+#       target, as the verifier treats it: a declaration in the session's
+#       notes that the candidate's diff bears out (flake-verify.py). Its
+#       `stressed` is the ID to stress, or null when nothing is. Exit 2 on
+#       error.
 #   flake-verify.sh judge --scope S --test ID --dir D --iterations N
 #                         --quarantined yes|no [--protected-touched F] [--plan F]
-#                         [--baseline-md F]                               (pure)
+#                         [--baseline-md F] [--target-change F]           (pure)
 #       exit 0 pass, 1 fail, 3 ineligible, 2 malformed input.
+#   flake-verify.sh keep-transcript --from F --runner-temp D --out F
+#                                                         (cwd: anywhere)
+#       copies a fixer session's execution file – claude-code-action's
+#       transcript, which it writes to D/claude-execution-output.json and no
+#       other path – to F with every credential-shaped string redacted, then
+#       removes the original so the next session's cannot be mistaken for
+#       it. Exit 0 kept, 1 nothing kept (the reason on stdout), 2 on error.
 #   flake-verify.sh snapshot-processes --out F          (cwd: anywhere)
 #   flake-verify.sh end-session-processes --before F    (cwd: anywhere)
 #       TERM, then KILL, every process of this user that is new since the
@@ -233,6 +246,108 @@ cmd_stress() {
 }
 
 cmd_judge() { py judge "$@"; }
+
+cmd_target_change() {
+  local test="" base="" notes="" diff rc=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --test) test="${2:-}"; shift 2 ;;
+      --base) base="${2:-}"; shift 2 ;;
+      --notes) notes="${2:-}"; shift 2 ;;
+      *) die "target-change: unknown argument $1" ;;
+    esac
+  done
+  [[ -n "$test" && -n "$base" && -n "$notes" ]] || die "target-change: --test, --base and --notes are required"
+  cd "$(toplevel)" || die "cannot enter the verification tree"
+  # Through files, not pipes: a failed read must not look like an empty one.
+  diff="$(mktemp -d "${TMPDIR:-/tmp}/flake-verify-change.XXXXXX")" || die "cannot create a temporary directory"
+  git diff --no-renames --no-color --no-ext-diff -U0 "$base...HEAD" -- Tests/ > "$diff/diff" \
+    || { rm -rf "$diff"; die "git diff $base...HEAD failed"; }
+  # Each revision's type declarations, so a removal counts only in the files
+  # that declare the target's suite. git grep's 1 is "none found".
+  decls "$base" > "$diff/base" || { rm -rf "$diff"; die "cannot list $base's declarations"; }
+  decls HEAD > "$diff/head" || { rm -rf "$diff"; die "cannot list the candidate's declarations"; }
+  py target-change --test "$test" --notes "$notes" --diff "$diff/diff" \
+    --base-decls "$diff/base" --head-decls "$diff/head" || rc=$?
+  rm -rf "$diff"
+  return "$rc"
+}
+
+# decls REV: `REV:path:text` for every type declaration under Tests/ at REV.
+decls() {
+  local rc=0
+  git grep --no-color -I -E '(struct|class|enum|actor|extension)[[:space:]]+[A-Za-z_]' "$1" -- Tests/ || rc=$?
+  [[ "$rc" -le 1 ]]
+}
+
+# --- the session transcripts ------------------------------------------------------
+
+# claude-code-action writes every message of a session to this file in
+# RUNNER_TEMP when the session ends, and names it in its `execution_file`
+# output (base-action/src/execution-file.ts).
+EXECUTION_FILE_NAME=claude-execution-output.json
+# Credential shapes a transcript could carry, as extended regexes: Anthropic
+# keys and OAuth tokens, GitHub tokens of every prefix, and JWTs such as the
+# Actions runtime token. The artifact is not masked the way a log is.
+REDACT_PATTERNS=(
+  'sk-ant-[A-Za-z0-9_-]{8,}'
+  '(gh[opsur]_|github_pat_)[A-Za-z0-9_]{20,}'
+  'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+)
+REDACTED='[REDACTED]'
+
+cmd_keep_transcript() {
+  local from="" rt="" out="" dir p n=0 any="" sed_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) from="${2:-}"; shift 2 ;;
+      --runner-temp) rt="${2:-}"; shift 2 ;;
+      --out) out="${2:-}"; shift 2 ;;
+      *) die "keep-transcript: unknown argument $1" ;;
+    esac
+  done
+  [[ -n "$rt" && -n "$out" ]] || die "keep-transcript: --runner-temp and --out are required"
+  for p in "${REDACT_PATTERNS[@]}"; do
+    sed_args+=(-e "s/$p/$REDACTED/g")
+    any="${any:+$any|}$p"
+  done
+  # First, whatever else happens: the directory is uploaded as it is, and a
+  # later session could reach it. Anything in it but a regular file – a
+  # symlink to a secret, say – goes, and every file in it is redacted again,
+  # so what a later session wrote there is redacted like the rest.
+  dir="$(dirname "$out")"
+  [[ ! -L "$dir" ]] || die "keep-transcript: $dir is a symlink"
+  mkdir -p "$dir" || die "cannot create $dir"
+  find "$dir" -mindepth 1 ! -type f -prune -exec rm -rf {} + || die "cannot clear $dir of non-files"
+  # The upload leaves out hidden files (upload-artifact's default), so `*`
+  # reaches everything it sends.
+  for p in "$dir"/*; do
+    [[ -f "$p" && ! -L "$p" ]] || continue
+    LC_ALL=C sed -E "${sed_args[@]}" "$p" > "$p.redacting" || die "cannot redact $p"  # non-empty: one -e per pattern
+    mv -f "$p.redacting" "$p" || die "cannot redact $p"
+  done
+  if [[ -z "$from" ]]; then
+    echo "the session left no execution file (it ended before the action wrote one: a timeout, a cancellation or a crash)"
+    return 1
+  fi
+  # Only the action's own path: the output naming it is one the session's
+  # process could have written, and any other path could be a secret's.
+  if [[ "$from" != "$rt/$EXECUTION_FILE_NAME" ]]; then
+    echo "the execution file is named as $from, not the action's $rt/$EXECUTION_FILE_NAME; not kept"
+    return 1
+  fi
+  if [[ -L "$from" || ! -f "$from" ]]; then
+    echo "$from is not a regular file; not kept"
+    return 1
+  fi
+  # Counted on the original: a count read from the copy could not tell a
+  # redaction from marker text the session wrote itself. grep's 1 is "none".
+  n="$( { LC_ALL=C grep -oE "$any" "$from" || [[ $? -eq 1 ]]; } | wc -l | tr -d ' ')" || die "cannot scan $from"
+  rm -f "$out" || die "cannot replace $out"
+  LC_ALL=C sed -E "${sed_args[@]}" "$from" > "$out" || die "cannot copy $from"  # non-empty: one -e per pattern
+  rm -f "$from" || die "cannot remove $from"
+  echo "kept $out ($n credential-shaped string(s) redacted)"
+}
 
 # --- the candidate --------------------------------------------------------------
 
@@ -482,9 +597,11 @@ main() {
     protected-touched)     cmd_protected_touched "$@" ;;
     protected-in)          cmd_protected_in "$@" ;;
     judge)                 cmd_judge "$@" ;;
+    target-change)         cmd_target_change "$@" ;;
+    keep-transcript)       cmd_keep_transcript "$@" ;;
     snapshot-processes)    cmd_snapshot_processes "$@" ;;
     end-session-processes) cmd_end_session_processes "$@" ;;
-    *) die "usage: $0 {quarantined|baseline|choose-scope|plan-iterations|apply-candidate|stress|protected-touched|protected-in|judge|snapshot-processes|end-session-processes} ..." ;;
+    *) die "usage: $0 {quarantined|baseline|choose-scope|plan-iterations|apply-candidate|stress|protected-touched|protected-in|judge|target-change|keep-transcript|snapshot-processes|end-session-processes} ..." ;;
   esac
 }
 

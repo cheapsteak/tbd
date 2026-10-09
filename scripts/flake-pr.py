@@ -66,6 +66,16 @@ WEAK_CLAUSE = "weak evidence"
 WEAK_LABEL = "flakefix-weak-evidence"
 WEAK_LABEL_COLOR = "FBCA04"
 WEAK_LABEL_DESCRIPTION = "Flake fix whose stress evidence is weak: weigh it against the diff"
+# A candidate that renamed, moved or retired its target test (§6.4): the PR
+# stays a draft, and promote never readies one carrying this label (§7).
+NEEDS_HUMAN_LABEL = "flakefix-needs-human"
+NEEDS_HUMAN_LABEL_COLOR = "D93F0B"
+NEEDS_HUMAN_LABEL_DESCRIPTION = "Flake fix that renamed or retired its target test: a human must judge coverage"
+LABELS = {
+    "weak": (WEAK_LABEL, WEAK_LABEL_COLOR, WEAK_LABEL_DESCRIPTION),
+    "needs-human": (NEEDS_HUMAN_LABEL, NEEDS_HUMAN_LABEL_COLOR, NEEDS_HUMAN_LABEL_DESCRIPTION),
+}
+COVERAGE_NOTE = "a human must judge whether coverage is preserved"
 FAILING_LINES_IN_COMMENT = 60
 NOTES_IN_BODY = 20000
 
@@ -136,8 +146,26 @@ def status(verdict: dict, replayed: tuple[str, str] | None = None) -> tuple[str,
     return state, fit(f"{text}; {note}" if note else text)
 
 
+def target_change(verdict: dict) -> dict | None:
+    """The verdict's honored change to the target (§6.4), or None."""
+    change = verdict.get("target_change")
+    if isinstance(change, dict) and change.get("kind") in ("renamed", "retired"):
+        return change
+    return None
+
+
 def _status(verdict: dict) -> tuple[str, str]:
     v = verdict.get("verdict")
+    change = target_change(verdict)
+    if v == "ineligible" and change:
+        if change["kind"] == "renamed":
+            part = f"target test renamed; no failure observed in {verdict['iterations']} runs under its new ID"
+        else:
+            part = "target test retired; nothing was stress-run"
+        if change["kind"] == "renamed" and verdict.get("weak"):
+            part += f"; {WEAK_CLAUSE}"
+        parts = [part] + (["touches " + ", ".join(verdict["protected"])] if verdict.get("protected") else [])
+        return "failure", "not eligible for ready, a human must judge: " + "; ".join(parts)
     if v == "pass":
         text = f"no failure observed in {verdict['iterations']} runs"
         if verdict.get("weak"):
@@ -180,7 +208,17 @@ def body(pick: Path, attempt: Path, repo: str, commits: str, replayed: tuple[str
         verdict["baseline"] = f"{f} of {v}"
     notes = sanitize(read_text(attempt / "flakefix-notes.md").strip())[:NOTES_IN_BODY]
     test = target["test_id"]
+    change = target_change(verdict)
     out = []
+    if change:
+        # §6.4, §7: first, above everything, so no reviewer misses it.
+        if change["kind"] == "renamed":
+            what = f"`{test}` is now `{change['to']}`, and the stress run below is for the new ID."
+        else:
+            what = (f"`{test}` is gone, so nothing was stress-run and no stress verdict is claimed. "
+                    f"The session's reason: {sanitize(change.get('reason') or 'none given')}")
+        out += [f"> **The target test was {change['kind']}; {COVERAGE_NOTE}.** {what} "
+                f"This PR stays a draft that the bot never marks ready, labelled `{NEEDS_HUMAN_LABEL}`.", ""]
     if verdict.get("weak"):
         out += [
             f"> **Weak evidence.** {numbers_line(verdict)}. A clean run here says little on its own; "
@@ -218,7 +256,7 @@ def body(pick: Path, attempt: Path, repo: str, commits: str, replayed: tuple[str
             f"`{replayed[0][:12]}`; this PR's own CI runs on the replayed commits, and promotion waits for it.",
             "",
         ]
-    if not verdict.get("weak"):
+    if not verdict.get("weak") and not (change and change["kind"] == "retired"):
         out += [f"Numbers: {numbers_line(verdict)}.", ""]
     out += [sanitize(read_text(attempt / "verify" / "verdict.md").strip()), ""]
     run_url = read_text(attempt / "run_url").strip()
@@ -234,8 +272,8 @@ def issue_comment(attempt: Path, kind: str, pr: str | None, detail: str) -> str:
     notes = sanitize(read_text(attempt / "flakefix-notes.md").strip())
     run_url = read_text(attempt / "run_url").strip()
     head = {
-        "failed": f"### Flake fix attempt: not eligible for ready\n\nThe verifier failed the candidate, or it touches a file the verdict depends on. "
-                  f"Draft PR #{pr} stays open for a human to read, finish, or close.",
+        "failed": f"### Flake fix attempt: not eligible for ready\n\nThe verifier failed the candidate, it touches a file the verdict "
+                  f"depends on, or it renamed or retired the target test. Draft PR #{pr} stays open for a human to read, finish, or close.",
         "no-diff": "### Flake fix attempt: no change\n\nThe fixer session made no commits, so no PR was opened.",
         "push-refused": "### Flake fix attempt: the push was refused\n\nNo PR was opened.",
     }[kind]
@@ -269,12 +307,17 @@ def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
     )
     if outcome == "pr-opened":
         verdict = read_json(attempt / "verify" / "verdict.json")
+        change = target_change(verdict)
+        stressed = not (change and change["kind"] == "retired" and verdict.get("verdict") != "fail")
         record = fl.Attempt(
             **{**asdict(record), "pr": pr, "scope": verdict.get("scope"), "n": verdict.get("n"),
                "false_pass": verdict.get("false_pass"), "weak": bool(verdict.get("weak")),
                "protected_touched": list(verdict.get("protected") or []),
-               # The stress verdict; a protected file is recorded beside it.
-               "verdict": "fail" if verdict.get("verdict") == "fail" else "pass"}
+               # The stress verdict; a protected file and a renamed or retired
+               # target are recorded beside it. A retirement ran nothing.
+               "verdict": ("fail" if verdict.get("verdict") == "fail" else "pass") if stressed else None,
+               "target_change": change["kind"] if change else None,
+               "renamed_to": change["to"] if change and change["kind"] == "renamed" else None}
         )
     return asdict(record)
 
@@ -339,12 +382,14 @@ def render_bounded(attempts: list[fl.Attempt], repo: str) -> str:
         keep += 1
 
 
-def ensure_weak_label(repo: str, pr: int) -> None:
+def ensure_label(repo: str, pr: int, which: str) -> None:
+    """Puts one of the bot's PR labels on PR, creating it if it is missing."""
+    name, color, description = LABELS[which]
     names = [label["name"] for label in ledger.gh_lines("api", "--paginate", f"repos/{repo}/labels?per_page=100", "--jq", ".[] | {name}")]
-    if WEAK_LABEL not in names:
+    if name not in names:
         ledger.gh_write("api", "-X", "POST", f"repos/{repo}/labels",
-                        payload={"name": WEAK_LABEL, "color": WEAK_LABEL_COLOR, "description": WEAK_LABEL_DESCRIPTION})
-    ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{pr}/labels", payload={"labels": [WEAK_LABEL]})
+                        payload={"name": name, "color": color, "description": description})
+    ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{pr}/labels", payload={"labels": [name]})
 
 
 # --- promotion (spec §6.5, §7) -------------------------------------------------------------
@@ -453,6 +498,9 @@ def promote_decision(facts: dict) -> str:
             return "SKIP the PR's head is in another repository"
         if not fl.trusted_author(pr["author"], pr["author_type"]):
             return f"SKIP the PR was opened by {pr['author']}, not the bot"
+        # A renamed or retired target (§6.4): only a human marks it ready.
+        if NEEDS_HUMAN_LABEL in pr["labels"]:
+            return f"SKIP the PR is labelled {NEEDS_HUMAN_LABEL}: its target test was renamed or retired, and {COVERAGE_NOTE}"
         # A human who returns the PR to draft is holding it; the bot never
         # overrides that. Only a human marking it ready releases the hold.
         held = [d for d in facts["drafted"] if not fl.trusted_author(d["actor"], d["actor_type"])]
@@ -534,9 +582,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--entry", type=Path, required=True)
-    p = sub.add_parser("weak-label")
+    p = sub.add_parser("label")
     p.add_argument("--repo", required=True)
     p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--which", choices=sorted(LABELS), required=True)
     p = sub.add_parser("comment")
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
@@ -581,8 +630,8 @@ def main(argv: list[str]) -> int:
             print(promote_resolve(args.repo, args.sha))
         elif args.command == "promote-decide":
             print(promote_decision(read_json(args.facts)))
-        elif args.command == "weak-label":
-            ensure_weak_label(args.repo, args.pr)
+        elif args.command == "label":
+            ensure_label(args.repo, args.pr, args.which)
         else:
             ledger.gh_write("api", "-X", "POST", f"repos/{args.repo}/issues/{args.issue}/comments",
                             payload={"body": read_text(args.body)})

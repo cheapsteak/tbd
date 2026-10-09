@@ -117,7 +117,8 @@ extension RPCRouter {
             if t.transport == .holder {
                 if keepsHistory {
                     await WorktreeLifecycle.recordHolderClosedTerminal(
-                        t, registry: holderRegistry, history: db.terminalHistory)
+                        t, registry: holderRegistry, resolver: holderScreenResolver,
+                        history: db.terminalHistory)
                 }
                 if let failure = await disposeHolder(for: t) {
                     scratchLogger.warning(

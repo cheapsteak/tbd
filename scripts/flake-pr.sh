@@ -409,6 +409,15 @@ cmd_open() {
     echo "flake-pr: opened draft PR #$PR"
   fi
 
+  # §6.4, §7: a candidate that renamed or retired its target stays a draft for
+  # a human; the label is what promote refuses on. Before the status, so no
+  # status can reach promote ahead of it.
+  local change
+  change="$(jq -r '.target_change.kind // "none"' "$ATTEMPT/verify/verdict.json")" || die "cannot read the verdict"
+  if [[ "$change" == renamed || "$change" == retired ]]; then
+    py label --repo "$REPO" --pr "$PR" --which needs-human || die "cannot label PR #$PR"
+  fi
+
   # The verdict was measured on the candidate; the status goes on what was
   # pushed, which promote then requires to be the PR's head (§7).
   local line state description run_url
@@ -427,7 +436,7 @@ cmd_open() {
     comment failed --pr "$PR" --detail "$lines"
   fi
   if [[ "$(jq -r .weak "$ATTEMPT/verify/verdict.json")" == true ]]; then
-    py weak-label --repo "$REPO" --pr "$PR" || die "cannot label PR #$PR"
+    py label --repo "$REPO" --pr "$PR" --which weak || die "cannot label PR #$PR"
   fi
   RECORDING=1
   record_opened
@@ -511,7 +520,7 @@ cmd_promote() {
   if [[ "$decision" == "PROMOTE label" ]]; then
     # §6.5: weak evidence cannot be missed. publish labels the PR; one that
     # died before it did gets the label here, before anyone is asked to review.
-    FLAKE_WRITE_TOKEN="$APP_TOKEN" py weak-label --repo "$repo" --pr "$number" || die "cannot label PR #$number"
+    FLAKE_WRITE_TOKEN="$APP_TOKEN" py label --repo "$repo" --pr "$number" --which weak || die "cannot label PR #$number"
   fi
   ghw pr ready "$number" --repo "$repo" || die "cannot mark PR #$number ready"
   # GitHub's ready takes no expected head, so a push that landed after the

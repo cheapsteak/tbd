@@ -193,7 +193,7 @@ func awaitDeliveryCycle(
 
 // MARK: - Suite
 
-/// Tier 2 — a real (temp-directory) actuation log and a `TestClock`. No tmux,
+/// Tier 2 — a real (temp-directory) actuation log and an `EventDrivenTestClock`. No tmux,
 /// no database, no network: the observation's two machine facts arrive through
 /// an injected source, so §12's four-result mapping and the retry ladder are
 /// exercised in-process. The mapping tests themselves touch nothing but the
@@ -206,7 +206,7 @@ struct DeliveryVerifierTests {
 
     private struct Harness {
         let verifier: DeliveryVerifier
-        let clock: TestClock<Duration>
+        let clock: EventDrivenTestClock
         let source: ScriptedObservationSource
         let redeliveries: RedeliveryRecorder
         let logPath: String
@@ -231,7 +231,7 @@ struct DeliveryVerifierTests {
         let log = ActuationLog(path: logPath, now: { stamp })
         let source = ScriptedObservationSource(answers)
         let redeliveries = RedeliveryRecorder(answering: retryOutcome)
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         return Harness(
             verifier: DeliveryVerifier(
                 log: log, source: source, redeliver: redeliveries.seam,
@@ -399,8 +399,8 @@ struct DeliveryVerifierTests {
             actuationID: id, terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "<tbd-dispatch id=\"\(id)\" from=\"anonymous\"/>\nstatus?",
             submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -435,8 +435,8 @@ struct DeliveryVerifierTests {
         ])
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -457,7 +457,7 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -490,7 +490,7 @@ struct DeliveryVerifierTests {
             actuationID: id, terminalID: Self.terminal, sessionID: "session-at-dispatch",
             deliveredPayload: "<tbd-dispatch id=\"\(id)\" from=\"anonymous\"/>\nstatus?",
             submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -513,7 +513,7 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: "session-at-dispatch",
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows"
         })
@@ -538,7 +538,7 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -562,7 +562,7 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows"
         })
@@ -583,8 +583,8 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -606,7 +606,7 @@ struct DeliveryVerifierTests {
             answers: [.silence(state: .idle)], retryOutcome: .refused(.targetMismatch))
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -633,7 +633,7 @@ struct DeliveryVerifierTests {
         await harness.verifier.armVerification(
             actuationID: "a3f1b2c3d4e5", terminalID: Self.terminal, sessionID: nil,
             deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
@@ -661,8 +661,8 @@ struct DeliveryVerifierTests {
         ])
         await harness.verifier.armVerification(
             actuationID: id, terminalID: Self.terminal, sessionID: nil, deliveredPayload: "x", submit: true)
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
-        await harness.clock.advanceWhenSuspended(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
+        await harness.clock.advanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(harness.verifier, observed: {
             "\((try? results(at: harness.logPath)) ?? []) rows, "
                 + "\(harness.redeliveries.calls.count) re-deliveries"
