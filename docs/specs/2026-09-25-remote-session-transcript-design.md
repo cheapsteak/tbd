@@ -10,18 +10,23 @@ The pieces that exist for remote sessions do not add up to either feature:
 - The live transcript pane (`TableTranscriptPaneView`) is keyed on a local `Terminal` row and a `LocalWorktree`, so it cannot render a remote session at all.
 - The contract's `send` delivers raw keystrokes. Reliable message submission into Claude Code needs the body as one bracketed paste followed by a separate Enter; an unbracketed write of 64 bytes or more with `\r` in the same write does not submit, and past roughly 1 KB a keystroke burst is coalesced into a paste that absorbs the Enter (the 64-byte threshold is measured in `docs/specs/2026-09-05-transcript-composer-design.md`, the ~1 KB coalescing in `docs/submit-reliability.md`). Locally the daemon owns that mechanism (`tmux paste-buffer -p` then `send-keys Enter`). Over raw `send` the caller would have to reproduce it without seeing the remote terminal's paste mode, across a transport it cannot observe, and with no evidence that the message landed.
 - The contract gives a caller no signal when `transcript` answers `--since` from the beginning — a cursor the provider can no longer honor, or a conversation restarted by `/clear` or a resume — so an appending caller would duplicate records or splice two conversations together.
+- A transcript fetched only while its pane is on screen is stale whenever the user opens it: a session that worked for an hour unwatched owes the whole hour on open, over a transport that may page at tens of seconds per call. And a forward read can only start at the beginning, so a long conversation the user has never opened streams in from its first record while the user wants its last.
 
 ## Goals
 
 - Show a remote session's transcript beside its terminal, live, using the existing transcript renderer.
 - Send messages to a remote session from a composer in that transcript, with the same delivery guarantees the local composer has.
 - Keep what is fetched, so reopening a transcript, relaunching the app, or restarting the daemon fetches only what is new. Some providers' transports are slow per call and cap output per call, so a full refetch of a long transcript takes many round trips.
+- Keep remote sessions' transcripts up to date without the user opening them, so a pane opens over a current cache.
+- Never load a transcript eagerly in full. A session new to the cache, or far behind it, loads only its last 12 conversation records; earlier history loads only when the user scrolls up to it.
 
 ## Non-goals
 
 - New tabs, note tabs, or `⌘T` on remote sessions.
 - A slash-command menu, image attachments, or waking an exited session from the remote composer.
 - Transcripts for providers that do not declare `transcript.read`.
+- Background sync for a provider that does not report the transcript hint, or tail-first loading for one that does not declare `transcript.tail`. Such a provider syncs only while its pane is open, reading forward from the beginning.
+- Earlier history in the local transcript pane or Session History. Both read local files and are unchanged.
 
 ## Contract changes
 
@@ -67,6 +72,30 @@ The flag makes `send` read the way it reads everywhere else in TBD — `tbd term
 
 Paste mechanics stay with the provider because the provider owns the transport and can see the terminal: whether bracketed paste is on, when the input box is ready, how long to wait before Enter. A caller composing bracketed paste over raw `send` would encode one TUI's timing across a hop it cannot observe, and would depend on the provider's keystroke path passing escape bytes through untouched. The machine-interface rule applies unchanged: a provider may verify delivery however it likes, and TBD reads only the exit status.
 
+### `transcript read --tail` and `--before`
+
+A new capability, `transcript.tail`, admits two forms of `transcript read` that read a conversation from its end. Both count in **conversation records**: JSONL records whose `type` is `user` or `assistant`. Records between them — tool results and any other type — come along with the conversation records they sit among.
+
+- **`transcript read <id> --tail <n>`** returns the end of the current conversation, starting at the record boundary of the n-th-from-last conversation record and including everything after it. It is always a reset. The envelope carries `cursor`, which continues forward on `--since` like any other cursor, and `before`: an opaque cursor for the history above this output, absent when the output already starts at the conversation's beginning. It never sets `more`.
+- **`transcript read <id> --before <cursor> --tail <n>`** returns the n conversation records, with the records among them, that end immediately before `<cursor>`. The envelope carries only `before`, absent once the page reaches the conversation's beginning. A `before` cursor names a position in one specific conversation and stays valid after `/clear`, because it still points into the conversation it came from. A provider that can no longer serve it fails with the error code `cursor_expired`.
+
+In both forms a provider MAY return fewer than n conversation records to stay within its own byte budget, but MUST return at least one record when one exists before the requested position, so paging always progresses, even past a multi-megabyte record. `--tail` is not combined with `--since`. A caller MUST NOT use either form without `transcript.tail`.
+
+The unit is the conversation record because it is roughly one row in the pane, and a provider can count records without knowing how TBD renders them. The count is TBD's request parameter, not a contract constant: TBD asks for 12, for a tail reset and for each page of earlier history alike.
+
+### The transcript hint
+
+A session object on `list` and `events` may carry an optional hint:
+
+```json
+"transcript": {"id": "opaque-conversation-id", "size": 1048576}
+```
+
+- **`id`** – opaque, and changes when the session moves to a new conversation (`/clear`, a resume).
+- **`size`** – the conversation's length in bytes. It never decreases for a given `id`.
+
+The hint is only a change signal. A caller compares it with the hint it recorded and never constructs a cursor from it. It needs no capability: like every optional session field, a caller that does not read it ignores it.
+
 ## Daemon
 
 ### `RemoteTranscriptSync`
@@ -76,28 +105,42 @@ A new actor under `Sources/TBDDaemon/Remote/` gives each `(provider, sessionID)`
 - One `transcript read` runs per session at a time. A request arriving while one is in flight waits for it, plus at most one follow-up, so a burst of requests costs at most two fetches.
 - It pages while the envelope says `more`, writing each page before fetching the next. A sync stops after a page cap and reports that it is not caught up, so a provider that never clears `more` cannot hold the lane forever; the next sync resumes from the stored cursor.
 - The page cap is one page, for an initial load and an incremental sync alike. A page is the unit the pane can show, and it is slow: over a provider transport measured at about 60 KB/s, one full `transcript read` page of about 860 KB takes about 22 seconds. The round trip that ends one sync and starts the next — a local RPC, a `state.json` load, and the app reading the appended bytes — costs milliseconds. Returning after every page therefore puts first content on screen one page in, at no measurable cost to throughput, and keeps each lane hold to a single provider call, so a sync asked for by a send waits behind one page rather than several. The app's driver re-syncs at once while a sync reports it is not caught up (see "Refreshing"), so a long first load streams in page by page. An incremental delta is almost always one page, so a separate cap for it would buy nothing.
-- A `--since` answer that comes without a valid envelope, absent or malformed, is discarded rather than written: that output is only the delta after the cursor, so reading it as a reset would wipe the history held before it. The sync drops the cursor and refetches from the beginning within the same sync. The discarded answer does not count toward the page cap; the refetch does. With a one-page cap, a discard that used the sync up would leave the stored cursor in place, so the next sync would send it again, be discarded again, and never progress. The loop stays bounded because the refetch carries no cursor and so cannot itself be discarded: every discard is followed by a persisted page. On the envelope's own side, a `{`-prefixed stderr line that is not valid JSON is a diagnostic and is passed over; only an object naming `cursor`, `reset`, or `more` that then fails the strict decode is malformed.
-- The sync actor and the `remote.sendMessage` serializer never sleep, poll, or time out on their own. Each provider call's timeout is enforced by `ProviderRunner` through `RemoteProviderManager.invoke(timeout:)`, and the refresh cadence lives in the app's sync driver, which takes the injected clock.
+- A `--since` answer that comes without a valid envelope, absent or malformed, is discarded rather than written: that output is only the delta after the cursor, so reading it as a reset would wipe the history held before it. The sync drops the cursor and refetches from the beginning within the same sync. The discarded answer does not count toward the page cap; the refetch does. With a one-page cap, a discard that used the sync up would leave the stored cursor in place, so the next sync would send it again, be discarded again, and never progress. The loop stays bounded because the refetch carries no cursor and so cannot itself be discarded: every discard is followed by a persisted page. On the envelope's own side, a `{`-prefixed stderr line that is not valid JSON is a diagnostic and is passed over; only an object naming `cursor`, `reset`, `more`, or `before` that then fails the strict decode is malformed.
+- When the flag (see "Gating") is on and the provider declares `transcript.tail`, the actor chooses between a tail reset and a forward read on every sync, for the on-screen pane and background sync alike. It runs `--tail 12` when the cache is empty, when the hint's `id` differs from the one recorded at the last caught-up sync, or when the hint's `size` has grown by more than 512 KB since then; otherwise it reads forward with `--since`. The 512 KB threshold is a constant pinned by a test, not configuration. A far-behind session therefore drops its cache in the reset, and the history it held becomes earlier history, loaded on scroll-up. The cache is always one contiguous run ending at the newest record, never one with gaps.
+- With the flag off, the actor never passes `--tail` or `--before`, and ignores the hint. A cache that holds a non-null `before`, left from a period with the flag on, is refetched in full — a reset without `--tail` — on its next sync, so the whole conversation returns.
+- The sync actors and the `remote.sendMessage` serializer never sleep, poll, or time out on their own. Each provider call's timeout is enforced by `ProviderRunner` through `RemoteProviderManager.invoke(timeout:)`, and the refresh cadence lives in the app's sync driver, which takes the injected clock.
 
 ### Cache
 
 Each session's transcript is cached under `~/tbd/remote-transcripts/<provider>/<sessionID>/`, through a new `TBDConstants` helper that honors `TBD_HOME` and escapes both components the way `retainedTranscriptPath` does. The directory holds two files:
 
 - **`transcript.jsonl`** – the conversation.
-- **`state.json`** – `{cursor, length, generation}`.
+- **`state.json`** – `{cursor, length, generation, before, head, hint}`. `before` is the provider's cursor for earlier history, null once the cache reaches the conversation's beginning. `head` is a counter bumped on every prepend. `hint` is the transcript hint recorded at the last caught-up sync, so background sync survives a daemon restart without refetching every session.
 
 The two files are kept consistent by write order:
 
 - **Append.** A page is appended to `transcript.jsonl` first. Then `state.json` is written atomically with the new cursor and the file's new length. On load, `transcript.jsonl` is truncated to the recorded `length`, so a crash between the two writes cannot leave records that the next fetch returns again.
-- **Reset.** Three steps, in this order. First `state.json` is written atomically with no cursor, a `length` of 0, and `generation` incremented, so readers know to discard what they hold. Then the page is written to a temporary file and renamed over `transcript.jsonl`. Last, `state.json` is written again with the new cursor and length. A crash after the first step leaves a state that records nothing: load truncates `transcript.jsonl` to zero bytes, and the next sync fetches from the beginning, which is itself a reset. No crash point can pair a new file with an old cursor. Load also removes any temporary file a crash left between the write and the rename.
+- **Reset.** Three steps, in this order. First `state.json` is written atomically with no cursor, a `length` of 0, and `generation` incremented, so readers know to discard what they hold. Then the page is written to a temporary file and renamed over `transcript.jsonl`. Last, `state.json` is written again with the new cursor and length, and for a tail reset with the envelope's `before`. A crash after the first step leaves a state that records nothing: load truncates `transcript.jsonl` to zero bytes, and the next sync fetches from the beginning, which is itself a reset. No crash point can pair a new file with an old cursor. Load also removes any temporary file a crash left between the write and the rename.
+- **Prepend.** Earlier history goes at the front of the one file, in four steps. First `state.json` is written atomically with a `pendingPrepend` marker. Then the fetched page followed by the current file is written to a temporary file, which is renamed over `transcript.jsonl`. Last, `state.json` is written atomically with the new `length`, `before`, and `head`, and the marker cleared. A load that finds the marker resets the cache, at the cost of one tail refetch. Without the marker, a crash between the rename and the last write would leave a file longer than `length` beside an old `before`, and the truncation on load would cut the newly prepended file in the wrong place.
 - **Repair on load.** Beyond truncating uncommitted bytes, load clears `transcript.jsonl` and drops the cursor when the file is shorter than the recorded `length` or `state.json` cannot be read, so the next sync fetches from the beginning. Every repair increments `generation`, so a reader never keeps records the cache no longer holds.
 - **Unchanged reset.** A reset whose page is byte-identical to the committed file keeps its `generation` and rewrites only the cursor. A provider with no incremental support answers every call with the whole conversation, and bumping `generation` each time would make the pane discard and re-render an unchanged transcript on every sync.
 
 The cache sits outside the Claude projects store on purpose: `ClaudeSessionScanner` searches under project roots, so a TBD-owned root keeps remote conversations from being listed as local sessions. The daemon only writes this root and the app reads it directly, so no daemon read RPC needs to admit a second permitted transcript root.
 
+### Background sync
+
+A second actor, `RemoteTranscriptBackgroundSync` under `Sources/TBDDaemon/Remote/`, keeps unopened sessions' caches current. It runs no timers. Its only input is the session rows `RemoteProviderManager.apply(snapshot:)` and `applyUpsert` already process: it enqueues a session once when the row's hint differs from the hint recorded at its last caught-up sync, and repeated changes before that sync runs coalesce into one entry.
+
+- **Skips** – dismissed sessions; providers that do not declare both `transcript.read` and `transcript.tail`; sessions whose rows carry no hint; and everything while the flag is off.
+- **Pacing** – one sync at a time per provider. Each runs on the session's lane in `RemoteTranscriptSync`, so it coalesces with the on-screen pane's 3-second syncs rather than racing them. A sync that ends not caught up goes to the back of its provider's queue, so one long backlog cannot starve the other sessions.
+- **Restart** – the recorded hint lives in `state.json`, so after a daemon restart a session whose hint still matches is not refetched.
+
+A provider that reports no hint gets no background sync: its sessions sync only while their pane is open. The daemon cannot tell what changed on such a provider without asking, and the rejected alternatives below cover the ways it could ask.
+
 ### RPCs
 
-- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, caughtUp}`. The app calls it; the daemon runs no timers of its own for transcripts. It is refused unless the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
+- **`remote.transcriptSync {provider, sessionID}`** returns `{path, generation, head, caughtUp, hasEarlier}`. The app calls it for an on-screen pane; the daemon's only other sync path is background sync, which runs on snapshots, not timers. It is refused unless the provider declares `transcript.read`, and it is refused for a dismissed session, so a pane still open after a dismiss cannot rebuild the cache the dismiss discarded.
+- **`remote.transcriptLoadEarlier {provider, sessionID}`** returns `{generation, head, reachedStart}`. It runs `transcript read <id> --before <cached before> --tail 12` on the session's lane and prepends the page. It is refused while the flag is off, unless the provider declares `transcript.tail`, for a dismissed session, and when the cache's `before` is null. If the cache's `generation` changed between the request and the write, the page is discarded. On `cursor_expired` it clears `before` and returns `reachedStart` with an `expired` reason.
 - **`remote.sendMessage {provider, sessionID, text}`** invokes `send <id> --submit` with `text` on stdin and a 30-second timeout. It is refused:
   - unless the provider declares `send-submit`;
   - when the provider's snapshot is stale, as `remote.send` is;
@@ -112,13 +155,22 @@ The existing `remote.transcript` RPC and `tbd remote transcript` keep their full
 
 ### Gating
 
-The remote transcript carries no feature flag. `remote.transcriptSync`, the pane, and the composer are gated by the provider's own declarations — `transcript.read` for the sync and the pane, `send-submit` for the composer — under the remote-backends gate and the cloud gate every provider-named verb already sits behind. The daemon checks those declarations itself, so a direct RPC call cannot do what the hidden pane or composer would not.
+The pane, the composer, and forward sync carry no feature flag. `remote.transcriptSync`, the pane, and the composer are gated by the provider's own declarations — `transcript.read` for the sync and the pane, `send-submit` for the composer — under the remote-backends gate and the cloud gate every provider-named verb already sits behind. The daemon checks those declarations itself, so a direct RPC call cannot do what the hidden pane or composer would not.
+
+Tail-first loading, loading earlier history, and background sync sit behind one default-off flag, the config column `remote_transcript_live_sync_enabled INTEGER`, added with no SQL default so that NULL means unset. `ConfigRecord.toModel()` reads it as `?? Config.remoteTranscriptLiveSyncEnabledDefault`, which is `false`. The flag is required because background sync acts without a user gesture, and because the prepend-and-anchor reflow is the transcript viewer's riskiest UI path. With the flag off, every sync is a forward read: the daemon ignores the hint, never passes `--tail` or `--before`, refuses `remote.transcriptLoadEarlier`, and refetches in full any cache that holds a `before`.
+
+One flag covers all three because they are not independently useful. Background sync without tail-first loading would fetch every session's whole history in the background, which is the eager load the design avoids.
+
+The flag lives only in TBD's daemon. Providers never see it: they declare `transcript.tail` and report the hint regardless. The daemon reads the flag at each decision — background-sync admission, the tail-or-forward choice in `RemoteTranscriptSync`, and the `remote.transcriptLoadEarlier` refusal — so a change takes effect on the next sync without a restart, and background sync drops its queue when the flag goes off. The app's pane never reads the flag; it acts on the `hasEarlier` the daemon returns.
+
+The flag is set by a toggle, "Keep remote transcripts up to date in the background", in the Remote Sessions section of Settings, through the existing config RPC. Its help text says background sync fetches only from providers that report a transcript hint.
 
 ### Reclaiming the cache
 
 The cache directory is a new kind of durable resource, and `OrphanGC` reclaims it in a new leg under `gcEnabled`:
 
 - A session directory is reclaimed when TBD no longer tracks its `(provider, sessionID)` and nothing has been written to it within `gcGraceSeconds`, the grace window every other leg uses. A session is tracked while a `remote_session` row for it has `dismissed = 0` or a `worktree` row for it has a status other than `archived`. Row absence alone would not do: dismissing sets `dismissed = 1` and keeps the row, and archiving keeps the worktree row, so a sweep that waited for rows to disappear would never reclaim a dismissed or archived session's cache. A session un-dismissed or unarchived after its cache was reclaimed simply refetches. The window keeps a sync that raced a dismiss from losing its file mid-write.
+- Background sync introduces no new kind of resource: it writes the same directory, and this leg covers it. The leg matters more with background sync on, because caches then exist for sessions nobody opened.
 - A successful `remote.delete` and `remote.dismiss` remove the session's directory immediately. A sync already in flight for that session drops what it fetched instead of writing it back into a recreated directory. The sweep is the guarantee; the eager removal is only prompt cleanup.
 
 The leg needs no soak flag of its own, unlike the retained-transcripts leg beside it, which ships behind `gc_retained_transcripts_enabled`. That leg deletes database rows and unlinks transcripts that may be the only copy left once the provider's own copy expires, so a wrong decision there loses data. This leg deletes no rows, and everything it removes is a copy of what the provider still serves: a directory is eligible only after TBD has stopped tracking the session altogether, and if the session reappears, the next sync rebuilds its cache from the provider. The worst a wrong reclaim can cost is one refetch. The default-off rule exists for behavior that can destroy state someone needs, and a derived cache of an untracked session is not that state. An install whose providers never served a transcript has no such directories, so the leg finds nothing. The leg walks the whole cache root against the rows rather than a record of what it created, so it also reclaims directories written before it existed.
@@ -129,6 +181,8 @@ The leg needs no soak flag of its own, unlike the retained-transcripts leg besid
 
 Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read`.
 
+With the flag on, background sync keeps the cache current, so the pane opens over it and the cached first paint described under "Layout" shows it at once. For a session with no cache yet, the first sync is a tail reset, so the pane fills from 12 records rather than streaming the whole history page by page.
+
 Whether the transcript is open is one preference shared by every remote session, stored in `UserDefaults` under `remoteTranscriptOpen`. Unset reads as open, so the first remote session a user views shows its transcript. Closing it with the toggle stores `false`, and every remote session then opens without it until the toggle stores `true` again.
 
 ### Layout
@@ -138,13 +192,22 @@ Whether the transcript is open is one preference shared by every remote session,
 - **Left** – what the pane shows today: the attached terminal, the detached prompt, or the log fallback. `RemoteAttachPager` stays mounted whether or not the split is open, because unmounting it drops every live attach connection. Both halves are on screen together, so no hidden terminal is left receiving input.
 - **Right** – `RemoteTranscriptPaneView`, built the way Session History's transcript view is: `TableTranscriptView` and `TranscriptPresentation` with a `TranscriptCardContext` whose `terminalID` is nil.
 
-The pane tails the cache file with the existing `TranscriptSource`, keyed in `sessionTranscripts` as `remote:<provider>/<sessionID>`. When `generation` changes it drops its items and reads the file from the start.
+The pane tails the cache file with the existing `TranscriptSource`, keyed in `sessionTranscripts` as `remote:<provider>/<sessionID>`. When `generation` changes it drops its items, reads the file from the start, and scrolls to the bottom. When `head` changes it also re-reads the whole file, which stays small, but first records the top visible row and its offset, and restores both afterwards so the rows on screen do not move. The anchor is the record `uuid` behind that row; when no visible row has one, the pane keeps its old distance from the bottom.
 
 The pane does not wait for a sync to learn where the file is. The cache path is deterministic — `TBDConstants.remoteTranscriptDir` plus `transcript.jsonl`, following `TBD_HOME` exactly as the daemon does — so when the pane mounts it shows whatever the cache already holds, before the first sync returns. It takes the generation from `state.json` beside the file, or 0 when that file is missing or unreadable. The first sync's generation is authoritative: if it differs, the pane drops what it read and re-reads from the start, the same path a provider reset takes. A long first load can take a minute or more over a slow transport, and a pane that had to wait for a sync would spin over a cache already on disk. While no sync has reported `caughtUp`, the header shows a non-blocking "Syncing…" and cached records stay readable. The full-pane loading state is only for a session with no cache file yet. "Show full output" looks the record up in the cache file on the app side. Links to file paths are suppressed, because those paths name files on another machine.
 
 ### Refreshing
 
 While the pane is visible and the app is active, the app calls `remote.transcriptSync` every 3 seconds, and stops when the pane is hidden or the app is inactive. It also syncs at once after a successful send and whenever the session's `agent_state` changes. A sync that succeeds without being caught up is followed by the next at once rather than after the interval, so a long first load arrives one page per sync: each completed sync bumps the pane's refresh token, the pane reads the page just persisted, and the 3-second cadence resumes once a sync reports `caughtUp`. A failed sync always waits the interval, so a daemon that refuses the call is not retried in a tight loop. A provider that never clears `more` therefore keeps a visible pane syncing back to back, one provider call at a time: the page cap bounds how long a sync holds its lane, not how often the pane asks. The syncs never overlap — the driver starts the next only after the last returns — and hiding the pane or deactivating the app stops the catch-up just as it stops the cadence: no sync starts while inactive. A sync already in flight at that moment still publishes when it returns, because the daemon has persisted what it fetched either way and the result is for the same session; discarding it would only leave the pane spinning over data already on disk when it comes back. A result is dropped in two cases only. The first is a driver retired because the pane went away or its selection moved to another session, since a driver must never publish into a pane showing a different session. The second is a result older than one already published, so a slow sync finishing after a restart cannot move the pane backwards. The cadence takes an injected clock.
+
+### Loading earlier history
+
+When the table scrolls to within about five rows of its top and the last sync reported `hasEarlier`, the pane calls `remote.transcriptLoadEarlier`. One call is in flight per pane at a time, and a failed call waits for the next scroll to retry. A slim header row at the top of the table shows where the history stands:
+
+- **Loading** – a spinner while a call is in flight.
+- **Failed** – a "Load earlier messages" button after a failure.
+- **Start of conversation** – after `reachedStart`.
+- **Expired** – "Earlier history is no longer available" after `cursor_expired`.
 
 ### Composer
 
@@ -159,13 +222,13 @@ For a remote target:
 
 The attached terminal and the composer are independent writers to the same session. Text left unsent in the agent's own input box is prefixed to the composer's message. This is the limitation the local composer already accepts.
 
-The existing send footer appears only when no terminal is live and the composer is not on screen taking messages. A composer that is shown but cannot send — blocked on a prompt, starting, unknown, or exited — leaves the footer in place, because with no live terminal its raw keystrokes are the only way to answer a prompt.
+The composer, sidebar rows, and send footer do not depend on the flag. The existing send footer appears only when no terminal is live and the composer is not on screen taking messages. A composer that is shown but cannot send — blocked on a prompt, starting, unknown, or exited — leaves the footer in place, because with no live terminal its raw keystrokes are the only way to answer a prompt.
 
 ## Testing
 
 Each gate is tested on both branches.
 
-- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope; a non-JSON `{` diagnostic beside a valid envelope.
+- **Envelope parsing** – `cursor` alone, with `reset`, with `more`; no envelope (a reset that is caught up); `more` without a cursor; a malformed envelope; a non-JSON `{` diagnostic beside a valid envelope; `before`, including `before` without `cursor`; `cursor_expired` mapped to its own error.
 - **Sync actor**, against a scripted provider invoker:
   - append and cursor round-trip;
   - reset rewrites the file and increments `generation`;
@@ -174,21 +237,29 @@ Each gate is tested on both branches.
   - a `--since` answer with an absent or malformed envelope keeps what is held and ends in a full refetch within the same sync, even with a one-page cap: the discarded answer does not count toward the cap and the refetch does;
   - concurrent requests coalesce;
   - a `transcript.jsonl` longer than `state.json`'s `length` is truncated on load;
-  - paths follow `TBD_HOME`.
+  - paths follow `TBD_HOME`;
+  - with the flag on, a tail reset on an empty cache, on a changed hint `id`, and on `size` growth past 512 KB, and `--since` at or below 512 KB;
+  - with the flag off, never `--tail`, and a full reset fetch for a cache holding a non-null `before`;
+  - prepend round-trip; a `pendingPrepend` marker found on load resets the cache; a load-earlier page is discarded when `generation` changed mid-call.
+- **Background sync** – idle with the flag off and enqueuing with it on, with the three flag states (NULL, 0, 1) distinguishable, an explicit `false` surviving a change to the default constant, and NULL following it; skips sessions with no hint, dismissed sessions, and providers missing a capability; hint changes coalesce; one sync per provider at a time; a sync not caught up re-queues at the back; no refetch after a daemon restart when the stored `hint` matches; the queue is dropped when the flag goes off.
 - **RPC gates**:
-  - `remote.transcriptSync` refused without `transcript.read`, or for a dismissed session;
+  - `remote.transcriptSync` refused without `transcript.read`, or for a dismissed session, and its result carries `head` and `hasEarlier`;
+  - `remote.transcriptLoadEarlier` refused with the flag off, without `transcript.tail`, for a dismissed session, and with a null `before`; its `reachedStart` and `expired` outcomes;
   - `remote.sendMessage` refused without `send-submit`, on a stale snapshot, while `waiting_input`, and after exit;
   - on success it invokes `send <id> --submit` with the text on stdin, and concurrent sends to one session are serialized;
   - a provider that times out or dies yields the unknown outcome, never a failure and never a retry; the composer's unknown banner requires an edit or confirmation before resending.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
 - **OrphanGC leg** – keeps a directory whose session has an undismissed `remote_session` row or an unarchived `worktree` row, keeps one written within `gcGraceSeconds`, reclaims one outside the window whose only rows are dismissed or archived, reclaims one with no rows at all, and does nothing with `gcEnabled` off; a successful `remote.delete` and `remote.dismiss` remove only their own session's directory, and a failed delete removes nothing.
 - **Sync driver**, on an injected clock – the 3-second cadence; a sync that is not caught up is followed at once, after its page is published, until one catches up and the cadence resumes; a failed sync waits the interval even mid-load; hiding the pane mid-load starts no further sync while the one in flight still publishes; a sync finishing after the driver is retired, or after a switch to another session, publishes nothing; a pane mounted over an existing cache has the file's path and `state.json`'s generation before any sync completes, and no cache file leaves it in the full loading state.
-- **App gates** – toolbar toggle visibility against the capability; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked.
+- **App gates** – toolbar toggle visibility against the capability; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked; the Settings toggle round-trips through the config RPC.
+- **Earlier history in the pane** – scrolling near the top triggers exactly one load; the anchor row stays put across a `head` bump; a `generation` bump scrolls to the bottom; the header's four states.
 
 ## Rollout
 
 - The namespace rename is a hard cutover in TBD. A provider that has not adopted the namespaced spellings loses, until it does, every transcript operation it declares under a bare spelling — `transcript` (read), `retain`, `import`, and `recall` alike. Every other capability keeps working. No provider shipped the bare `transcript` or `import`, so in practice an un-updated provider loses retain and recall.
 - Provider implementations of `transcript read` (with paging and `reset`), `send --submit`, and the renamed verbs are tracked with each provider.
+- Providers implement `transcript.tail` and the transcript hint, tracked with each provider; the first provider gains both alongside TBD. A provider without both gets neither background sync nor tail-first loading, and behaves as it does with the flag off.
+- `remote_transcript_live_sync_enabled` ships default-off. The soak enables it with the Settings toggle on a dogfood machine. Graduation flips `Config.remoteTranscriptLiveSyncEnabledDefault`, and a later change deletes the flag.
 
 ## Rejected alternatives
 
@@ -199,3 +270,12 @@ Each gate is tested on both branches.
 - **Pushing transcript records on `events`.** Lowest latency, but it is a per-session stream shape the remote design has already declined; cursor polling comes first, and the evidence that would reopen this is a sync cadence users find too slow.
 - **A per-session open state for the transcript.** Hiding the transcript is a standing preference about how a user views remote sessions, not a fact about one session, and a per-session state would make every newly viewed session ignore it.
 - **A new contract major for the rename.** Makes an un-updated provider unusable instead of degrading two of its verbs; see the namespace section.
+- **A `before` cursor that the provider refuses once the session moves to a new conversation.** Simpler for the provider, but a `/clear` landing between a sync and a scroll-up is a benign race, and this would turn it into an error.
+- **Two flags, one for tail-first loading and one for background sync that requires it.** Background sync without tail mode fetches every session's whole history in the background, so the halves are not independently useful and a second flag only adds a combination nobody should run.
+- **Slow timed `--since` polling for providers without the hint.** Puts unasked load on exactly the providers that cannot say what changed.
+- **Triggering background sync on `agent_state` edges.** Misses records written mid-turn, while the state stays `working`.
+- **Keeping the old cache on a far-behind session and filling the gap.** Leaves holes in the cache and needs gap markers in the pane; a cache that is one contiguous run ending at the newest record needs neither.
+- **Tail resets only for a session with no cache.** A long-idle session would catch up slowly and spend background bandwidth on history nobody is reading.
+- **Twelve user turns, or a byte budget alone, as the tail unit.** One user turn can carry hundreds of tool calls, so its size is unpredictable; a byte budget alone yields a wildly varying number of messages. The conversation record maps to roughly one pane row.
+- **Earlier history in segment files (`earlier-0001.jsonl`, …).** `TranscriptSource` reads one file, and the cache stays small enough to prepend into it.
+- **Background sync driven by the app.** Runs only while the app runs, puts a fleet-wide decision in the UI layer, and has every app instance poll independently. Per-event cost across a fleet belongs in the daemon.
