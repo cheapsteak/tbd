@@ -94,9 +94,9 @@ not a work list; each has its own fix and owner.
 - **1,595 `U+0000` cells across five of nine sessions** in one `terminal.output`
   sweep: a differential painter positions past cells it is not changing, and
   the render projected those cells literally. Fixed in the render
-  (`TerminalScreenProjection.rowText` now projects a
-  never-written cell as a space), and no consumer had noticed, because every
-  consumer matches on text and a NUL displays as nothing.
+  (`TerminalScreenProjection.rowText` now projects a never-written cell as a
+  space), and no consumer had noticed, because every consumer matches on text
+  and a NUL displays as nothing.
 - **A machine read of any session a person has open returns an error that
   says the session is gone.** `holderTerminalOutput` (`:1911-1936` in the
   handlers file) requires `reader(for:)`; the attach acknowledgement stops that
@@ -275,9 +275,13 @@ design builds is the pull the model has always required.
   that protocol itself and forwards neither call onward, and the only other
   route — a `DECRQM 25` probe — is forbidden against a live parser for the
   reason stated above. So a viewer answer reports the mode default and flags
-  the value as a default rather than an observation, on the same provenance
-  axis `modesObserved` uses for an emulator reporting a fresh terminal's
-  flags. Nothing is lost by it: the only consumer that reads a screen's cursor
+  the value as a default rather than an observation — a provenance flag of the
+  kind `modesObserved` carries for an emulator reporting a fresh terminal's
+  modes, stated on the viewer's own answer beside the value it qualifies, and
+  **not** by lowering `modesObserved` itself: a viewer's SwiftTerm genuinely
+  tracks the three child modes, and saying otherwise would send every send
+  composed against a viewer answer back to the unobserved guess. Nothing is
+  lost by it: the only consumer that reads a screen's cursor
   is the hibernation pending-input rail, and that rail refuses a `.viewer`
   screen outright. Forking SwiftTerm to intercept the two calls is rejected —
   a fork commit is a standing maintenance cost for a field no consumer reads,
