@@ -251,6 +251,7 @@ jobs:
           bash scripts/flake-verify.test.sh
           bash scripts/flake-pr.test.sh
           bash scripts/restart-guard-lib.test.sh
+          bash scripts/dsym-prune-lib.test.sh
           bash scripts/ci/first-party-wipe-needed.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
           python3 scripts/diag/terminal-latency-report.py --self-test

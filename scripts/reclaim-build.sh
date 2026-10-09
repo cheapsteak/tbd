@@ -10,6 +10,10 @@
 # What it reclaims, per worktree (a TBD worktree OR a Claude .claude/worktrees/* one):
 #   Tier 1 — SwiftPM .build/index-build idle > T1 (6h). Package.swift-gated.
 #   Tier 2 — whole SwiftPM .build idle > T2 (48h), no live session. Package.swift-gated.
+#   dsym   — the *.dSYM bundles under .build/<triple>/debug, debug build idle >
+#            RECLAIM_ACTIVE_GRACE, when Tier 2 does not already take the whole
+#            .build. Package.swift-gated. Skipped with TBD_KEEP_DSYM=1 or CI set.
+#            See scripts/dsym-prune-lib.sh.
 #   installs — node_modules/.terraform idle > T2, no live session. Agent worktrees only
 #              (Claude-managed, one-shot; NOT TBD-managed). NOT gated on Package.swift.
 #
@@ -54,6 +58,11 @@ LIVE_CWDS=""
 INSTALL_DIRS=(node_modules .terraform)
 
 log() { printf '%s\n' "$*" >&2; }
+
+# list_debug_dsyms / prune_debug_dsyms / dsym_prune_disabled, shared with
+# restart.sh and test.sh.
+# shellcheck source=/dev/null
+source "${BASH_SOURCE[0]%/*}/dsym-prune-lib.sh"
 
 # --- test seams --------------------------------------------------------------
 _now()           { printf '%s\n' "${RECLAIM_NOW:-$(date +%s)}"; }
@@ -265,6 +274,7 @@ list_all_worktrees_tsv() {
 # plan_worktree WORKTREE_PATH LIVE_SESSIONS SOURCE -> decision line(s):
 #   PLAN tier1 <wt>     rm .build/index-build
 #   PLAN tier2 <wt>     rm whole .build
+#   PLAN dsym <wt>      rm .build/<triple>/debug/**/*.dSYM
 #   PLAN installs <wt>  rm node_modules/.terraform (agent worktrees only)
 #   SKIP active-build|fresh <wt>
 # Tier 1/2 apply to all worktrees. Installs apply only to agent worktrees.
@@ -299,6 +309,14 @@ plan_worktree() {
       idx_m="$(newest_mtime "$build/index-build")"
       if [[ -n "$idx_m" ]] && (( now - idx_m >= t1 )); then
         echo "PLAN tier1 $wt"; emitted=true
+      fi
+      # The debug build's dSYMs are dead weight from the moment the link
+      # finishes (scripts/dsym-prune-lib.sh), so the only clock is the grace
+      # that keeps this off a link still writing one.
+      if ! dsym_prune_disabled && [[ -n "$dbg_m" ]] \
+          && (( now - dbg_m >= RECLAIM_ACTIVE_GRACE )) \
+          && [[ -n "$(list_debug_dsyms "$wt")" ]]; then
+        echo "PLAN dsym $wt"; emitted=true
       fi
     fi
   fi
@@ -367,7 +385,7 @@ main() {
     while read -r action tier path; do
       [[ "$action" == "PLAN" ]] || continue
       case "$tier" in
-        tier1|tier2)
+        tier1|tier2|dsym)
           if has_active_build "$path"; then log "skip (now active): $path"; continue; fi
           # Defense-in-depth: has_active_build's ps allowlist misses the dependency
           # fetch phase (top-level swift-build carries no worktree path; its git
@@ -379,6 +397,8 @@ main() {
           fi
           if [[ "$tier" == "tier1" ]]; then
             if rm -rf "$path/.build/index-build"; then log "reclaimed index-build: $path"; else log "rm failed: $path"; fi
+          elif [[ "$tier" == "dsym" ]]; then
+            log "reclaiming dSYMs: $path"; prune_debug_dsyms "$path" >&2
           else
             if rm -rf "$path/.build"; then log "reclaimed .build: $path"; else log "rm failed: $path"; fi
           fi

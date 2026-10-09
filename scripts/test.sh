@@ -725,6 +725,12 @@ asks_for_a_listing() {
   return 1
 }
 
+# `prune_debug_dsyms`, which `cleanup` below calls. Loaded from beside this
+# script rather than from the repository it tests, so a fixture repository needs
+# no copy of it.
+# shellcheck source=/dev/null
+source "${BASH_SOURCE[0]%/*}/dsym-prune-lib.sh"
+
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing
 # as `main "$@"` under the inverse condition; this script stays straight-line
@@ -737,6 +743,7 @@ fi
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+repo_toplevel="$PWD"
 
 # On in CI, off on a developer box. See "WHY DETECTION IS CI-ONLY" above.
 fingerprint=0
@@ -946,10 +953,19 @@ tmux_tmpdir="$scratch_home/tmux"
 # regardless. So both sweeps run BEFORE the scratch dir goes away, and both take
 # it as an argument so `reclaim_abandoned_run_roots` can run the same two passes
 # over a root some earlier run never got to.
+#
+# THE .dSYM PRUNE RIDES ALONG, AND IT MUST NEVER DECIDE THE EXIT STATUS. Linking
+# the test bundle writes a 646 MB `TBDPackageTests.dSYM` (plus one per product)
+# that nothing local reads — see scripts/dsym-prune-lib.sh — so the trap drops
+# them on every exit, red, green or killed. bash keeps the status `exit` was
+# given when an EXIT trap returns normally, but a failing command under `set -e`
+# inside the trap would replace it; hence the `|| true`. Skipped under CI and
+# with TBD_KEEP_DSYM=1.
 cleanup() {
   sweep_tmux_servers "$scratch_home"
   sweep_holders "$scratch_home"
   rm -rf "$scratch_home"
+  prune_debug_dsyms "$repo_toplevel" >&2 || true
 }
 # EXIT alone is sufficient, including when this wrapper is killed:
 # `scripts/nightly-flake-stress.sh` TERMs it when its outer deadline fires, and

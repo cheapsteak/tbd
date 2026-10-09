@@ -13,6 +13,7 @@ set -e
 #   scripts/restart.sh --wip    # force install even if on a WIP branch
 #   scripts/restart.sh --release # build/launch optimized (-c release) instead of debug
 #   TBD_INSTALL_WIP=1 scripts/restart.sh # same as --wip
+#   TBD_KEEP_DSYM=1 scripts/restart.sh   # keep the build's .dSYM bundles (see below)
 
 SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 if [ "$SCRIPT_DIR" = "${BASH_SOURCE[0]}" ]; then
@@ -219,6 +220,14 @@ if [ "$skip_build" = false ]; then
     # run_governed_build has already said what went wrong and that nothing was
     # shipped, so this only has to stop.
     [ "$build_status" -eq 0 ] || exit "$build_status"
+
+    # Drop the ~900 MB of .dSYM bundles the link step just wrote: lldb reads
+    # the same DWARF from the .o files through the binary's debug map, and
+    # nothing ships them. Never fails the restart; skipped under CI and with
+    # TBD_KEEP_DSYM=1. See scripts/dsym-prune-lib.sh.
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/scripts/dsym-prune-lib.sh"
+    prune_debug_dsyms "$REPO_ROOT" || true
 fi
 
 # MARK: - Assemble TBD.app bundle
