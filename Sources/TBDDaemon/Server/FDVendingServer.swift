@@ -141,6 +141,34 @@ actor FDVendingServer {
     /// directly (see `HolderInjectionCourier`).
     var onInjectionAck: (@Sendable (SidecarInjectionAck) -> Void)?
 
+    /// Sink for app → daemon `.screenReply` frames: a viewer's answer to one
+    /// screen request for a session whose pty it holds. Same contract as
+    /// `onInput` — installed by the daemon wiring BEFORE
+    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
+    /// nil, replies are logged and dropped, which is survivable rather than
+    /// fatal: an unanswered pull reaches `HolderScreenPull`'s bound and the
+    /// daemon answers from its own retained emulator.
+    ///
+    /// **The second parameter is the epoch of the connection the reply arrived
+    /// on**, which is what lets a pull tell a current answer from one that
+    /// crossed a reconnect. Matching by `requestID` alone would let a reply
+    /// from a connection that has since been replaced resolve a request sent on
+    /// the new one.
+    var onScreenReply: (@Sendable (SidecarScreenReply, UInt64) -> Void)?
+
+    /// Sink for "a sidecar connection's receive loop has ended", carrying that
+    /// connection's epoch.
+    ///
+    /// Distinct from `onClientDisconnect`, which asks whether the *app* is
+    /// gone and fires only for the connection that was still current. This one
+    /// fires for **every** connection whose loop exits, superseded ones
+    /// included, because the question it answers is narrower and has no
+    /// ambiguity in it: nothing sent on that epoch can ever be answered now, so
+    /// anything waiting on one can stop waiting. A reconnect is exactly the
+    /// case where the two differ — it is not a death, and it *is* the end of
+    /// that epoch.
+    var onConnectionLost: (@Sendable (UInt64) -> Void)?
+
     /// Sink for "the app's connection went away", carrying the identity
     /// recorded for it at adopt time (nil when the peer could not be
     /// identified).
@@ -178,6 +206,19 @@ actor FDVendingServer {
     /// at adopt time.
     func setOnInjectionAck(_ handler: (@Sendable (SidecarInjectionAck) -> Void)?) {
         onInjectionAck = handler
+    }
+
+    /// Install the screen-reply sink. Must be called BEFORE
+    /// `listen`/`adoptConnection` — each connection captures the current sink
+    /// at adopt time.
+    func setOnScreenReply(_ handler: (@Sendable (SidecarScreenReply, UInt64) -> Void)?) {
+        onScreenReply = handler
+    }
+
+    /// Install the connection-lost sink (see `onConnectionLost`). Like the
+    /// other sinks, install it before `listen`/`adoptConnection`.
+    func setOnConnectionLost(_ handler: (@Sendable (UInt64) -> Void)?) {
+        onConnectionLost = handler
     }
 
     /// Install the disconnect sink (see `onClientDisconnect`). Like the other
@@ -294,7 +335,8 @@ actor FDVendingServer {
         let epoch = epochBox.advance()
         startReceiveThread(
             fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste,
-            injectionAckSink: onInjectionAck)
+            injectionAckSink: onInjectionAck, screenReplySink: onScreenReply,
+            connectionLostSink: onConnectionLost)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
@@ -383,9 +425,20 @@ actor FDVendingServer {
     /// which means the app connected long ago. A throw here says the sidecar is
     /// gone, and the caller (`HolderInjectionCourier`) answers it by writing
     /// the bytes itself rather than by waiting.
-    func sendFrame(_ frame: Data) throws {
+    ///
+    /// **Returns the connection epoch the frame went out on**, which is what
+    /// lets a caller awaiting an answer scope its wait to that connection. The
+    /// epoch is read here, inside the send, and that is the whole guarantee:
+    /// this method and `adoptConnection` are both isolated to this actor, so no
+    /// reconnect can land between writing the bytes and reading the epoch —
+    /// there is no window in which a request is stamped with an epoch it was
+    /// not sent on. `@discardableResult` because the injection courier, which
+    /// correlates by id and has no epoch scoping, does not want it.
+    @discardableResult
+    func sendFrame(_ frame: Data) throws -> UInt64 {
         guard clientFD >= 0 else { throw FDVendingServerError.notConnected }
         try FDChannel.sendData(frame, over: clientFD)
+        return epochBox.current()
     }
 
     /// Spawn the receive thread for one connection. The thread reads framed
@@ -402,7 +455,9 @@ actor FDVendingServer {
         epoch: UInt64,
         inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
         pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
-        injectionAckSink: (@Sendable (SidecarInjectionAck) -> Void)?
+        injectionAckSink: (@Sendable (SidecarInjectionAck) -> Void)?,
+        screenReplySink: (@Sendable (SidecarScreenReply, UInt64) -> Void)?,
+        connectionLostSink: (@Sendable (UInt64) -> Void)?
     ) {
         let logger = self.logger
         let epochBox = self.epochBox
@@ -461,9 +516,23 @@ actor FDVendingServer {
                         } else {
                             logger.debug("sidecar: injection ack with no handler, dropping")
                         }
-                    case .fdVend, .injection:
-                        // The app must never send fd vends or injections —
-                        // both directions are daemon → app only.
+                    case .screenReply:
+                        guard let reply = try? SidecarFrameCodec.decodeScreenReply(
+                            payload: frame.payload) else {
+                            logger.error("sidecar: undecodable screen reply, dropping")
+                            continue
+                        }
+                        if let screenReplySink {
+                            // The epoch travels with the reply so the pull can
+                            // refuse one that crossed a reconnect.
+                            screenReplySink(reply, epoch)
+                        } else {
+                            logger.debug("sidecar: screen reply with no handler, dropping")
+                        }
+                    case .fdVend, .injection, .screenRequest:
+                        // The app must never send fd vends, injections or
+                        // screen requests — all three directions are
+                        // daemon → app only.
                         logger.error("sidecar: received \(frame.type, privacy: .public) frame from app (protocol violation), dropping")
                     }
                 }
@@ -472,6 +541,13 @@ actor FDVendingServer {
                     break readLoop
                 }
             }
+            // Fired from the thread, before the actor hop, because this sink's
+            // subject is the EPOCH and the thread is the only place that knows
+            // its own: anything waiting on an answer from this connection can
+            // stop waiting now, whether or not this connection was still the
+            // current one. Synchronous and cheap by contract — it resolves
+            // waiters, it does not do IO.
+            connectionLostSink?(epoch)
             // Reader never closes: hop onto the actor, which clears clientFD (if
             // still this fd) and performs the sole close, then fires the test hook.
             Task { await self?.receiveLoopExited(fd: fd) }

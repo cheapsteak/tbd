@@ -491,13 +491,20 @@ jobs:
           # global or system git config for the verifier's git, since a
           # session can write ~/.gitconfig (the tests' git never reads it,
           # under test.sh's fenced HOME).
-          rec="$({
+          # A function, so no `case` sits inside the command substitution: the
+          # runner's /bin/bash is 3.2, which ends a `$(` at a case pattern's
+          # unpaired `)` and fails the step (scripts/flake-bash32.test.sh).
+          record() {
+            local v
             for v in $(compgen -e); do
-              case "$v" in GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_|GIT_CONFIG_*) ;;
-                *) printf '%s=%s\0' "$v" "${!v}" ;; esac
+              case "$v" in
+                (GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_|GIT_CONFIG_*) ;;
+                (*) printf '%s=%s\0' "$v" "${!v}" ;;
+              esac
             done
             printf '%s\0' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-          } | base64 | tr -d '\n')"
+          }
+          rec="$(record | base64 | tr -d '\n')"
           [ -n "$rec" ]
           echo "env=$rec" >> "$GITHUB_OUTPUT"
 
@@ -564,7 +571,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM SNAP_SUM BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -634,7 +641,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -679,7 +686,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -718,7 +725,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -747,7 +754,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -765,7 +772,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -812,7 +819,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM TRY1_VERIFY_SUM SNAP_SUM TRY1_HEAD BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -892,7 +899,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -937,7 +944,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -993,11 +1000,13 @@ jobs:
           # outage, a crash, the turn limit or the step's timeout – which
           # `continue-on-error` hides. An action that reports no conclusion at
           # all counts as failed: the job then goes red, which is how a change
-          # to the action's outputs would show.
+          # to the action's outputs would show. A skipped session never ran: an
+          # earlier step failed, which already ends the job red and is the
+          # abort reason below, not a session's failure.
           failed_session=""
-          if [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; then
+          if [ "$S1" != skipped ] && { [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; }; then
             failed_session="1 (step $S1, Claude Code ${S1_CONCLUSION:-reported nothing})"
-          elif [ "$TRY2" = true ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
+          elif [ "$TRY2" = true ] && [ "$S2" != skipped ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
             failed_session="2 (step $S2, Claude Code ${S2_CONCLUSION:-reported nothing})"
           fi
           if [ -f "$T/abort_reason" ]; then
@@ -1062,7 +1071,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -1185,6 +1194,10 @@ jobs:
   # status text (§6.5). A PR a human returned to draft is held and never
   # promoted again. It writes no ledger or attempt state (§4.4); a skip
   # changes nothing.
+  # The status leg does not filter on the event's `branches`: GitHub lists at
+  # most 10 branches there, so a commit on more could hide its flakefix/issue-
+  # branch. `promote --from-status` resolves the PR from the commit itself and
+  # skips cleanly when there is none.
   promote:
     name: promote
     if: >-
@@ -1199,8 +1212,7 @@ jobs:
         github.event.workflow_run.head_repository.full_name == github.repository) ||
        (github.event_name == 'status' &&
         github.event.context == 'flakefix/stress' &&
-        github.event.state == 'success' &&
-        contains(toJSON(github.event.branches.*.name), '"flakefix/issue-')))
+        github.event.state == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # No concurrency group. Each promote decides for its own run's head SHA,

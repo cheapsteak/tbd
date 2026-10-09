@@ -6,9 +6,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 
 /// One holder's residue in the rendezvous directory, keyed by its socket.
 ///
-/// The socket is the only member the reconciler decides on. The lock and the
-/// log are unlinked as its siblings and never on their own — see
-/// `HolderRendezvousCollector` for why that asymmetry is deliberate.
+/// The socket is the member this candidate is decided on; the lock and the log
+/// are unlinked as its siblings. A lock and a log with no socket at all are
+/// `HolderRendezvousOrphanPair` instead, decided on by their own gates — see
+/// `HolderRendezvousCollector` for the two arms and what bounds each.
 public struct HolderRendezvousCandidate: Sendable, Equatable {
     public var sessionID: UUID
     public var socketPath: String
@@ -23,11 +24,35 @@ public struct HolderRendezvousCandidate: Sendable, Equatable {
     }
 }
 
-/// Outcome of gating one candidate. `reason` is one of `"unknown-age"`,
-/// `"grace"`, `"lock-held"`, `"listening"`.
+/// Outcome of gating one candidate, shared by both arms. `reason` is one of
+/// `"unknown-age"`, `"grace"`, `"lock-held"`, `"listening"` (socket arm) or
+/// `"has-row"` (socket-less arm).
 public enum HolderRendezvousDecision: Sendable, Equatable {
     case keep(reason: String)
     case reap
+}
+
+/// One session's **socket-less** residue: a `<uuid>.lock`, a `<uuid>.log`, or
+/// both, with no `<uuid>.sock` sibling in the directory.
+///
+/// Named by its lock path whether or not the lock file itself exists, so one
+/// string identifies the pair in plans, in logs and in the anchoring check —
+/// the role `socketPath` plays for `HolderRendezvousCandidate`.
+public struct HolderRendezvousOrphanPair: Sendable, Equatable {
+    public var sessionID: UUID
+    public var lockPath: String
+    /// The **newest** creation date among the files that exist, or `nil` when
+    /// any of them could not be read — which the grace gate treats as "too
+    /// young to touch". Newest rather than oldest because the gate asks whether
+    /// anything recent has happened under this UUID, and the keep-biased answer
+    /// to a week-old lock beside a log written a second ago is to wait.
+    public var createdAt: Date?
+
+    public init(sessionID: UUID, lockPath: String, createdAt: Date?) {
+        self.sessionID = sessionID
+        self.lockPath = lockPath
+        self.createdAt = createdAt
+    }
 }
 
 /// The named reconciler for holder rendezvous files: the `<uuid>.sock` a pty
@@ -43,16 +68,46 @@ public enum HolderRendezvousDecision: Sendable, Equatable {
 /// this machine was ~7,100 dead socket files accumulated in nine days. Without
 /// this sweep the holder transport leaks a file triple per session forever.
 ///
-/// **The lock and the log are swept as siblings of a socket being reaped,
-/// never on their own.** For the lock that asymmetry is a safety property, not
-/// tidiness: `HolderLock` deliberately leaves its file behind on release
-/// because unlinking a lock somebody holds lets a racing spawner create and
-/// lock a *different* file at the same path — two holders for one session.
-/// Anchoring every unlink to a socket the sweep has already proven dead keeps
-/// this collector out of that race, and the `lock-held` gate closes it even
-/// when a spawn is in flight over an old socket. For the log the reasoning is
-/// the same shape: a log with no socket may belong to a holder still being
-/// born, whose socket is about to appear.
+/// **Two arms read one directory.** The socket arm decides on a `<uuid>.sock`
+/// and unlinks its `<uuid>.lock` and `<uuid>.log` siblings along with it. The
+/// socket-less arm decides on a lock-and-log pair that has **no** socket —
+/// the residue of a holder that got far enough to unlink its own socket, or
+/// whose socket an earlier sweep already took. The socket arm structurally
+/// cannot see that pair, so without the second arm a clean holder exit leaks
+/// two files per session forever: measured on this machine, 557 such pairs
+/// against 53 live sockets.
+///
+/// **What licenses unlinking a lock is never the lock's own freeness alone.**
+/// `HolderLock` deliberately leaves its file behind on release, because
+/// unlinking a lock somebody holds lets a racing spawner create and lock a
+/// *different* file at the same path — two holders for one session. The socket
+/// arm stays out of that race by anchoring every unlink to a socket it has
+/// already proven dead. The socket-less arm has no such anchor, and **the lock
+/// itself is what bounds it**: the flock is taken by the spawner before the
+/// lock file's siblings exist, travels to the holder as an inherited
+/// descriptor on the same open file description, and is released only by the
+/// holder's death — so a spawn in flight presents a held lock for all but the
+/// one instant named below. The row gate and the grace window are the
+/// reinforcement, not the
+/// argument: a fresh spawn's row is written *after* the holder
+/// (`WorktreeLifecycle+SpawnTerminal`), so the row covers the wake and respawn
+/// paths, where the row precedes the holder, and says of everything else that
+/// TBD no longer knows the session. The grace window is defense in depth
+/// against both, and a socket that appeared since the listing is a late gate in
+/// front of the unlink itself.
+///
+/// Two residuals follow, both one syscall pair wide and both accepted rather
+/// than closed. `lockIsHeld` can read a free lock an instant before a spawner
+/// takes it, and the unlink then lands on the file that spawner holds; and
+/// `HolderLock.acquire` opens the lock file with `O_CREAT` *before* it flocks
+/// it, so for the instant in between the file exists and is free. Neither is
+/// closable with `flock` — holding the lock across the unlink leaves a waiting
+/// spawner locking an unlinked inode, which is the same hazard. What covers
+/// both is that each needs a coincidence the spawn path does not produce: a
+/// spawn beginning, in that one instant, for a UUID whose residue is already
+/// past the grace window — while a spawn mints a fresh UUID with no residue at
+/// all. This is the one place the grace window is load-bearing rather than
+/// reinforcement, and it is why it should stay large relative to a spawn.
 ///
 /// **The log is swept, though the design spec predates it.** It is created by
 /// `HolderSpawner` under the same `<session-uuid>.<ext>` rule in the same
@@ -168,10 +223,170 @@ public struct HolderRendezvousCollector: Sendable {
             """)
             return []
         }
+        let removed = unlinkRendezvousFiles(
+            sessionID: candidate.sessionID, extensions: HolderRendezvous.fileExtensions)
+        if !removed.isEmpty {
+            logger.info("""
+            gc: unlinked holder rendezvous for session \
+            \(candidate.sessionID.uuidString, privacy: .public): \
+            \(removed.joined(separator: " "), privacy: .public)
+            """)
+        }
+        return removed
+    }
+
+    // MARK: - The socket-less arm
+
+    /// Immediate children named `<uuid>.lock` or `<uuid>.log` whose `<uuid>.sock`
+    /// sibling is absent, grouped one pair per session. A name whose stem does
+    /// not parse as a UUID, a directory, and every other extension are not
+    /// candidates; an unreadable or missing base yields none — the same reading
+    /// of the directory `candidates()` takes, because the two arms must agree
+    /// about what lives there.
+    ///
+    /// The socket set is built from the same listing, so "has no socket" is
+    /// answered against one snapshot rather than by a second `stat` that could
+    /// disagree with the first. A socket that appears after the listing is
+    /// caught by the late gate in `reapOrphanPair`.
+    public func orphanPairCandidates() -> [HolderRendezvousOrphanPair] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: base.path) else { return [] }
+
+        var socketIDs: Set<UUID> = []
+        var residueIDs: Set<UUID> = []
+        var newest: [UUID: Date] = [:]
+        var unreadableAge: Set<UUID> = []
+        for name in names {
+            let matched = HolderRendezvous.fileExtensions.first { name.hasSuffix(".\($0)") }
+            guard let ext = matched,
+                  let id = UUID(uuidString: String(name.dropLast(ext.count + 1)))
+            else { continue }
+            let url = base.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+                continue
+            }
+            guard ext != "sock" else {
+                socketIDs.insert(id)
+                continue
+            }
+            residueIDs.insert(id)
+            if let created = (try? fm.attributesOfItem(atPath: url.path))?[.creationDate] as? Date {
+                newest[id] = newest[id].map { Swift.max($0, created) } ?? created
+            } else {
+                unreadableAge.insert(id)
+            }
+        }
+
+        return residueIDs.subtracting(socketIDs).map { id in
+            HolderRendezvousOrphanPair(
+                sessionID: id, lockPath: lockPath(sessionID: id),
+                createdAt: unreadableAge.contains(id) ? nil : newest[id])
+        }.sorted { $0.lockPath < $1.lockPath }
+    }
+
+    /// Gate order: age → row → lock. Every gate fails toward keeping, and the
+    /// pair's socket-lessness — established by `orphanPairCandidates()` — is
+    /// the gate in front of all three.
+    ///
+    /// Age comes first for the reason it does in the socket arm: it is a `stat`
+    /// already paid for by the listing, and it exists for a race rather than a
+    /// fact. `OrphanGC` runs on demand from RPC handlers, so a sweep can land
+    /// between a spawner creating the lock and the holder binding its socket,
+    /// and reaping there would unlink a session's lock while it is being born.
+    ///
+    /// The row comes next because it is a set membership against rows read once
+    /// for the whole phase. It is the gate that says TBD no longer knows this
+    /// session, and it covers the wake and respawn paths, where the row exists
+    /// before the holder does. It is **not** what protects a fresh spawn: that
+    /// row is written after the holder (`WorktreeLifecycle+SpawnTerminal`), so
+    /// mid-spawn a UUID legitimately has a lock, a log and no row.
+    ///
+    /// The lock probe comes last — the one syscall of the three — and is the
+    /// same non-blocking acquisition the socket arm uses. It is the gate a
+    /// fresh spawn is held by: a holder holds its lock for its whole life, and
+    /// so does the spawner that took it before the holder existed, with no gap
+    /// between them because the descriptor is inherited rather than reopened.
+    /// It keeps whatever the grace window is configured to, which is why that
+    /// window is reinforcement here and not the bound.
+    ///
+    /// - Parameter claimedSessionIDs: the ids of every session row that exists.
+    ///   A pair in this set belongs to a session TBD still knows about.
+    public func decideOrphanPair(
+        _ pair: HolderRendezvousOrphanPair,
+        graceSeconds: Int,
+        claimedSessionIDs: Set<UUID>
+    ) -> HolderRendezvousDecision {
+        guard let created = pair.createdAt else {
+            return .keep(reason: "unknown-age")
+        }
+        if now().timeIntervalSince(created) < Double(graceSeconds) {
+            return .keep(reason: "grace")
+        }
+        if claimedSessionIDs.contains(pair.sessionID) {
+            return .keep(reason: "has-row")
+        }
+        if lockIsHeld(sessionID: pair.sessionID) {
+            return .keep(reason: "lock-held")
+        }
+        return .reap
+    }
+
+    /// Unlinks the lock and the log, and returns the paths that are gone as a
+    /// result. **Never the socket**, which this arm has no verdict on: a socket
+    /// at this path means the socket arm's gates are the ones that apply.
+    ///
+    /// Two guards in front, both refusing rather than proceeding:
+    ///
+    ///   - **Anchored**, the same check `reap` keeps: `orphanPairCandidates()`
+    ///     only produces anchored pairs, but `HolderRendezvousOrphanPair` is a
+    ///     public value type anyone can construct, so the invariant is checked
+    ///     rather than assumed.
+    ///   - **Still socket-less.** The gates ran against the listing; a spawner
+    ///     that bound a socket since then owns this UUID, and its lock is not
+    ///     ours to unlink.
+    @discardableResult
+    public func reapOrphanPair(_ pair: HolderRendezvousOrphanPair) -> [String] {
+        guard isAnchored(pair) else {
+            logger.warning("""
+            gc: refusing to unlink \(pair.lockPath, privacy: .public) — not a \
+            \(pair.sessionID.uuidString.lowercased(), privacy: .public).lock immediate child \
+            of \(self.base.path, privacy: .public)
+            """)
+            return []
+        }
+        let socketPath = base.appendingPathComponent(
+            "\(pair.sessionID.uuidString.lowercased()).sock").path
+        guard !FileManager.default.fileExists(atPath: socketPath) else {
+            logger.info("""
+            gc: \(pair.lockPath, privacy: .public) acquired a socket since the listing — \
+            left to the socket arm
+            """)
+            return []
+        }
+        let removed = unlinkRendezvousFiles(
+            sessionID: pair.sessionID, extensions: ["lock", "log"])
+        if !removed.isEmpty {
+            logger.info("""
+            gc: unlinked socket-less holder rendezvous residue for session \
+            \(pair.sessionID.uuidString, privacy: .public): \
+            \(removed.joined(separator: " "), privacy: .public)
+            """)
+        }
+        return removed
+    }
+
+    // MARK: - Unlinking
+
+    /// Unlinks `base/<sessionID>.<ext>` for every extension that exists, and
+    /// returns the paths that are gone as a result. A missing file is not a
+    /// failure — a holder that bound but never wrote a log leaves one — and a
+    /// failed unlink leaves the file for the next sweep to reconsider.
+    private func unlinkRendezvousFiles(sessionID: UUID, extensions: [String]) -> [String] {
         var removed: [String] = []
-        for ext in HolderRendezvous.fileExtensions {
+        for ext in extensions {
             let path = base.appendingPathComponent(
-                "\(candidate.sessionID.uuidString.lowercased()).\(ext)").path
+                "\(sessionID.uuidString.lowercased()).\(ext)").path
             guard FileManager.default.fileExists(atPath: path) else { continue }
             if unlink(path) == 0 {
                 removed.append(path)
@@ -182,13 +397,6 @@ public struct HolderRendezvousCollector: Sendable {
                 \(String(cString: strerror(code)), privacy: .public) (errno \(code, privacy: .public))
                 """)
             }
-        }
-        if !removed.isEmpty {
-            logger.info("""
-            gc: unlinked holder rendezvous for session \
-            \(candidate.sessionID.uuidString, privacy: .public): \
-            \(removed.joined(separator: " "), privacy: .public)
-            """)
         }
         return removed
     }
@@ -205,9 +413,7 @@ public struct HolderRendezvousCollector: Sendable {
     /// releases it, so no window is left in which this process is the holder of
     /// record.
     func lockIsHeld(sessionID: UUID) -> Bool {
-        let path = base.appendingPathComponent(
-            "\(sessionID.uuidString.lowercased()).lock").path
-        let fd = open(path, O_RDONLY | O_CLOEXEC)
+        let fd = open(lockPath(sessionID: sessionID), O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else {
             // ENOENT is "no lock file, so nobody holds it". Anything else is an
             // unreadable answer, and an unreadable answer keeps.
@@ -262,5 +468,18 @@ public struct HolderRendezvousCollector: Sendable {
         let url = URL(fileURLWithPath: candidate.socketPath)
         guard url.deletingLastPathComponent().path == base.path else { return false }
         return url.lastPathComponent == "\(candidate.sessionID.uuidString.lowercased()).sock"
+    }
+
+    /// The same check for a socket-less pair, which names itself by its lock.
+    private func isAnchored(_ pair: HolderRendezvousOrphanPair) -> Bool {
+        let url = URL(fileURLWithPath: pair.lockPath)
+        guard url.deletingLastPathComponent().path == base.path else { return false }
+        return url.lastPathComponent == "\(pair.sessionID.uuidString.lowercased()).lock"
+    }
+
+    /// Where this session's creation lock lives. One derivation, so the probe,
+    /// the unlink and the pair's own name cannot drift apart.
+    private func lockPath(sessionID: UUID) -> String {
+        base.appendingPathComponent("\(sessionID.uuidString.lowercased()).lock").path
     }
 }

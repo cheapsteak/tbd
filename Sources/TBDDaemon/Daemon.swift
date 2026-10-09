@@ -204,6 +204,14 @@ public final class Daemon: Sendable {
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+    /// Logs the holder transport's reader census — the double-reader violation
+    /// count — once at startup and then hourly. `nil` in mock mode.
+    ///
+    /// The counter itself is always on and costs a dictionary write per reader
+    /// transition; this task is only how a human reads it back weeks later,
+    /// because the count lives in daemon memory and signposts are a ring
+    /// buffer. See `HolderRegistry.reportReaderCensusPeriodically`.
+    nonisolated(unsafe) var holderReaderCensusTask: Task<Void, Never>?
     /// The one `ModelProxySupervisor` for this TBD home. Owned here so
     /// shutdown can take the watch away, and so the config RPC that flips
     /// `model_proxy_enabled` can reach the same instance the lifecycle, the
@@ -986,6 +994,22 @@ public final class Daemon: Sendable {
                 })
         }
 
+        // The read direction of the same arrangement: ask the viewer that holds
+        // a session's pty what is on its screen. Built from the sidecar alone —
+        // unlike the courier it needs no fallback writer, because the fallback
+        // for a read is the daemon's own retained emulator and that belongs to
+        // the resolver above it. Gated on the registry for the same reason the
+        // courier is: with no registry there is no holder transport in this
+        // daemon, so there is nothing to pull from. Its reply and
+        // connection-lost sinks are installed at step 9a, before the sidecar
+        // listens, because a connection captures its sinks at adopt time.
+        let holderScreenPull: HolderScreenPull? = holderRegistry.map { _ in
+            HolderScreenPull(
+                sendFrame: { [fdVendingServer] frame in
+                    try await fdVendingServer.sendFrame(frame)
+                })
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1414,6 +1438,16 @@ public final class Daemon: Sendable {
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
 
+        // Pending provider replacements recover only after the socket is live:
+        // Codex readiness arrives through the SessionStart hook RPC, so a
+        // pre-bind recovery would always time out despite a healthy process.
+        // The durable row remains Codex throughout the pass. It is NOT run
+        // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
+        // for that hook, serially, so awaiting it would hold every later boot
+        // step (the sidecar, the HTTP server) behind N × 15 s. The maintenance
+        // task in step 11a-gc runs the same pass immediately after boot, off the
+        // critical path, and then hourly.
+
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
         // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
@@ -1468,6 +1502,19 @@ public final class Daemon: Sendable {
         if let holderInjectionCourier {
             await fdVendingServer.setOnInjectionAck { ack in
                 holderInjectionCourier.acknowledge(ack)
+            }
+        }
+        // A viewer's answer to one screen request, and the end of the
+        // connection that carried it. Both sinks go to the same actor: the
+        // reply resolves a waiting pull, and a connection that ends fails every
+        // pull still outstanding on it rather than leaving them to the bound.
+        // Nil-safe by construction, like the ack sink above.
+        if let holderScreenPull {
+            await fdVendingServer.setOnScreenReply { reply, epoch in
+                holderScreenPull.record(reply, epoch: epoch)
+            }
+            await fdVendingServer.setOnConnectionLost { epoch in
+                holderScreenPull.connectionLost(epoch: epoch)
             }
         }
 
@@ -1560,6 +1607,20 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-reader-census. Record the holder transport's double-reader
+            // violation count where a human can read it back. The detector is
+            // always on inside `HolderRegistry` — every transition into reading
+            // asserts the session had no reader — but the count lives in daemon
+            // memory, so without a persisted line "did the soak see any
+            // violations?" is answerable only by an absence, which is exactly
+            // the unaided observation the detector replaces. One `.notice` at
+            // startup and one an hour after that.
+            if let holderRegistry {
+                self.holderReaderCensusTask = Task {
+                    await holderRegistry.reportReaderCensusPeriodically()
+                }
+            }
+
             // 11a-questions. Expire stranded AskUserQuestion captures. This
             // ran as a side effect of `terminal.transcript` until the app
             // started reading transcripts itself; on that path the handler is
@@ -1615,8 +1676,13 @@ public final class Daemon: Sendable {
             // `orphanGC` is always non-nil here.
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
-                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
                     // Sweep once immediately (cold recovery), then every hour.
+                    // The immediate pass is also the post-socket recovery of any
+                    // Continue in Claude transaction a crash left pending: it
+                    // waits on hook-delivered readiness, so it runs here, off
+                    // the boot path, rather than serially before the listeners.
+                    await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,
                         lifecycle: maintenanceLifecycle,
@@ -1626,6 +1692,7 @@ public final class Daemon: Sendable {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
+                        await rpcRouter.reconcilePendingContinueInClaude()
                         await Self.performOrphanMaintenance(
                             orphanGC: orphanGC,
                             lifecycle: maintenanceLifecycle,
@@ -2215,6 +2282,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        holderReaderCensusTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
         shadowPeerReconcilerTask?.cancel()

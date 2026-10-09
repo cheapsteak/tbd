@@ -51,6 +51,16 @@ final class FDSidecarClient: @unchecked Sendable {
     /// bytes, and saying so immediately is what lets the daemon write them
     /// itself instead of waiting out its deadline.
     private var injectionHandler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?
+    /// Sink for daemon → app `.screenRequest` frames: the daemon asking what is
+    /// on the screen of a holder-backed session whose pty this app holds.
+    /// Guarded by `lock` for `injectionHandler`'s reason — the receive thread
+    /// reads it per frame while the main actor installs it.
+    ///
+    /// When nil, a request is answered `.unavailable(.noPanel)` rather than
+    /// dropped. An app with no handler is one that will never answer, and
+    /// saying so immediately is what lets the daemon answer from its own
+    /// emulator instead of waiting out its bound.
+    private var screenRequestHandler: (@Sendable (SidecarScreenRequest) -> Void)?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
 
@@ -59,6 +69,13 @@ final class FDSidecarClient: @unchecked Sendable {
     /// startup survives every sidecar reconnect.
     func setOnInjection(_ handler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?) {
         lock.lock(); injectionHandler = handler; lock.unlock()
+    }
+
+    /// Install the daemon → app screen-request handler. Read per frame rather
+    /// than captured per connection, so installing it once at startup survives
+    /// every sidecar reconnect.
+    func setOnScreenRequest(_ handler: (@Sendable (SidecarScreenRequest) -> Void)?) {
+        lock.lock(); screenRequestHandler = handler; lock.unlock()
     }
 
     /// Connect to `path` and start the receive thread. Idempotent.
@@ -295,6 +312,52 @@ final class FDSidecarClient: @unchecked Sendable {
         return true
     }
 
+    /// Answer one daemon screen request.
+    ///
+    /// Same inline-encode + `sendQueue` shape as `sendInjectionAck`, and
+    /// deliberately **not** gated on `isConnected` for the same reason: the
+    /// reply is a report the daemon is already waiting on with a bound, so the
+    /// cheapest correct thing to do with a dead socket is try and let the write
+    /// block log its own failure. Refusing early would reach the same outcome —
+    /// the daemon's fallback to its own emulator — one main-actor frame sooner,
+    /// and no caller here can act on the difference.
+    ///
+    /// Returns whether the frame was handed to `sendQueue`; `false` for an
+    /// encode failure, which is reported rather than swallowed. Unlike an
+    /// injection ack's two UUIDs and a Bool, a reply carries a whole screen, so
+    /// an encode failure here is at least imaginable.
+    @discardableResult
+    func sendScreenReply(_ reply: SidecarScreenReply) -> Bool {
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodeScreenReply(reply)
+        } catch {
+            logger.error("""
+                sidecar: failed to encode screen reply for \
+                \(reply.requestID.uuidString, privacy: .public), dropping
+                """)
+            return false
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("""
+                    sidecar: screen reply for \
+                    \(reply.requestID.uuidString, privacy: .public) while disconnected, dropping
+                    """)
+                return
+            }
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error(
+                    "sidecar: screen reply send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return true
+    }
+
     private func receiveLoop(_ fd: Int32) {
         let scanner = SidecarFrameScanner()
         // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
@@ -350,9 +413,11 @@ final class FDSidecarClient: @unchecked Sendable {
                     handleFDVend(headerPayload: frame.payload, fd: rxFD)
                 case .injection:
                     handleInjection(payload: frame.payload)
-                case .input, .paste, .injectionAck:
-                    // The daemon must never send input, paste or ack frames —
-                    // those directions are app → daemon only.
+                case .screenRequest:
+                    handleScreenRequest(payload: frame.payload)
+                case .input, .paste, .injectionAck, .screenReply:
+                    // The daemon must never send input, paste, ack or screen
+                    // reply frames — those directions are app → daemon only.
                     logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
@@ -402,6 +467,37 @@ final class FDSidecarClient: @unchecked Sendable {
             return
         }
         handler(header, bytes)
+    }
+
+    /// Hand a completed `.screenRequest` frame to the installed handler, or
+    /// answer it unavailable.
+    ///
+    /// The answer for a missing handler is sent from here rather than left to
+    /// the daemon's bound, for `handleInjection`'s reason: "nothing here can
+    /// answer" is a *knowable, synchronous* refusal, and reporting it at once
+    /// is what keeps the daemon from spending half a second on an answer that
+    /// was never coming. `.noPanel` is the honest reason — from the daemon's
+    /// side a build with no handler and an app with no panel for that session
+    /// are the same fact — and the log line is what distinguishes them here.
+    private func handleScreenRequest(payload: Data) {
+        guard let request = try? SidecarFrameCodec.decodeScreenRequest(payload: payload) else {
+            logger.error("sidecar: undecodable screen request frame, dropping")
+            return
+        }
+        lock.lock(); let handler = screenRequestHandler; lock.unlock()
+        guard let handler else {
+            logger.error("""
+                sidecar: screen request for terminal \
+                \(request.terminalID.uuidString, privacy: .public) arrived with no handler \
+                installed; answering it unavailable
+                """)
+            sendScreenReply(
+                SidecarScreenReply(
+                    requestID: request.requestID, terminalID: request.terminalID,
+                    unavailable: .noPanel))
+            return
+        }
+        handler(request)
     }
 
     /// Route a completed `.fdVend` frame's paired fd to its waiter, or close it.

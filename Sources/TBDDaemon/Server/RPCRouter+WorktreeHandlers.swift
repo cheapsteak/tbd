@@ -117,7 +117,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay, rollBackOnFailure: false)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
@@ -134,16 +134,15 @@ extension RPCRouter {
                     break
                 }
             } catch {
-                // completeCreateWorktree already deletes the DB row on failure.
-                // Broadcast an archive delta so clients remove the pending entry.
-                // `creationFailed: true` is set ONLY here — this is the single
-                // path where a row disappears because its creation actually
-                // failed, so it's the only place that can tell clients apart
-                // from a deliberate archive of a still-`.creating` row.
-                subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
-                    worktreeID: pending.id,
-                    creationFailed: true
-                )))
+                // Delete the row (saving any first message parked in it) and
+                // broadcast an archive delta so clients remove the pending
+                // entry. `creationFailed: true` is set ONLY here — this is the
+                // single path where a row disappears because its creation
+                // actually failed, so it's the only place that can tell
+                // clients apart from a deliberate archive of a still-`.creating`
+                // row.
+                subs.broadcast(delta: .worktreeArchived(
+                    await lifecycle.rollBackFailedCreate(worktreeID: pending.id)))
                 // `String(describing:)` rather than `localizedDescription`:
                 // this line is the only record of the failure — the create runs
                 // detached, so nothing about it returns down the RPC. An error

@@ -243,6 +243,12 @@ final class AppState {
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
     @ObservationIgnored var terminalSessionOrderObservedAt: [UUID: Date] = [:]
+    /// Monotonic app-local generation for provider-replacement observations.
+    /// Each terminal records the generation of its latest `terminalReplaced`
+    /// adoption so an already-running terminal.list response cannot put the
+    /// superseded provider back after the pushed replacement commits.
+    @ObservationIgnored var terminalReplacementObservationGeneration: UInt64 = 0
+    @ObservationIgnored var terminalReplacementObservedGeneration: [UUID: UInt64] = [:]
     /// Polled note METADATA — never content. `note.list` touches no file (see
     /// `NoteStore`); a pane that needs content reads it off disk with
     /// `noteContent(noteID:worktreeID:)`.
@@ -896,6 +902,16 @@ final class AppState {
     /// live, and consulted by the sidecar's injection handler
     /// (`installInjectionHandler`).
     @ObservationIgnored let terminalInjections = TerminalInjectionRouter()
+    /// Where a daemon screen request for a holder-backed session goes: the
+    /// panel whose terminal is that session's live store. Registered by
+    /// `TerminalPanelView.Coordinator` for as long as its holder attach is
+    /// live, and consulted by the sidecar's screen-request handler
+    /// (`installScreenRequestHandler`).
+    ///
+    /// A sibling of `terminalInjections` rather than a second closure on it:
+    /// answering a screen needs no write descriptor, so a panel that runs
+    /// read-only can still serve reads. `TerminalScreenRouter`'s doc argues it.
+    @ObservationIgnored let terminalScreens = TerminalScreenRouter()
     /// The holder handbacks in flight, keyed by terminal ID. A panel that is
     /// replacing another panel for the same holder-backed terminal waits here
     /// for its predecessor's `pane.detach` before attaching, because the
@@ -1700,8 +1716,14 @@ final class AppState {
     @ObservationIgnored var terminalRecoveryBudget = TerminalRecoveryBudget()
 
     // Alert state for user feedback
-    var alertMessage: String? = nil
+    var alertMessage: String? = nil {
+        didSet { if alertMessage == nil { alertRevealPath = nil } }
+    }
     var alertIsError: Bool = false
+    /// A file the current alert is about. When set, the alert offers Copy
+    /// Path and Reveal in Finder beside OK. Cleared whenever the alert is, so
+    /// a later plain alert can never inherit buttons for an earlier file.
+    var alertRevealPath: String? = nil
 
     private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
     private(set) var savedTmuxExecutablePath: String?
@@ -1938,6 +1960,9 @@ final class AppState {
     /// asked to call something first.
     var queuedPromptTarget: QueuedPromptTarget? {
         didSet {
+            if let closed = oldValue, closed !== queuedPromptTarget {
+                composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== closed }
+            }
             if queuedPromptTarget == nil { advanceQueuedPromptBacklog() }
         }
     }
@@ -1949,6 +1974,13 @@ final class AppState {
     /// the operator can be left typing into a modal bound to the *previous*
     /// target. They queue instead.
     @ObservationIgnored var queuedPromptBacklog: [QueuedPromptTarget] = []
+    /// Composers on screen or queued, keyed by their daemon worktree ID once
+    /// `worktree.create` has returned it. `git worktree add` runs after that
+    /// return, so its failure arrives later as a
+    /// `.worktreeArchived(creationFailed: true)` delta, and this is how the
+    /// delta finds the composer whose draft would otherwise go with the row.
+    /// An entry leaves when its composer closes and on any archive of its row.
+    @ObservationIgnored var composerTargetsByWorktreeID: [UUID: QueuedPromptTarget] = [:]
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -1994,6 +2026,19 @@ final class AppState {
                 checkoutPRHead: request.checkoutPRHead
             )
         }
+    /// Where a first message that never reached its worktree is written —
+    /// `UnsentPromptFile` under `~/tbd/repos/<repoID>/unsent-prompts/`.
+    /// Returns the path written. Injectable so tests never write under the
+    /// process-global `TBD_HOME`, and can make the write fail.
+    @ObservationIgnored lazy var unsentPromptWriter:
+        @MainActor (_ repoID: UUID, _ worktreeName: String, _ text: String) throws -> String =
+            { repoID, worktreeName, text in
+                try UnsentPromptFile.write(
+                    text: text,
+                    worktreeName: worktreeName,
+                    directory: TBDConstants.unsentPromptsDir(repoID: repoID),
+                    date: Date())
+            }
     /// How `submitQueuedPrompt` parks the composed text — injectable for the
     /// same reason as `worktreeCreator`.
     /// A `nil` text unparks — the daemon clears the column and disarms any
@@ -2241,6 +2286,7 @@ final class AppState {
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
+        installScreenRequestHandler()
         // Give the notification manager a back-reference so banner clicks
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
@@ -2777,6 +2823,8 @@ final class AppState {
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
+        case .terminalReplaced(let terminal):
+            applyTerminalReplacedDelta(terminal)
         case .terminalRemoved(let d):
             applyTerminalRemovedDelta(d)
         case .terminalActivityUpdated(let d):
@@ -2928,7 +2976,9 @@ final class AppState {
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
         // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
-        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+        let failureMessage = creationFailureAlert(
+            worktree, delta: delta,
+            composer: composerTargetsByWorktreeID.removeValue(forKey: delta.worktreeID))
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
@@ -2946,9 +2996,54 @@ final class AppState {
         // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
         // pre-session hook — arrives with creationFailed == false and must stay
         // silent, even though the row is `.creating` at this moment.
+        //
+        // Nil when the open composer will raise the alert itself — replacing
+        // an alert while it is on screen is not reliable on macOS, so there is
+        // only ever one.
         if let message = failureMessage {
-            showAlert(message, isError: true)
+            showAlert(message.text, isError: true, revealPath: message.revealPath)
         }
+    }
+
+    /// The alert for a creation-failure archive, and the composer side of it.
+    ///
+    /// Names the file the daemon saved the row's parked first message to, if
+    /// it saved one. Tells this row's composer the creation failed: an open
+    /// one saves its draft, closes and raises the alert itself — so this
+    /// returns nil for it — while a queued one, never on screen and so
+    /// holding no draft, is dropped from the queue and this alert stands. A
+    /// deliberate archive (`creationFailed == false`) returns nil and leaves
+    /// the composer alone.
+    ///
+    /// "Open" is exact because of what the map holds: a composer leaves it
+    /// when it closes (`queuedPromptTarget`'s observer) and when it submits
+    /// (`submitQueuedPrompt`), so an entry that is also the presented target
+    /// is a live, unsubmitted sheet whose `onChange(of: hasFailed)` will run.
+    /// A daemon-saved (or daemon-lost) message is the one exception: that
+    /// alert is the only place its fate is named, so it stands regardless.
+    private func creationFailureAlert(
+        _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
+    ) -> (text: String, revealPath: String?)? {
+        guard delta.creationFailed else { return nil }
+        let named = Self.creationFailureMessage(worktree, creationFailed: true)
+        guard let failure = named
+            ?? ((composer != nil || delta.unsentPromptPath != nil || delta.unsentPromptLost)
+                ? "Worktree creation failed." : nil)
+        else { return nil }
+        if let composer {
+            composer.failAfterCreate(reason: failure)
+            queuedPromptBacklog.removeAll { $0 === composer }
+            if queuedPromptTarget === composer, delta.unsentPromptPath == nil,
+               !delta.unsentPromptLost { return nil }
+        }
+        if delta.unsentPromptLost {
+            // "If one was queued": the daemon sets the flag when it could not
+            // even read the row, so a message is possible, not certain.
+            return ("\(failure) Its first message, if one was queued, could not be saved.", nil)
+        }
+        guard let path = delta.unsentPromptPath else { return (failure, nil) }
+        let shown = (path as NSString).abbreviatingWithTildeInPath
+        return ("\(failure) Its first message was saved to \(shown).", path)
     }
 
     /// Returns a failure alert message when the daemon reported that this
@@ -3712,13 +3807,15 @@ final class AppState {
             }
 
             // Single RPC — fetch all terminals, group client-side
+            let terminalSnapshotGeneration = terminalReplacementObservationGeneration
             let allTerminals = try await daemonClient.listTerminals()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
             for wtID in visibleWorktreeIDs {
                 adoptTerminalSnapshot(
                     terminalsByWorktree[wtID] ?? [],
-                    worktreeID: wtID
+                    worktreeID: wtID,
+                    startedAtReplacementGeneration: terminalSnapshotGeneration
                 )
             }
 
@@ -3758,8 +3855,12 @@ final class AppState {
     /// Refresh terminals for a specific worktree. Only updates if data changed.
     func refreshTerminals(worktreeID: UUID) async {
         do {
+            let snapshotGeneration = terminalReplacementObservationGeneration
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
-            adoptTerminalSnapshot(fetched, worktreeID: worktreeID)
+            adoptTerminalSnapshot(
+                fetched,
+                worktreeID: worktreeID,
+                startedAtReplacementGeneration: snapshotGeneration)
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)

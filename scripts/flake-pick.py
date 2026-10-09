@@ -112,6 +112,13 @@ def pr_outcome(state: fl.State, number: int | None) -> str | None:
     return None
 
 
+def told_nothing(attempt) -> bool:
+    """An abort that says nothing about the test (spec §5): a fixer session
+    that failed before committing anything, or a verified candidate that
+    `publish` lost to `main` moving during the run."""
+    return attempt.outcome == "aborted" and bool(attempt.session_failed or attempt.publish_raced)
+
+
 def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
     """Spec §5: the last attempt in the current episode, by its recorded
     outcome, allows another, or there is none."""
@@ -127,18 +134,21 @@ def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
         return False, f"PR #{last.pr} merged in this episode"
     if outcome == "pr-opened":
         return False, f"PR #{last.pr} has no recorded close"
-    if outcome == "aborted" and last.session_failed:
+    if told_nothing(last):
         # A session that failed without a commit (an outage, an expired
-        # token, a crash) told us nothing about the test, so the next night
-        # may try again on the same evidence – once: a second such failure in
-        # a row, with no failure of the test between them, waits for a new
+        # token, a crash), or a publish that lost its candidate to `main`
+        # moving during the run, told us nothing about the test, so the next
+        # night may try again on the same evidence – once: a second such abort
+        # in a row, with no failure of the test between them, waits for a new
         # one like any other abort. That also bounds a session that keeps
         # running out of turns or time on this test: it cannot hold every
         # night's slot.
         prev = ordered[-2] if len(ordered) > 1 else None
-        repeated = (prev is not None and prev.outcome == "aborted" and prev.session_failed
+        repeated = (prev is not None and told_nothing(prev)
                     and latest_failure_at(state) <= prev.started_at)
         if not repeated:
+            if last.publish_raced:
+                return True, "the last attempt's candidate was lost to main moving during the run"
             return True, "the last attempt's session failed before trying anything"
     if outcome in RETRY_AFTER_NEW_FAILURE:
         if latest_failure_at(state) > last.started_at:
@@ -156,6 +166,9 @@ def open_bot_pr(number: int, prs: list[dict]) -> int | None:
 
 def eligible(view, prs: list[dict]) -> tuple[bool, str]:
     state = view.ledger
+    if fl.WATCHLIST_LABEL in view.labels:
+        # The watchlist holds many tests' histories, none of them a target.
+        return False, "the flake watchlist"
     if view.unreadable:
         # The bot's own comment does not parse: its attempts are unknown, and
         # the ledger leaves such an issue alone too.
@@ -196,6 +209,8 @@ def check_dispatch(views: dict, number: int, prs: list[dict]):
         raise Refused(f"issue #{number} is not open")
     if fl.FLAKY_LABEL not in view.labels:
         raise Refused(f"issue #{number} is not labelled {fl.FLAKY_LABEL}")
+    if fl.WATCHLIST_LABEL in view.labels:
+        raise Refused(f"issue #{number} is the flake watchlist, not one test's issue")
     if view.unreadable:
         raise Refused(f"issue #{number} has a bot comment that does not parse; its attempt history is unknown")
     if view.ledger is None:

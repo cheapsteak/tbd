@@ -456,6 +456,239 @@ test_a_workflow_candidate_refused_for_another_reason_goes_red() {
   assert_eq "mutation: classifying on the diff turns it green" "0" "$(publish "$d" "$mutant")"
 }
 
+# ----------------------------------------------------------------------------
+# replay at publish (spec §7, §8): `main` moving during the run
+# ----------------------------------------------------------------------------
+
+WF_REFUSAL='refusing to allow a GitHub App to create or update workflow `.github/workflows/test.yml` without `workflows` permission'
+
+# main_moves D PATH CONTENT: a commit on the remote's main, as a PR merging
+# while `fix` ran (run 37879620449: #952 changed .github/workflows/).
+main_moves() {
+  local d="$1" path="$2" content="$3"
+  git -C "$d/seed" fetch -q origin 2>/dev/null && git -C "$d/seed" reset -q --hard origin/main
+  mkdir -p "$d/seed/$(dirname "$path")"; printf '%s\n' "$content" > "$d/seed/$path"
+  git -C "$d/seed" add -A && git -C "$d/seed" commit -q -m "main moves: $path" && git -C "$d/seed" push -q origin HEAD:main 2>/dev/null
+}
+
+# github_gate D [ONCE [RESET]]: a pre-receive hook refusing, as GitHub refuses
+# an App without the `workflows` permission, a branch whose .github/workflows/
+# files differ from main's – whoever's commits made the difference. With ONCE,
+# only the first push is refused, as when main moved between the fetch and
+# the push; with RESET, that refusal also moves main to the commit RESET.
+github_gate() {
+  local d="$1" once="${2:-}" reset="${3:-}"
+  printf '%s\n' "$WF_REFUSAL" > "$d/reject-message"
+  : > "$d/pushes"
+  cat > "$d/origin.git/hooks/pre-receive" <<EOF
+#!/usr/bin/env bash
+while read -r old new ref; do
+  [[ "\$ref" == refs/heads/main ]] && continue
+  echo push >> "$d/pushes"
+  if [[ -n "$once" && "\$(wc -l < "$d/pushes")" -eq 1 ]] \\
+      || [[ -z "$once" && -n "\$(git diff --name-only refs/heads/main "\$new" -- .github/workflows/)" ]]; then
+    cat "$d/reject-message" >&2
+    if [[ -n "$reset" ]]; then
+      env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\
+        git update-ref refs/heads/main "$reset"
+    fi
+    exit 1
+  fi
+done
+EOF
+  chmod +x "$d/origin.git/hooks/pre-receive"
+}
+
+# always_refuse_as_workflow D: every branch push gets the workflow refusal,
+# as when main keeps moving.
+always_refuse_as_workflow() {
+  local d="$1"
+  github_gate "$d"
+  sed -i.bak 's/^  if \[\[ -n "" .*$/  if true \\/' "$d/origin.git/hooks/pre-receive"
+}
+
+status_sha() { sed -n 's|.*repos/cheapsteak/tbd/statuses/\([0-9a-f]*\) .*|\1|p' "$1/log" | head -1; }
+status_desc() { grep 'statuses/' "$1/log" | sed -n 's/.*-f description=\(.*\) -f target_url=.*/\1/p' | head -1; }
+
+test_main_moving_without_workflow_changes_pushes_the_candidate_as_is() {
+  local d mutant head; d="$(world)"; routes "$d"
+  main_moves "$d" README.md "unrelated"
+  github_gate "$d"
+  head="$(cat "$d/attempt/head_sha")"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$head" "$(remote_head "$d")"
+  assert_eq "the status is on it" "$head" "$(status_sha "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/^  \[\[ "\$rc" -eq 1 \]\]$/  true/' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" README.md "unrelated"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: replaying whenever main moved changes the pushed commit" "different" \
+    "$([[ "$(remote_head "$d")" == "$(cat "$d/attempt/head_sha")" ]] && echo same || echo different)"
+}
+
+test_main_workflows_moving_replays_a_clean_candidate_onto_main() {
+  local d mutant head base new pushed log; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push # #952"
+  github_gate "$d"
+  head="$(cat "$d/attempt/head_sha")"; base="$(cat "$d/pick/base_sha")"
+  new="$(git -C "$d/origin.git" rev-parse refs/heads/main)"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  pushed="$(remote_head "$d")"
+  assert_eq "the replay sits on main as it is now" "$new" "$(git -C "$d/origin.git" rev-parse "$pushed~1")"
+  assert_eq "it carries the candidate's change" "fixed" "$(git -C "$d/origin.git" show "$pushed:Tests/TBDSharedTests/HolderLockTests.swift")"
+  assert_eq "keeping its author and subject" "t Fix the lock race" "$(git -C "$d/origin.git" log -1 --format='%an %s' "$pushed")"
+  assert_contains "and naming the original commit" "$(git -C "$d/origin.git" log -1 --format=%B "$pushed")" "(cherry picked from commit $head)"
+  assert_eq "the first push was accepted: no refusal, no retry" "1" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "the status is on the pushed commit" "$pushed" "$(status_sha "$d")"
+  assert_contains "saying where it was stress-checked and where it was replayed" "$(status_desc "$d")" \
+    "no failure observed in 59 runs; stress-checked on ${base:0:7}; replayed onto main ${new:0:7} because main's workflow files changed during the run"
+  log="$(logged "$d")"
+  assert_contains "so does the PR body" "$log" "stress-checked on ${base:0:7}; replayed onto main ${new:0:7} because main's workflow files changed during the run"
+  assert_eq "recorded pr-opened, noting the replay" "pr-opened 77 true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.pr) \(.notes | contains("replayed onto main"))"')"
+  mutant="$(mutant_of 's#statuses/\$PUSHED"#statuses/$head"#' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: a status on the candidate misses the PR's head" "$(cat "$d/attempt/head_sha")" "$(status_sha "$d")"
+  mutant="$(mutant_of 's/^  if workflows_moved; then$/  if false; then/' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the check the first push is refused" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+}
+
+test_a_replay_that_conflicts_is_a_retryable_abort_and_pushes_nothing() {
+  local d mutant rc; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  main_moves "$d" Tests/TBDSharedTests/HolderLockTests.swift "main's own change"
+  github_gate "$d"
+  rc="$(publish "$d")"
+  assert_eq "recorded, exit 0" "0" "$rc"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$(logged "$d")" "pr create"
+  assert_eq "recorded aborted, marked publish_raced, saying why" "aborted true null true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced) \(.session_failed) \(.notes | contains("the replay did not apply"))"')"
+  mutant="$(mutant_of 's/^  record aborted --publish-raced --reason "\$1"$/  record aborted --reason "$1"/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"; main_moves "$d" Tests/TBDSharedTests/HolderLockTests.swift "x"
+  github_gate "$d"; publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: an unmarked abort is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  # main cannot be read: a publishing failure, not news about the test.
+  d="$(world)"; routes "$d"
+  git -C "$d/origin.git" update-ref -d refs/heads/main
+  assert_eq "a failed fetch of main exits 2" "2" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_eq "recorded aborted, marked publish_raced" "aborted true" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  mutant="$(mutant_of 's/^  RACED_DIE=1$/  true/' "$PR_SH")"
+  d="$(world)"; routes "$d"; git -C "$d/origin.git" update-ref -d refs/heads/main
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: unmarked, a transient fetch failure is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+}
+
+test_a_workflow_refusal_of_a_clean_candidate_is_retried_then_aborted() {
+  local d mutant rc log; d="$(world)"; routes "$d"
+  always_refuse_as_workflow "$d"
+  rc="$(publish "$d")"
+  log="$(logged "$d")"
+  assert_eq "the run goes red" "1" "$rc"
+  assert_eq "after one retry" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$log" "pr create"
+  assert_lacks "it never says the fix needs a workflow change" "$log" "appears to need a workflow change"
+  assert_eq "recorded aborted, marked publish_raced, with GitHub's message" "aborted true true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced) \(.notes | contains("without `workflows` permission"))"')"
+  mutant="$(mutant_of 's/^    if \[\[ "\$rc" -ne 0 \&\& -z "\$touches_workflows" \]\] \&\& grep/    if false \&\& grep/' "$PR_SH")"
+  d="$(world)"; routes "$d"; always_refuse_as_workflow "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the retry it is the push-refused lock-out" "push-refused" "$(recorded "$d" | jq -r .outcome)"
+  # main moved between the check and the push: the retry's replay goes through.
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once
+  assert_eq "a refusal the retry clears: exit 0" "0" "$(publish "$d")"
+  assert_eq "pushed twice" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "the replay is on the branch" "$(git -C "$d/origin.git" rev-parse refs/heads/main)" \
+    "$(git -C "$d/origin.git" rev-parse "$(remote_head "$d")~1")"
+  assert_eq "and has the status" "$(remote_head "$d")" "$(status_sha "$d")"
+  assert_eq "recorded pr-opened" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
+  # main's workflow files did not move: the retry pushes the candidate as it is,
+  # and nothing claims a replay.
+  d="$(world)"; routes "$d"
+  github_gate "$d" once
+  assert_eq "a refusal with main's workflows unmoved: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/checking main again"$/checking main again"; workflows_moved() { true; }/' "$PR_SH")"
+  d="$(world)"; routes "$d"; github_gate "$d" once
+  publish "$d" "$mutant" > /dev/null
+  assert_contains "mutation: replaying regardless claims a workflow change that never happened" "$(status_desc "$d")" "replayed"
+  # main's workflow change was reverted between the replay and the push: the
+  # retry pushes the candidate itself, not the stale replay.
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  assert_eq "main reverted under the push: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/^    PUSHED="\$head" NEW_BASE=""$/    true/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the reset it re-pushes the stale replay" "different" \
+    "$([[ "$(remote_head "$d")" == "$(cat "$d/attempt/head_sha")" ]] && echo same || echo different)"
+}
+
+test_a_candidate_touching_workflows_is_never_replayed() {
+  local d mutant rc; d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d"
+  rc="$(publish "$d")"
+  assert_eq "recorded, exit 0" "0" "$rc"
+  assert_eq "pushed once, as it is" "1" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_contains "the issue is told it needs a workflow change" "$(logged "$d")" "appears to need a workflow change"
+  assert_eq "recorded push-refused" "push-refused null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  mutant="$(mutant_of 's/^  \[\[ "\$wrc" -eq 1 \]\] \&\& touches_workflows=1$/  true/' "$PR_SH")"
+  d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: treated as clean it is replayed instead" "aborted true" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+}
+
+test_a_rerun_reuses_the_open_pr_on_its_replay() {
+  local d mutant pushed; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d"
+  publish "$d" > /dev/null
+  pushed="$(remote_head "$d")"
+  : > "$d/log"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$pushed\"}]"
+  assert_eq "a re-run: exit 0" "0" "$(publish "$d")"
+  assert_lacks "it opens no second PR" "$(logged "$d")" "pr create"
+  assert_eq "the status goes on the replay again" "$pushed" "$(status_sha "$d")"
+  assert_contains "with the note" "$(status_desc "$d")" "replayed onto main"
+  assert_eq "and records the open PR" "pr-opened 77" "$(recorded "$d" | jq -r '"\(.outcome) \(.pr)"')"
+  mutant="$(mutant_of 's/^  local sha="\$1" tip onto$/  return 1/' "$PR_SH")"
+  : > "$d/log"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: an unrecognised replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  # A human amends the replay, keeping its message: not the bot's replay any more.
+  git -C "$d/session" fetch -q "$d/origin.git" "refs/heads/flakefix/issue-10" 2>/dev/null
+  git -C "$d/session" checkout -q FETCH_HEAD 2>/dev/null
+  echo "a human's change" > "$d/session/Tests/TBDSharedTests/HolderLockTests.swift"
+  git -C "$d/session" commit -q -a --amend --no-edit
+  git -C "$d/session" push -q -f "$d/origin.git" "HEAD:refs/heads/flakefix/issue-10" 2>/dev/null
+  pushed="$(remote_head "$d")"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$pushed\"}]"
+  : > "$d/log"
+  publish "$d" > /dev/null
+  assert_eq "an amended replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  assert_lacks "and gets no status" "$(logged "$d")" "statuses/"
+  mutant="$(mutant_of 's/if replay_onto "\$onto" \&\& \[\[ "\$PUSHED" == "\$sha" \]\]; then/if replay_onto "$onto"; then PUSHED="$sha"/' "$PR_SH")"
+  : > "$d/log"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: trusting the message alone stamps the amended head" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
+}
+
 test_a_stale_branch_is_replaced_deliberately() {
   local d old; d="$(world)"; routes "$d"
   git -C "$d/session" push -q "$d/origin.git" "HEAD~1:refs/heads/flakefix/issue-10" 2>/dev/null
@@ -813,6 +1046,29 @@ failed_session_two_ends_red() {
   package_run "$1" "$rt" C1=success C2=success TRY2=true S1=success S1_CONCLUSION=success S2=success S2_CONCLUSION=failure > /dev/null
   [[ "$(cat "$rt/flakefix/outcome")" == candidate && ! -e "$rt/flakefix/abort_kind" ]] && grep -q '^session_failed=true$' "$rt/out"
 }
+# A step before session 1 failed (run 37845177223: the environment record), so
+# session 1 was skipped: aborted on that step, and no session counts as failed.
+skipped_session_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=skipped S1=skipped S1_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    grep -q "before a session's commits were collected" "$rt/flakefix/abort_reason" &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
+# The same for session 2: a step that prepares try 2 failed, so it was skipped.
+skipped_session_two_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=success TRY2=true C2=skipped S1=success S1_CONCLUSION=success S2=skipped S2_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
+test_a_session_that_never_ran_is_not_a_failed_session() {
+  check "a skipped session is no failed session" skipped_session_is_no_failure \
+    'if [ "$S1" != skipped ] && { [ "$S1" != success ]' 'if { [ "$S1" != success ]'
+  check "nor a skipped session 2" skipped_session_two_is_no_failure \
+    '[ "$TRY2" = true ] && [ "$S2" != skipped ] && {' '[ "$TRY2" = true ] && {'
+}
+
 test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
   check "a failed or never-finished session with no commit is aborted, kind session" session_failure_is_aborted \
     'elif [ -n "$failed_session" ]; then' 'elif false; then'
@@ -918,14 +1174,16 @@ end_run() {
 }
 
 # record_env FILE RT: run FILE's "Record the verifier's environment" step as
-# the job would before session 1, and print the record it outputs.
+# the job would before session 1, and print the record it outputs. Under
+# /bin/bash, not the first bash on PATH: the macOS runner's is 3.2, which a
+# Homebrew bash 5 ahead of it on a developer's PATH would hide.
 record_env() {
   local wf="$1" rt="$2" t="$2/flakefix"
   step_script "$wf" "Record the verifier" > "$rt/record.sh"
   : > "$rt/record-out"
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="$rt/tmp" T="$t" VS="$rt/flakefix-verifier-scripts" VT="$rt/flakefix-verify" \
     FLAKEFIX_NOTES="$t/flakefix-notes.md" FLAKE_VERIFY_PS="$rt/bin/ps-stub" GIT_CEILING_DIRECTORIES="$SCRATCH" \
-    GITHUB_OUTPUT="$rt/record-out" bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
+    GITHUB_OUTPUT="$rt/record-out" /bin/bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
   sed -n 's/^env=//p' "$rt/record-out"
 }
 
@@ -1459,10 +1717,12 @@ promote_gated() {
       "github.event.workflow_run.event == 'pull_request'" "github.event.workflow_run.conclusion == 'success'" \
       "startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-')" \
       "github.event.workflow_run.head_repository.full_name == github.repository" \
-      "github.event_name == 'status'" "github.event.context == 'flakefix/stress'" "github.event.state == 'success'" \
-      "contains(toJSON(github.event.branches.*.name), '\"flakefix/issue-')"; do
+      "github.event_name == 'status'" "github.event.context == 'flakefix/stress'" "github.event.state == 'success'"; do
     grep -qF "$c" <<< "$job" || return 1
   done
+  # No filter on a status's `branches`: GitHub lists at most 10, so it could
+  # miss the PR's branch; `promote --from-status` resolves the PR itself.
+  ! grep -qF "github.event.branches" <<< "$job" || return 1
   grep -q '^    workflows: \[Nightly, Test\]$' "$1" && grep -qF "    branches: [main, 'flakefix/issue-*']" "$1" &&
     grep -q '^  status:$' "$1"
 }
@@ -1479,6 +1739,9 @@ test_promote_is_gated_by_flag_workflow_branch_prefix_and_same_repo() {
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: no status trigger passes"; FAIL=1; else echo "ok   - mutation: no status trigger fails"; fi
   c="$(mutated "        github.event.context == 'flakefix/stress' &&" "")"
   if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: any status context passes"; FAIL=1; else echo "ok   - mutation: any status context fails"; fi
+  c="$(mutated "        github.event.state == 'success'))" "        github.event.state == 'success' &&
+        contains(toJSON(github.event.branches.*.name), '\"flakefix/issue-')))")"
+  if ( set +o pipefail; promote_gated "$c" ); then echo "FAIL - mutation: a status filtered on its capped branch list passes"; FAIL=1; else echo "ok   - mutation: a status filtered on its capped branch list fails"; fi
 }
 
 # The status trigger runs the same script, through env, with --from-status.

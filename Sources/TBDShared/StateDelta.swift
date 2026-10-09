@@ -15,6 +15,10 @@ public enum StateDelta: Codable, Sendable {
     case repoHiddenChanged(RepoHiddenDelta)
     case repoExpandedChanged(RepoExpandedDelta)
     case terminalCreated(TerminalDelta)
+    /// An in-place provider replacement committed for an existing terminal.
+    /// Carries the complete row because a creation delta intentionally omits
+    /// provider, session, transcript, profile, and process-incarnation fields.
+    case terminalReplaced(Terminal)
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
     case terminalPinChanged(TerminalPinDelta)
@@ -351,23 +355,41 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// legitimate cancel is indistinguishable from a git failure by status
     /// alone. Only the daemon knows which happened, so it says so here.
     public let creationFailed: Bool
+    /// Where the daemon saved the first message parked in this row, when a
+    /// failed creation deleted the row with the message in it
+    /// (`UnsentPromptFile`). Nil when nothing was parked, when the save
+    /// failed, and on every deliberate archive. Optional so payloads from a
+    /// daemon that predates it still decode.
+    public let unsentPromptPath: String?
+    /// True when the row may have held a first message the daemon could not
+    /// save: the save failed, the row had no repo to save under, or the
+    /// rollback could not read the row at all. Absent (older daemons) reads
+    /// as false.
+    public let unsentPromptLost: Bool
 
-    public init(worktreeID: UUID, creationFailed: Bool = false) {
+    public init(
+        worktreeID: UUID, creationFailed: Bool = false,
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
+    ) {
         self.worktreeID = worktreeID
         self.creationFailed = creationFailed
+        self.unsentPromptPath = unsentPromptPath
+        self.unsentPromptLost = unsentPromptLost
     }
 
     // Explicit decoding: a synthesized `init(from:)` ignores property defaults
     // and would throw `keyNotFound` against an older daemon that never sends
     // this key. Absent means "not a creation failure".
     private enum CodingKeys: String, CodingKey {
-        case worktreeID, creationFailed
+        case worktreeID, creationFailed, unsentPromptPath, unsentPromptLost
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
         self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
+        self.unsentPromptPath = try c.decodeIfPresent(String.self, forKey: .unsentPromptPath)
+        self.unsentPromptLost = try c.decodeIfPresent(Bool.self, forKey: .unsentPromptLost) ?? false
     }
 }
 

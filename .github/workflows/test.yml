@@ -159,6 +159,17 @@ jobs:
           /bin/bash scripts/update.test.sh
           /bin/bash scripts/restart-build-lib.test.sh
 
+      # The flake fixer's `fix` job runs on macOS, under the runner's bash 3.2,
+      # and the other flake harnesses run on Linux under bash 5, which passed a
+      # step 3.2 cannot run. This one reads every macOS `run:` script in
+      # flake-fixer.yml and the scripts they run, checks them against 3.2's
+      # gaps – including a `case` inside `$( … )`, which `bash -n` cannot see
+      # because 3.2 parses a substitution only when it runs it – and runs the
+      # steps every later one depends on under 3.2. Here because Linux has no
+      # bash 3.2; it fails rather than skips under $CI without one. ~2 s.
+      - name: Test the flake fixer's macOS steps under bash 3.2
+        run: /bin/bash scripts/flake-bash32.test.sh
+
       # The stall watchdog's own harness: fixture directories, a stub
       # `scripts/test.sh` and a stub `sample`, no build, no SwiftPM, no real
       # store touched. It cannot join the Linux collection in `plans-guard`
@@ -206,6 +217,7 @@ jobs:
       # (`scripts/test.test.sh`), whose guards read BSD `stat -f`, the three
       # installer harnesses, the build-library harness
       # (`scripts/restart-build-lib.test.sh`), which must run under bash 3.2,
+      # the flake fixer's bash 3.2 harness (`scripts/flake-bash32.test.sh`),
       # and the stall-watchdog harness
       # (`scripts/ci/watched-test-pass.test.sh`), which drives BSD `ps`,
       # `script(1)` and `sample`.
@@ -229,6 +241,11 @@ jobs:
       # paying a cold build, too many churns main's entry out of a 10 GB store,
       # and neither shows up in a suite.
       #
+      # `sweep-foreign-worktrees.test.sh` also needs `jq` (preinstalled on the
+      # runner). Its fixtures are real repos with real linked worktrees in a
+      # temp dir, and every tool it would otherwise reach — `tbd`, `gh`, `lsof`
+      # — is a fake behind a seam, with failing shims first on PATH.
+      #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -244,6 +261,7 @@ jobs:
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/sweep-foreign-worktrees.test.sh
           bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/flake-ledger.test.sh

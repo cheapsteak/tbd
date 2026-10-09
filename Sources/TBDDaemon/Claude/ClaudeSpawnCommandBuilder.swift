@@ -19,6 +19,11 @@ import TBDShared
 ///   stays live (otherwise both processes write the same session JSONL).
 /// - `freshSessionID` non-nil → `claude --session-id <id> --dangerously-skip-permissions`
 ///   with optional `--append-system-prompt` and trailing initial-prompt arg.
+/// - `initialPromptFilePath` (used only when `initialPrompt` is empty) hands the
+///   prompt over as `"$(cat <path>)"`, read by the launching shell. tmux packs
+///   the whole spawn command into one ~16 KiB client message and refuses a
+///   longer one ("command too long"), so a prompt that can exceed that must
+///   travel as a file. The caller owns the file's lifetime.
 /// - Otherwise → `cmd` if set, else `shellFallback`.
 ///
 /// `sessionName`, when non-nil and not blank, adds ` --name <escaped>` to both
@@ -71,6 +76,7 @@ enum ClaudeSpawnCommandBuilder {
         freshSessionID: String?,
         appendSystemPrompt: String?,
         initialPrompt: String?,
+        initialPromptFilePath: String? = nil,
         profileSecret: String?,
         profileKind: CredentialKind? = nil,
         profileBaseURL: String? = nil,
@@ -118,22 +124,30 @@ enum ClaudeSpawnCommandBuilder {
             nameFlag = ""
         }
 
+        // The trailing initial-prompt argument. Inline text is shell-escaped
+        // into the command; a file path is read by the launching shell at
+        // spawn, so the prompt never has to fit in the command string.
+        let promptArgument: String
+        if let p = initialPrompt, !p.isEmpty {
+            promptArgument = " \(SystemPromptBuilder.shellEscape(p))"
+        } else if let path = initialPromptFilePath, !path.isEmpty {
+            promptArgument = " \"$(cat \(SystemPromptBuilder.shellEscape(path)))\""
+        } else {
+            promptArgument = ""
+        }
+
         let base: String
         if let resumeID {
             let forkFlag = forkSession ? " --fork-session" : ""
             var b = "claude --resume \(resumeID)\(forkFlag) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
-            if let p = initialPrompt, !p.isEmpty {
-                b += " \(SystemPromptBuilder.shellEscape(p))"
-            }
+            b += promptArgument
             base = b
         } else if let sessionID = freshSessionID {
             var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }
-            if let p = initialPrompt, !p.isEmpty {
-                b += " \(SystemPromptBuilder.shellEscape(p))"
-            }
+            b += promptArgument
             base = b
         } else if let cmd {
             return Result(command: cmd, sensitiveEnv: [:])

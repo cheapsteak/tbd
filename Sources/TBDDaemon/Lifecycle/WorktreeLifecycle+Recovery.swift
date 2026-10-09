@@ -40,10 +40,14 @@ extension WorktreeLifecycle {
     ///   else ever resolves a `.creating` row, so skipping would strand it
     ///   forever. Delete the row and its terminal/tab records.
     ///
+    /// Every delete here goes through `rollBackFailedCreate`, so a first
+    /// message the app parked in the row is saved to `unsent-prompts/` rather
+    /// than deleted with it; `unsentPromptsReposDir` is that save's test seam.
+    ///
     /// Returns the detached phase-3 resume tasks (for tests); the daemon
     /// ignores them.
     @discardableResult
-    public func recoverCreatingWorktrees() async -> [Task<Void, Never>] {
+    public func recoverCreatingWorktrees(unsentPromptsReposDir: URL? = nil) async -> [Task<Void, Never>] {
         // Location-neutral: this sweep is the only thing that resolves a
         // `.creating` row, so fencing it to local rows would strand every
         // remote one. The fence is the per-row guard below instead, which
@@ -90,7 +94,7 @@ extension WorktreeLifecycle {
                     try await db.tabs.deleteForWorktree(worktreeID: row.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: row.id)
-                    try await db.worktrees.delete(id: row.id)
+                    await rollBackStrandedCreate(row.id, reposDir: unsentPromptsReposDir)
                 } catch {
                     logger.warning("recovery: cleanup of missing-checkout worktree \(row.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -117,7 +121,7 @@ extension WorktreeLifecycle {
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
-                    try await db.worktrees.delete(id: worktree.id)
+                    await rollBackStrandedCreate(worktree.id, reposDir: unsentPromptsReposDir)
                 } catch {
                     logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
@@ -131,7 +135,7 @@ extension WorktreeLifecycle {
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
-                    try await db.worktrees.delete(id: worktree.id)
+                    await rollBackStrandedCreate(worktree.id, reposDir: unsentPromptsReposDir)
                 } catch {
                     logger.warning("recovery: cleanup of repo-less worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -204,5 +208,15 @@ extension WorktreeLifecycle {
             resumed.append(task)
         }
         return resumed
+    }
+
+    /// Delete a stranded `.creating` row the way a failed create is rolled
+    /// back, saving any parked first message, and log where it went. No
+    /// broadcast: recovery runs at startup, before any client is connected.
+    private func rollBackStrandedCreate(_ worktreeID: UUID, reposDir: URL?) async {
+        let delta = await rollBackFailedCreate(worktreeID: worktreeID, reposDir: reposDir)
+        if let path = delta.unsentPromptPath {
+            logger.info("recovery: saved the parked first message of \(worktreeID, privacy: .public) to \(path, privacy: .public)")
+        }
     }
 }

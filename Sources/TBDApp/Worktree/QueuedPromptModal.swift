@@ -35,7 +35,25 @@ final class QueuedPromptTarget: ObservableObject, Identifiable {
     let worktreeName: String
 
     @Published private(set) var resolution: Resolution?
+    /// Set when creation fails AFTER the daemon row existed — the common
+    /// case, since `git worktree add` runs after `worktree.create` returns and
+    /// its failure arrives as a `.worktreeArchived(creationFailed: true)`
+    /// delta. `resolution` is set-once and already `.created` by then, so this
+    /// is a separate fact. Carries the failure sentence the alert should open
+    /// with, which is how the generic failure alert and the draft's alert
+    /// become one.
+    @Published private(set) var failureAfterCreate: String?
     private var waiters: [CheckedContinuation<Resolution, Never>] = []
+
+    /// Whether creation failed, before or after the daemon row existed.
+    var hasFailed: Bool { resolution == .failed || failureAfterCreate != nil }
+
+    /// Record that creation failed after the row existed. Set-once, like
+    /// `resolve`.
+    func failAfterCreate(reason: String) {
+        guard failureAfterCreate == nil else { return }
+        failureAfterCreate = reason
+    }
 
     init(placeholderID: UUID, repoID: UUID, worktreeName: String) {
         self.id = placeholderID
@@ -132,12 +150,25 @@ enum QueuedPromptComposer {
 /// Escape parks nothing: the worktree is already being created and keeps
 /// running with an idle agent, exactly as before the feature existed. Follows
 /// the sheet convention of `ScratchInstructionsView`.
+///
+/// If creation fails while the sheet is still up — before or after the daemon
+/// row existed — the sheet closes itself:
+/// there is no worktree left to compose for. Any unsent text goes to
+/// `AppState.keepUnsentDraftAfterFailedCreation` first, which writes it to a
+/// file and raises the alert naming it — closing rather than staying open
+/// with a note, because the alert is the one surface that says where the
+/// text went, and it would otherwise sit behind a sheet that can no longer
+/// do anything.
 struct QueuedPromptModal: View {
     @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var target: QueuedPromptTarget
 
     @State private var draft: String = ""
+    /// Set once the text has gone to `submitQueuedPrompt`, which owns every
+    /// failure from then on. Without it a failure landing between submit and
+    /// the sheet's teardown would save the same message twice.
+    @State private var submitted = false
 
     /// Remembered across composers, and written the moment the box is ticked —
     /// including when the sheet is then dismissed with Escape. That is what the
@@ -168,7 +199,7 @@ struct QueuedPromptModal: View {
                 initialText: draft,
                 onTextChange: { draft = $0 },
                 onSubmit: { submit($0) },
-                onCancel: { dismiss() }
+                onCancel: { cancel() }
             )
             .frame(minHeight: 140)
             .padding(4)
@@ -182,7 +213,7 @@ struct QueuedPromptModal: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { cancel() }
                     .keyboardShortcut(.cancelAction)
                 // `draft`, not the editor's own string, and safe for the same
                 // reason the disabled state is: this closure is rebuilt on
@@ -196,10 +227,36 @@ struct QueuedPromptModal: View {
         }
         .padding(20)
         .frame(width: 480)
+        // `initial: true`: a modal presented after its creation already
+        // failed sees no change, and must still hand off and close.
+        .onChange(of: target.hasFailed, initial: true) { _, failed in
+            guard Self.shouldHandOffDraft(creationFailed: failed, submitted: submitted) else { return }
+            appState.keepUnsentDraftAfterFailedCreation(target, draft: draft)
+            dismiss()
+        }
+    }
+
+    /// Whether the sheet hands its draft to `AppState` and closes. Only on a
+    /// failed creation, and never after a submit: from then on
+    /// `submitQueuedPrompt` owns every failure, and handing off here too would
+    /// save the same message twice when a failure lands between the submit and
+    /// the sheet's teardown. Cancel discards by design, so a sheet closed
+    /// before the failure hands nothing off.
+    nonisolated static func shouldHandOffDraft(creationFailed: Bool, submitted: Bool) -> Bool {
+        creationFailed && !submitted
+    }
+
+    /// Cancel and Escape. Discards the draft by design; withdraws the
+    /// composer first so a failure landing during the teardown raises its own
+    /// alert rather than waiting on this sheet.
+    private func cancel() {
+        appState.withdrawComposer(target)
+        dismiss()
     }
 
     private func submit(_ text: String) {
         guard !isBlank(text) else { return }
+        submitted = true
         appState.submitQueuedPrompt(target, text: text, submit: sendImmediately)
         dismiss()
     }

@@ -158,8 +158,11 @@ extension AppState {
         }
     }
 
-    func showAlert(_ message: String, isError: Bool = false) {
+    /// `revealPath` names a file the alert is about; the alert then offers
+    /// Copy Path and Reveal in Finder for it.
+    func showAlert(_ message: String, isError: Bool = false, revealPath: String? = nil) {
         alertMessage = message
         alertIsError = isError
+        alertRevealPath = revealPath
     }
 }

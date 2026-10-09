@@ -595,6 +595,14 @@ jobs:
           # (see the mint step above) is also the identity the post step's comments
           # carry, which is what the sentinel selector matches on.
           github_token: ${{ steps.app-token.outputs.token }}
+          # The action refuses any non-human actor unless it is listed here. The
+          # flake-autofix App opens PRs that must pass this required gate like
+          # any other (docs/specs/2026-10-07-flake-autofix-design.md §7), so it
+          # alone is admitted. Never '*': on a public repo that would let any
+          # installed App start a review session. The action lowercases both
+          # sides and strips a trailing "[bot]", so this matches the actor
+          # `tbd-flake-fixer[bot]`. The author-trust gate above still applies.
+          allowed_bots: tbd-flake-fixer
           show_full_output: true
           # The SESSION POSTS NOTHING. It writes review-result.json; the post
           # step below renders that file's `comment_body` into a comment body

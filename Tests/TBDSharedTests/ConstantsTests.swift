@@ -175,6 +175,12 @@ import Foundation
     #expect(path == "/tmp/tbd-notes/repos/12345678-1234-1234-1234-123456789ABC/notes.md")
 }
 
+@Test func unsentPromptsDirRepoScope() {
+    let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
+    let dir = TBDConstants.unsentPromptsDir(repoID: repoID, environment: ["TBD_HOME": "/tmp/tbd-unsent"])
+    #expect(dir.path == "/tmp/tbd-unsent/repos/12345678-1234-1234-1234-123456789ABC/unsent-prompts")
+}
+
 @Test func claudeSettingsOverlayPathRepoScope() {
     let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
     let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID, environment: ["TBD_HOME": "/tmp/tbd-cso"])

@@ -78,6 +78,9 @@ public actor OrphanGC {
     /// disagree on where a session's directory is. The process environment in
     /// production; tests pass a temp `TBD_HOME`.
     private let remoteTranscriptsEnvironment: [String: String]
+    /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
+    /// production; tests pass a temp directory.
+    private let unsentPromptsReposBase: URL
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -173,6 +176,7 @@ public actor OrphanGC {
         streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
+        reposBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -235,6 +239,7 @@ public actor OrphanGC {
         self.hangStackCollector = HangStackCollector(base: resolvedHangStackBase)
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
+        self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -261,6 +266,9 @@ public actor OrphanGC {
         // They are still added to the returned total so `tbd gc sweep` reports
         // honestly.
         var hangStacksReaped = 0
+        // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
+        // `ReapRecord`.
+        var unsentPromptsReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -346,6 +354,13 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
+        // After the socket arm, deliberately: anything that arm reclaimed took
+        // its lock and log with it, so this one only ever sees residue the
+        // socket arm structurally cannot reach.
+        await reclaimHolderRendezvousOrphanPairs(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
         await reclaimModelProxyFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
@@ -360,6 +375,8 @@ public actor OrphanGC {
 
         await reclaimAttachments(dryRun: dryRun, planned: &planned, reaped: &reaped)
 
+        reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
+
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
         )
@@ -371,7 +388,73 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+    }
+
+    // MARK: - Unsent first messages
+
+    /// How long an unsent first message is kept before the sweep reclaims it:
+    /// 30 days. The root `CLAUDE.md` OrphanGC entry states the same figure.
+    static let unsentPromptRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Reclaims files under `~/tbd/repos/<repoID>/unsent-prompts/` older than
+    /// `unsentPromptRetention` (30 days) by modification date — the named reconciler for
+    /// the first messages written there when a worktree creation fails: by the
+    /// daemon for a message parked in the row it deletes, by the app for a
+    /// composer draft or a refused park.
+    ///
+    /// Under `gcEnabled` alone, with no flag of its own: each file is a copy
+    /// the operator was told about (alert, path, pasteboard) when it was
+    /// written, and a month is long enough to have acted on it. `dryRun` plans
+    /// without touching disk, as everywhere in `sweep`.
+    ///
+    /// Only regular files directly inside an `unsent-prompts` directory are
+    /// candidates; anything else there is left alone, and an unreadable date
+    /// keeps. Repo directories are walked whether or not a repo row still
+    /// exists, since a removed repo's drafts age out the same way.
+    ///
+    /// No `ReapRecord`: there is no worktree to key one by.
+    private func reclaimUnsentPrompts(dryRun: Bool, planned: inout [String], reaped: inout Int) {
+        let fm = FileManager.default
+        guard let repoDirs = try? fm.contentsOfDirectory(atPath: unsentPromptsReposBase.path) else {
+            return
+        }
+        let asOf = now()
+        for repoDir in repoDirs.sorted() where !repoDir.hasPrefix(".") {
+            let dir = unsentPromptsReposBase
+                .appendingPathComponent(repoDir)
+                .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+            guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            for name in names.sorted() {
+                let path = dir.appendingPathComponent(name).path
+                guard let attributes = try? fm.attributesOfItem(atPath: path),
+                      attributes[.type] as? FileAttributeType == .typeRegular
+                else { continue }
+                guard let modified = attributes[.modificationDate] as? Date else {
+                    planned.append("KEEP unknown-age \(path)")
+                    continue
+                }
+                guard asOf.timeIntervalSince(modified) >= Self.unsentPromptRetention else {
+                    planned.append("KEEP retention \(path)")
+                    continue
+                }
+                planned.append("REAP unsent-prompt \(path)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                do {
+                    try fm.removeItem(atPath: path)
+                    reaped += 1
+                    logger.info("gc: reclaimed unsent first message \(path, privacy: .public)")
+                } catch {
+                    planned.append("KEEP remove-failed \(path)")
+                    logger.warning("""
+                    gc: could not remove \(path, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                }
+            }
+        }
     }
 
     /// Reclaims hang-stack diagnostic files under
@@ -870,6 +953,77 @@ public actor OrphanGC {
                 // one holder's residue, and `reaped` is what the sweep reports
                 // as things reclaimed. No `ReapRecord` is written — these files
                 // are unlinked, not quarantined, and there is nothing a
+                // `tbd gc restore` could put back.
+                reaped += 1
+            }
+        }
+    }
+
+    /// Unlinks the `<uuid>.lock` and `<uuid>.log` a holder left behind with no
+    /// `<uuid>.sock` beside them — the socket-less arm of the same reconciler
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation").
+    ///
+    /// A holder that exits cleanly unlinks its own socket, and a sweep that
+    /// reaped a socket for it already did. Either way the pair that is left has
+    /// no socket for the phase above to decide on, so without this one it
+    /// survives every sweep forever: measured on a development machine, 557
+    /// such pairs against 53 live sockets.
+    ///
+    /// Runs under `gcEnabled`, with no flag of its own, exactly like the socket
+    /// arm and for the same reason — holder-ness is a transport property, not a
+    /// separate opt-in (`docs/specs/2026-09-07-holder-flag-consolidation-design.md`).
+    /// `dryRun` bypasses `gcEnabled` as it does everywhere in `sweep`.
+    ///
+    /// **This phase reads rows, where the socket arm deliberately does not.**
+    /// The socket arm anchors every unlink to a socket it has proven dead; this
+    /// one has no such anchor, so it asks whether TBD still knows the session
+    /// at all. A failed read skips the phase rather than proceeding on an empty
+    /// set, which would read as "nothing is claimed".
+    ///
+    /// The row is not what makes the arm safe against a spawn in flight — a
+    /// fresh spawn's row is written *after* its holder — and the collector's
+    /// own doc comment carries that argument, which rests on the creation lock.
+    /// Rows are read once, before any gate; a row that commits during the phase
+    /// belongs to a session whose lock is held for the whole spawn, which the
+    /// collector's last gate reads.
+    private func reclaimHolderRendezvousOrphanPairs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = holderRendezvousCollector.orphanPairCandidates()
+        guard !candidates.isEmpty else { return }
+
+        guard let terminals = try? await db.terminals.list() else {
+            logger.error("""
+            gc: session rows unreadable this sweep — skipping the holder-rendezvous-pair phase
+            """)
+            planned.append("KEEP rows-unreadable holder-rendezvous-pair phase")
+            return
+        }
+        let claimed = Set(terminals.map(\.id))
+
+        for pair in candidates {
+            switch holderRendezvousCollector.decideOrphanPair(
+                pair, graceSeconds: config.gcGraceSeconds, claimedSessionIDs: claimed
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(pair.lockPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(pair.lockPath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP holder-rendezvous-pair \(pair.lockPath)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                let removed = holderRendezvousCollector.reapOrphanPair(pair)
+                if removed.isEmpty {
+                    planned.append("KEEP unlink-failed \(pair.lockPath)")
+                    continue
+                }
+                // Counted once per session, as the socket arm counts its
+                // triple: the files are one holder's residue. No `ReapRecord` —
+                // these are unlinked, not quarantined, and there is nothing a
                 // `tbd gc restore` could put back.
                 reaped += 1
             }

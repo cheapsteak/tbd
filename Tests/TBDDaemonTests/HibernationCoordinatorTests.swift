@@ -1514,8 +1514,8 @@ struct HibernationCoordinatorTests {
 
         let wake = await coord.wake(terminalID: terminalID)
 
-        #expect(wake.isOk)
         let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(wake == .ok(sessionIncarnationID: after.sessionIncarnationID))
         #expect(!after.isParked)
         #expect(after.tmuxWindowID == "@mock-0")
         #expect(after.tmuxPaneID == "%mock-0")
