@@ -70,7 +70,8 @@ enum NightwatchModePresentation {
     /// them there), so a menu that relies on `.help` alone to explain why an
     /// item is greyed out can look dead with no explanation. This caption is
     /// rendered as a second, always-disabled row instead.
-    static let holderUnavailableCaption = "Unavailable while the pty-holder transport is on"
+    static let holderUnavailableCaption =
+        "Unavailable while the pty-holder transport is on or still holding sessions"
 
     /// The tooltip a control should carry: the refusal when the mode is
     /// disabled, otherwise the mode's own help.

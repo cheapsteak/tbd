@@ -134,6 +134,16 @@ struct NightwatchHolderGateTests {
         #expect(NightwatchHolderGate.modeRefusal.contains("pty-holder"))
         #expect(NightwatchHolderGate.modeRefusal.contains("deprecated"))
         #expect(NightwatchHolderGate.modeRefusal.contains("fleet supervision"))
+        // The refusal must name BOTH terms of the hazard. Turning the flag off
+        // does not lift it while holder-backed sessions are still alive, and a
+        // message that promised otherwise would send that user back to a switch
+        // they have already flipped.
+        #expect(
+            NightwatchHolderGate.modeRefusal.contains("already running on a holder"),
+            "the live-session term has to be in the copy, not only in the gate")
+        #expect(
+            NightwatchHolderGate.modeRefusal.contains("parked"),
+            "a parked holder row counts as alive, which is the surprising half")
         #expect(NightwatchHolderGate.holderRefusal.contains("Turn Nightwatch off first"))
         #expect(NightwatchHolderGate.deprecationNotice.contains("deprecated"))
     }

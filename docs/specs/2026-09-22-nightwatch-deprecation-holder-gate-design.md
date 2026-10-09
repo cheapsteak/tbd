@@ -72,9 +72,18 @@ live. Turning the holder off is never refused either way.
 One shared constant in `TBDShared` carries the sentence every surface uses, so
 the app, the CLI, the RPC error, and the log say the same thing. It names the
 holder flag, states that Nightwatch is deprecated and replaced by fleet
-supervision, and says which switch to flip first. A second constant carries the
-mirror sentence for the holder switch ("turn Nightwatch off first"). Both are
-plain prose without org, host, or person names.
+supervision, and says what has to change.
+
+**It names both terms of the hazard, not just the switch.** Turning the
+transport off is the first step and often not the last, because a watch mode
+stays refused while any holder-backed session is still alive — a parked one
+included, since it wakes back onto a holder. A refusal that named only the flag
+would read as a broken promise to the user who flipped it and got the identical
+message back, and would send them to a switch they had already thrown.
+
+A second constant carries the mirror sentence for the holder switch ("turn
+Nightwatch off first"). Both are plain prose without org, host, or person
+names.
 
 ### Enforcement point 1: `nightwatch.setMode`
 

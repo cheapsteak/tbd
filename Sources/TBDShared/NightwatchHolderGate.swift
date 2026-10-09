@@ -34,14 +34,23 @@ import Foundation
 ///
 /// Spec: docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md
 public enum NightwatchHolderGate {
-    /// Why `nightwatch.setMode` refuses a watch mode while the holder is on.
-    /// Shared by the RPC error, the boot-reconcile log and notification, the
-    /// app's disabled-control tooltip, and the CLI.
+    /// Why `nightwatch.setMode` refuses a watch mode while the holder hazard is
+    /// live. Shared by the RPC error, the boot-reconcile log and notification,
+    /// the app's disabled-control tooltip, and the CLI.
+    ///
+    /// **It has to name both terms.** Turning the transport off is the first
+    /// step but not always the last: a watch mode stays refused while any
+    /// holder-backed session is still alive, and with the transport on by
+    /// default an install will usually have some. A message that named only
+    /// the flag would read as a broken promise to the user who turned it off
+    /// and got the identical refusal back.
     public static let modeRefusal = """
         Nightwatch is deprecated and does not run with the pty-holder transport \
         (pty_holder_enabled, Settings → "Run new sessions without tmux"). It is \
         being replaced by fleet supervision. To keep using it on tmux, turn the \
-        pty-holder transport off first.
+        pty-holder transport off and let the sessions already running on a \
+        holder finish — a watch mode stays unavailable while any of them is \
+        alive, a parked one included.
         """
 
     /// Why `config.setPtyHolderEnabled` refuses `true` while a watch mode is active.
