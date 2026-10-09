@@ -30,7 +30,7 @@ enum MatchedSessionFixtures {
 
 /// A fixed-seed generator, so the corpus is the same on every run and every
 /// machine. SplitMix64: small, and well-distributed enough for shuffling.
-struct SplitMix64: RandomNumberGenerator {
+private struct SplitMix64: RandomNumberGenerator {
     var state: UInt64
 
     mutating func next() -> UInt64 {
