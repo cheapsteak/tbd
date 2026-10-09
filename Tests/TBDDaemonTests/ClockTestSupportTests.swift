@@ -50,8 +50,9 @@ struct ClockTestSupportTests {
     /// past its 45 s guard on the saturated fast pass, while this test asserts
     /// only the virtual-time contract. The arming wait parks on a continuation
     /// signalled by the sleep itself, with a budget sized to the pass's latency.
-    /// `advanceWhenSuspended` itself stays covered by the test above.
-    @Test func advanceMovesTheClockForward() async throws {
+    /// `advanceWhenSuspended` itself stays covered by the test above. The name
+    /// is kept so the flake ledger's identity for this test is unchanged.
+    @Test func advanceWhenSuspendedMovesTheClockForward() async throws {
         let clock = EventDrivenTestClock()
         let before = clock.now
 
