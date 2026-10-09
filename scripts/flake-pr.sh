@@ -59,8 +59,8 @@
 # Exit: 0 when the attempt is recorded (whatever its outcome), 1 when a push
 # was refused for any reason but the candidate's own workflow change, or as a
 # workflow change twice for a candidate that makes none (recorded, but the run
-# goes red), 2 on a malformed artifact, a missing token, or a failed GitHub
-# call.
+# goes red), 2 on a malformed artifact, a missing token, a failed GitHub
+# call, or an attempt record it cannot read (below).
 
 set -uo pipefail
 
@@ -85,7 +85,10 @@ WORKFLOW_REFUSAL='refusing to allow .* to create or update workflow|to create or
 # records `pr-opened` when a PR exists and `aborted` otherwise, once (a failed
 # record does not record again), then exits 2 so the run goes red. A failure
 # in the replay's own steps (RACED_DIE) says nothing about the test, so its
-# abort is marked publish_raced.
+# abort is marked publish_raced. The one failure that records nothing is an
+# attempt record publish cannot read (a corrupt comment, or a schema version
+# this code does not read): recording would hit that same comment, so `open`
+# refuses before anything is pushed or posted, and exits 2.
 ISSUE="" PR="" POST_PUSH="" RECORDING="" REUSED="" RACED_DIE="" NEW_BASE=""
 die() {
   echo "flake-pr: $*" >&2

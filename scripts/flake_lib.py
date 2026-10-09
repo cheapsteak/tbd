@@ -473,27 +473,28 @@ class UnsupportedSchema(Exception):
 _DECLARED_VERSION = re.compile(r"(\d{1,9}) -->")
 
 
-def _block_version(payload: dict | None) -> int | None:
-    version = payload.get("schema") if payload else None
+def _is_version(value) -> bool:
     # `True == 1` in Python: a boolean is not a version.
-    return version if isinstance(version, int) and not isinstance(version, bool) else None
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _declared(body: str, prefix: str, payload: dict | None) -> list[int]:
+def _declared(body: str, prefix: str, payload: dict | None) -> list:
+    """What the sentinel and the block declare, as written: an int for a
+    well-formed version, else the raw spelling, which no reader reads."""
     found = []
     if body.startswith(prefix):
-        match = _DECLARED_VERSION.match(body, len(prefix))
-        if match:
-            found.append(int(match.group(1)))
-    if _block_version(payload) is not None:
-        found.append(_block_version(payload))
+        rest = body[len(prefix):].split("\n", 1)[0].rstrip()
+        match = _DECLARED_VERSION.fullmatch(rest)
+        found.append(int(match.group(1)) if match else rest[:40])
+    if payload and "schema" in payload:
+        found.append(payload["schema"])
     return found
 
 
-def declared_versions(body: str, prefix: str, begin: str, end: str) -> list[int]:
+def declared_versions(body: str, prefix: str, begin: str, end: str) -> list:
     """The schema versions a comment declares: its sentinel's, then its JSON
-    block's `schema`, each when it is there and an integer. A corrupt comment
-    may declare neither."""
+    block's `schema`, each when it is there. A corrupt comment's block may
+    declare none."""
     return _declared(body, prefix, _parse_json_block(body, begin, end))
 
 
@@ -503,15 +504,24 @@ def _versioned_payload(body: str, prefix: str, begin: str, end: str, what: str) 
     `UnsupportedSchema` when the sentinel or the block declares a version
     outside `READABLE_SCHEMAS`, so a block returned is one this code reads."""
     payload = _parse_json_block(body, begin, end)
-    unreadable = [v for v in _declared(body, prefix, payload) if v not in READABLE_SCHEMAS]
+    unreadable = [v for v in _declared(body, prefix, payload) if not (_is_version(v) and v in READABLE_SCHEMAS)]
     if unreadable:
-        version = max(unreadable)
-        age = "newer than" if version > max(READABLE_SCHEMAS) else "not one of"
+        versions = [v for v in unreadable if _is_version(v)]
+        if len(versions) == len(unreadable):
+            version = max(versions)
+            age = "newer than" if version > max(READABLE_SCHEMAS) else "not one of"
+        else:
+            # A spelling this code does not know – `v2.0`, `"2"` – is a format
+            # it cannot read, not a corrupt comment to skip.
+            version = json.dumps(next(v for v in unreadable if not _is_version(v)))
+            age = "not a version spelled as"
         raise UnsupportedSchema(
             f"the bot's {what} comment declares schema version {version}, {age} the versions this code reads "
             f"({', '.join(str(v) for v in sorted(READABLE_SCHEMAS))}); stopping rather than reading it as empty"
         )
-    return payload if _block_version(payload) is not None else None
+    # Every declared version is readable here, so a block declaring one is
+    # a block this code reads; one declaring none is corrupt.
+    return payload if payload and "schema" in payload else None
 
 
 def code_span(text: str) -> str:

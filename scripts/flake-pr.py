@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, fields
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -653,6 +654,10 @@ def main(argv: list[str]) -> int:
                 # 3, not 2: the record itself is unreadable, which a retry
                 # cannot change; a failed read stays 2.
                 print(f"flake-pr: {error}", file=sys.stderr)
+                summary = os.environ.get("GITHUB_STEP_SUMMARY")
+                if summary:
+                    with open(summary, "a") as handle:
+                        handle.write(f"Publishing refused, nothing pushed or written: {error}\n")
                 return 3
         elif args.command == "promote-facts":
             facts = promote_facts(args.repo, args.branch, args.sha, args.trigger, args.conclusion, args.event,

@@ -429,7 +429,8 @@ readers that match the prefix; code older than the prefix match fetches only
 the exact `v1` sentinels, so a bump to version 2 must never be rolled back
 past the prefix-matching readers. A comment from the
 bot that declares, in either place, a version outside the set this code reads
-(`READABLE_SCHEMAS`) is not treated as corrupt, because reading it as corrupt
+(`READABLE_SCHEMAS`), or a version spelled as anything but a bare integer
+(`v2.0`, `"2"`), is not treated as corrupt, because reading it as corrupt
 would read it as empty. A schema bump, or a rollback to code older than the
 comments it finds, would make every bot comment unreadable at once: the
 watchlist would read as empty, so every sub-threshold test would restart its
@@ -1848,7 +1849,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   comment each declaring a newer version – in the sentinel, in the JSON
   block, or both – each stopping the run before any write, naming the
   comment, its version, and the versions read, and found by `fetch` though
-  its sentinel is not this code's; a watchlist comment at the current version
+  its sentinel is not this code's; a version spelled other than as a bare
+  integer, in the sentinel or the block, stopping the reader too; a watchlist comment at the current version
   whose block holds no state, and one whose block declares no version, each
   still skipped and listed; a key added at the current version to each kind
   of comment, still read; every writer stamping the current version in the

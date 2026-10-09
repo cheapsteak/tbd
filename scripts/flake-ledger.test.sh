@@ -1410,7 +1410,7 @@ bump() {
 }
 
 # The schema check's one line, and a mutation that turns it off.
-NO_SCHEMA_CHECK='s/^    unreadable = \[v for v in _declared\(body, prefix, payload\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/'
+NO_SCHEMA_CHECK='s/^    unreadable = \[v for v in _declared\(body, prefix, payload\) if not \(_is_version\(v\) and v in READABLE_SCHEMAS\)\]$/    unreadable = []/'
 
 # watch_world DIR BODY: stub_world plus a bot watchlist, #900, whose one
 # comment, 901, is BODY.
@@ -1520,9 +1520,39 @@ test_a_corrupt_watchlist_comment_at_a_known_version_is_still_skipped() {
   assert_contains "the first is listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 901"
   assert_contains "and the second" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 902"
   assert_eq "neither is written; the entry goes to a new comment" "0" "$(jq '[.watchlist.writes[].comment_id | select(. != null)] | length' <<< "$out")"
-  mutant="$(mutant_of 's/ if v not in READABLE_SCHEMAS\]$/]/' "$LIB")"
+  mutant="$(mutant_of 's/ if not \(_is_version\(v\) and v in READABLE_SCHEMAS\)\]$/]/' "$LIB")"
   rc=0; analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
   assert_eq "mutation: failing closed on every declared version stops the run" "2" "$rc"
+}
+
+test_a_version_spelled_another_way_stops_the_reader_too() {
+  local script out mutant
+  script="$STATE_PRELUDE"'
+s = m.State("t/x()", failures=[F("1", "night:2026-10-01")])
+body = m.render_watchlist([s], "r/r")
+cases = {
+    "sentinel v2.0": body.replace(" v1 -->", " v2.0 -->", 1),
+    "sentinel vNext": body.replace(" v1 -->", " vNext -->", 1),
+    "sentinel v2--> unspaced": body.replace(" v1 -->", " v2-->", 1),
+    "block schema \"2\"": body.replace("\"schema\":1", "\"schema\":\"2\"", 1),
+    "block schema 2.0": body.replace("\"schema\":1", "\"schema\":2.0", 1),
+}
+for name, text in cases.items():
+    assert text != body, name
+    try:
+        m.parse_watchlist(text, m.BOT_LOGIN, "Bot")
+        print(name, "read")
+    except m.UnsupportedSchema as error:
+        print(name, "stops" if "not a version spelled as" in str(error) else str(error))
+'
+  out="$(py <<< "$script")"
+  assert_eq "each spelling stops the reader, not skipped as corrupt" 'sentinel v2.0 stops
+sentinel vNext stops
+sentinel v2--> unspaced stops
+block schema "2" stops
+block schema 2.0 stops' "$out"
+  mutant="$(mutant_of 's/^        found.append\(int\(match.group\(1\)\) if match else rest\[:40\]\)$/        found += [int(match.group(1))] if match else []/' "$LIB")"
+  assert_eq "mutation: ignoring a sentinel it cannot spell reads the comment as v1" "sentinel v2.0 read" "$(py "$mutant" <<< "$script" | head -1)"
 }
 
 test_an_additive_key_at_the_current_version_is_still_read() {

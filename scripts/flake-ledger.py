@@ -1648,7 +1648,9 @@ def report_red_run(repo: str, run_id: int, issue: int, now: datetime, job_token:
     url = f"https://github.com/{repo}/actions/runs/{run_id}"
     body = (
         f"The flake ledger's `ledger` job failed: {url}. It wrote nothing after the failure, "
-        "and the next green run converges. Later consecutive red runs post nothing here."
+        "and the next green run converges – unless the run's summary says it stopped on a comment's schema "
+        "version, which no run converges past until the code reads that version. "
+        "Later consecutive red runs post nothing here."
     )
     if job_token:
         body += (
