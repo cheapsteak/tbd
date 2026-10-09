@@ -1340,6 +1340,37 @@ struct PreSessionHookTests {
         #expect(FileManager.default.fileExists(atPath: checkoutPath))
     }
 
+    /// A terminal-less `.creating` row whose path holds a directory git does not
+    /// list as a worktree is not a checkout TBD can vouch for: the row is
+    /// deleted, not activated, and the directory is not touched.
+    @Test func recoveryDeletesTerminalLessRowWhosePathIsAPlainDirectory() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let base = try #require(repo.worktreeRoot)
+        let plain = (base as NSString).appendingPathComponent("plain")
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let keep = (plain as NSString).appendingPathComponent("keep.txt")
+        try "someone's work".write(toFile: keep, atomically: true, encoding: .utf8)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "plain", branch: "tbd/plain",
+            path: plain, tmuxServer: "tbd-test", status: .creating
+        )
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.isEmpty)
+        #expect(try await db.worktrees.get(id: wt.id) == nil,
+                "a row whose path git does not list must not be activated")
+        #expect(try String(contentsOfFile: keep, encoding: .utf8) == "someone's work",
+                "the directory and its files must be untouched")
+    }
+
     @Test func recoveryDeletesCreatingRowWhoseRepoVanished() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }

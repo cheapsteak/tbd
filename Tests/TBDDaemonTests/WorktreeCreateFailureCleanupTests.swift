@@ -623,6 +623,17 @@ import Testing
 
     // MARK: - A create that fails after its checkout exists keeps it tracked
 
+    /// `realpath()` of a directory that exists. `URL.resolvingSymlinksInPath()`
+    /// is not a substitute: it strips a leading `/private` instead of adding
+    /// it, so `/var/folders/...` stays unresolved while git reports
+    /// `/private/var/folders/...`, and adoption (which matches paths exactly
+    /// against `git worktree list`) then fails to find the checkout.
+    private func canonical(_ url: URL) -> URL {
+        guard let resolved = realpath(url.path, nil) else { return url }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved))
+    }
+
     /// Makes the final `.creating` -> `.active` flip fail, which is the last
     /// step of a create and runs after the checkout and the terminals exist.
     /// The row survives the failure, so the rollback has a real row to delete.
@@ -686,8 +697,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: parentDir) }
         // git reports realpath()-resolved paths; the row's path must match them
         // for adoption to find the checkout in `git worktree list`.
-        let resolvedHost = hostDir.resolvingSymlinksInPath()
-        let resolvedRepo = repoDir.resolvingSymlinksInPath()
+        let resolvedHost = canonical(hostDir)
+        let resolvedRepo = canonical(repoDir)
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
@@ -699,44 +710,107 @@ import Testing
         )
         try await failTheFinalStatusFlip(db)
 
-        await #expect(throws: (any Error).self) {
+        var thrown: Error?
+        do {
             _ = try await lifecycle.completeCreateWorktree(
                 worktreeID: pending.id, skipClaude: true,
                 existingBranchRef: "pr-7", checkoutPRHead: true
             )
+        } catch {
+            thrown = error
         }
 
+        let facts = await describeState(db: db, repoDir: resolvedRepo, pending: pending, thrown: thrown)
+        #expect(thrown != nil, "the create was expected to fail at activation; \(facts)")
         let atPath = try await db.worktrees.list().filter { $0.localPath == pending.localPath }
-        #expect(atPath.count == 1, "expected exactly one row at the checkout: \(atPath)")
-        #expect(atPath.first?.status == .active)
+        #expect(atPath.count == 1, "expected exactly one row at the checkout; \(facts)")
+        #expect(atPath.first?.status == .active, "\(facts)")
         #expect(atPath.first?.foreignHead == true,
-                "a fork checkout was re-adopted without its foreign-head stamp")
+                "a fork checkout was re-adopted without its foreign-head stamp; \(facts)")
     }
 
-    /// A failure DURING `git worktree add` made no checkout, so nothing is
-    /// adopted, and a foreign directory sitting at the row's path is left
-    /// alone and untracked.
-    @Test func aFailureDuringWorktreeAddAdoptsNothing() async throws {
+    /// The facts that explain a failed expectation about a create's aftermath:
+    /// what the create threw, every row, whether the pending path exists, and
+    /// what git lists. Kept in the failure message so a CI-only failure can be
+    /// read without a rerun.
+    private func describeState(
+        db: TBDDatabase, repoDir: URL, pending: Worktree, thrown: Error?
+    ) async -> String {
+        let rows = ((try? await db.worktrees.list()) ?? []).map { row in
+            "[\(row.id == pending.id ? "pending-id" : "other-id") \(row.localPath) \(row.status) foreignHead=\(row.foreignHead)]"
+        }
+        let listed = ((try? await GitManager().worktreeList(repoPath: repoDir.path)) ?? [])
+            .map { "\($0.path)@\($0.branch)" }
+        let threw = thrown.map { String(describing: $0) } ?? "nothing"
+        let exists = FileManager.default.fileExists(atPath: pending.localPath)
+        return "threw: \(threw); pending path: \(pending.localPath) (exists: \(exists)); "
+            + "rows: \(rows); git worktree list: \(listed)"
+    }
+
+    /// The plain existing-branch leg records its checkout too: a failure after
+    /// the add re-adopts it.
+    @Test func aFailureAfterAnExistingBranchCheckoutKeepsItTracked() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await shell("git branch feature", at: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "owned-by-caller", skipClaude: true
+            repoID: repo.id, branch: "feature", skipClaude: true, useExistingBranch: true
+        )
+        try await failTheFinalStatusFlip(db)
+
+        var thrown: Error?
+        do {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true, existingBranchRef: "feature"
+            )
+        } catch {
+            thrown = error
+        }
+
+        let facts = await describeState(db: db, repoDir: repoDir, pending: pending, thrown: thrown)
+        #expect(thrown != nil, "the create was expected to fail at activation; \(facts)")
+        let atPath = try await db.worktrees.list().filter { $0.localPath == pending.localPath }
+        #expect(atPath.count == 1, "expected exactly one row at the checkout; \(facts)")
+        #expect(atPath.first?.status == .active, "\(facts)")
+        #expect(atPath.first?.foreignHead == false, "\(facts)")
+    }
+
+    /// A failure DURING `git worktree add` made no checkout, so nothing is
+    /// adopted. The failure has to be real: an occupied folder alone only
+    /// triggers the generated-name retry, which succeeds, so the caller names
+    /// the folder (`userSpecifiedFolder`), which turns the collision into a
+    /// failure. A cloned repo is used so `origin/main` resolves and the first
+    /// attempt is the one that trips over the path (an origin-less repo falls
+    /// back to the local base, whose cleanup clears the planted directory).
+    @Test func aFailureDuringWorktreeAddAdoptsNothing() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        let resolvedHost = canonical(hostDir)
+        let resolvedRepo = canonical(repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: resolvedHost, repoDir: resolvedRepo)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, folder: "taken", skipClaude: true
         )
         try occupy(pending.localPath)
 
         await #expect(throws: WorktreeLifecycleError.self) {
             _ = try await lifecycle.completeCreateWorktree(
-                worktreeID: pending.id, skipClaude: true, userSpecifiedBranch: true
+                worktreeID: pending.id, skipClaude: true, userSpecifiedFolder: true
             )
         }
 
-        #expect(try await db.worktrees.list(repoID: repo.id).filter { $0.status != .main }.isEmpty,
-                "no row may be created for a checkout that was never made")
+        let rows = try await db.worktrees.list(repoID: repo.id).filter { $0.status != .main }
+        #expect(rows.isEmpty,
+                "no row may be created for a checkout that was never made; rows: \(rows.map { "\($0.localPath) \($0.status)" })")
     }
 
     /// A name collision makes the create retry at a new folder and branch. The

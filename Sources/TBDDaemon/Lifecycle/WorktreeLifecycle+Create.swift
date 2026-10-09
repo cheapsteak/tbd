@@ -480,28 +480,29 @@ extension WorktreeLifecycle {
                     worktreePath: worktree.path,
                     userSpecifiedFolder: userSpecifiedFolder,
                     userSpecifiedBranch: userSpecifiedBranch,
-                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
+                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision,
+                    // A name collision makes `attemptWorktreeAdd` retry at a new
+                    // folder and branch. The row must name the checkout that
+                    // will exist: a row whose path is not in `git worktree
+                    // list` is archived by the next reconcile, which would kill
+                    // the new worktree's terminals. It is written BEFORE the
+                    // retry's add so a daemon death after the add leaves a row
+                    // recovery can match to the checkout. If the retry add then
+                    // fails, the create fails and the rollback deletes the row
+                    // as usual. The row's `name` is left as it was (it is the
+                    // identity the caller was handed; no store setter changes
+                    // it); its folder and branch are what reconcile and every
+                    // later git call read.
+                    beforeRetry: { [db] retryPath, retryBranch in
+                        try await db.worktrees.updatePath(id: worktreeID, path: retryPath)
+                        try await db.worktrees.updateBranch(id: worktreeID, branch: retryBranch)
+                    }
                 )
 
                 // The checkout exists from here on. Recorded before any
                 // bookkeeping below can throw, so a failed create hands this
                 // checkout back instead of orphaning it.
                 await createdCheckouts.record(worktreeID: worktreeID, path: result.path)
-
-                // 4. A name collision makes `attemptWorktreeAdd` retry at a new
-                // folder and branch. The row must name the checkout that
-                // exists: a row whose path is not in `git worktree list` is
-                // archived by the next reconcile, which would kill the new
-                // worktree's terminals. The row's `name` is left as it was
-                // (it is the identity the caller was handed; no store setter
-                // changes it); its folder and branch are what reconcile and
-                // every later git call read.
-                if result.path != worktree.path {
-                    try await db.worktrees.updatePath(id: worktreeID, path: result.path)
-                }
-                if result.branch != worktree.branch {
-                    try await db.worktrees.updateBranch(id: worktreeID, branch: result.branch)
-                }
                 resultPath = result.path
                 resultBranch = result.branch
             }
@@ -819,7 +820,14 @@ extension WorktreeLifecycle {
         worktreePath: String,
         userSpecifiedFolder: Bool,
         userSpecifiedBranch: Bool,
-        retryGeneratedNameOnCollision: Bool
+        retryGeneratedNameOnCollision: Bool,
+        // Runs once, just before the collision-retry's `git worktree add`, with
+        // the folder and branch the retry is about to create. The caller
+        // persists them on the row so that a daemon death between the add and
+        // the caller's own bookkeeping leaves a row that names the checkout:
+        // startup recovery then finds it, instead of deleting a row whose path
+        // is missing and orphaning the real checkout.
+        beforeRetry: (_ path: String, _ branch: String) async throws -> Void
     ) async throws -> (name: String, branch: String, path: String) {
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
@@ -989,6 +997,8 @@ extension WorktreeLifecycle {
         let retryBranchPreExisted: Bool? = retryBranch == branch
             ? branchPreExisted
             : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
+
+        try await beforeRetry(retryPath, retryBranch)
 
         for baseBranch in baseBranches {
             // Sampled per base and before the add, exactly as in the first loop.
