@@ -473,29 +473,37 @@ class UnsupportedSchema(Exception):
 _DECLARED_VERSION = re.compile(r"(\d{1,9}) -->")
 
 
-def declared_versions(body: str, prefix: str, begin: str, end: str) -> list[int]:
-    """The schema versions a comment declares: its sentinel's, then its JSON
-    block's `schema`, each when it is there and an integer. A corrupt comment
-    may declare neither."""
+def _block_version(payload: dict | None) -> int | None:
+    version = payload.get("schema") if payload else None
+    # `True == 1` in Python: a boolean is not a version.
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def _declared(body: str, prefix: str, payload: dict | None) -> list[int]:
     found = []
     if body.startswith(prefix):
         match = _DECLARED_VERSION.match(body, len(prefix))
         if match:
             found.append(int(match.group(1)))
-    payload = _parse_json_block(body, begin, end)
-    version = payload.get("schema") if payload else None
-    if isinstance(version, int) and not isinstance(version, bool):
-        found.append(version)
+    if _block_version(payload) is not None:
+        found.append(_block_version(payload))
     return found
 
 
-def _readable(version) -> bool:
-    # `True == 1` in Python: a boolean is not a version.
-    return isinstance(version, int) and not isinstance(version, bool) and version in READABLE_SCHEMAS
+def declared_versions(body: str, prefix: str, begin: str, end: str) -> list[int]:
+    """The schema versions a comment declares: its sentinel's, then its JSON
+    block's `schema`, each when it is there and an integer. A corrupt comment
+    may declare neither."""
+    return _declared(body, prefix, _parse_json_block(body, begin, end))
 
 
-def _check_schema(body: str, prefix: str, begin: str, end: str, what: str) -> None:
-    unreadable = [v for v in declared_versions(body, prefix, begin, end) if v not in READABLE_SCHEMAS]
+def _versioned_payload(body: str, prefix: str, begin: str, end: str, what: str) -> dict | None:
+    """A bot comment's JSON block, parsed once: None when the comment is
+    corrupt (no block, or a block that declares no version). Raises
+    `UnsupportedSchema` when the sentinel or the block declares a version
+    outside `READABLE_SCHEMAS`, so a block returned is one this code reads."""
+    payload = _parse_json_block(body, begin, end)
+    unreadable = [v for v in _declared(body, prefix, payload) if v not in READABLE_SCHEMAS]
     if unreadable:
         version = max(unreadable)
         age = "newer than" if version > max(READABLE_SCHEMAS) else "not one of"
@@ -503,6 +511,7 @@ def _check_schema(body: str, prefix: str, begin: str, end: str, what: str) -> No
             f"the bot's {what} comment declares schema version {version}, {age} the versions this code reads "
             f"({', '.join(str(v) for v in sorted(READABLE_SCHEMAS))}); stopping rather than reading it as empty"
         )
+    return payload if _block_version(payload) is not None else None
 
 
 def code_span(text: str) -> str:
@@ -690,9 +699,8 @@ def parse_comment(body: str, login: str | None, user_type: str | None) -> State 
     `UnsupportedSchema` instead of reading as None."""
     if not trusted_author(login, user_type) or not body.startswith(SENTINEL_PREFIX):
         return None
-    _check_schema(body, SENTINEL_PREFIX, STATE_BEGIN, STATE_END, "ledger")
-    payload = _parse_json_block(body, STATE_BEGIN, STATE_END)
-    if not payload or not _readable(payload.get("schema")):
+    payload = _versioned_payload(body, SENTINEL_PREFIX, STATE_BEGIN, STATE_END, "ledger")
+    if not payload:
         return None
     return _state_from_payload(payload)
 
@@ -757,9 +765,8 @@ def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list
     `UnsupportedSchema` as `parse_comment` does."""
     if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL_PREFIX):
         return None
-    _check_schema(body, WATCHLIST_SENTINEL_PREFIX, WATCHLIST_BEGIN, WATCHLIST_END, "watchlist")
-    payload = _parse_json_block(body, WATCHLIST_BEGIN, WATCHLIST_END)
-    if not payload or not _readable(payload.get("schema")) or not isinstance(payload.get("tests"), list):
+    payload = _versioned_payload(body, WATCHLIST_SENTINEL_PREFIX, WATCHLIST_BEGIN, WATCHLIST_END, "watchlist")
+    if not payload or not isinstance(payload.get("tests"), list):
         return None
     states = [_state_from_payload(t) for t in payload["tests"]]
     if any(s is None for s in states):
@@ -829,9 +836,8 @@ def parse_attempts(body: str, login: str | None, user_type: str | None) -> list[
     Raises `UnsupportedSchema` as `parse_comment` does."""
     if not trusted_author(login, user_type) or not body.startswith(ATTEMPTS_SENTINEL_PREFIX):
         return None
-    _check_schema(body, ATTEMPTS_SENTINEL_PREFIX, ATTEMPTS_BEGIN, ATTEMPTS_END, "attempt")
-    payload = _parse_json_block(body, ATTEMPTS_BEGIN, ATTEMPTS_END)
-    if not payload or not _readable(payload.get("schema")):
+    payload = _versioned_payload(body, ATTEMPTS_SENTINEL_PREFIX, ATTEMPTS_BEGIN, ATTEMPTS_END, "attempt")
+    if not payload:
         return None
     known = {f.name for f in fields(Attempt)}
     try:

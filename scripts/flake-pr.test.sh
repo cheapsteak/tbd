@@ -476,7 +476,10 @@ PY
   assert_eq "one entry for run 4242, now pr-opened" "4242 pr-opened" "$(recorded "$d" all | jq -r '"\(.run_id) \(.outcome)"')"
 }
 
-unreadable_attempts() { # D newer|corrupt -> a comments file holding one bot attempt comment, 555
+# unreadable_attempts D newer|corrupt|second -> a comments file holding one
+# bot attempt comment, 555, in a newer schema or corrupt; with `second`, a
+# readable 555 and a newer 556 after it.
+unreadable_attempts() {
   local d="$1" f="$1/comments.jsonl"
   python3 - "$HERE" "$2" > "$f" <<'PY'
 import json, sys
@@ -484,12 +487,17 @@ sys.path.insert(0, sys.argv[1])
 import flake_lib as fl
 old = fl.Attempt(run_id=1111, started_at="2026-10-01T06:00:00Z", main_sha="a" * 40, episode=0, outcome="no-diff")
 body = fl.render_attempts([old], "cheapsteak/tbd")
+newer = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
+assert newer.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in newer
+bot = {"login": fl.BOT_LOGIN, "type": "Bot"}
 if sys.argv[2] == "newer":
-    body = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
-    assert body.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in body
+    print(json.dumps({"id": 555, "body": newer, "user": bot}))
+elif sys.argv[2] == "second":
+    print(json.dumps({"id": 555, "body": body, "user": bot}))
+    print(json.dumps({"id": 556, "body": newer, "user": bot}))
 else:
-    body = body.split("<!-- flakefix-attempts-state")[0] + "<!-- flakefix-attempts-state\n{edited by hand\nflakefix-attempts-state -->"
-print(json.dumps({"id": 555, "body": body, "user": {"login": fl.BOT_LOGIN, "type": "Bot"}}))
+    corrupt = body.split("<!-- flakefix-attempts-state")[0] + "<!-- flakefix-attempts-state\n{edited by hand\nflakefix-attempts-state -->"
+    print(json.dumps({"id": 555, "body": corrupt, "user": bot}))
 PY
   printf '%s' "$f"
 }
@@ -514,10 +522,27 @@ test_an_attempt_record_in_a_newer_schema_refuses_to_publish() {
   assert_eq "corrupt: exit 2" "2" "$(publish "$d")"
   assert_eq "corrupt: nothing pushed" "none" "$(remote_head "$d")"
   assert_contains "corrupt: said so" "$(cat "$d/out")" "the bot's own attempt comment 555 does not parse"
+  # A newer comment after a readable one: every bot comment is read.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" second)"
+  assert_eq "second: exit 2" "2" "$(publish "$d")"
+  assert_eq "second: nothing pushed" "none" "$(remote_head "$d")"
+  assert_contains "second: naming the later comment" "$(cat "$d/out")" "#10 comment 556: the bot's attempt comment declares schema version 2"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" second)"
+  mutant="$(mutant_of 's/^    for c in sorted\(comments, key=lambda c: c\["id"\]\):$/    for c in sorted(comments, key=lambda c: c["id"])[:1]:/' "$PR_PY")"
+  publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: stopping at the first comment pushes past the newer one" "$(remote_head "$d")" "none"
   d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
-  mutant="$(mutant_of 's/^  if ! py check-attempts --repo "\$REPO" --issue "\$ISSUE"; then$/  if false; then/' "$PR_SH")"
+  mutant="$(mutant_of 's/^  py check-attempts --repo "\$REPO" --issue "\$ISSUE" \|\| crc=\$\?$/  true/' "$PR_SH")"
   publish "$d" "$mutant" > /dev/null
   assert_lacks "mutation: without the up-front read the candidate is pushed first" "$(remote_head "$d")" "none"
+  # A failed read is not an unreadable record: it dies the usual way, trying
+  # to record the abort, rather than refusing.
+  d="$(world)"; routes "$d"
+  jq '[{match: "issues/10/comments\\?per_page", exit: 1, err: "HTTP 502"}] + .' "$d/routes.json" > "$d/r" && mv "$d/r" "$d/routes.json"
+  assert_eq "a failed read: exit 2" "2" "$(publish "$d")"
+  assert_contains "a failed read: said so" "$(cat "$d/out")" "cannot read #10's attempt record"
+  assert_lacks "a failed read: not a refusal" "$(cat "$d/out")" "refusing to publish"
+  assert_contains "a failed read: it tried to record the abort" "$(cat "$d/out")" "cannot record the aborted attempt"
   d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
   mutant="$(mutant_of 's/startswith\(fl.ATTEMPTS_SENTINEL_PREFIX\)/startswith(fl.ATTEMPTS_SENTINEL)/' "$PR_PY")"
   assert_eq "mutation: matching only the v1 sentinel publishes" "0" "$(publish "$d" "$mutant")"

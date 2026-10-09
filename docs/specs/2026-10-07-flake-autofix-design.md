@@ -424,7 +424,10 @@ not know stops it.** Every writer stamps the current version
 `<!-- flake-watchlist v1 -->`) and as the JSON block's `schema` key. One version
 covers all three kinds of comment. Readers find a comment by the sentinel's
 prefix (`<!-- flake-ledger v`, and so on), whatever version follows, so a
-comment another version wrote is never invisible to them. A comment from the
+comment another version wrote is never invisible to them. That holds for
+readers that match the prefix; code older than the prefix match fetches only
+the exact `v1` sentinels, so a bump to version 2 must never be rolled back
+past the prefix-matching readers. A comment from the
 bot that declares, in either place, a version outside the set this code reads
 (`READABLE_SCHEMAS`) is not treated as corrupt, because reading it as corrupt
 would read it as empty. A schema bump, or a rollback to code older than the
@@ -438,11 +441,15 @@ declares, and the versions the code reads. Only a comment the bot wrote can
 stop a run this way; a forgery is ignored before its version is read. An older
 version stays in the readable set for as long as the readers can read it,
 migrating it as they load it. Within one version a writer may add a key: an
-attempt reader drops a key it does not know, and the ledger and watchlist
-readers ignore an unknown top-level key, so an additive field needs no bump. A
-change an older reader would misread – a key renamed, retyped, or given a new
-meaning, or a new key inside a failure record, which the reader does not
-accept – takes a new version. A comment the bot wrote whose
+attempt reader drops an entry key it does not know, and the ledger and
+watchlist readers ignore an unknown top-level key. But every writer rebuilds
+its comment from what it parsed, so an older reader that drops a key also
+erases it the next time it writes. An additive field therefore needs no bump
+only when losing it is harmless, as for the optional attempt fields
+(`OPTIONAL_ATTEMPT_FIELDS`), which mean nothing when absent. A change an older
+reader would misread – a key renamed, retyped, or given a new meaning, a key
+whose loss matters, or a new key inside a failure or folded record, which the
+reader does not accept – takes a new version. A comment the bot wrote whose
 declared version is readable or absent, but whose JSON block does not parse
 or does not hold state of that version, is corrupt – most likely a hand edit –
 and is handled per comment: a watchlist comment is skipped (above), and an
@@ -1494,10 +1501,14 @@ Transitions, each owned by the PR driver:
   code that reads that version, or adds the migration. Every reader stops
   rather than skipping the one comment, because a version change reaches every
   bot comment at once, and skipping them all would read the watchlist and the
-  attempt records as empty. `publish` reads the attempt comment before it
-  pushes, and a bot attempt comment that does not parse stops it there too:
+  attempt records as empty. `publish` reads every bot attempt comment on the
+  issue before it pushes, and one that does not parse stops it there too:
   the record `publish` ends with cannot be written over such a comment, so a
-  push or a PR made first would be an attempt nobody recorded.
+  push or a PR made first would be an attempt nobody recorded. A failed read
+  of those comments is not a refusal: `publish` fails as for any other read
+  failure, still trying to record `aborted`. The tracking-issue note (above)
+  does not say why the ledger went red; the job's summary and log name the
+  comment and the versions.
 - **The build fails before the session starts.** No attempt; the job ends red.
   `main` is expected to build, so this is a CI problem, not a flake.
 - **The session fails** – it errors, times out, or exhausts its turns, or
@@ -1959,9 +1970,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   stress verdict recorded; a weak-evidence rename, whose status keeps the
   weak-evidence clause; an entry with no change, which writes neither
   change field, and an attempt comment holding a key its reader does not
-  know, which still parses; an attempt comment in a newer schema version, and
-  one that does not parse, each refusing `publish` before any push, post, or
-  record, the first naming its version; a rename whose stress failed, still labelled, and
+  know, which still parses; an attempt comment in a newer schema version, one
+  after a readable bot attempt comment, and one that does not parse, each
+  refusing `publish` before any push, post, or record, the newer ones naming
+  their version; a failed read of the comments, which fails without refusing
+  and tries to record the abort; a rename whose stress failed, still labelled, and
   a plain failure, not; and a PR carrying `flakefix-needs-human`, never
   promoted under either trigger with every other condition met. The
   workflow: both sessions on the model the layout step names, never through

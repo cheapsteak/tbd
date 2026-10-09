@@ -268,9 +268,14 @@ cmd_open() {
   # schema this code does not read, or one that does not parse, would be
   # misread or overwritten by the record at the end, so publishing stops here
   # with nothing written – recording the refusal would hit the same comment.
-  if ! py check-attempts --repo "$REPO" --issue "$ISSUE"; then
+  # A failed read (exit 2) is not that: it dies the usual way, recording.
+  local crc=0
+  py check-attempts --repo "$REPO" --issue "$ISSUE" || crc=$?
+  if [[ "$crc" -eq 3 ]]; then
     RECORDING=1
     die "refusing to publish: #$ISSUE's attempt record cannot be read (above)"
+  elif [[ "$crc" -ne 0 ]]; then
+    die "cannot read #$ISSUE's attempt record"
   fi
   local branch="$BRANCH_PREFIX$ISSUE" remote="${FLAKE_PR_REMOTE:-https://github.com/$REPO.git}"
   # The run link every post carries is rebuilt from the pick, uploaded before

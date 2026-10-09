@@ -1410,7 +1410,7 @@ bump() {
 }
 
 # The schema check's one line, and a mutation that turns it off.
-NO_SCHEMA_CHECK='s/^    unreadable = \[v for v in declared_versions\(body, prefix, begin, end\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/'
+NO_SCHEMA_CHECK='s/^    unreadable = \[v for v in _declared\(body, prefix, payload\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/'
 
 # watch_world DIR BODY: stub_world plus a bot watchlist, #900, whose one
 # comment, 901, is BODY.
@@ -1457,8 +1457,8 @@ test_a_watchlist_comment_in_a_newer_schema_stops_the_run_unwritten() {
   d="$(mktmpd)"; watch_world "$d" "$newer"
   mutant="$(mutant_of "$NO_SCHEMA_CHECK" "$LIB")"
   out="$(write_run "$d" "$mutant/flake-ledger.py")"
-  assert_eq "mutation: without the check it is skipped as corrupt and the run goes on" "rc=0" "$(head -1 <<< "$out")"
-  assert_contains "mutation: writing a fresh watchlist comment beside it" "$(writes_in "$d/log")" "-X POST repos/cheapsteak/tbd/issues/900/comments"
+  assert_eq "mutation: without the check the run goes on" "rc=0" "$(head -1 <<< "$out")"
+  assert_contains "mutation: misreading the newer comment and rewriting it at this version" "$(writes_in "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/comments/901"
   d="$(mktmpd)"; watch_world "$d" "$newer"
   mutant="$(mutant_of 's/\(fl.WATCHLIST_SENTINEL_PREFIX,\)/(fl.WATCHLIST_SENTINEL,)/' "$LEDGER")"
   assert_eq "mutation: fetching by the v1 sentinel never sees the v2 comment" "rc=0" "$(write_run "$d" "$mutant/flake-ledger.py" | head -1)"
@@ -1477,7 +1477,7 @@ test_a_ledger_or_attempt_comment_in_a_newer_schema_stops_the_run_unwritten() {
   assert_contains "naming it" "$out" "#970 comment 95: the bot's ledger comment declares schema version 2"
   mutant="$(mutant_of "$NO_SCHEMA_CHECK" "$LIB")"
   rc=0; analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
-  assert_eq "mutation: without the check it is read as corrupt and the run goes on" "0" "$rc"
+  assert_eq "mutation: without the check the run goes on" "0" "$rc"
   # The attempt comment, beside a readable ledger comment.
   attempts="$(mktmpd)/attempts.md"
   python3 - "$HERE" "$attempts" <<'PY'

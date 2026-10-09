@@ -153,8 +153,8 @@ test_an_attempt_record_in_a_newer_schema_refuses_the_pick() {
   assert_contains "naming the comment, its version and the version read" "$out" \
     "refused: #10 comment 1010: the bot's attempt comment declares schema version 2, newer than the versions this code reads (1)"
   assert_eq "a dispatch refuses too" "rc=2 none" "$(picked "$w" "$HERE" --issue 10)"
-  mutant="$(mutant_of 's/^    unreadable = \[v for v in declared_versions\(body, prefix, begin, end\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/' "$HERE/flake_lib.py")"
-  assert_eq "mutation: read as corrupt, the other issue is picked" "rc=0 #11" "$(picked "$w" "$mutant")"
+  mutant="$(mutant_of 's/^    unreadable = \[v for v in _declared\(body, prefix, payload\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/' "$HERE/flake_lib.py")"
+  assert_eq "mutation: without the check the newer record is misread as this version, and its test picked" "rc=0 #10" "$(picked "$w" "$mutant")"
   mutant="$(mutant_of 's/^    except \(Refused, fl.UnsupportedSchema\) as error:$/    except Refused as error:/' "$PICK")"
   assert_eq "mutation: uncaught, it is a crash, not a refusal" "rc=1 none" "$(picked "$w" "$mutant")"
 }

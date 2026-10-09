@@ -24,8 +24,9 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
         a second. Only a comment the bot wrote is ever edited.
     check-attempts --repo R --issue N
         reads the issue's attempt comment as `record` will, writing nothing:
-        exit 2 when the bot's comment does not parse or is in a schema this
-        code does not read, so `open` refuses before it pushes or posts.
+        exit 3 when a bot attempt comment does not parse or is in a schema
+        this code does not read, so `open` refuses before it pushes or posts;
+        exit 2 when the comments cannot be read at all.
     comment --repo R --issue N --body F
         posts one issue comment.
     promote-resolve --repo R --sha S
@@ -350,8 +351,10 @@ def attempt_comment(repo: str, issue: int) -> tuple[int, list[fl.Attempt]] | Non
         if attempts is None:
             # Fail closed: overwriting an unreadable record would lose history.
             raise Malformed(f"#{issue}: the bot's own attempt comment {c['id']} does not parse")
-        mine = (int(c["id"]), attempts)
-        break
+        # The oldest is the one written; every later bot comment is still
+        # read, so one in another schema stops publish as it stops the ledger.
+        if mine is None:
+            mine = (int(c["id"]), attempts)
     return mine
 
 
@@ -644,7 +647,13 @@ def main(argv: list[str]) -> int:
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
         elif args.command == "check-attempts":
-            attempt_comment(args.repo, args.issue)
+            try:
+                attempt_comment(args.repo, args.issue)
+            except Malformed as error:
+                # 3, not 2: the record itself is unreadable, which a retry
+                # cannot change; a failed read stays 2.
+                print(f"flake-pr: {error}", file=sys.stderr)
+                return 3
         elif args.command == "promote-facts":
             facts = promote_facts(args.repo, args.branch, args.sha, args.trigger, args.conclusion, args.event,
                                   args.run_id, args.run_created_at)
