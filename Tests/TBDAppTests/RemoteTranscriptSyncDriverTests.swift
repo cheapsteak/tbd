@@ -527,3 +527,353 @@ final class RemoteTranscriptSyncGate {
         waiters.removeAll()
     }
 }
+
+// MARK: - Earlier history
+
+/// `RemoteTranscriptSyncDriver.loadEarlier(trigger:)` and `noteNearTop(_:)`:
+/// one `remote.transcriptLoadEarlier` in flight at a time, only while the
+/// daemon reports `hasEarlier`; a failure waits for the next entry into the
+/// top zone or the header's button; `head` never moves backwards within a
+/// generation; a newer generation resets the earlier-history state.
+extension RemoteTranscriptSyncDriverTests {
+    private struct Refused: Error, LocalizedError {
+        var errorDescription: String? { "nope" }
+    }
+
+    /// The cache a pane mounts over: generation 1, head 0, more above.
+    private static func seed(hasEarlier: Bool = true) -> RemoteTranscriptSyncSnapshot {
+        var seed = RemoteTranscriptSyncSnapshot(path: "/cache/s1.jsonl", generation: 1, caughtUp: false)
+        seed.hasEarlier = hasEarlier
+        return seed
+    }
+
+    private static func page(
+        generation: Int = 1, head: Int, reachedStart: Bool = false, expired: Bool = false
+    ) -> RemoteTranscriptLoadEarlierResult {
+        RemoteTranscriptLoadEarlierResult(
+            generation: generation, head: head, reachedStart: reachedStart, expired: expired)
+    }
+
+    /// A driver whose loads record their ordinal and answer from `load`, and
+    /// whose syncs answer from `sync` (caught up, generation 1, head 0, more
+    /// above, by default).
+    private static func makeLoadingDriver(
+        clock: EventDrivenTestClock,
+        seed: RemoteTranscriptSyncSnapshot = RemoteTranscriptSyncDriverTests.seed(),
+        syncs: FireRecorder<Int> = FireRecorder<Int>(),
+        loads: FireRecorder<Int>,
+        sync: @escaping @MainActor (Int) throws -> RemoteTranscriptSyncResult = { _ in
+            RemoteTranscriptSyncResult(
+                path: "/cache/s1.jsonl", generation: 1, caughtUp: true, head: 0, hasEarlier: true)
+        },
+        load: @escaping @MainActor (Int) async throws -> RemoteTranscriptLoadEarlierResult
+    ) -> RemoteTranscriptSyncDriver {
+        var syncCount = 0
+        var loadCount = 0
+        return RemoteTranscriptSyncDriver(
+            selection: selection,
+            sync: { _ in
+                syncCount += 1
+                let ordinal = syncCount
+                defer { syncs.record(ordinal) }
+                return try sync(ordinal)
+            },
+            loadEarlier: { selectionSeen in
+                #expect(selectionSeen == selection)
+                loadCount += 1
+                let ordinal = loadCount
+                loads.record(ordinal)
+                return try await load(ordinal)
+            },
+            initialSnapshot: seed,
+            interval: interval,
+            clock: clock)
+    }
+
+    private static func until(
+        _ driver: RemoteTranscriptSyncDriver,
+        _ condition: @escaping @MainActor (RemoteTranscriptSyncSnapshot) -> Bool
+    ) async -> PollOutcome {
+        await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { condition(driver.snapshot) }
+        }
+    }
+
+    @Test("a sync publishes head and hasEarlier")
+    func syncPublishesHeadAndHasEarlier() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let driver = Self.makeDriver(clock: clock, syncs: syncs) { _ in
+            RemoteTranscriptSyncResult(
+                path: "/cache/s1.jsonl", generation: 1, caughtUp: true, head: 2, hasEarlier: true)
+        }
+        defer { driver.stop() }
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot.head == 2)
+        #expect(driver.snapshot.hasEarlier)
+        #expect(driver.snapshot.earlier == .idle)
+    }
+
+    @Test("near the top with hasEarlier loads once")
+    func oneLoadInFlight() async throws {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let gate = RemoteTranscriptSyncGate()
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in
+            await gate.wait()
+            return Self.page(head: 1)
+        }
+        defer {
+            driver.stop()
+            gate.open()
+        }
+
+        driver.noteNearTop(true)
+        #expect(driver.snapshot.earlier == .loading)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1)
+
+        driver.loadEarlier(trigger: .nearTop)
+        driver.loadEarlier(trigger: .button)
+        driver.noteNearTop(false)
+        driver.noteNearTop(true)
+        await settle()
+        #expect(loads.values == [1], "a second call while one is in flight")
+        #expect(driver.snapshot.earlier == .loading)
+
+        gate.releaseOne()
+        #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
+        #expect(loads.values == [1])
+    }
+
+    @Test("no load without hasEarlier")
+    func noLoadWithoutHasEarlier() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(
+            clock: clock, seed: Self.seed(hasEarlier: false), loads: loads
+        ) { _ in Self.page(head: 1) }
+        defer { driver.stop() }
+
+        driver.noteNearTop(true)
+        driver.loadEarlier(trigger: .nearTop)
+        driver.loadEarlier(trigger: .button)
+        await settle()
+        #expect(loads.values.isEmpty)
+        #expect(driver.snapshot.earlier == .idle)
+    }
+
+    @Test("a successful load publishes the new head and bumps the refresh token")
+    func successfulLoadPublishes() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in Self.page(head: 1) }
+        defer { driver.stop() }
+        let tokenBefore = driver.snapshot.refreshToken
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
+        #expect(driver.snapshot.earlier == .idle)
+        #expect(driver.snapshot.hasEarlier)
+        #expect(driver.snapshot.generation == 1)
+        #expect(driver.snapshot.refreshToken == tokenBefore + 1)
+    }
+
+    @Test("reachedStart and expired end the history")
+    func reachedStartAndExpired() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let start = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in
+            Self.page(head: 1, reachedStart: true)
+        }
+        defer { start.stop() }
+        start.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(start) { $0.earlier == .reachedStart } == .satisfied)
+        #expect(start.snapshot.hasEarlier == false)
+
+        let expiredLoads = FireRecorder<Int>()
+        let expired = Self.makeLoadingDriver(clock: clock, loads: expiredLoads) { _ in
+            Self.page(head: 0, reachedStart: true, expired: true)
+        }
+        defer { expired.stop() }
+        expired.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(expired) { $0.earlier == .expired } == .satisfied)
+        #expect(expired.snapshot.hasEarlier == false)
+
+        // Neither asks again.
+        start.loadEarlier(trigger: .button)
+        expired.loadEarlier(trigger: .button)
+        await settle()
+        #expect(loads.values == [1])
+        #expect(expiredLoads.values == [1])
+    }
+
+    @Test("a failed load waits for the next scroll, or the button")
+    func failureWaitsForTheNextScroll() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let loads = FireRecorder<Int>()
+        // Loads 1 and 2 fail; 3 succeeds.
+        let driver = Self.makeLoadingDriver(clock: clock, syncs: syncs, loads: loads) { n in
+            if n < 3 { throw Refused() }
+            return Self.page(head: 1)
+        }
+        defer { driver.stop() }
+
+        driver.noteNearTop(true)
+        #expect(await Self.until(driver) { $0.earlier == .failed("nope") } == .satisfied)
+
+        // A sync while still near the top is not a retry.
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        driver.noteNearTop(true)
+        await settle()
+        #expect(loads.values == [1], "a failure was retried without a new scroll into the zone")
+        #expect(driver.snapshot.earlier == .failed("nope"))
+
+        // Leaving the zone and coming back is the next scroll.
+        driver.noteNearTop(false)
+        driver.noteNearTop(true)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 2)
+        #expect(await Self.until(driver) { $0.earlier == .failed("nope") } == .satisfied)
+
+        // The header's button retries too.
+        driver.loadEarlier(trigger: .button)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 3)
+        #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
+        #expect(driver.snapshot.earlier == .idle)
+    }
+
+    @Test("head never moves backwards within a generation")
+    func headNeverMovesBackwards() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let loads = FireRecorder<Int>()
+        // The sync read the cache before the prepend: head 0.
+        let driver = Self.makeLoadingDriver(clock: clock, syncs: syncs, loads: loads) { _ in
+            Self.page(head: 1)
+        }
+        defer { driver.stop() }
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot.head == 1, "a sync's stale head moved the pane backwards")
+        #expect(driver.snapshot.caughtUp, "the rest of the sync still publishes")
+    }
+
+    @Test("a sync cannot revive hasEarlier once a load reached the start")
+    func syncCannotReviveHasEarlier() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(clock: clock, syncs: syncs, loads: loads) { _ in
+            Self.page(head: 0, reachedStart: true)
+        }
+        defer { driver.stop() }
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(driver) { $0.earlier == .reachedStart } == .satisfied)
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot.hasEarlier == false)
+        #expect(driver.snapshot.earlier == .reachedStart)
+    }
+
+    @Test("a newer generation from a sync resets the earlier state")
+    func newerGenerationResets() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(
+            clock: clock, syncs: syncs, loads: loads,
+            sync: { _ in
+                RemoteTranscriptSyncResult(
+                    path: "/cache/s1.jsonl", generation: 2, caughtUp: true, head: 5, hasEarlier: true)
+            },
+            load: { _ in Self.page(head: 1, reachedStart: true) })
+        defer { driver.stop() }
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(driver) { $0.earlier == .reachedStart } == .satisfied)
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        try await Self.armed(clock)
+        #expect(driver.snapshot.generation == 2)
+        #expect(driver.snapshot.head == 5)
+        #expect(driver.snapshot.hasEarlier)
+        #expect(driver.snapshot.earlier == .idle)
+    }
+
+    @Test("a load answered under another generation is treated as that reset")
+    func loadUnderAnotherGenerationIsAReset() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in
+            Self.page(generation: 2, head: 3)
+        }
+        defer { driver.stop() }
+        let tokenBefore = driver.snapshot.refreshToken
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await Self.until(driver) { $0.generation == 2 } == .satisfied)
+        #expect(driver.snapshot.head == 3)
+        #expect(driver.snapshot.hasEarlier == false, "only the next sync can say what the new cache holds")
+        #expect(driver.snapshot.earlier == .idle)
+        #expect(driver.snapshot.refreshToken == tokenBefore + 1)
+    }
+
+    @Test("a sync published while the table is near the top loads earlier history")
+    func syncNearTopLoads() async throws {
+        let clock = EventDrivenTestClock()
+        let syncs = FireRecorder<Int>()
+        let loads = FireRecorder<Int>()
+        let driver = Self.makeLoadingDriver(
+            clock: clock, seed: Self.seed(hasEarlier: false), syncs: syncs, loads: loads
+        ) { _ in Self.page(head: 1) }
+        defer { driver.stop() }
+
+        // The table is already at the top before anything says there is more.
+        driver.noteNearTop(true)
+        await settle()
+        #expect(loads.values.isEmpty)
+
+        driver.setActive(true)
+        _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1,
+                "hasEarlier arriving with the table at the top must start a load")
+    }
+
+    @Test("a load result after stop publishes nothing")
+    func loadAfterStopIsDropped() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let gate = RemoteTranscriptSyncGate()
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in
+            await gate.wait()
+            return Self.page(head: 1)
+        }
+        defer { gate.open() }
+
+        driver.loadEarlier(trigger: .nearTop)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1)
+        let held = driver.snapshot
+        driver.stop()
+        gate.releaseOne()
+        await settle()
+        #expect(driver.snapshot == held, "a retired driver's pane is gone or shows another session")
+
+        driver.loadEarlier(trigger: .button)
+        await settle()
+        #expect(loads.values == [1], "a retired driver must not load")
+    }
+}

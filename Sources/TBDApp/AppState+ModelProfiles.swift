@@ -967,6 +967,22 @@ extension AppState {
         }
     }
 
+    // MARK: - Live remote transcript sync
+
+    /// Persist the live remote transcript sync gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// reads the flag at every decision; no restart.
+    func setRemoteTranscriptLiveSyncEnabled(_ enabled: Bool) async {
+        do {
+            try await remoteTranscriptLiveSyncFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set remote transcript live sync: \(error, privacy: .public)")
+            showAlert(
+                "Failed to set remote transcript sync: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a profile's pool opt-out, then reload profiles.
     func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
         do {

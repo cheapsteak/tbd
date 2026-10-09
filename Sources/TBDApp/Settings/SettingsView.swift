@@ -244,6 +244,7 @@ struct GeneralSettingsTab: View {
             Section("Remote Sessions") {
                 remoteBackendsToggle
                 claudeCloudToggle
+                remoteTranscriptLiveSyncToggle
                 remoteProvidersRegistryRow
                 RemoteCreateDefaultsEditor(
                     scope: .global,
@@ -704,6 +705,27 @@ struct GeneralSettingsTab: View {
             .font(.caption)
             .foregroundStyle(.secondary)
     }
+
+    /// Live remote transcript sync (`remote_transcript_live_sync_enabled`).
+    /// Reads `daemon.capabilities`, writes
+    /// `config.setRemoteTranscriptLiveSyncEnabled`. Off by default (soaking).
+    @ViewBuilder
+    private var remoteTranscriptLiveSyncToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Keep remote transcripts up to date in the background", isOn: Binding(
+            get: {
+                capabilities?.remoteTranscriptLiveSyncEnabled
+                    ?? Config.remoteTranscriptLiveSyncEnabledDefault
+            },
+            set: { newValue in Task { await appState.setRemoteTranscriptLiveSyncEnabled(newValue) } }
+        ))
+        .help(Self.remoteTranscriptLiveSyncHelp)
+    }
+
+    static let remoteTranscriptLiveSyncHelp =
+        "Opens remote transcripts at their latest messages and loads earlier ones as you scroll up. "
+        + "Background sync fetches only from providers that report a transcript hint. "
+        + "Off by default (soaking)."
 
     /// The registry file row — tilde-abbreviated path + copy-path button,
     /// copying the exact row implementation style `RepoHooksSettingsView`
