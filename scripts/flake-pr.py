@@ -6,14 +6,17 @@ this file for every piece of text it posts and for the attempt record. Reads
 and writes go through `flake-ledger.py`'s `gh` helpers, so a write refuses to
 run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
 
-    body --attempt-dir A --repo R --commits F --out F
+    body --attempt-dir A --repo R --commits F [--replayed OLD NEW] --out F
         the draft PR's body (the template's bug-fix variant).
-    status --attempt-dir A
+    status --attempt-dir A [--replayed OLD NEW]
         `<state>\\t<description>` for the `flakefix/stress` commit status.
+        --replayed names the `main` the candidate was stress-checked on and
+        the `main` it was replayed onto (§7); both texts then say so.
     issue-comment --attempt-dir A --kind failed|no-diff|push-refused|aborted
                   [--pr N] [--detail F] --out F
         the visible comment an attempt posts on its issue.
-    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT] [--session-failed] --out F
+    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT]
+          [--session-failed | --publish-raced] --out F
         the attempt entry, as flake_lib.Attempt JSON.
     record --repo R --issue N --entry F
         appends the entry to the issue's attempt comment, or creates it. A
@@ -110,8 +113,30 @@ def pct(x: float) -> str:
 # --- the status ------------------------------------------------------------------------
 
 
-def status(verdict: dict) -> tuple[str, str]:
-    """Spec §6.5, §7. Success says what was observed, never "fixed"."""
+def replay_note(replayed: tuple[str, str] | None) -> str:
+    """Spec §7: the verdict was measured on one `main`, the PR carries the
+    candidate replayed onto a later one."""
+    if not replayed:
+        return ""
+    old, new = replayed
+    return (f"stress-checked on {old[:7]}; replayed onto main {new[:7]} "
+            "because main's workflow files changed during the run")
+
+
+def fit(text: str) -> str:
+    return text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…"
+
+
+def status(verdict: dict, replayed: tuple[str, str] | None = None) -> tuple[str, str]:
+    """Spec §6.5, §7. Success says what was observed, never "fixed". A replay
+    note goes after the verdict's own text, so a cut falls on the note and
+    never on the weak-evidence clause promote reads back."""
+    state, text = _status(verdict)
+    note = replay_note(replayed)
+    return state, fit(f"{text}; {note}" if note else text)
+
+
+def _status(verdict: dict) -> tuple[str, str]:
     v = verdict.get("verdict")
     if v == "pass":
         text = f"no failure observed in {verdict['iterations']} runs"
@@ -123,10 +148,10 @@ def status(verdict: dict) -> tuple[str, str]:
         return "success", text[:STATUS_MAX]
     if v == "ineligible":
         text = "not eligible for ready, a human must judge: touches " + ", ".join(verdict.get("protected") or [])
-        return "failure", (text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…")
+        return "failure", fit(text)
     reasons = verdict.get("reasons") or ["the stress run failed"]
     text = f"stress failed: target failed in {verdict.get('target_failures', 0)} of {verdict.get('iterations')} runs; {reasons[0]}"
-    return "failure", (text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…")
+    return "failure", fit(text)
 
 
 # --- the PR body -------------------------------------------------------------------------
@@ -145,7 +170,7 @@ def numbers_line(verdict: dict) -> str:
     )
 
 
-def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
+def body(pick: Path, attempt: Path, repo: str, commits: str, replayed: tuple[str, str] | None = None) -> str:
     # The target comes from the pick, uploaded before any session ran.
     target = read_json(pick / "target.json")
     verdict = read_json(attempt / "verify" / "verdict.json")
@@ -186,6 +211,13 @@ def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
         "## Evidence & verification",
         "",
     ]
+    if replayed:
+        out += [
+            f"**Replayed.** The candidate was {replay_note(replayed)}: GitHub refuses the bot's push of a branch "
+            "whose workflow files differ from `main`'s. The verdict below is for the candidate on "
+            f"`{replayed[0][:12]}`; this PR's own CI runs on the replayed commits, and promotion waits for it.",
+            "",
+        ]
     if not verdict.get("weak"):
         out += [f"Numbers: {numbers_line(verdict)}.", ""]
     out += [sanitize(read_text(attempt / "verify" / "verdict.md").strip()), ""]
@@ -220,7 +252,7 @@ def issue_comment(attempt: Path, kind: str, pr: str | None, detail: str) -> str:
 
 
 def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
-          session_failed: bool = False) -> dict:
+          session_failed: bool = False, publish_raced: bool = False) -> dict:
     target = read_json(pick / "target.json")
     notes = read_text(attempt / "flakefix-notes.md").strip() if attempt.is_dir() else ""
     if reason:
@@ -233,6 +265,7 @@ def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
         outcome=outcome,
         notes=notes[: fl.ATTEMPT_NOTES_CHARS],
         session_failed=True if outcome == "aborted" and session_failed else None,
+        publish_raced=True if outcome == "aborted" and publish_raced else None,
     )
     if outcome == "pr-opened":
         verdict = read_json(attempt / "verify" / "verdict.json")
@@ -476,9 +509,11 @@ def main(argv: list[str]) -> int:
     p.add_argument("--attempt-dir", type=Path, required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--commits", type=Path, required=True)
+    p.add_argument("--replayed", nargs=2, metavar=("OLD", "NEW"))
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("status")
     p.add_argument("--attempt-dir", type=Path, required=True)
+    p.add_argument("--replayed", nargs=2, metavar=("OLD", "NEW"))
     p = sub.add_parser("issue-comment")
     p.add_argument("--attempt-dir", type=Path, required=True)
     p.add_argument("--kind", choices=("failed", "no-diff", "push-refused"), required=True)
@@ -491,7 +526,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--outcome", choices=fl.ATTEMPT_OUTCOMES, required=True)
     p.add_argument("--pr", type=int)
     p.add_argument("--reason", default="")
-    p.add_argument("--session-failed", action="store_true")
+    kind = p.add_mutually_exclusive_group()
+    kind.add_argument("--session-failed", action="store_true")
+    kind.add_argument("--publish-raced", action="store_true")
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("record")
     p.add_argument("--repo", required=True)
@@ -522,16 +559,18 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "body":
-            args.out.write_text(body(args.pick_dir, args.attempt_dir, args.repo, read_text(args.commits)))
+            replayed = tuple(args.replayed) if args.replayed else None
+            args.out.write_text(body(args.pick_dir, args.attempt_dir, args.repo, read_text(args.commits), replayed))
         elif args.command == "status":
-            state, text = status(read_json(args.attempt_dir / "verify" / "verdict.json"))
+            replayed = tuple(args.replayed) if args.replayed else None
+            state, text = status(read_json(args.attempt_dir / "verify" / "verdict.json"), replayed)
             print(f"{state}\t{text}")
         elif args.command == "issue-comment":
             detail = read_text(args.detail) if args.detail else ""
             args.out.write_text(issue_comment(args.attempt_dir, args.kind, args.pr, detail))
         elif args.command == "entry":
             args.out.write_text(json.dumps(entry(args.pick_dir, args.attempt_dir, args.outcome, args.pr, args.reason,
-                                              args.session_failed)) + "\n")
+                                              args.session_failed, args.publish_raced)) + "\n")
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
         elif args.command == "promote-facts":

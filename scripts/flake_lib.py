@@ -728,6 +728,11 @@ class Attempt:
     # `aborted` only: True when a fixer session failed (an outage, an expired
     # token, a crash) and left no commit, so the attempt tried nothing (§5).
     session_failed: bool | None = None
+    # `aborted` only: True when `publish` lost a verified candidate to `main`
+    # moving during the run – its replay onto the new `main` conflicted, or a
+    # workflow refusal outlived the replay – so the attempt said nothing about
+    # the test (§5, §8).
+    publish_raced: bool | None = None
 
 
 def render_attempts(attempts: list[Attempt], repo: str) -> str:
