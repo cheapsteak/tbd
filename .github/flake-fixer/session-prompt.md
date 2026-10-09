@@ -91,8 +91,9 @@ section there.
   The verifier then stress-runs the new ID (a retired test runs nothing),
   and the PR stays a draft labelled `flakefix-needs-human`, because a human
   must judge whether coverage is preserved. A declaration counts only when
-  your diff takes the old test's function (for a rename or move, its
-  function or its suite) out of its module. A target that disappears without
+  your diff takes the old test's function out of its suite's file and, for a
+  rename or move, puts the new one into a file declaring the new suite (or
+  renames the suite itself). A target that disappears without
   a declaration fails the verdict, so never restore an old name over a test
   that no longer checks what that name says.
 

@@ -969,7 +969,7 @@ session_transcripts() {
   job="$(job_block "$1" fix)"
   for i in 1 2; do
     block="$(step "$1" fix "Keep session $i's transcript")"
-    grep -qF "if: always() && (steps.s$i.outcome == 'success' || steps.s$i.outcome == 'failure')" <<< "$block" &&
+    grep -qF "if: always() && (steps.s$i.outcome == 'success' || steps.s$i.outcome == 'failure') && steps.c$i.outcome == 'success'" <<< "$block" &&
       grep -qF "EXECUTION_FILE: \${{ steps.s$i.outputs.execution_file }}" <<< "$block" &&
       grep -qF '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' <<< "$block" &&
       grep -qF 'bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE"' <<< "$block" &&
@@ -987,6 +987,8 @@ test_each_sessions_transcript_is_logged_and_kept() {
   check "each transcript is kept only from the checked copy" session_transcripts \
     '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' '[ "$VS" = "" ]'
   check "and uploaded for 14 days" session_transcripts 'retention-days: 14' 'retention-days: 90'
+  check "only once the session's processes are ended" session_transcripts \
+    "steps.s1.outcome == 'failure') && steps.c1.outcome == 'success'" "steps.s1.outcome == 'failure')"
 }
 
 # The stress steps stress what target-change names, and the judges read it.

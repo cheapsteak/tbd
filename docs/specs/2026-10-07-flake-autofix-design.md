@@ -638,19 +638,30 @@ rewrite, where an `env` value could be changed by session 1 through
 
 **Every session leaves a transcript.** Both session steps set
 `show_full_output: true`, so the session's messages and tool results go to
-the step log, where the runner masks every registered secret. The action also
+the step log. The runner masks only registered secrets there –
+`CLAUDE_CODE_OAUTH_TOKEN`, the job token, and the runtime tokens it issues –
+and the action's own documentation warns that full output can expose any
+other secret a tool prints. The session's environment holds no other secret
+(§6.1's credential list), so this is accepted for the reasoning it makes
+visible. The action also
 writes the whole session to `claude-execution-output.json` in `$RUNNER_TEMP`
 when the session ends and names it in its `execution_file` output; an
 artifact is not masked the way a log is, so a step after each session, run
-whatever the attempt's outcome and in the recorded environment (§6.4), copies
+whatever the attempt's outcome once that session's End step has ended its
+processes, and in the recorded environment (§6.4), copies
 that file and only that file – at the action's own path, a regular file, never
 a symlink – into `flakefix-transcripts/session-<i>.json`, with every
 credential-shaped string redacted: Anthropic keys and OAuth tokens
 (`sk-ant-…`), GitHub tokens of every prefix (`ghs_…`, `github_pat_…`), and
-JWTs such as the Actions runtime token. It runs main's verifier copy, checked
+JWTs such as the Actions runtime token. Before anything else, even with no
+file to keep, it removes from the transcript directory anything that is not a
+regular file and redacts every file in it again, so a symlink or an
+unredacted file session 2 left there is not uploaded; the upload leaves out
+hidden files. It runs main's verifier copy, checked
 against its fingerprint first, and removes the original, so session 2's
 transcript can never be session 1's left behind. A transcript that cannot be
-kept says why in the job summary and never fails the job. The `fix` job
+kept says why in the job summary and never fails the job; one whose session
+ended in an aborted End step is not kept at all. The `fix` job
 uploads the directory as the `flakefix-transcripts` artifact. A transcript
 holds repository content and this repository's CI output, and the repository
 is public, so nothing in it is private beyond the credentials redacted. A
@@ -988,12 +999,19 @@ stress run:
   for the target are not honored. The notes are read without following a
   symlink.
 - **The diff bears it out.** Read from `git diff -U0` of the candidate under
-  `Tests/`: a rename or move takes a declaration of the old test's function,
-  or of its innermost suite (a renamed suite), out of the old ID's module, and
-  puts one of the new ID's function or suite into the new ID's module. A
-  retirement takes the old test's function out of its module; a suite
-  declaration alone is not enough, since it may be one of several extensions
-  with the test still in another.
+  `Tests/`, with each revision's type declarations from `git grep`. The old
+  side: the diff takes the old test's function declaration out of a file
+  that declared its innermost suite on the base – a same-named function in
+  another suite's file, or a commented-out line, proves nothing – or, for a
+  rename that keeps the function's name, the old suite is declared nowhere in
+  its module afterwards (a renamed suite). Removing a suite extension while
+  the function stays is never enough. The new side, for a rename: the new
+  function's declaration goes into a file that declares the new suite
+  afterwards, or the renamed suite is declared in a file that held the old
+  one. A retirement needs the old side's function removal. Two suites in one
+  file with a same-named function are told apart by no part of this; a human
+  reading the draft is the backstop there, as for everything a rename or
+  retirement leaves.
 
 What follows:
 
@@ -1813,9 +1831,15 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   honored and saying why; a rename with no declaration, which changes
   nothing; a declared retirement that removes the function, which stresses
   nothing; one that removes only a suite extension and keeps the function,
-  not honored; two declarations for the target, a declaration for another
+  not honored; a retirement whose only removal is a same-named function in
+  another suite's file, or a commented-out line, not honored; a move into
+  another suite's file, renamed or keeping its name, honored; a rename that
+  only drops a suite extension while the target stays, not honored; two
+  declarations for the target, a declaration for another
   test, and a new ID not in the xunit form, none honored; and a notes file
-  that is a symlink, or missing, which declares nothing. The judge with a
+  that is a symlink, or missing, which declares nothing. A `target-change`
+  that failed and left an empty change file still gets its harness-error
+  verdict. The judge with a
   change: a clean rename under its new ID, not eligible for ready, and the
   same iterations without the change failing on the absent old ID; a rename
   whose new ID never ran, failed; a retirement, not eligible, claiming no
@@ -1826,7 +1850,8 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   and a JWT each redacted, the count reported, and the original removed; a
   path other than the action's own, a symlink at the action's path, and no
   file at all, each keeping nothing; and a planted symlink in the transcript
-  directory, removed.
+  directory, removed, and an unredacted file there redacted again, even when
+  there is no execution file to keep.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier

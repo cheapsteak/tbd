@@ -20,13 +20,13 @@ here is a pure function of files on disk.
         pass, 1 fail, 3 ineligible, 2 malformed input. With a target change
         (below) the stress run is judged under the new ID, or, for a retired
         target, not at all, and a candidate that would pass is ineligible.
-    target-change --test ID --notes F --diff F
+    target-change --test ID --notes F --diff F --base-decls F --head-decls F
         prints, as JSON, whether the candidate renamed, moved or retired the
         target: honored only when the session declared it in its notes
         (`RENAMED: <old> -> <new>` or `RETIRED: <old> — <reason>`) and the
-        diff (`git diff -U0` of the candidate, under Tests/) takes the old
-        test's function (or, for a rename, its suite) declaration out of
-        its module, and a rename's new declaration into the new ID's.
+        diff (`git diff -U0` of the candidate, under Tests/) bears it out
+        (`target_change` says how). The decls files are `git grep` listings
+        of the base's and the candidate's type declarations under Tests/.
     quarantined --test ID --inventory F --root DIR
         prints yes, no, or ambiguous (exit 2), from the quarantine audit's
         inventory.
@@ -258,7 +258,7 @@ REASON_MAX = 500
 # honored, so a second try that renamed on purpose knows how to say so.
 DECLARE_HINT = ("If the candidate renamed, moved or retired the target on purpose, declare it in the notes "
                 "with a `RENAMED: <old ID> -> <new ID>` or `RETIRED: <old ID> — <reason>` line; it counts only "
-                "when the diff takes the old test's function or suite declaration out of its module.")
+                "when the diff takes the old test's function out of its suite's file (or renames the suite).")
 
 
 def read_notes(path: Path) -> str:
@@ -296,33 +296,64 @@ def diff_lines(diff: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def declarations(test: str) -> tuple[str, list[re.Pattern]]:
-    """The test's module, and the declarations that make it this test there:
-    its function, and its innermost suite when it has one."""
+def parse_id(test: str) -> tuple[str, str | None, str]:
+    """(module, innermost suite or None, function name) of a test ID."""
     classname, _, _ = test.rpartition("/")
     module, *suites = classname.split(".")
-    found = [re.compile(rf"\bfunc\s+{re.escape(fl.function_name(test))}\s*[(<]")]
-    if suites:
-        found.append(re.compile(rf"\b(?:struct|class|enum|actor|extension)\s+{re.escape(suites[-1])}\b"))
-    return module, found
+    return module, (suites[-1] if suites else None), fl.function_name(test)
 
 
-def net(lines: list[tuple[str, str, str]], module: str, pattern: re.Pattern) -> int:
-    """Declarations matching PATTERN the diff removes from Tests/<module>/,
-    less those it adds there: positive when it takes one out."""
-    prefix, n = f"Tests/{module}/", 0
+def is_comment(text: str) -> bool:
+    return text.lstrip().startswith(("//", "/*", "*"))
+
+
+def func_decl(name: str) -> re.Pattern:
+    return re.compile(rf"\bfunc\s+{re.escape(name)}\s*[(<]")
+
+
+def suite_decl(name: str) -> re.Pattern:
+    return re.compile(rf"\b(?:struct|class|enum|actor|extension)\s+{re.escape(name)}\b")
+
+
+def suite_files(listing: str, module: str, suite: str) -> set[str]:
+    """The files under Tests/<module>/ that declare SUITE, from a `git grep`
+    of one revision's type declarations (`<rev>:<path>:<text>` lines)."""
+    prefix, pattern, out = f"Tests/{module}/", suite_decl(suite), set()
+    for line in listing.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[1].startswith(prefix) and not is_comment(parts[2]) and pattern.search(parts[2]):
+            out.add(parts[1])
+    return out
+
+
+def func_net(lines: list[tuple[str, str, str]], module: str, files: set[str] | None, name: str) -> int:
+    """Declarations of function NAME the diff removes, less those it adds, in
+    FILES, or anywhere under Tests/<module>/ when FILES is None (a test outside
+    any suite). Commented-out lines do not count."""
+    prefix, pattern, n = f"Tests/{module}/", func_decl(name), 0
     for sign, path, text in lines:
-        if path.startswith(prefix) and pattern.search(text):
+        inside = path in files if files is not None else path.startswith(prefix)
+        if inside and not is_comment(text) and pattern.search(text):
             n += 1 if sign == "-" else -1
     return n
 
 
-def target_change(test: str, notes: str, diff: str) -> dict:
+def target_change(test: str, notes: str, diff: str, base_decls: str = "", head_decls: str = "") -> dict:
     """Whether the candidate renamed, moved or retired the target, as the
     verifier treats it. `stressed` is the ID the stress run is judged on, or
     None when nothing is stressed. A declaration the diff does not bear out is
     kept, with why, in `rejected`, and changes nothing: the target's own ID is
-    stressed, and its absence fails the verdict as it always does."""
+    stressed, and its absence fails the verdict as it always does.
+
+    The diff bears a change out when it takes the target's function out of a
+    file that declared the target's suite on the base – not a same-named
+    function in another suite's file, nor a commented-out line – or, for a
+    rename that keeps the function's name, when the old suite is declared
+    nowhere in its module afterwards (a renamed suite). A rename's new side is
+    its function put into a file that declares the new suite afterwards, or
+    the renamed suite declared in a file that held the old one. BASE_DECLS
+    and HEAD_DECLS are `git grep` listings of the two revisions' type
+    declarations under Tests/."""
     none = {"kind": "none", "from": test, "to": None, "reason": None, "stressed": test, "declared": None, "rejected": None}
     found = {}
     for line in notes.splitlines():
@@ -339,18 +370,26 @@ def target_change(test: str, notes: str, diff: str) -> dict:
     if kind == "renamed" and (not TEST_ID_FORM.fullmatch(new) or new == test):
         return {**none, "rejected": f"`{new}` is not a test ID in the xunit form, or is the target's own"}
     lines = diff_lines(diff)
-    module, old_decls = declarations(test)
+    module, suite, func = parse_id(test)
+    old_files = suite_files(base_decls, module, suite) if suite else None
+    removed = func_net(lines, module, old_files, func) > 0
+    where = f"a file of Tests/{module}/ that declared {suite}" if suite else f"Tests/{module}/"
     if kind == "retired":
-        # A retired test's function is gone; a suite declaration alone could
+        # A retired test's function is gone. A suite declaration alone could
         # be one of several extensions, with the test still in another.
-        if net(lines, module, old_decls[0]) <= 0:
-            return {**none, "rejected": f"the diff does not take the target's function out of Tests/{module}/"}
+        if not removed:
+            return {**none, "rejected": f"the diff does not take the target's function out of {where}"}
         return {**none, "kind": "retired", "reason": reason, "stressed": None}
-    if not any(net(lines, module, p) > 0 for p in old_decls):
-        return {**none, "rejected": f"the diff takes neither the target's function nor its suite declaration out of Tests/{module}/"}
-    new_module, new_decls = declarations(new)
-    if not any(net(lines, new_module, p) < 0 for p in new_decls):
-        return {**none, "rejected": f"the diff adds neither `{new}`'s function nor its suite declaration to Tests/{new_module}/"}
+    new_module, new_suite, new_func = parse_id(new)
+    suite_gone = (suite is not None and new_suite is not None and suite != new_suite and new_func == func
+                  and new_module == module and not suite_files(head_decls, module, suite))
+    if not (removed or suite_gone):
+        return {**none, "rejected": f"the diff neither takes the target's function out of {where} nor renames its suite"}
+    new_files = suite_files(head_decls, new_module, new_suite) if new_suite else None
+    added = func_net(lines, new_module, new_files, new_func) < 0
+    renamed_in_place = suite_gone and bool((new_files or set()) & (old_files or set()))
+    if not (added or renamed_in_place):
+        return {**none, "rejected": f"the diff puts `{new}`'s function into no file that declares its suite"}
     return {**none, "kind": "renamed", "to": new, "stressed": new}
 
 
@@ -520,8 +559,11 @@ def run_judge(args) -> int:
     if args.protected_touched and args.protected_touched.exists():
         protected = [ln.strip() for ln in args.protected_touched.read_text().splitlines() if ln.strip()]
     change = None
-    if args.target_change and args.target_change.exists():
-        change = json.loads(args.target_change.read_text())
+    # Empty or missing: target-change never ran, or failed and left a
+    # harness-error marker, which the judge reports.
+    text = args.target_change.read_text() if args.target_change and args.target_change.exists() else ""
+    if text.strip():
+        change = json.loads(text)
         if not isinstance(change, dict) or change.get("kind") not in ("none", "renamed", "retired") \
                 or change.get("from") != args.test or (change["kind"] == "renamed" and not change.get("to")):
             raise ValueError(f"{args.target_change}: not a target change for {args.test}")
@@ -674,6 +716,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--test", required=True)
     p.add_argument("--notes", type=Path, required=True)
     p.add_argument("--diff", type=Path, required=True)
+    p.add_argument("--base-decls", type=Path, required=True)
+    p.add_argument("--head-decls", type=Path, required=True)
     p = sub.add_parser("quarantined")
     p.add_argument("--test", required=True)
     p.add_argument("--inventory", type=Path, required=True)
@@ -700,7 +744,9 @@ def main(argv: list[str]) -> int:
         if args.command == "judge":
             return run_judge(args)
         if args.command == "target-change":
-            print(json.dumps(target_change(args.test, read_notes(args.notes), args.diff.read_text(errors="replace"))))
+            print(json.dumps(target_change(args.test, read_notes(args.notes), args.diff.read_text(errors="replace"),
+                                           args.base_decls.read_text(errors="replace"),
+                                           args.head_decls.read_text(errors="replace"))))
             return 0
         if args.command == "tree-digest":
             if not args.dir.is_dir() or args.dir.is_symlink():

@@ -516,7 +516,7 @@ test_a_declared_rename_the_diff_bears_out_is_stressed_under_the_new_id() {
 - RENAMED: \`$CLOCK\` -> \`$NEWCLOCK\`")"
   assert_eq "renamed, and the new ID is the one stressed" "renamed $NEWCLOCK" "$(kind_of "$out")"
   assert_eq "it records what it was renamed from" "$CLOCK" "$(jq -r .from <<< "$out")"
-  mutant="$(mutant_of 's/^    if not any\(net\(lines, new_module, p\) < 0 for p in new_decls\):$/    if True:/' "$VPY")"
+  mutant="$(mutant_of 's/^    added = func_net\(lines, new_module, new_files, new_func\) < 0$/    added = False/' "$VPY")"
   assert_eq "mutation: a rename the diff must also bear out on the new side" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK" "$mutant")")"
 }
 
@@ -536,8 +536,8 @@ extension ClockTestSupportTests {
 }")"
   out="$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK")"
   assert_eq "not honored: the old ID is stressed" "none $CLOCK" "$(kind_of "$out")"
-  assert_contains "and the declaration is kept, with why" "$(jq -r .rejected <<< "$out")" "takes neither the target's function nor its suite declaration out"
-  mutant="$(mutant_of 's/^    if not any\(net\(lines, module, p\) > 0 for p in old_decls\):$/    if False:/' "$VPY")"
+  assert_contains "and the declaration is kept, with why" "$(jq -r .rejected <<< "$out")" "neither takes the target's function out"
+  mutant="$(mutant_of 's/^    if not \(removed or suite_gone\):$/    if False:/' "$VPY")"
   assert_eq "mutation: without the removal check it is a rename" "renamed $NEWCLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK" "$mutant")")"
 }
 
@@ -573,8 +573,70 @@ test_a_retirement_that_keeps_the_function_is_not_honored() {
 }')"
   out="$(change "$d" "RETIRED: $CLOCK -- obsolete")"
   assert_eq "not honored" "none $CLOCK" "$(kind_of "$out")"
-  mutant="$(mutant_of 's/^        if net\(lines, module, old_decls\[0\]\) <= 0:$/        if not any(net(lines, module, p) > 0 for p in old_decls):/' "$VPY")"
-  assert_eq "mutation: a suite declaration alone would retire it" "retired null" "$(kind_of "$(change "$d" "RETIRED: $CLOCK -- obsolete" "$mutant")")"
+  mutant="$(mutant_of 's/^    removed = func_net\(lines, module, old_files, func\) > 0$/    removed = True/' "$VPY")"
+  assert_eq "mutation: without the removal check it would retire" "retired null" "$(kind_of "$(change "$d" "RETIRED: $CLOCK -- obsolete" "$mutant")")"
+}
+
+# files_repo -> D: a throwaway repo D/r with two suites in two files of one
+# module, each declaring `func shared()`, at D/base; the caller edits and
+# commits the candidate.
+OTHER_SRC='struct OtherSuiteTests {
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {}
+}'
+files_repo() {
+  local d; d="$(mktmpd)"
+  git init -q "$d/r"; mkdir -p "$d/r/Tests/TBDDaemonTests"
+  printf '%s\n' "$CLOCK_SRC" > "$d/r/Tests/TBDDaemonTests/ClockTestSupportTests.swift"
+  printf '%s\n' "$OTHER_SRC" > "$d/r/Tests/TBDDaemonTests/OtherSuiteTests.swift"
+  git -C "$d/r" add -A && git -C "$d/r" commit -q -m base
+  git -C "$d/r" rev-parse HEAD > "$d/base"
+  printf '%s' "$d"
+}
+
+test_a_same_named_function_in_another_suite_proves_nothing() {
+  local d
+  d="$(files_repo)"
+  # The other suite's same-named test goes; the target stays.
+  printf 'struct OtherSuiteTests {\n}\n' > "$d/r/Tests/TBDDaemonTests/OtherSuiteTests.swift"
+  git -C "$d/r" commit -q -am candidate
+  assert_eq "a retirement is not honored" "none $CLOCK" "$(kind_of "$(change "$d" "RETIRED: $CLOCK — gone")")"
+  # A commented-out declaration that goes is no removal of the test.
+  d="$(change_repo "$CLOCK_SRC
+// func advanceWhenSuspendedMovesTheClockForward() {}" "$CLOCK_SRC")"
+  assert_eq "nor does deleting a comment that looks like it" "none $CLOCK" "$(kind_of "$(change "$d" "RETIRED: $CLOCK — gone")")"
+}
+
+test_a_move_to_another_suite_keeping_the_name_is_a_rename() {
+  local d moved='TBDDaemonTests.OtherSuiteTests/advanceWhenSuspendedFires()' mutant
+  d="$(files_repo)"
+  printf '%s\n' "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/unrelatedStays}" > "$d/r/Tests/TBDDaemonTests/ClockTestSupportTests.swift"
+  printf 'struct OtherSuiteTests {\n    @Test func advanceWhenSuspendedMovesTheClockForward() async {}\n    @Test func advanceWhenSuspendedFires() async {}\n}\n' > "$d/r/Tests/TBDDaemonTests/OtherSuiteTests.swift"
+  git -C "$d/r" commit -q -am candidate
+  assert_eq "moved and renamed into the other suite's file" "renamed $moved" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $moved")")"
+  mutant="$(mutant_of 's/^    old_files = suite_files\(base_decls, module, suite\) if suite else None$/    old_files = set()/' "$VPY")"
+  assert_eq "mutation: without the base's suite files nothing counts" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $moved" "$mutant")")"
+  # The same function name, moved to a suite in another file of the module.
+  local same='TBDDaemonTests.ThirdSuiteTests/advanceWhenSuspendedMovesTheClockForward()'
+  d="$(files_repo)"
+  printf 'struct ThirdSuiteTests {\n}\n' > "$d/r/Tests/TBDDaemonTests/ThirdSuiteTests.swift"
+  git -C "$d/r" add -A && git -C "$d/r" commit -q --amend -m base
+  git -C "$d/r" rev-parse HEAD > "$d/base"
+  printf '%s\n' "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/unrelatedStays}" > "$d/r/Tests/TBDDaemonTests/ClockTestSupportTests.swift"
+  printf 'struct ThirdSuiteTests {\n    @Test func advanceWhenSuspendedMovesTheClockForward() async {}\n}\n' > "$d/r/Tests/TBDDaemonTests/ThirdSuiteTests.swift"
+  git -C "$d/r" commit -q -am candidate
+  assert_eq "a same-name move to another file's suite is a rename" "renamed $same" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $same")")"
+}
+
+test_a_rename_that_only_drops_a_suite_extension_is_not_honored() {
+  local d
+  d="$(change_repo "$CLOCK_SRC" 'struct ClockTestSupportTests {
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {
+        let clock = TestClock()
+    }
+    @Test func somethingNew() async {}
+}')"
+  assert_eq "the target is still there" "none $CLOCK" \
+    "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> TBDDaemonTests.ClockTestSupportTests/somethingNew()")")"
 }
 
 test_conflicting_or_foreign_declarations_are_not_honored() {
@@ -648,6 +710,13 @@ test_an_absent_target_with_no_honored_change_fails_and_says_how_to_declare() {
   assert_lacks "mutation: without the hint the second try is not told" "$(cat "$d/failing-lines.txt")" "RENAMED:"
 }
 
+test_a_failed_target_change_still_gets_its_harness_verdict() {
+  local d f; d="$(mktmpd)"; f="$(mktmpd)/target-change.json"
+  echo "target-change failed: git diff failed" > "$d/harness-error"; : > "$f"
+  assert_eq "an empty change file is no change; the marker decides" "rc=1 fail" "$(judge "$d" test 3 no "$HERE" --target-change "$f")"
+  assert_eq "as a harness error" "the stress harness errored" "$(jq -r '.reasons[0]' "$d/verdict.json")"
+}
+
 test_a_target_change_for_another_test_is_malformed() {
   local d c; d="$(three)"; c="$(change_file renamed "$NEWHOLDER")"
   jq '.from = "TBDSharedTests.OtherTests/x()"' "$c" > "$c.x" && mv "$c.x" "$c"
@@ -709,6 +778,14 @@ test_the_transcript_directory_holds_only_regular_files() {
   printf '%s\n' "$TRANSCRIPT" > "$rt/claude-execution-output.json"
   assert_eq "kept" "rc=0" "$(keep "$rt" "$rt/claude-execution-output.json")"
   assert_eq "a planted link is removed before the upload" "no" "$([[ -L "$rt/flakefix-transcripts/planted.json" ]] && echo yes || echo no)"
+  # A later session that left no execution file still cannot leave a link,
+  # or an unredacted file, behind for the upload.
+  rt="$(mktmpd)"; mkdir -p "$rt/flakefix-transcripts"; echo SECRET-FILE > "$rt/credentials.json"
+  ln -s "$rt/credentials.json" "$rt/flakefix-transcripts/planted.json"
+  printf '%s\n' "$TRANSCRIPT" > "$rt/flakefix-transcripts/session-1.json"
+  assert_eq "nothing to keep" "rc=1" "$(keep "$rt" "")"
+  assert_eq "the link still goes" "no" "$([[ -L "$rt/flakefix-transcripts/planted.json" ]] && echo yes || echo no)"
+  assert_lacks "and a file rewritten there is redacted again" "$(cat "$rt/flakefix-transcripts/session-1.json")" "sk-ant-oat01"
 }
 
 # ============================================================================

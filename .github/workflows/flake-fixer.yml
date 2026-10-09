@@ -640,7 +640,7 @@ jobs:
       # copied, redacted, by main's verifier copy checked against its
       # fingerprint; a transcript that cannot be kept never fails the job.
       - name: Keep session 1's transcript
-        if: always() && (steps.s1.outcome == 'success' || steps.s1.outcome == 'failure')
+        if: always() && (steps.s1.outcome == 'success' || steps.s1.outcome == 'failure') && steps.c1.outcome == 'success'
         continue-on-error: true
         shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
@@ -717,6 +717,7 @@ jobs:
             > "$T/verify/target-change.json" 2> "$T/verify/target-change-errors" || rc=$?
           if [ "$rc" != 0 ]; then
             { echo "target-change failed:"; cat "$T/verify/target-change-errors"; } > "$T/verify/harness-error"
+            rm -f "$T/verify/target-change.json"
             exit 1
           fi
           stressed="$(jq -r '.stressed // empty' "$T/verify/target-change.json")"
@@ -948,7 +949,7 @@ jobs:
           rm -rf "$T/verify-1"
 
       - name: Keep session 2's transcript
-        if: always() && (steps.s2.outcome == 'success' || steps.s2.outcome == 'failure')
+        if: always() && (steps.s2.outcome == 'success' || steps.s2.outcome == 'failure') && steps.c2.outcome == 'success'
         continue-on-error: true
         shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
@@ -1023,6 +1024,7 @@ jobs:
             > "$T/verify/target-change.json" 2> "$T/verify/target-change-errors" || rc=$?
           if [ "$rc" != 0 ]; then
             { echo "target-change failed:"; cat "$T/verify/target-change-errors"; } > "$T/verify/harness-error"
+            rm -f "$T/verify/target-change.json"
             exit 1
           fi
           stressed="$(jq -r '.stressed // empty' "$T/verify/target-change.json")"
@@ -1177,6 +1179,8 @@ jobs:
         with:
           name: flakefix-transcripts
           path: ${{ runner.temp }}/flakefix-transcripts/
+          # The Keep steps redact every file `*` reaches, which is no hidden one.
+          include-hidden-files: false
           if-no-files-found: ignore
           retention-days: 14  # spec §11
 

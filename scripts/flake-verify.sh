@@ -259,13 +259,25 @@ cmd_target_change() {
   done
   [[ -n "$test" && -n "$base" && -n "$notes" ]] || die "target-change: --test, --base and --notes are required"
   cd "$(toplevel)" || die "cannot enter the verification tree"
-  # Through a file, not a pipe: a failed diff must not read as an empty one.
-  diff="$(mktemp "${TMPDIR:-/tmp}/flake-verify-diff.XXXXXX")" || die "cannot create a temporary file"
-  git diff --no-renames --no-color --no-ext-diff -U0 "$base...HEAD" -- Tests/ > "$diff" \
-    || { rm -f "$diff"; die "git diff $base...HEAD failed"; }
-  py target-change --test "$test" --notes "$notes" --diff "$diff" || rc=$?
-  rm -f "$diff"
+  # Through files, not pipes: a failed read must not look like an empty one.
+  diff="$(mktemp -d "${TMPDIR:-/tmp}/flake-verify-change.XXXXXX")" || die "cannot create a temporary directory"
+  git diff --no-renames --no-color --no-ext-diff -U0 "$base...HEAD" -- Tests/ > "$diff/diff" \
+    || { rm -rf "$diff"; die "git diff $base...HEAD failed"; }
+  # Each revision's type declarations, so a removal counts only in the files
+  # that declare the target's suite. git grep's 1 is "none found".
+  decls "$base" > "$diff/base" || { rm -rf "$diff"; die "cannot list $base's declarations"; }
+  decls HEAD > "$diff/head" || { rm -rf "$diff"; die "cannot list the candidate's declarations"; }
+  py target-change --test "$test" --notes "$notes" --diff "$diff/diff" \
+    --base-decls "$diff/base" --head-decls "$diff/head" || rc=$?
+  rm -rf "$diff"
   return "$rc"
+}
+
+# decls REV: `REV:path:text` for every type declaration under Tests/ at REV.
+decls() {
+  local rc=0
+  git grep --no-color -I -E '(struct|class|enum|actor|extension)[[:space:]]+[A-Za-z_]' "$1" -- Tests/ || rc=$?
+  [[ "$rc" -le 1 ]]
 }
 
 # --- the session transcripts ------------------------------------------------------
@@ -295,6 +307,25 @@ cmd_keep_transcript() {
     esac
   done
   [[ -n "$rt" && -n "$out" ]] || die "keep-transcript: --runner-temp and --out are required"
+  for p in "${REDACT_PATTERNS[@]}"; do
+    sed_args+=(-e "s/$p/$REDACTED/g")
+    any="${any:+$any|}$p"
+  done
+  # First, whatever else happens: the directory is uploaded as it is, and a
+  # later session could reach it. Anything in it but a regular file – a
+  # symlink to a secret, say – goes, and every file in it is redacted again,
+  # so what a later session wrote there is redacted like the rest.
+  dir="$(dirname "$out")"
+  [[ ! -L "$dir" ]] || die "keep-transcript: $dir is a symlink"
+  mkdir -p "$dir" || die "cannot create $dir"
+  find "$dir" -mindepth 1 ! -type f -prune -exec rm -rf {} + || die "cannot clear $dir of non-files"
+  # The upload leaves out hidden files (upload-artifact's default), so `*`
+  # reaches everything it sends.
+  for p in "$dir"/*; do
+    [[ -f "$p" && ! -L "$p" ]] || continue
+    LC_ALL=C sed -E "${sed_args[@]}" "$p" > "$p.redacting" || die "cannot redact $p"  # non-empty: one -e per pattern
+    mv -f "$p.redacting" "$p" || die "cannot redact $p"
+  done
   if [[ -z "$from" ]]; then
     echo "the session left no execution file (it ended before the action wrote one: a timeout, a cancellation or a crash)"
     return 1
@@ -309,16 +340,6 @@ cmd_keep_transcript() {
     echo "$from is not a regular file; not kept"
     return 1
   fi
-  dir="$(dirname "$out")"
-  [[ ! -L "$dir" ]] || die "keep-transcript: $dir is a symlink"
-  mkdir -p "$dir" || die "cannot create $dir"
-  # The directory is uploaded as it is, and a later session could reach it:
-  # anything in it but a regular file – a symlink to a secret, say – goes.
-  find "$dir" -mindepth 1 ! -type f -prune -exec rm -rf {} + || die "cannot clear $dir of non-files"
-  for p in "${REDACT_PATTERNS[@]}"; do
-    sed_args+=(-e "s/$p/$REDACTED/g")
-    any="${any:+$any|}$p"
-  done
   # Counted on the original: a count read from the copy could not tell a
   # redaction from marker text the session wrote itself. grep's 1 is "none".
   n="$( { LC_ALL=C grep -oE "$any" "$from" || [[ $? -eq 1 ]]; } | wc -l | tr -d ' ')" || die "cannot scan $from"
