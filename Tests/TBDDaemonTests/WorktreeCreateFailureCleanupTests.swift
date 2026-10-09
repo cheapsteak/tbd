@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -618,6 +619,125 @@ import Testing
         let branches = try await localBranches(repoDir)
         #expect(branches.contains(pending.branch),
                 "cleanup deleted the pre-existing colliding branch: \(branches)")
+    }
+
+    // MARK: - A create that fails after its checkout exists keeps it tracked
+
+    /// Makes the final `.creating` -> `.active` flip fail, which is the last
+    /// step of a create and runs after the checkout and the terminals exist.
+    /// The row survives the failure, so the rollback has a real row to delete.
+    private func failTheFinalStatusFlip(_ db: TBDDatabase) async throws {
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER induced_activation_failure
+                BEFORE UPDATE OF status ON worktree
+                WHEN NEW.status = 'active'
+                BEGIN SELECT RAISE(ABORT, 'induced activation failure'); END
+                """)
+        }
+    }
+
+    /// The create fails after `git worktree add` succeeded. The create is
+    /// reported failed and its row is gone, but the checkout TBD made stays on
+    /// disk and gets exactly one fresh active row, with the old display name
+    /// and no terminals. Reconcile only reports a tree that has no row, so
+    /// without this the checkout would be orphaned.
+    @Test func aFailureAfterWorktreeAddKeepsTheCheckoutTracked() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, displayName: "my feature", skipClaude: true
+        )
+        try await failTheFinalStatusFlip(db)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true
+            )
+        }
+
+        #expect(try await db.worktrees.get(id: pending.id) == nil,
+                "the failed create's own row must be gone")
+        #expect(FileManager.default.fileExists(atPath: pending.localPath),
+                "the checkout must stay on disk")
+        let atPath = try await db.worktrees.list().filter { $0.localPath == pending.localPath }
+        #expect(atPath.count == 1, "expected exactly one row at the checkout: \(atPath)")
+        #expect(atPath.first?.status == .active)
+        #expect(atPath.first?.displayName == "my feature")
+        #expect(atPath.first.map { $0.id != pending.id } == true)
+        #expect(try await db.terminals.list(worktreeID: try #require(atPath.first).id).isEmpty)
+
+        // The ledger entry was consumed by the rollback.
+        let leftover = await lifecycle.createdCheckouts.take(worktreeID: pending.id)
+        #expect(leftover == nil)
+    }
+
+    /// A failure DURING `git worktree add` made no checkout, so nothing is
+    /// adopted, and a foreign directory sitting at the row's path is left
+    /// alone and untracked.
+    @Test func aFailureDuringWorktreeAddAdoptsNothing() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "owned-by-caller", skipClaude: true
+        )
+        try occupy(pending.localPath)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true, userSpecifiedBranch: true
+            )
+        }
+
+        #expect(try await db.worktrees.list(repoID: repo.id).filter { $0.status != .main }.isEmpty,
+                "no row may be created for a checkout that was never made")
+    }
+
+    /// A name collision makes the create retry at a new folder and branch. The
+    /// row must name the checkout that exists, or the next reconcile archives
+    /// it (killing its terminals) because its path is not in git.
+    @Test func aCollisionRetryMovesTheRowOntoTheCheckoutThatExists() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        try await shell("git branch '\(pending.branch)'", at: repoDir)
+
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id, skipClaude: true
+        )
+        if case .preSessionPending(let phase3) = completion {
+            await phase3.value
+        }
+
+        let row = try #require(try await db.worktrees.get(id: pending.id))
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        let checkout = try #require(listed.first { $0.branch.hasPrefix("tbd/") && $0.branch != pending.branch })
+        #expect(row.localPath == checkout.path, "the row names a path git does not list")
+        #expect(row.branch == checkout.branch)
+        #expect(row.localPath != pending.localPath)
+
+        try await lifecycle.reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+        #expect(try await db.worktrees.get(id: pending.id)?.status == .active,
+                "reconcile archived the worktree whose checkout lives at the retried path")
+        #expect(try await db.terminals.list(worktreeID: pending.id).isEmpty == false,
+                "the terminals of the retried worktree must survive reconcile")
     }
 
     // MARK: - Existing-branch creation cleanup

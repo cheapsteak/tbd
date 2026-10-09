@@ -294,6 +294,9 @@ extension WorktreeLifecycle {
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
             let resultPath: String
+            // The branch the checkout actually has, which a collision retry or
+            // a fork-PR fetch can move off the row's original one.
+            let resultBranch: String
             // Set by the PR-head branch below: this worktree's contents came
             // from `refs/pull/<n>/head`, which a third-party fork may have
             // authored. Persisted on the row so the five *later* trust-seeding
@@ -455,7 +458,9 @@ extension WorktreeLifecycle {
                 // would hand it a correctly-fetched branch and a valid directory
                 // to destroy. Failing the create is still right (the outer catch
                 // drops the row); destroying the checkout is not.
+                await createdCheckouts.record(worktreeID: worktreeID, path: worktree.path)
                 resultPath = worktree.path
+                resultBranch = fetchedPullHeadBranch ?? worktree.branch
                 if let fetchedPullHeadBranch {
                     if fetchedPullHeadBranch != worktree.branch {
                         try await db.worktrees.updateBranch(
@@ -476,13 +481,27 @@ extension WorktreeLifecycle {
                     retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
                 )
 
-                // 4. If the name changed due to collision, update the DB record
-                if result.name != worktree.name {
-                    // Update path/branch/name in DB would be complex — for now the retry
-                    // names the worktree path differently but we keep the original DB row.
-                    // The attemptWorktreeAdd already handles retries.
+                // The checkout exists from here on. Recorded before any
+                // bookkeeping below can throw, so a failed create hands this
+                // checkout back instead of orphaning it.
+                await createdCheckouts.record(worktreeID: worktreeID, path: result.path)
+
+                // 4. A name collision makes `attemptWorktreeAdd` retry at a new
+                // folder and branch. The row must name the checkout that
+                // exists: a row whose path is not in `git worktree list` is
+                // archived by the next reconcile, which would kill the new
+                // worktree's terminals. The row's `name` is left as it was
+                // (it is the identity the caller was handed; no store setter
+                // changes it); its folder and branch are what reconcile and
+                // every later git call read.
+                if result.path != worktree.path {
+                    try await db.worktrees.updatePath(id: worktreeID, path: result.path)
+                }
+                if result.branch != worktree.branch {
+                    try await db.worktrees.updateBranch(id: worktreeID, branch: result.branch)
                 }
                 resultPath = result.path
+                resultBranch = result.branch
             }
             let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
@@ -492,6 +511,9 @@ extension WorktreeLifecycle {
             // otherwise the very first Claude spawn would still seed trust for
             // a tree it just fetched from a fork.
             var stamped = worktree.worktree
+            // The in-memory copy predates any path or branch drift above.
+            stamped.localPath = resultPath
+            stamped.branch = resultBranch
             stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
             let spawnWorktree = stamped
 
@@ -547,6 +569,8 @@ extension WorktreeLifecycle {
                         )
                     }
                 }
+                // Phase 3 never deletes the row, so the row owns the checkout now.
+                await createdCheckouts.discard(worktreeID: worktreeID)
                 return .preSessionPending(phase3: phase3)
             }
 
@@ -589,6 +613,7 @@ extension WorktreeLifecycle {
 
             let totalElapsedMs = phaseStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.info("complete-worktree \(worktreeID.uuidString, privacy: .public) total \(Int(totalElapsedMs))ms")
+            await createdCheckouts.discard(worktreeID: worktreeID)
             return .ready
 
         } catch {
@@ -619,6 +644,10 @@ extension WorktreeLifecycle {
     /// either way, because a creation that failed must not linger as a
     /// `.creating` row.
     ///
+    /// If the create had already made its checkout (`createdCheckouts`), the
+    /// checkout is not left untracked: it gets a fresh `.active` row through
+    /// `adoptWorktree` (`readoptCheckoutOfFailedCreate`).
+    ///
     /// `reposDir` and `date` are test seams; production resolves them from
     /// `TBDConstants` (honoring `TBD_HOME`) and the lifecycle's date seam.
     func rollBackFailedCreate(
@@ -643,9 +672,44 @@ extension WorktreeLifecycle {
             savedPath = saved.path
             lost = lost || saved.lost
         }
+        // Taken whether or not the delete worked, so the entry never outlives
+        // the create it describes.
+        let madeCheckout = await createdCheckouts.take(worktreeID: worktreeID)
+        if let row = deleted, let madeCheckout {
+            await readoptCheckoutOfFailedCreate(row: row, checkoutPath: madeCheckout)
+        }
         return WorktreeIDDelta(
             worktreeID: worktreeID, creationFailed: true,
             unsentPromptPath: savedPath, unsentPromptLost: lost)
+    }
+
+    /// Give the checkout a failed create left behind a fresh `.active` row.
+    ///
+    /// Failing the create is right; destroying or orphaning the checkout is
+    /// not. Reconcile reports a git worktree that has no row but never adopts
+    /// it, so a tree TBD itself made would otherwise be left untracked. The
+    /// ledger entry (`createdCheckouts`) is what says the directory at
+    /// `checkoutPath` came from this create; nothing here infers it from the
+    /// row's own path, which after a name collision can hold someone else's
+    /// tree. The new row is what `adoptWorktree` makes: active, no terminals,
+    /// the old display name. A failure is logged and leaves the checkout
+    /// reported by reconcile; it never propagates, because the rollback it runs
+    /// inside must finish.
+    private func readoptCheckoutOfFailedCreate(row: Worktree, checkoutPath: String) async {
+        guard let repoID = row.repoID else { return }
+        guard FileManager.default.fileExists(atPath: checkoutPath) else { return }
+        do {
+            let outcome = try await adoptWorktree(
+                repoID: repoID, path: checkoutPath, displayName: row.displayName)
+            let adopted = outcome.worktree
+            logger.info("failed create \(row.id, privacy: .public) left its checkout at \(checkoutPath, privacy: .public); tracking it as worktree \(adopted.id, privacy: .public)")
+            subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                worktreeID: adopted.id, repoID: adopted.repoID,
+                name: adopted.name, path: adopted.localPath
+            )))
+        } catch {
+            logger.error("failed create \(row.id, privacy: .public) left a checkout at \(checkoutPath, privacy: .public) that could not be tracked: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Write the first message parked in `row` to

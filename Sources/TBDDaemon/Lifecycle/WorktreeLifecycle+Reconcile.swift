@@ -450,7 +450,14 @@ extension WorktreeLifecycle {
                 continue
             }
 
-            logger.info("reconcile: git worktree \(gitWt.path, privacy: .public) is under a TBD worktree directory but has no TBD row, so TBD is not managing it and will not archive or delete it. Run `tbd worktree adopt \(gitWt.path, privacy: .public)` to track it.")
+            // A path can be here because an archived row still holds it (an
+            // interrupted archive, or a directory recreated at a row's path).
+            // "No TBD row" would be wrong for it, and `adopt` revives that row.
+            if let held = try await db.worktrees.findByPath(path: gitWt.path) {
+                logger.info("reconcile: git worktree \(gitWt.path, privacy: .public) is under a TBD worktree directory and is held by the \(held.status.rawValue, privacy: .public) TBD worktree \(held.id, privacy: .public), so TBD is not managing it. Run `tbd worktree adopt \(gitWt.path, privacy: .public)` to track it again.")
+            } else {
+                logger.info("reconcile: git worktree \(gitWt.path, privacy: .public) is under a TBD worktree directory but has no TBD row, so TBD is not managing it and will not archive or delete it. Run `tbd worktree adopt \(gitWt.path, privacy: .public)` to track it.")
+            }
         }
 
         let allLiveWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)

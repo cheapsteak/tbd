@@ -89,6 +89,11 @@ public struct WorktreeLifecycle: Sendable {
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
+    /// The checkout each in-flight create has made, so a failed create can hand
+    /// it back as a tracked worktree instead of orphaning it
+    /// (`rollBackFailedCreate`). An actor reference for the same reason
+    /// `conflictSweepCache` is one.
+    public let createdCheckouts = CreatedCheckoutLedger()
     /// Since when each worktree's commits have stood still — §13's third
     /// runaway input, filled from the branch tips `refreshGitStatuses` already
     /// resolves for the gate above, at no extra subprocess cost. An actor

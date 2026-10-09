@@ -219,7 +219,7 @@ extension WorktreeLifecycle {
     ///   the loss is logged.
     /// - A row still carrying `archivedClaudeSessions` was mid-revive. No
     ///   terminal exists to restore them into, so they are kept: the row goes
-    ///   through `revive(clearSessions: false)`, which also clears
+    ///   through `activateRecoveredCreate`, which also clears
     ///   `archivedAt`, the same outcome as a revive with `skipClaude`.
     private func activateTerminalLessCreate(_ row: Worktree, reposDir: URL?) async {
         let saved = saveParkedFirstMessage(of: row, reposDir: reposDir)
@@ -227,14 +227,8 @@ extension WorktreeLifecycle {
             logger.error("recovery: the parked first message of \(row.id, privacy: .public) could not be saved and is being cleared")
         }
         do {
-            if row.pendingPrompt != nil {
-                _ = try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: nil, submit: false)
-            }
-            if row.archivedClaudeSessions?.isEmpty == false {
-                try await db.worktrees.revive(id: row.id, clearSessions: false)
-            } else {
-                try await db.worktrees.updateStatus(id: row.id, status: .active)
-            }
+            // One write: the prompt clear and the status flip land together.
+            try await db.worktrees.activateRecoveredCreate(id: row.id)
             logger.info("recovery: activated terminal-less .creating worktree \(row.id, privacy: .public) — its checkout exists and TBD created it, so the row is kept")
         } catch {
             logger.warning("recovery: failed to activate terminal-less worktree \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
