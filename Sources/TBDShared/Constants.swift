@@ -215,6 +215,23 @@ public enum TBDConstants {
         unsentPromptsDir(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Name of the per-repo directory holding the clone-backed checkout's
+    /// template: `tree/` (the tracked files of one commit, no `.git`), `index`
+    /// (that tree's own index file) and `commit` (the SHA it holds). Shared by
+    /// `CheckoutTemplateStore`, which writes it, and `OrphanGC`, which reclaims
+    /// it.
+    public static let checkoutTemplateDirName = "checkout-template"
+
+    /// A repo's clone-backed checkout template:
+    /// `~/tbd/repos/<repoID>/checkout-template/`. Honors TBD_HOME. Lives under
+    /// `~/tbd` so it shares a volume with the default worktree location, which
+    /// `clonefile(2)` requires.
+    public static func checkoutTemplateDir(repoID: UUID, environment: [String: String]) -> URL {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(checkoutTemplateDirName, isDirectory: true)
+    }
+
     /// Path to a repo's Claude settings overlay fragment file:
     /// `~/tbd/repos/<repoID>/claude-settings.json`. A user-authored JSON
     /// object deep-merged into TBD's `--settings` overlay at Claude spawn

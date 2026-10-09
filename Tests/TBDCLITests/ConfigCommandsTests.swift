@@ -143,6 +143,33 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("pr-poll-schedule: on"))
     }
 
+    // MARK: - clone-checkout: the soak switch for clone-backed worktree checkout
+
+    @Test func cloneCheckoutDescribesBothStates() {
+        #expect(ConfigSet.confirmation(key: "clone-checkout", value: .on)
+            == "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
+            + "checkout where the volume supports it, so unchanged files share disk blocks. "
+            + "Takes effect at the next worktree.")
+        #expect(ConfigSet.confirmation(key: "clone-checkout", value: .off)
+            == "Set clone-checkout to off. New worktrees write every tracked file with "
+            + "git worktree add. Takes effect at the next worktree.")
+    }
+
+    @Test func cloneCheckoutIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("clone-checkout"))
+        #expect(try ConfigSet.parseOnOff("on", key: "clone-checkout") == .on)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "clone-checkout")
+        }
+    }
+
+    @Test func configGetPrintsCloneCheckoutInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("clone-checkout: off"))
+        config.cloneCheckoutEnabled = true
+        #expect(ConfigGet.render(config).contains("clone-checkout: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

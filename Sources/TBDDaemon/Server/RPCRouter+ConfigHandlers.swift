@@ -596,4 +596,16 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the clone-backed worktree checkout gate (default OFF, soaking).
+    /// No live switch: `WorktreeLifecycle` reads the column on every create.
+    /// Design: docs/specs/2026-10-09-clone-backed-worktree-checkout-design.md.
+    func handleConfigSetCloneCheckoutEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetCloneCheckoutEnabledParams.self, from: paramsData)
+        try await db.config.setCloneCheckoutEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

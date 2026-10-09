@@ -956,6 +956,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
+            case RPCMethod.configSetCloneCheckoutEnabled:
+                return try await handleConfigSetCloneCheckoutEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
