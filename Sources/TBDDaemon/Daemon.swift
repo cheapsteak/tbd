@@ -204,6 +204,14 @@ public final class Daemon: Sendable {
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+    /// Logs the holder transport's reader census — the double-reader violation
+    /// count — once at startup and then hourly. `nil` in mock mode.
+    ///
+    /// The counter itself is always on and costs a dictionary write per reader
+    /// transition; this task is only how a human reads it back weeks later,
+    /// because the count lives in daemon memory and signposts are a ring
+    /// buffer. See `HolderRegistry.reportReaderCensusPeriodically`.
+    nonisolated(unsafe) var holderReaderCensusTask: Task<Void, Never>?
     /// The one `ModelProxySupervisor` for this TBD home. Owned here so
     /// shutdown can take the watch away, and so the config RPC that flips
     /// `model_proxy_enabled` can reach the same instance the lifecycle, the
@@ -1560,6 +1568,20 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-reader-census. Record the holder transport's double-reader
+            // violation count where a human can read it back. The detector is
+            // always on inside `HolderRegistry` — every transition into reading
+            // asserts the session had no reader — but the count lives in daemon
+            // memory, so without a persisted line "did the soak see any
+            // violations?" is answerable only by an absence, which is exactly
+            // the unaided observation the detector replaces. One `.notice` at
+            // startup and one an hour after that.
+            if let holderRegistry {
+                self.holderReaderCensusTask = Task {
+                    await holderRegistry.reportReaderCensusPeriodically()
+                }
+            }
+
             // 11a-questions. Expire stranded AskUserQuestion captures. This
             // ran as a side effect of `terminal.transcript` until the app
             // started reading transcripts itself; on that path the handler is
@@ -2215,6 +2237,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        holderReaderCensusTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
         shadowPeerReconcilerTask?.cancel()
