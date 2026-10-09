@@ -72,6 +72,11 @@ struct RemoteTranscriptPaneView: View {
     /// The generation and head of the last successful read, so `ReadPlan`
     /// can tell a prepend from a reset.
     @State private var lastRead: ReadPlan.Mark?
+    /// Every item ID that has started the loaded window, so an activity group
+    /// that earlier history extends at its front keeps its identity (see
+    /// `TranscriptPresentation.groupKeyID`). Cleared on a new conversation or
+    /// session, whose window shares no IDs with this one.
+    @State private var windowStartIDs: Set<String> = []
 
     private var storeKey: String { RemoteTranscriptTail.storeKey(selection) }
 
@@ -164,6 +169,7 @@ struct RemoteTranscriptPaneView: View {
                 for: .remote(provider: old.provider, sessionID: old.sessionID))
             overlayCoordinator.close()
             activityGroupExpansion.removeAll()
+            windowStartIDs.removeAll()
             lastRead = nil
         }
         .onDisappear {
@@ -241,6 +247,7 @@ struct RemoteTranscriptPaneView: View {
                 items: withCards.items,
                 expansionOverrides: activityGroupExpansion,
                 pendingPrompts: withCards.prompts,
+                windowStartIDs: windowStartIDs,
                 memo: presentationMemo
             )
             TableTranscriptView(
@@ -330,6 +337,12 @@ struct RemoteTranscriptPaneView: View {
         // Only a read that landed moves the mark, so a prepend whose re-read
         // failed is still anchored when the next read succeeds.
         lastRead = mark
+        if plan == .resetToBottom { windowStartIDs.removeAll() }
+        // `fresh` is the read before prompt cards merge in, so a card is never
+        // recorded as a window start.
+        if let start = TranscriptPresentation.windowStartID(of: fresh) {
+            windowStartIDs.insert(start)
+        }
         if appState.sessionTranscripts[key] != fresh {
             appState.sessionTranscripts[key] = fresh
             // Same main-actor turn as the items, so the table sees the new
