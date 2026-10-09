@@ -7,7 +7,8 @@ one file per main-thread hang event into `~/Library/Logs/TBD/hang-stacks/`,
 appending resamples while the stall lasts. It has no prune, no cap, and no
 retention policy. The directory therefore grows for the lifetime of the
 install: on the machine this design was written against it held **25,799 files,
-~300 MB**, accumulated since the writer was introduced.
+~300 MB**, and on another machine with no reclaimer it held **44,822 files and
+553 MB**.
 
 This is a textbook instance of the shape
 [`docs/specs/2026-08-15-named-reconciler-doctrine-design.md`](2026-08-15-named-reconciler-doctrine-design.md)
@@ -54,7 +55,7 @@ once examined.
   The daemon outlives app restarts.
 - **The sweep already exists, with everything a reclaimer needs.** Hourly
   cadence, the `gcEnabled` master switch, `dryRun` planning through
-  `tbd gc sweep --dry-run`, per-phase soak flags, and a keep-biased failure
+  `tbd gc sweep --dry-run`, per-phase gates, and a keep-biased failure
   discipline. An app-side prune would be a second, weaker instance of that
   mechanism: a new timer, a new flag surface, no dry run, no master switch. The
   doctrine's whole argument is that consolidating on named sweeps beats
@@ -162,33 +163,27 @@ Writer and collector read the same constants from
 
 ### One flag, daemon-side, covering both halves
 
-Deleting persisted state from a background sweep trips the house default-off
-rule, so the phase ships behind `gc_hang_stacks_enabled`: a new `config` column,
-added by a `.sql` migration with **no SQL default**, so NULL stays the third
-state and the shipped default lives in exactly one place —
-`?? Config.gcHangStacksEnabledDefault` (= `false`) in `ConfigRecord.toModel()`.
+The phase is gated by `gc_hang_stacks_enabled`: a `config` column added by a
+`.sql` migration with **no SQL default**, so NULL stays a third state that
+follows the shipped default, which lives in exactly one place —
+`?? Config.gcHangStacksEnabledDefault` (= `true`) in `ConfigRecord.toModel()`.
 Read on top of `gcEnabled`, like the other per-phase gates. `dryRun` plans
-regardless of the flag, exactly as the other phases do: deciding whether to
-enable a default-off flag requires seeing what enabling it would reclaim.
+regardless of the flag, exactly as the other phases do, so an operator deciding
+whether to switch the phase off can see what it reclaims.
 
-**`gcEnabled` alone would not be a soak gate, and that is the whole reason this
-column exists.** It resolves as `gc_enabled ?? true` — default ON, and backfilled
-`1` on every install that has ever run the sweep — so a phase riding it alone
-begins deleting files on 100% of installations the moment it merges, with no
-opt-out short of turning the entire sweep off. The per-phase gate is what buys a
-soak, and it is what every destructive phase added to `OrphanGC` since the master
-switch has carried: `gcProfileDirsEnabled`, `gcOrphanProcessesEnabled`,
-`gcRetainedTranscriptsEnabled`. The last of those is the closest analogue — it
-also merely unlinks machine-generated, non-credential files — and it shipped OFF
-for exactly this reason.
+**`gcEnabled` alone would not be a per-phase gate, and that is the reason this
+column exists.** It resolves as `gc_enabled ?? true` — backfilled `1` on every
+install that has ever run the sweep — so a phase riding it alone could be
+switched off only by turning the entire sweep off. The per-phase gate is what
+every destructive phase added to `OrphanGC` since the master switch carries:
+`gcProfileDirsEnabled`, `gcOrphanProcessesEnabled`, `gcRetainedTranscriptsEnabled`.
 
 The write-side cap answers to the **same** flag rather than a second app-side
 `UserDefaults` twin. Two flags for one behavior is sprawl, and worse, it makes
 "is the reclaimer on?" a question with two answers. The app already loads
 `Config` at launch and on config-change deltas; it mirrors the resolved value
-into `HangStackWriter`. The mirror starts OFF and stays OFF whenever the daemon
-is unreachable — the keep-biased direction, and the same answer an unset column
-gives.
+into `HangStackWriter`. The mirror starts disarmed and stays disarmed until the
+app has read the daemon's resolved `Config` — the keep-biased direction.
 
 **Resolved means `gcEnabled && gcHangStacksEnabled`**, exactly the conjunction
 the daemon's phase reads, and the app resolves it through one named function
@@ -200,8 +195,9 @@ keeps deleting.
 The switch is exposed twice over one RPC, `config.setGCHangStacksEnabled`:
 as `tbd gc hang-stacks on|off` (no argument prints the current value),
 mirroring `tbd gc profile-dirs` and `tbd gc orphan-processes`, and as the
-Settings → Cleanup toggle "Reclaim old hang-stack diagnostics". The default
-stays off; graduation flips `Config.gcHangStacksEnabledDefault`.
+Settings → Cleanup toggle "Reclaim old hang-stack diagnostics". NULL follows
+the shipped default (`Config.gcHangStacksEnabledDefault`, on), and an explicit
+`off` is honored.
 
 ## Mechanics
 
@@ -270,14 +266,13 @@ injected `now`.
 - **Aggregation** — a sweep that reclaims 2,000 files adds one plan line and
   zero `reap_records` rows.
 
-## Graduation
+## Default and retirement
 
-Soak with `tbd gc hang-stacks on` on the development fleet. Graduation is a
-one-line change to `Config.gcHangStacksEnabledDefault`, which reaches every
-install that never touched the toggle and preserves every explicit opt-out.
-Delete the flag once the default has been on through a release.
+The phase ships on. Without it the directory grows for the life of the install,
+so the default is the bound itself: `Config.gcHangStacksEnabledDefault` reaches
+every install that never touched the toggle, and every explicit opt-out is
+preserved. No migration forces the column. Once the default has been on through
+a release, the flag is deleted and the phase runs under `gcEnabled` alone.
 
-The pre-existing 25,799 files are cleaned up separately, by hand. This design
-deliberately does not special-case the backlog: the first sweep after the flag
-is enabled reclaims it through the ordinary path, which is the honest test of
-whether the ordinary path works.
+The pre-existing backlog needs no special case. The first sweep reclaims it
+through the ordinary path, the same path that handles every later file.

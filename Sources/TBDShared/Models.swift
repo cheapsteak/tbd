@@ -1554,10 +1554,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// Gate for the orphan-GC phase that reclaims hang-stack diagnostic files
     /// under `~/Library/Logs/TBD/hang-stacks/`
     /// (`docs/specs/2026-08-29-hang-stack-reclaimer-design.md`). Read on top of
-    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
-    /// it deletes persisted state from a background sweep, which is the house
-    /// default-off rule; the app mirrors the same resolved value into
-    /// `HangStackWriter`'s write-side cap, so one flag governs both halves.
+    /// `gcEnabled`: both must be on for the phase to run. It ships ON: a hang
+    /// storm otherwise grows the directory without bound (one machine with the
+    /// phase off held 44,822 files and 553 MB). The app mirrors the same
+    /// resolved value into `HangStackWriter`'s write-side cap, so one flag
+    /// governs both halves.
     ///
     /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
@@ -1781,10 +1782,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// opt-out is left alone.
     public static let gcOrphanProcessesEnabledDefault = false
     /// The shipped default for `gcHangStacksEnabled`, and the single place it
-    /// lives. The hang-stack reclaimer ships off; graduating it is a change to
-    /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
-    /// is left alone.
-    public static let gcHangStacksEnabledDefault = false
+    /// lives. The hang-stack reclaimer ships on, bounding the diagnostic
+    /// directory by age and count, with the write-side cap armed by the same
+    /// value. An explicit opt-out is honored and left alone; the constant
+    /// itself is retired once the default has been on through a release.
+    public static let gcHangStacksEnabledDefault = true
     /// The shipped default for `remotePeerMessagingEnabled`, and the single
     /// place it lives. The peer bridge ships off; graduation — after a soak in
     /// which no ghost record outlives its daemon — is a change to this
