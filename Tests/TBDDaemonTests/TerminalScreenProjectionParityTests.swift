@@ -183,13 +183,24 @@ import struct TBDShared.TerminalScreen
         expectParity(fixture, depths: Self.depths, "60 lines over an 8-row viewport")
     }
 
-    /// The case that makes `viewportStart` land past the end of `lines`: a
-    /// blank viewport over scrollback whose own last row is blank, so the trim
-    /// eats both.
+    /// The case that makes `viewportStart` land **past the end** of `lines`:
+    /// the trailing-blank trim does not stop at the viewport's first row, so a
+    /// wholly blank viewport over blank-tailed scrollback has both trimmed away
+    /// and the index is left beyond the array rather than at it.
     @Test("a blank viewport over blank-tailed scrollback projects identically")
     func trimmedPastTheViewportParity() {
-        let fixture = Fixture(feeding: (1...20).map { "row \($0)" }.joined(separator: "\r\n") + "\r\n\r\n\r\n")
+        let blankTail = String(repeating: "\r\n", count: 9)
+        let fixture = Fixture(
+            feeding: (1...20).map { "row \($0)" }.joined(separator: "\r\n") + blankTail)
         expectParity(fixture, depths: Self.depths, "a trimmed-away viewport")
+
+        // Guards the case rather than the parity: a fixture that stopped
+        // producing an out-of-range offset would still satisfy the equality
+        // above while asserting nothing about the arithmetic.
+        let shared = TerminalScreenProjection.project(fixture.terminal, maxLines: 10_000)
+        #expect(
+            shared.viewportStart > shared.lines.count,
+            "viewportStart \(shared.viewportStart) over \(shared.lines.count) lines")
     }
 
     /// And the case that makes it negative: a tail cut inside the viewport.
@@ -205,17 +216,29 @@ import struct TBDShared.TerminalScreen
         #expect(shared.viewportStart < 0, "viewportStart was \(shared.viewportStart)")
     }
 
-    @Test("tabs survive, and the cursor and modes come through")
-    func tabsCursorAndModesParity() {
+    /// Tab-laid-out text, a moved cursor and two set modes in one stream.
+    ///
+    /// The tabs are here for the cells they skip, not for a tab character in
+    /// the output: `HT` moves the cursor to the next stop and writes nothing,
+    /// so the columns it passes over are never-written cells and project as
+    /// spaces. A screen line may hold a tab, and none produced from a grid
+    /// does.
+    @Test("a moved cursor and set modes come through identically")
+    func cursorAndModesParity() {
         let fixture = Fixture(
             feeding: "col\tcol\tcol\r\n\(Self.esc)[?2004h\(Self.esc)[?1h\(Self.esc)[3;7H")
-        expectParity(fixture, depths: Self.depths, "tabs, cursor and modes")
+        expectParity(fixture, depths: Self.depths, "a moved cursor and set modes")
+
+        // Guards the fixture: a stream that failed to set the modes or move the
+        // cursor would make the parity assertion above compare two sets of
+        // defaults and assert nothing.
         let shared = TerminalScreenProjection.project(fixture.terminal, maxLines: 50)
-        // Guards the fixture: a stream that failed to set the modes would make
-        // the parity assertion above compare two sets of defaults.
         #expect(shared.modes.bracketedPaste)
         #expect(shared.modes.applicationCursor)
-        #expect(shared.lines.first?.contains("\t") == true)
+        // `ESC[3;7H` is one-based, so the viewport-relative cursor is (2, 6).
+        #expect(
+            shared.cursorRow == 2 && shared.cursorColumn == 6,
+            "cursor landed at (\(shared.cursorRow), \(shared.cursorColumn))")
     }
 
     @Test("the alternate screen projects identically")
