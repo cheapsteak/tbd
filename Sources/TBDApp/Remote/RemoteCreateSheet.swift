@@ -63,7 +63,10 @@ struct RemoteCreateSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("New \(describe?.name ?? provider.name) session")
+            // The registry key, not `describe.name`: two entries of the same
+            // kind report the same kind, and the sheet must say which entry
+            // this session will be created under.
+            Text("New \(provider.name) session")
                 .font(.headline)
 
             if fields.isEmpty {

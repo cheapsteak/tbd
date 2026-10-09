@@ -154,9 +154,14 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// `isArchived` for display, which supplies the contract's
     /// absent-reads-as-false semantics.
     public let archived: Bool?
+    /// The contract's optional `pending_question` — WHAT a `waiting_input`
+    /// session is blocked on. Liveness axis, not filing: a snapshot that has
+    /// gone stale can no longer assert it (see `projectedForStaleSnapshot`).
+    public let pendingQuestion: RemotePendingQuestion?
 
     enum CodingKeys: String, CodingKey {
         case id, title, state, meta, archived
+        case pendingQuestion = "pending_question"
         case createdAt = "created_at"
         case exitCode = "exit_code"
         case agentState = "agent_state"
@@ -168,11 +173,13 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 state: RemoteProcessState, exitCode: Int? = nil,
                 agentState: RemoteAgentState = .unknown,
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
-                meta: [String: String]? = nil, archived: Bool? = nil) {
+                meta: [String: String]? = nil, archived: Bool? = nil,
+                pendingQuestion: RemotePendingQuestion? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
         self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
+        self.pendingQuestion = pendingQuestion
     }
 
     /// Decoded leniently, field by field, and fatal on exactly one thing.
@@ -210,6 +217,10 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentStateReason = lenient(String.self, .agentStateReason)
         agentStateAt = lenient(String.self, .agentStateAt)
         archived = lenient(Bool.self, .archived)
+        // Absent whenever it is anything other than a question block TBD can
+        // read: the contract forbids inferring blockage from this field, so
+        // its loss costs an explanation and never a state.
+        pendingQuestion = lenient(RemotePendingQuestion.self, .pendingQuestion)
         let provider = decoder.userInfo[.remoteProviderName] as? String
         meta = Self.decodeMeta(from: c, sessionID: id, provider: provider)
         if !dropped.isEmpty {
@@ -254,9 +265,9 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     private static func decodeMeta(
         from c: KeyedDecodingContainer<CodingKeys>, sessionID: String, provider: String?
     ) -> [String: String]? {
-        let raw: [String: MetaValue]?
+        let raw: [String: LenientDisplayScalar]?
         do {
-            raw = try c.decodeIfPresent([String: MetaValue].self, forKey: .meta)
+            raw = try c.decodeIfPresent([String: LenientDisplayScalar].self, forKey: .meta)
         } catch {
             // `meta` present but not an object — the one case that costs the
             // WHOLE map rather than a key, including `repo`, which is what
@@ -297,26 +308,6 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         return kept
     }
 
-    /// One `meta` value, decoded down to the string a display map can show.
-    /// `literal` is nil for anything with no unambiguous literal form — an
-    /// object, an array, or an explicit null.
-    private struct MetaValue: Decodable {
-        let literal: String?
-
-        init(from decoder: any Decoder) throws {
-            guard let c = try? decoder.singleValueContainer(), !c.decodeNil() else {
-                literal = nil
-                return
-            }
-            if let s = try? c.decode(String.self) { literal = s; return }
-            if let b = try? c.decode(Bool.self) { literal = b ? "true" : "false"; return }
-            // Int before Double so a whole number reads as `42`, not `42.0`.
-            if let i = try? c.decode(Int.self) { literal = String(i); return }
-            if let d = try? c.decode(Double.self) { literal = String(d); return }
-            literal = nil
-        }
-    }
-
     /// The contract's absent-reads-as-`false` display semantics. The sync
     /// path must NOT use this — it needs to distinguish "no claim" (nil) from
     /// an explicit `false`, so it reads `archived` directly.
@@ -346,7 +337,11 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
             id: id, title: title, createdAt: createdAt,
             state: .unknown, exitCode: exitCode, agentState: .unknown,
             agentStateReason: nil, agentStateAt: agentStateAt, meta: meta,
-            archived: archived)
+            archived: archived,
+            // Liveness axis: "blocked on this question" is a claim about
+            // right now, and a provider that has stopped answering leaves
+            // TBD no standing to make it.
+            pendingQuestion: nil)
     }
 }
 
@@ -449,9 +444,19 @@ public struct ProviderDescribe: Codable, Sendable {
     public let providerVersion: String?
     public let capabilities: [String]
     public let createParams: [ProviderCreateParamField]
+    /// Which BACKEND this registry entry is pointed at, as non-secret display
+    /// pairs (`docs/remote-provider-contract.md` § `describe`). Nil from any
+    /// provider that doesn't send it, which is every provider written before
+    /// the field existed — TBD then shows only the identity it can derive
+    /// locally (the registry key and the command it runs).
+    ///
+    /// Note what `name` is and is not: it identifies the provider's KIND, so
+    /// two registry entries running the same binary against different control
+    /// planes report the same one. It is never sufficient identity on its own.
+    public let identity: ProviderIdentity?
 
     enum CodingKeys: String, CodingKey {
-        case name, capabilities
+        case name, capabilities, identity
         case contractVersions = "contract_versions"
         case providerVersion = "provider_version"
         case createParams = "create_params"
@@ -462,12 +467,14 @@ public struct ProviderDescribe: Codable, Sendable {
     /// memberwise init, so without this the only way to build one was a
     /// round-trip through `JSONDecoder`.
     public init(contractVersions: [Int] = [1], name: String, providerVersion: String? = nil,
-                capabilities: [String] = [], createParams: [ProviderCreateParamField] = []) {
+                capabilities: [String] = [], createParams: [ProviderCreateParamField] = [],
+                identity: ProviderIdentity? = nil) {
         self.contractVersions = contractVersions
         self.name = name
         self.providerVersion = providerVersion
         self.capabilities = capabilities
         self.createParams = createParams
+        self.identity = identity
     }
 
     public init(from decoder: Decoder) throws {
@@ -477,6 +484,9 @@ public struct ProviderDescribe: Codable, Sendable {
         providerVersion = try c.decodeIfPresent(String.self, forKey: .providerVersion)
         capabilities = try c.decodeIfPresent([String].self, forKey: .capabilities) ?? []
         createParams = try c.decodeIfPresent([ProviderCreateParamField].self, forKey: .createParams) ?? []
+        // Never fatal: an identity block TBD can't read costs the identity
+        // rows, never the provider's registration.
+        identity = (try? c.decodeIfPresent(ProviderIdentity.self, forKey: .identity)).flatMap { $0 }
     }
 }
 

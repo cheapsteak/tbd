@@ -25,6 +25,15 @@ struct RemoteProviderDeskSummary: Equatable {
     let terminal: TerminalCounts
     let agent: AgentCounts
     let latestMirrorUpdate: Date?
+    /// Rows whose agent axis says a human has to act (`waiting_input`), in
+    /// the same order as `sessions`. Held as rows rather than a count
+    /// because the desk names them and states WHY each is blocked —
+    /// a digit in a strip is not an explanation.
+    let needsAttention: [RemoteSessionInfo]
+    /// Rows with a live terminal and no reported agent state. Counted apart
+    /// from both working and waiting because it is neither: it means only
+    /// that a terminal exists (`RemoteAgentAttention.isUnattributedRunning`).
+    let unattributedRunning: [RemoteSessionInfo]
 
     var total: Int { sessions.count }
 
@@ -102,5 +111,18 @@ struct RemoteProviderDeskSummary: Equatable {
         self.terminal = terminal
         self.agent = agent
         latestMirrorUpdate = sessions.first?.lastSeen
+        needsAttention = sessions.filter(RemoteAgentAttention.needsAttention)
+        unattributedRunning = sessions.filter(RemoteAgentAttention.isUnattributedRunning)
+    }
+
+    /// The one-line aggregate the desk states when live terminals are
+    /// reporting no agent state at all. Nil when none are.
+    var unattributedRunningNotice: String? {
+        let count = unattributedRunning.count
+        guard count > 0 else { return nil }
+        let subject = count == 1
+            ? "1 running session reports no agent state"
+            : "\(count) running sessions report no agent state"
+        return "\(subject) — terminal liveness is not agent progress."
     }
 }
