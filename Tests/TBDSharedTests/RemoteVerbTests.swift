@@ -59,6 +59,24 @@ struct RemoteVerbTests {
         #expect(RemoteVerb.transcriptRead(sessionID: "--since")
             == ["transcript", "read", "--since"])
     }
+
+    // MARK: - transcript.tail
+
+    @Test func transcriptTailCapabilityMatchesTheContract() {
+        #expect(RemoteCapability.transcriptTail == "transcript.tail")
+    }
+
+    @Test func transcriptReadTailAsksForTheEnd() {
+        let argv = RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12)
+        #expect(argv == ["transcript", "read", "s-1", "--tail", "12"])
+        #expect(!argv.contains("--since"))
+    }
+
+    @Test func transcriptReadBeforePassesTheCursorVerbatimAndNeverSince() {
+        let argv = RemoteVerb.transcriptReadBefore(sessionID: "s-1", before: "opaque/b 1", count: 12)
+        #expect(argv == ["transcript", "read", "s-1", "--before", "opaque/b 1", "--tail", "12"])
+        #expect(!argv.contains("--since"))
+    }
 }
 
 /// Wire shapes for the two RPCs the remote transcript pane and composer use.
@@ -91,6 +109,52 @@ struct RemoteTranscriptSyncWireTests {
         #expect(result.path == "/tmp/x/transcript.jsonl")
         #expect(result.generation == 3)
         #expect(result.caughtUp == false)
+    }
+
+    /// An older daemon sends neither field.
+    @Test func syncResultDecodesWithoutHeadOrHasEarlier() throws {
+        let json = #"{"path":"/tmp/x/transcript.jsonl","generation":3,"caughtUp":true}"#
+        let result = try JSONDecoder().decode(
+            RemoteTranscriptSyncResult.self, from: Data(json.utf8))
+        #expect(result.head == 0)
+        #expect(result.hasEarlier == false)
+    }
+
+    @Test func syncResultRoundTripsHeadAndHasEarlier() throws {
+        let result = RemoteTranscriptSyncResult(
+            path: "/tmp/x/transcript.jsonl", generation: 3, caughtUp: true, head: 4, hasEarlier: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptSyncResult.self, from: JSONEncoder().encode(result))
+        #expect(decoded == result)
+        #expect(decoded.head == 4)
+        #expect(decoded.hasEarlier)
+    }
+
+    @Test func loadEarlierIsProviderNamed() {
+        #expect(RPCMethod.remoteTranscriptLoadEarlier == "remote.transcriptLoadEarlier")
+        #expect(RPCMethod.providerNamedRemoteMethods.contains(RPCMethod.remoteTranscriptLoadEarlier))
+    }
+
+    @Test func loadEarlierParamsRoundTrip() throws {
+        let params = RemoteTranscriptLoadEarlierParams(provider: "acme", sessionID: "s-1")
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptLoadEarlierParams.self, from: JSONEncoder().encode(params))
+        #expect(decoded.provider == "acme")
+        #expect(decoded.sessionID == "s-1")
+    }
+
+    @Test func loadEarlierResultRoundTrips() throws {
+        let result = RemoteTranscriptLoadEarlierResult(generation: 3, head: 2, reachedStart: true, expired: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptLoadEarlierResult.self, from: JSONEncoder().encode(result))
+        #expect(decoded == result)
+    }
+
+    @Test func loadEarlierResultDecodesTheDocumentedKeys() throws {
+        let json = #"{"generation":4,"head":1,"reachedStart":false,"expired":false}"#
+        let result = try JSONDecoder().decode(RemoteTranscriptLoadEarlierResult.self, from: Data(json.utf8))
+        #expect(result == RemoteTranscriptLoadEarlierResult(
+            generation: 4, head: 1, reachedStart: false, expired: false))
     }
 
     @Test func sendMessageParamsRoundTrip() throws {

@@ -42,6 +42,13 @@ public actor RemoteProviderManager {
     /// RPC router exists, because the router owns the binding coordinator;
     /// nil in fixtures that do not exercise it, where naming PRs does nothing.
     private var providerPRBinder: ProviderPRBinder?
+    /// Hands every sighting — after deletion suppression, hint intact — to
+    /// remote transcript background sync, which records the hint and decides
+    /// whether the session's cache needs a sync. Installed after the RPC
+    /// router exists, on the same terms as `providerPRBinder`; nil in fixtures
+    /// that do not exercise it, where it does nothing.
+    typealias TranscriptSightingObserver = @Sendable (_ sessions: [RemoteSessionPayload], _ provider: String) async -> Void
+    private var transcriptSightingObserver: TranscriptSightingObserver?
     static let pollInterval: TimeInterval = 60
     /// The capability a provider must declare in `describe` before TBD opens a
     /// `messages` stream against it.
@@ -561,8 +568,12 @@ public actor RemoteProviderManager {
         let sightedSince = requestStartedAt ?? now
         let sightings = suppressingDeleted(
             sessions, provider: provider, sightedSince: sightedSince, now: now)
+        // The mirror stores each payload without its transcript hint — see
+        // `RemoteSessionPayload.withoutTranscriptHint`. Everything else below
+        // keeps the full sightings.
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sightings, complete: complete, now: now)
+            provider: provider, sessions: sightings.map(\.withoutTranscriptHint),
+            complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
@@ -587,6 +598,9 @@ public actor RemoteProviderManager {
         await syncFilingDecisions(
             sessions: sightings, provider: provider,
             requestStartedAt: sightedSince, now: now)
+        // Every sighting, flag or not: the hint store records hints whatever
+        // the flag says, and background sync reads the flag itself.
+        await transcriptSightingObserver?(sightings, provider)
         if complete {
             lastSuccessfulSnapshotAt[provider] = now
             // A live COMPLETE snapshot supersedes whatever the persisted row
@@ -648,8 +662,10 @@ public actor RemoteProviderManager {
         else { return }
         let outcome: SnapshotOutcome
         do {
+            // Hint stripped for the mirror only — see
+            // `RemoteSessionPayload.withoutTranscriptHint`.
             outcome = try await db.remoteSessions.upsertOne(
-                provider: provider, session: session, now: arrivedAt)
+                provider: provider, session: session.withoutTranscriptHint, now: arrivedAt)
         } catch {
             remoteLogger.error(
                 "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
@@ -666,6 +682,7 @@ public actor RemoteProviderManager {
         await syncFilingDecisions(
             sessions: [session], provider: provider,
             requestStartedAt: arrivedAt, now: arrivedAt)
+        await transcriptSightingObserver?([session], provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -684,6 +701,13 @@ public actor RemoteProviderManager {
     /// snapshot is applied without it.
     func setProviderPRBinder(_ binder: ProviderPRBinder?) {
         providerPRBinder = binder
+    }
+
+    /// Install (or clear) the observer remote transcript background sync reads
+    /// sightings through. Called once at boot, after the RPC router is built
+    /// and before `start()`, so no sighting is processed without it.
+    func setTranscriptSightingObserver(_ observer: TranscriptSightingObserver?) {
+        transcriptSightingObserver = observer
     }
 
     /// Tell subscribers what adoption changed. Both halves reuse the delta a

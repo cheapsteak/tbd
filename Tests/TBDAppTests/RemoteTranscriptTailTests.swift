@@ -196,4 +196,68 @@ struct RemoteTranscriptTailTests {
         #expect(b.count == 1)
         #expect(a.count > b.count)
     }
+
+    // MARK: - Prepends (`head`)
+
+    @Test("a head change re-reads the whole file under the same generation")
+    func headChangeRereadsWholeFile() async throws {
+        let records = (1...4).map { promptLine(uuid: "p-\($0)", text: "Record \($0).") }
+        let path = try cacheFile(Array(records[2...]))
+        let tail = RemoteTranscriptTail()
+        let before = try #require(await tail.read(key: "k", path: path, generation: 1, head: 0))
+        #expect(userPrompts(before) == ["Record 3.", "Record 4."])
+
+        // The daemon's prepend: the whole file rewritten and renamed over.
+        try replace(path, with: records)
+        let after = try #require(await tail.read(key: "k", path: path, generation: 1, head: 1))
+        #expect(userPrompts(after) == ["Record 1.", "Record 2.", "Record 3.", "Record 4."],
+                "earlier records in order, nothing doubled")
+    }
+
+    /// The append-shaped rewrite `TranscriptSource` alone reads as an append
+    /// (see `appendShapedRewriteWithoutGenerationIsAnAppend`): only the head
+    /// change can force the re-read that shows the new first record.
+    @Test("a head change re-reads even when the rewrite looks like an append")
+    func headChangeRereadsAnAppendShapedRewrite() async throws {
+        let longText = String(repeating: "x", count: 800)
+        let oldFirst = promptLine(uuid: "h1-u1", text: "Old opening line.")
+        let newFirst = promptLine(uuid: "h2-u1", text: "New opening line.")
+        let shared = promptLine(uuid: "shared-1", text: longText)
+        let appended = promptLine(uuid: "h2-u3", text: "Appended after.")
+
+        let path = try cacheFile([oldFirst, shared])
+        let tail = RemoteTranscriptTail()
+        _ = await tail.read(key: "k", path: path, generation: 1, head: 0)
+        try replace(path, with: [newFirst, shared, appended])
+        let after = try #require(await tail.read(key: "k", path: path, generation: 1, head: 1))
+        #expect(userPrompts(after).first == "New opening line.")
+        #expect(!userPrompts(after).contains("Old opening line."))
+    }
+
+    @Test("the same head after a prepend-shaped rewrite is still read incrementally")
+    func sameHeadIsIncremental() async throws {
+        let longText = String(repeating: "x", count: 800)
+        let oldFirst = promptLine(uuid: "h1-u1", text: "Old opening line.")
+        let newFirst = promptLine(uuid: "h2-u1", text: "New opening line.")
+        let shared = promptLine(uuid: "shared-1", text: longText)
+        let appended = promptLine(uuid: "h2-u3", text: "Appended after.")
+
+        let path = try cacheFile([oldFirst, shared])
+        let tail = RemoteTranscriptTail()
+        _ = await tail.read(key: "k", path: path, generation: 1, head: 2)
+        try replace(path, with: [newFirst, shared, appended])
+        let after = try #require(await tail.read(key: "k", path: path, generation: 1, head: 2))
+        #expect(userPrompts(after).first == "Old opening line.",
+                "only a head change may force a full re-read")
+        #expect(userPrompts(after).last == "Appended after.")
+    }
+
+    @Test("an unreadable file after a head-only change keeps what is on screen")
+    func unreadableAfterHeadChangeIsNoNews() async throws {
+        let path = try cacheFile(try fixtureLines())
+        let tail = RemoteTranscriptTail()
+        _ = await tail.read(key: "k", path: path, generation: 1, head: 0)
+        try FileManager.default.removeItem(atPath: path)
+        #expect(await tail.read(key: "k", path: path, generation: 1, head: 1) == nil)
+    }
 }

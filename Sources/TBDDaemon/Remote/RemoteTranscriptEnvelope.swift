@@ -5,14 +5,17 @@ private let envelopeLogger = Logger(subsystem: "com.tbd.daemon", category: "remo
 
 /// What one `transcript read` call said about itself, read from the JSON
 /// envelope it wrote on stderr (`docs/remote-provider-contract.md` §
-/// `transcript read <id> [--since <cursor>]`):
+/// `transcript read <id> [--since <cursor>]` and § `transcript read --tail`
+/// and `--before`):
 ///
 /// ```json
 /// {"cursor": "opaque-provider-string", "reset": true, "more": true}
+/// {"cursor": "opaque-provider-string", "before": "opaque-before-cursor"}
 /// ```
 ///
-/// Already resolved against the contract's rules, so a caller acts on the
-/// three fields without re-deriving any of them:
+/// The second shape answers the `--tail` forms only. Already resolved against
+/// the contract's rules, so a caller acts on the four fields without
+/// re-deriving any of them:
 ///
 /// - **No envelope** is a provider without incremental support: the output is
 ///   the whole conversation, so it is a reset, there is no cursor, and the
@@ -48,7 +51,20 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
     /// The provider stopped at its own size limit; call again at once with
     /// `cursor`. Never true without a cursor.
     let more: Bool
+    /// The cursor to pass verbatim to `--before` for the page of history
+    /// ending immediately before this output; `nil` when the output already
+    /// starts at the beginning of the conversation. Only the `--tail` forms
+    /// return it. Opaque on the same terms as `cursor`.
+    let before: String?
     let source: Source
+
+    init(cursor: String?, reset: Bool, more: Bool, before: String? = nil, source: Source) {
+        self.cursor = cursor
+        self.reset = reset
+        self.more = more
+        self.before = before
+        self.source = source
+    }
 
     /// The envelope's wire shape. Decoded strictly: a `cursor` that is not a
     /// string, or a flag that is not a boolean, makes the envelope malformed
@@ -57,9 +73,10 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
         let cursor: String?
         let reset: Bool?
         let more: Bool?
+        let before: String?
     }
 
-    private static let envelopeKeys: Set<String> = ["cursor", "reset", "more"]
+    private static let envelopeKeys: Set<String> = ["cursor", "reset", "more", "before"]
 
     /// Reads the envelope out of a `transcript read` call's stderr.
     ///
@@ -67,10 +84,10 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
     ///   - stderr: the call's whole stderr. The envelope is the only stderr
     ///     content the contract defines, but a provider may still write
     ///     diagnostics beside it, so the envelope is the **last** line that is
-    ///     a JSON object naming at least one of `cursor`, `reset`, `more`. A
-    ///     JSON object naming none of them is a diagnostic (a structured log
-    ///     line), not an envelope, and is passed over, as is a `{`-prefixed
-    ///     line that is not valid JSON at all. Only an object naming an
+    ///     a JSON object naming at least one of `cursor`, `reset`, `more`,
+    ///     `before`. A JSON object naming none of them is a diagnostic (a
+    ///     structured log line), not an envelope, and is passed over, as is a
+    ///     `{`-prefixed line that is not valid JSON at all. Only an object naming an
     ///     envelope key that then fails the strict decode is malformed.
     ///   - requestedSince: whether the call carried `--since`. Without it the
     ///     answer is a reset by definition.
@@ -98,7 +115,8 @@ struct RemoteTranscriptEnvelope: Equatable, Sendable {
                 envelopeLogger.error(
                     "transcript read provider=\(provider, privacy: .public): envelope sets more without a cursor; reading as caught up")
             }
-            return RemoteTranscriptEnvelope(cursor: wire.cursor, reset: reset, more: more, source: .envelope)
+            return RemoteTranscriptEnvelope(
+                cursor: wire.cursor, reset: reset, more: more, before: wire.before, source: .envelope)
         }
         return RemoteTranscriptEnvelope(cursor: nil, reset: true, more: false, source: .absent)
     }

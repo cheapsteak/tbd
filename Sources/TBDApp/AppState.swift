@@ -1899,6 +1899,15 @@ final class AppState {
             try await daemonClient.remoteTranscriptSync(
                 provider: selection.provider, sessionID: selection.sessionID)
         }
+    /// How a remote transcript pane runs `remote.transcriptLoadEarlier` —
+    /// injectable for the same reason as `remoteTranscriptSyncer`.
+    @ObservationIgnored
+    lazy var remoteTranscriptEarlierLoader:
+        @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptLoadEarlierResult =
+        { [daemonClient] selection in
+            try await daemonClient.remoteTranscriptLoadEarlier(
+                provider: selection.provider, sessionID: selection.sessionID)
+        }
     /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
     /// for the same reason as `controlModeSetter`.
     @ObservationIgnored
@@ -1928,6 +1937,11 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
+    /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
+    /// transcript sync gate — injectable for the same reason as
+    /// `controlModeSetter`.
+    @ObservationIgnored lazy var remoteTranscriptLiveSyncFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setRemoteTranscriptLiveSync(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

@@ -255,6 +255,15 @@ public final class RPCRouter: Sendable {
     /// `remoteManager`, so it is `nil` exactly when that is — and the handler
     /// is refused by `remoteGate()` before it would need one.
     let remoteTranscriptSync: RemoteTranscriptSync?
+    /// The latest transcript hint each remote session reported, read by
+    /// `remoteTranscriptSync`'s tail-or-forward decision. Always built, and
+    /// empty after every daemon start until the first sightings.
+    let remoteTranscriptHints: RemoteTranscriptHints
+    /// Keeps unopened remote sessions' transcript caches current, fed the
+    /// sightings `remoteManager` processes through the observer `Daemon`
+    /// installs. Built over `remoteTranscriptSync`, so it is `nil` exactly
+    /// when that is.
+    let remoteTranscriptBackgroundSync: RemoteTranscriptBackgroundSync?
     /// Daemon-lifetime incremental transcript baselines used only to enrich
     /// terminal-list responses for Codex presentation state.
     let codexActivityTracker = CodexTranscriptActivityTracker()
@@ -572,12 +581,53 @@ public final class RPCRouter: Sendable {
         // `remoteTranscriptEnvironment` resolves the cache root through
         // `TBDConstants`, so `TBD_HOME` decides where caches live and a test
         // can point it at a temp home without touching the process env.
-        self.remoteTranscriptSync = remoteManager.map { manager in
-            RemoteTranscriptSync(environment: remoteTranscriptEnvironment) { provider, verb in
-                try await manager.invoke(
-                    providerName: provider, verb: verb, stdin: nil,
-                    timeout: RPCRouter.transcriptReadTimeout)
-            }
+        let hints = RemoteTranscriptHints()
+        self.remoteTranscriptHints = hints
+        let transcriptSync = remoteManager.map { manager in
+            RemoteTranscriptSync(
+                environment: remoteTranscriptEnvironment,
+                policy: { [db] provider, sessionID in
+                    // Read at every decision, never cached (§ Gating), so a
+                    // toggle takes effect on the next sync.
+                    let enabled = (try? await db.config.get().remoteTranscriptLiveSyncEnabled)
+                        ?? Config.remoteTranscriptLiveSyncEnabledDefault
+                    let capabilities = await manager.declaredCapabilities(provider: provider)
+                    return RemoteTranscriptSyncPolicy(
+                        liveSyncEnabled: enabled,
+                        tailDeclared: capabilities.contains(RemoteCapability.transcriptTail),
+                        hint: await hints.latest(provider: provider, sessionID: sessionID))
+                },
+                invoke: { provider, verb in
+                    try await manager.invoke(
+                        providerName: provider, verb: verb, stdin: nil,
+                        timeout: RPCRouter.transcriptReadTimeout)
+                })
+        }
+        self.remoteTranscriptSync = transcriptSync
+        if let manager = remoteManager, let transcriptSync {
+            self.remoteTranscriptBackgroundSync = RemoteTranscriptBackgroundSync(
+                environment: remoteTranscriptEnvironment,
+                hints: hints,
+                isEnabled: { [db] in
+                    // Read at every admission and dequeue, never cached.
+                    (try? await db.config.get().remoteTranscriptLiveSyncEnabled)
+                        ?? Config.remoteTranscriptLiveSyncEnabledDefault
+                },
+                capabilities: { provider in
+                    await manager.declaredCapabilities(provider: provider)
+                },
+                isDismissed: { [db] provider, sessionID in
+                    let row = try? await db.remoteSessions.row(provider: provider, sessionID: sessionID)
+                    return row?.dismissed == true
+                },
+                discard: { provider, sessionID in
+                    await transcriptSync.discard(provider: provider, sessionID: sessionID)
+                },
+                sync: { provider, sessionID in
+                    try await transcriptSync.sync(provider: provider, sessionID: sessionID)
+                })
+        } else {
+            self.remoteTranscriptBackgroundSync = nil
         }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
@@ -956,6 +1006,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
+                return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -998,6 +1050,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteReconnect(request.paramsData)
             case RPCMethod.remoteTranscriptSync:
                 return try await handleRemoteTranscriptSync(request.paramsData)
+            case RPCMethod.remoteTranscriptLoadEarlier:
+                return try await handleRemoteTranscriptLoadEarlier(request.paramsData)
             case RPCMethod.remoteSendMessage:
                 return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
             case RPCMethod.configSetRemoteBackends:
@@ -1132,6 +1186,7 @@ public final class RPCRouter: Sendable {
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
+        result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
         return try RPCResponse(result: result)
     }
 

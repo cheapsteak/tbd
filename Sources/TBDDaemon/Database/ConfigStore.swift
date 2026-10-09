@@ -177,6 +177,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` means "never chose". Resolve it through
     /// `Config.prPollScheduleDefault`, never through `?? false`.
     var pr_poll_schedule_enabled: Bool?
+    /// Live remote transcript sync gate: tail-first loading, earlier-history
+    /// loading and hint-driven background sync. **Genuinely tri-state**: the
+    /// `20261008230000_config_remote_transcript_live_sync` migration carries
+    /// no SQL default, so `nil` means "never chose". Resolve it through
+    /// `Config.remoteTranscriptLiveSyncEnabledDefault`, never through
+    /// `?? false`.
+    var remote_transcript_live_sync_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -249,6 +256,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   the same way rather than to a hardcoded `.off`.
     /// - Parameter profileBalancingDefault: same shape again, for
     ///   `profile_balancing_enabled` — the launch policy's soak gate.
+    /// - Parameter prPollScheduleDefault: same shape again, for
+    ///   `pr_poll_schedule_enabled`.
+    /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
+    ///   `remote_transcript_live_sync_enabled` — the live remote transcript
+    ///   sync's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -265,7 +277,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault,
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
-        prPollScheduleDefault: Bool = Config.prPollScheduleDefault
+        prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
+        remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -373,6 +386,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // thresholds in one place.
         config.profileBalancingUsageCeilingPercent = profile_balancing_usage_ceiling_percent
         config.profileBalancingMaxReadingAgeSeconds = profile_balancing_max_reading_age_seconds
+        // Live remote transcript sync gate — NOT `?? false`.
+        config.remoteTranscriptLiveSyncEnabled =
+            remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
         return config
     }
 }
@@ -895,6 +911,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the live remote transcript sync gate (default OFF while it
+    /// soaks). Written on every call, so either value is the explicit gesture
+    /// that lifts the column out of NULL. Read fresh at every decision, so a
+    /// change applies on the next sync without a restart.
+    public func setRemoteTranscriptLiveSyncEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_transcript_live_sync_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

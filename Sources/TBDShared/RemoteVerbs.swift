@@ -16,6 +16,9 @@ import Foundation
 public enum RemoteCapability {
     /// `transcript read <id> [--since <cursor>]` — a live session's conversation.
     public static let transcriptRead = "transcript.read"
+    /// `--tail` and `--before` on `transcript read`. Gates flags, not a verb:
+    /// there is no `transcript tail` subcommand.
+    public static let transcriptTail = "transcript.tail"
     /// `transcript retain <id>`, and `delete <id> --retain`.
     public static let transcriptRetain = "transcript.retain"
     /// `transcript import` — Claude Code JSONL on stdin into the provider's store.
@@ -41,6 +44,20 @@ public enum RemoteVerb {
             argv += ["--since", cursor]
         }
         return argv
+    }
+
+    /// `transcript read <id> --tail <n>` — the end of the current conversation.
+    /// Always a reset. Only for a provider that declared
+    /// `RemoteCapability.transcriptTail`; never combined with `--since`.
+    public static func transcriptReadTail(sessionID: String, count: Int) -> [String] {
+        ["transcript", "read", sessionID, "--tail", String(count)]
+    }
+
+    /// `transcript read <id> --before <cursor> --tail <n>` — the page of
+    /// history ending immediately before `before`. Never carries `--since`.
+    /// Only for a provider that declared `RemoteCapability.transcriptTail`.
+    public static func transcriptReadBefore(sessionID: String, before: String, count: Int) -> [String] {
+        ["transcript", "read", sessionID, "--before", before, "--tail", String(count)]
     }
 
     /// `transcript retain <id>`.

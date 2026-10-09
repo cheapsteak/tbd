@@ -208,7 +208,8 @@ public struct RemoteSessionStore: Sendable {
             meta: incoming.meta, archived: incoming.archived,
             // Agent axis: the question is what a mirrored `waiting_input`
             // is blocked on, so it is kept or replaced together with it.
-            pendingQuestion: stored.pendingQuestion)
+            pendingQuestion: stored.pendingQuestion,
+            transcript: incoming.transcript)
     }
 
     /// The `agent_state_at` inside a mirrored payload string.

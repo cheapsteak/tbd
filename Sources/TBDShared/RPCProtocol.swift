@@ -331,6 +331,13 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
+    /// The live remote transcript sync gate
+    /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
+    /// the daemon reads it fresh at every decision — and turning it off drops
+    /// background sync's queue. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetRemoteTranscriptLiveSyncEnabled =
+        "config.setRemoteTranscriptLiveSyncEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -368,6 +375,13 @@ public enum RPCMethod {
     /// provider declares `transcript.read`. Design:
     /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
     public static let remoteTranscriptSync = "remote.transcriptSync"
+    /// Prepends one page of earlier history to a session's transcript cache
+    /// through `transcript read <id> --before <cursor> --tail 12`, on the
+    /// session's lane. Refused while `remote_transcript_live_sync_enabled` is
+    /// off, unless the provider declares `transcript.tail`, for a dismissed
+    /// session, and when the cache holds no `before`. The result is a
+    /// `RemoteTranscriptLoadEarlierResult`.
+    public static let remoteTranscriptLoadEarlier = "remote.transcriptLoadEarlier"
     /// Submits a message to a remote session through `send <id> --submit`, the
     /// provider pasting it and pressing Enter. Distinct from `remote.send`,
     /// which delivers raw keystrokes. Refused unless the provider declares
@@ -414,7 +428,7 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
-        remoteTranscriptSync, remoteSendMessage,
+        remoteTranscriptSync, remoteSendMessage, remoteTranscriptLoadEarlier,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
@@ -1890,12 +1904,71 @@ public struct RemoteTranscriptSyncParams: Codable, Sendable {
 /// - `caughtUp` — false when the sync stopped at its page cap with the
 ///   provider still reporting `more`; the next sync resumes from the stored
 ///   cursor.
+/// - `head` — bumped on every prepend of earlier history under the same
+///   generation. A reader whose `head` differs rereads the file while holding
+///   its top visible row still.
+/// - `hasEarlier` — earlier history can be loaded now: the live-sync flag is
+///   on, the provider declares `transcript.tail`, and the cache holds a
+///   `before`. Always false with the flag off.
+///
+/// An older daemon sends neither `head` nor `hasEarlier`; they decode as `0`
+/// and `false`.
 public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
     public let path: String
     public let generation: Int
     public let caughtUp: Bool
-    public init(path: String, generation: Int, caughtUp: Bool) {
+    public let head: Int
+    public let hasEarlier: Bool
+    public init(path: String, generation: Int, caughtUp: Bool, head: Int = 0, hasEarlier: Bool = false) {
         self.path = path; self.generation = generation; self.caughtUp = caughtUp
+        self.head = head; self.hasEarlier = hasEarlier
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path, generation, caughtUp, head, hasEarlier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        generation = try c.decode(Int.self, forKey: .generation)
+        caughtUp = try c.decode(Bool.self, forKey: .caughtUp)
+        head = try c.decodeIfPresent(Int.self, forKey: .head) ?? 0
+        hasEarlier = try c.decodeIfPresent(Bool.self, forKey: .hasEarlier) ?? false
+    }
+}
+
+/// Params for `remote.transcriptLoadEarlier` — prepend one page of earlier
+/// history to a session's transcript cache. The result is a
+/// `RemoteTranscriptLoadEarlierResult`.
+public struct RemoteTranscriptLoadEarlierParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcriptLoadEarlier`.
+///
+/// - `generation` — the cache's generation after the call. One that differs
+///   from the reader's means a sync replaced the file before the load ran: the
+///   load fetched nothing, and the reader discards what it holds and rereads.
+/// - `head` — bumped by every prepend. A reader whose `head` differs rereads
+///   the file while holding its top visible row still.
+/// - `reachedStart` — nothing earlier remains to load: the cache holds the
+///   conversation's beginning, or the history above it can no longer be
+///   fetched.
+/// - `expired` — the provider answered `cursor_expired`; implies
+///   `reachedStart`. The pane says earlier history is no longer available.
+public struct RemoteTranscriptLoadEarlierResult: Codable, Sendable, Equatable {
+    public let generation: Int
+    public let head: Int
+    public let reachedStart: Bool
+    public let expired: Bool
+    public init(generation: Int, head: Int, reachedStart: Bool, expired: Bool) {
+        self.generation = generation; self.head = head
+        self.reachedStart = reachedStart; self.expired = expired
     }
 }
 
@@ -3669,6 +3742,15 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
+/// tail-first loading, earlier-history loading and hint-driven background
+/// sync of remote session transcripts (default OFF during soak). Design:
+/// `docs/specs/2026-09-25-remote-session-transcript-design.md` § Gating.
+public struct ConfigSetRemoteLiveSyncEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
@@ -4082,6 +4164,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             usageCeilingPercent: profileBalancingUsageCeilingPercent,
             maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
     }
+    /// Whether live remote transcript sync is on
+    /// (`remote_transcript_live_sync_enabled`). Default OFF while it soaks.
+    /// Resolved through `Config.remoteTranscriptLiveSyncEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4220,6 +4309,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Int.self, forKey: .profileBalancingUsageCeilingPercent)
         profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+        // New field for the live remote transcript sync gate. A daemon that
+        // does not send it knows nothing about the feature, so fall through to
+        // the shipped default.
+        remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
+            ?? Config.remoteTranscriptLiveSyncEnabledDefault
     }
 }
 

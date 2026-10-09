@@ -118,4 +118,41 @@ struct RemoteTranscriptEnvelopeTests {
         let json = try #require(String(data: try JSONEncoder().encode(["cursor": cursor]), encoding: .utf8))
         #expect(parse(json).cursor == cursor)
     }
+
+    // MARK: - `before` (the `--tail` forms)
+
+    @Test func aTailEnvelopeCarriesCursorAndBefore() {
+        let e = parse(#"{"cursor":"c-9","before":"b-3"}"#, since: false)
+        #expect(e.source == .envelope)
+        #expect(e.cursor == "c-9")
+        #expect(e.before == "b-3")
+        #expect(e.reset)
+    }
+
+    @Test func beforeWithoutACursorIsAValidEnvelope() {
+        let e = parse(#"{"before":"b-2"}"#, since: false)
+        #expect(e.source == .envelope)
+        #expect(e.cursor == nil)
+        #expect(e.before == "b-2")
+        #expect(e.more == false)
+    }
+
+    @Test func aNonStringBeforeIsMalformed() {
+        let e = parse(#"{"cursor":"c","before":7}"#, since: true)
+        #expect(e.source == .malformed)
+        #expect(e.before == nil)
+    }
+
+    @Test func anObjectNamingOnlyBeforeIsAnEnvelopeNotADiagnostic() {
+        let stderr = "{\"level\":\"info\"}\n{\"before\":\"b\"}"
+        let e = parse(stderr, since: false)
+        #expect(e.source == .envelope)
+        #expect(e.before == "b")
+    }
+
+    /// The forward forms never carry `before`; an envelope without it reads nil.
+    @Test func aForwardEnvelopeHasNoBefore() {
+        #expect(parse(#"{"cursor":"c-2","reset":true}"#).before == nil)
+        #expect(parse("").before == nil)
+    }
 }

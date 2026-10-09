@@ -1188,6 +1188,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the live remote transcript sync gate (default OFF, soaking).
+    /// The daemon reads it at every decision, so it applies from the next sync.
+    func setRemoteTranscriptLiveSync(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteTranscriptLiveSyncEnabled,
+            params: ConfigSetRemoteLiveSyncEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
@@ -1371,6 +1380,20 @@ actor DaemonClient {
             method: RPCMethod.remoteTranscriptSync,
             params: RemoteTranscriptSyncParams(provider: provider, sessionID: sessionID),
             resultType: RemoteTranscriptSyncResult.self
+        )
+    }
+
+    /// Prepend one page of earlier history to a remote session's transcript
+    /// cache (`remote.transcriptLoadEarlier`). Refused by the daemon with
+    /// `remote_transcript_live_sync_enabled` off, without `transcript.tail`,
+    /// for a dismissed session, or when nothing is recorded above the cache.
+    func remoteTranscriptLoadEarlier(
+        provider: String, sessionID: String
+    ) async throws -> RemoteTranscriptLoadEarlierResult {
+        try await callAsync(
+            method: RPCMethod.remoteTranscriptLoadEarlier,
+            params: RemoteTranscriptLoadEarlierParams(provider: provider, sessionID: sessionID),
+            resultType: RemoteTranscriptLoadEarlierResult.self
         )
     }
 
