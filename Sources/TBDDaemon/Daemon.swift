@@ -1836,11 +1836,12 @@ public final class Daemon: Sendable {
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller
-            // Token profiles are kept off the 90s cadence because their usage
-            // probe is a real billed request; they refresh when a session using
-            // them finishes a turn instead. The store detects the edge (both of
-            // its activity writers commit it); this is the one place it is
-            // wired to a consumer.
+            // Token profiles probe at most every five minutes on the cadence
+            // because their usage probe is a real billed request; a session
+            // using one that finishes a turn refreshes it sooner, under the
+            // same floor. The store detects the edge (both of its activity
+            // writers commit it); this is the one place it is wired to a
+            // consumer.
             database.terminals.activityTransitions.onSessionBecameIdle { [weak oauthPoller] profileID in
                 Task { await oauthPoller?.noteSessionBecameIdle(profileID: profileID) }
             }

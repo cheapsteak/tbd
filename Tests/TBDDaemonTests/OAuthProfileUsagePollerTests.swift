@@ -653,6 +653,62 @@ private final class MutableClock: @unchecked Sendable {
         #expect(fetcher.calls.count == 3)
     }
 
+    /// A `Retry-After` gets the same additive jitter as the exponential
+    /// schedule, landing after the server's value and never before it, so
+    /// profiles told to wait the same time do not all retry on the same tick.
+    @Test func retryAfterIsJitteredOnTopOfTheServersValue() async {
+        let profile = oauthProfile(named: "Limited")
+        let dir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        fetcher.enqueue(configDirPath: dir, .rateLimited(retryAfter: 120))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: { [profile] },
+            loginIdentity: { _ in "someone@example.com" },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: {},
+            sleeper: { _ in },
+            now: { clock.now },
+            jitter: { _ in 7 }
+        )
+
+        _ = await poller.sweepForTest()          // 429, Retry-After 120 → 127s
+        #expect(fetcher.calls.count == 1)
+
+        clock.advance(121)                       // past the server's value...
+        _ = await poller.sweepForTest()
+        #expect(fetcher.calls.count == 1)        // ...but not past the jitter
+
+        clock.advance(7)                         // +128s
+        _ = await poller.sweepForTest()
+        #expect(fetcher.calls.count == 2)
+    }
+
+    /// A long `Retry-After` — on a token probe, the hours until the account's
+    /// window resets — is capped, so one rate-limited profile's reading is
+    /// retried within about 15 minutes rather than frozen for an hour.
+    @Test func longRetryAfterIsCappedAtMaxBackoff() async {
+        let profile = oauthProfile(named: "Limited")
+        let dir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        fetcher.enqueue(configDirPath: dir, .rateLimited(retryAfter: 3601))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
+
+        _ = await poller.sweepForTest()
+        #expect(fetcher.calls.count == 1)
+
+        clock.advance(OAuthProfileUsagePoller.maxBackoff - 1)
+        _ = await poller.sweepForTest()
+        #expect(fetcher.calls.count == 1)
+
+        clock.advance(2)                         // past the 900s cap, far short of 3601s
+        _ = await poller.sweepForTest()
+        #expect(fetcher.calls.count == 2)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .ok)
+    }
+
     @Test func oneProfileBackoffDoesNotBlockAnother() async {
         let limited = oauthProfile(named: "Limited")
         let healthy = oauthProfile(named: "Healthy")
@@ -758,7 +814,7 @@ struct ProfileUsageRPCCompatTests {
     }
 }
 
-// MARK: - Token profiles: the activity gate
+// MARK: - Token profiles: the cadence floor and the turn-end probe
 
 /// Build a poller over a mutable clock so the five-minute floor is a pure
 /// function of `clock.advance(_:)`. One scripted fetcher serves both legs, so
@@ -852,9 +908,11 @@ private func makeTokenPoller(
         #expect(fetcher.tokenProbeCount == 0)
     }
 
-    /// The cadence sweep serves signed-in profiles only; if it ever targeted a
-    /// token profile the activity gate would be pointless.
-    @Test func cadenceSweepNeverTargetsTokenProfiles() async {
+    /// The cadence sweep reaches token profiles too — an idle one has no turn
+    /// end to refresh it, and its account's windows move with work TBD never
+    /// sees — but only once per five-minute floor, because each probe is
+    /// billed. The signed-in profile beside it keeps its 90-second cadence.
+    @Test func cadenceSweepProbesTokenProfilesOncePerFloor() async {
         let token = tokenProfile(named: "Acme (token)")
         let signedIn = oauthProfile(named: "Acme")
         let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
@@ -862,12 +920,75 @@ private func makeTokenPoller(
         let poller = makeTokenPoller(
             profiles: [token, signedIn], tokens: [token.id: "sk-ant-oat01-A"],
             fetcher: fetcher, clock: clock, loggedIn: [signedIn.id])
+        let signedInDir = "/profiles/\(signedIn.id.uuidString.lowercased())/claude"
 
         await poller.sweepForTest()
+        #expect(fetcher.tokenProbeCount == 1)
+        #expect(fetcher.calls.filter { $0 == signedInDir }.count == 1)
+        #expect(await poller.snapshot(for: token.id)?.buckets == okBuckets)
 
-        #expect(fetcher.tokenProbeCount == 0)
-        #expect(fetcher.calls == ["/profiles/\(signedIn.id.uuidString.lowercased())/claude"])
-        #expect(await poller.snapshot(for: token.id) == nil)
+        // Three more ticks inside the floor: the signed-in profile is read on
+        // each, the token profile on none.
+        for _ in 0..<3 {
+            clock.advance(OAuthProfileUsagePoller.cadence)
+            await poller.sweepForTest()
+        }
+        #expect(fetcher.tokenProbeCount == 1)
+        #expect(fetcher.calls.filter { $0 == signedInDir }.count == 4)
+
+        // The fourth tick is past the floor (360s), so it probes again.
+        clock.advance(OAuthProfileUsagePoller.cadence)
+        await poller.sweepForTest()
+        #expect(fetcher.tokenProbeCount == 2)
+    }
+
+    /// The cadence leg must not become a way around the hold: a rejected token
+    /// stays unprobed by the scheduled sweep however much time passes, exactly
+    /// as it does under session activity.
+    @Test func cadenceSweepNeverProbesAHeldToken() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.sweepForTest()
+        #expect(fetcher.tokenProbeCount == 1)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+
+        for advance in [31.0, 3600, 86_400] {
+            clock.advance(advance)
+            await poller.sweepForTest()
+            _ = await poller.sweepNow()
+        }
+        #expect(fetcher.tokenProbeCount == 1)
+    }
+
+    /// The incident shape: a token profile with no session on it, read once
+    /// and never again, ages past the picker's 15-minute window and drops out
+    /// of balancing for good. The cadence keeps it inside that window with no
+    /// session activity at all.
+    @Test func idleTokenProfileStaysInsideThePickerStalenessWindow() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        // Eight hours of 90-second ticks and no turn ever ending.
+        let window = ProfilePoolPicker.stalenessWindow(for: .oauthToken)
+        for _ in 0..<(8 * 3600 / Int(OAuthProfileUsagePoller.cadence)) {
+            clock.advance(OAuthProfileUsagePoller.cadence)
+            await poller.sweepForTest()
+            let fetchedAt = await poller.snapshot(for: profile.id)?.fetchedAt
+            let age = fetchedAt.map { clock.now.timeIntervalSince($0) } ?? .infinity
+            #expect(age <= window)
+        }
+        // And it did so at the floor's rate, not the tick's: 320 ticks.
+        #expect(fetcher.tokenProbeCount == 80)
     }
 
     /// A full sweep prunes profiles it can no longer serve. "Not swept on
@@ -1081,10 +1202,9 @@ private func makeTokenPoller(
         #expect(fetcher.tokenProbeCount == 2)
 
         // The unnamed sweep — picker-open, `tbd profile list --refresh` —
-        // never reaches a token profile at all: it visits the cadence set,
-        // which excludes them. That is all this leg can show, and it is the
-        // property that matters, since a caller who cannot see the profile
-        // cannot release its hold either.
+        // visits the token profile too, but names nothing and so releases
+        // nothing: the probe above re-armed the hold, and it holds here.
+        clock.advance(10)
         _ = await poller.sweepNow()
         #expect(fetcher.tokenProbeCount == 2)
     }
@@ -1363,13 +1483,15 @@ private func makeCountingTokenPoller(
             fetcher: fetcher, clock: clock, loggedIn: [signedIn.id],
             providerCalls: calls)
 
-        // One cadence sweep warms the gate's cache.
+        // One cadence sweep warms the gate's cache. It probes the token
+        // profile as well, so the counts below are measured from here.
         await poller.sweepForTest()
         let warm = calls.value
+        let probesAfterWarm = fetcher.tokenProbeCount
 
         await poller.noteSessionBecameIdle(profileID: signedIn.id)
         #expect(calls.value == warm)
-        #expect(fetcher.tokenProbeCount == 0)
+        #expect(fetcher.tokenProbeCount == probesAfterWarm)
 
         // A terminal with no profile at all never reaches here, but an id the
         // table does not know must be just as cheap.
@@ -1377,10 +1499,11 @@ private func makeCountingTokenPoller(
         #expect(calls.value == warm)
 
         // The gate is a shortcut, not a wall: a token profile still gets
-        // through and probes.
+        // through and, once past the floor the warming sweep set, probes.
+        clock.advance(301)
         await poller.noteSessionBecameIdle(profileID: token.id)
         #expect(calls.value > warm)
-        #expect(fetcher.tokenProbeCount == 1)
+        #expect(fetcher.tokenProbeCount == probesAfterWarm + 1)
     }
 
     /// The staleness direction that would silently lose probes: a token

@@ -661,9 +661,10 @@ public struct TerminalStore: Sendable {
 
     /// `working -> idle` transitions reported by an OBSERVER of the session.
     ///
-    /// Its one consumer today is the token-profile usage probe, which is a
-    /// billed request and therefore fires on completed turns instead of a
-    /// timer (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
+    /// Its one consumer today is the token-profile usage probe, a billed
+    /// request that runs on a five-minute timer and also on completed turns,
+    /// so a turn's numbers land right after it
+    /// (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
     /// That consumer defines what the edge means: *a turn finished, so this
     /// profile's utilization moved*. It is not "the `activity_state` column
     /// changed value".
@@ -688,15 +689,13 @@ public struct TerminalStore: Sendable {
     ///   session, not evidence from the session that it stopped working. Most
     ///   parks are of sessions that were already idle, and the sweep that
     ///   issues them is a background timer — wiring a billed probe to it would
-    ///   put token profiles back on exactly the blind cadence the design
-    ///   removed.
+    ///   add a second, unbounded timer beside the poller's own five-minute one.
     ///
     /// The one case that genuinely loses information is a session parked
     /// **mid-turn**: utilization moved and no probe fires. It is accepted.
-    /// Those numbers are not lost, only late — the next turn on that profile
-    /// probes, the profile row renders its staleness note meanwhile, and the
-    /// profile's `⋯` menu offers a manual refresh. Paying a billed request per
-    /// park to shave that latency is the wrong trade.
+    /// Those numbers are not lost, only late — the poller's next five-minute
+    /// probe reads them. Paying a billed request per park to shave that
+    /// latency is the wrong trade.
     public let activityTransitions = TerminalActivityTransitionNotifier()
 
     init(writer: any DatabaseWriter) {

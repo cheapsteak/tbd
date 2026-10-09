@@ -188,7 +188,7 @@ struct WorktreeProfilePickerView: View {
                                 // shifts, whichever state it resolves to.
                                 reservesSubtitle: true,
                                 // Skeleton is reserved for the ONE genuine loading
-                                // case (logged-in OAuth awaiting its first poll).
+                                // case (a Claude account awaiting its first poll).
                                 showsSubtitleSkeleton: subtitle.showsSkeleton
                             ) {
                                 pick(profileID: entry.profile.id, agent: .claude)
@@ -621,16 +621,14 @@ struct WorktreeProfilePickerView: View {
 
     /// Whether a Claude row with no meter shows the shimmering placeholder.
     ///
-    /// Reserved for `.oauth`, as it was before token profiles reached this row
-    /// at all: a signed-in profile with no snapshot is genuinely awaiting its
-    /// first cadence poll, which lands within ~90 seconds. A token profile is
-    /// deliberately off that cadence — it probes after a session goes idle —
-    /// so a skeleton there would promise numbers that may not arrive until
-    /// some session finishes a turn, or at all if nobody spawns on it.
+    /// A Claude-account profile with no snapshot is genuinely awaiting its
+    /// first cadence poll, which lands within ~90 seconds for both kinds: a
+    /// token profile with no reading has nothing for the five-minute floor to
+    /// hold back, so the next tick probes it.
     nonisolated static func claudeRowShowsSkeleton(kind: CredentialKind,
                                                    usageNote: String?,
                                                    snapshot: ProfileUsageSnapshot?) -> Bool {
-        kind == .oauth && usageNote == nil && snapshot == nil
+        (kind == .oauth || kind == .oauthToken) && usageNote == nil && snapshot == nil
     }
 
     /// Subtitle for a selectable Claude row: the two-bar meter when the
@@ -827,7 +825,7 @@ private struct ClaudeProfileRow: View {
         /// Two-bar usage meter drawn from the entry's snapshot.
         case bars
         /// Single text line; skeleton is reserved for the ONE genuine loading
-        /// case (logged-in OAuth awaiting its first poll). Nil text with no
+        /// case (a Claude account awaiting its first poll). Nil text with no
         /// skeleton reserves the line's height so the row doesn't shift.
         case text(String?, showsSkeleton: Bool)
     }

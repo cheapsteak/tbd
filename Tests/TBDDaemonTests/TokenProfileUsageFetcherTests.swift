@@ -144,6 +144,46 @@ struct TokenUsageHeaderParserTests {
         ]))
         #expect(buckets.map(\.kind) == ["session", "weekly_all"])
     }
+
+    // MARK: limitReachedBuckets (a 429's headers)
+
+    @Test func limitReachedReadsAFullWindowAsTheReading() {
+        let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "1.0",
+            "anthropic-ratelimit-unified-5h-status": "rejected",
+            "anthropic-ratelimit-unified-7d-utilization": "0.4",
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+        ]))
+        #expect(buckets?.first { $0.kind == "session" }?.percent == 100)
+        #expect(buckets?.first { $0.kind == "session" }?.severity == "critical")
+        #expect(buckets?.first { $0.kind == "weekly_all" }?.percent == 40)
+    }
+
+    /// A refused window is full whatever its utilization rounds to: it is
+    /// refusing requests, and a 97% bar would show the picker headroom that
+    /// is not there.
+    @Test func limitReachedTreatsARefusedWindowAsFull() {
+        let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "0.2",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.97",
+            "anthropic-ratelimit-unified-7d-status": "rejected",
+        ]))
+        #expect(buckets?.first { $0.kind == "weekly_all" }?.percent == 100)
+        #expect(buckets?.first { $0.kind == "session" }?.percent == 20)
+    }
+
+    /// A 429 whose windows all report room is not the usage limit speaking,
+    /// so it is not a reading to route on.
+    @Test func limitReachedIsNilWhenNoWindowIsFull() {
+        #expect(TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "0.3",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.5",
+            "anthropic-ratelimit-unified-7d-status": "allowed_warning",
+        ])) == nil)
+        #expect(TokenUsageHeaderParser.limitReachedBuckets(from: [:]) == nil)
+    }
 }
 
 // MARK: - Probe fetcher over a mocked HTTP session
@@ -361,6 +401,52 @@ struct TokenProfileUsageFetcherTests {
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
         #expect(status == .rateLimited(retryAfter: 120))
+    }
+
+    /// The account at its limit refuses the probe with a 429 that still
+    /// carries the utilization headers. That is a reading — the window full,
+    /// read just now — and must be recorded as one, or the profile keeps its
+    /// pre-limit numbers and goes stale for as long as it stays full.
+    @Test func rateLimitedProbeAtTheUsageLimitIsAReading() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: [
+                                "Retry-After": "3601",
+                                "anthropic-organization-id": "org_acme",
+                                "anthropic-ratelimit-unified-5h-utilization": "1.02",
+                                "anthropic-ratelimit-unified-5h-status": "rejected",
+                                "anthropic-ratelimit-unified-5h-reset": "1788000000",
+                                "anthropic-ratelimit-unified-7d-utilization": "0.31",
+                                "anthropic-ratelimit-unified-7d-status": "allowed",
+                             ])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+
+        guard case .ok(let buckets, let organizationID) = status else {
+            Issue.record("expected .ok, got \(status)"); return
+        }
+        #expect(organizationID == "org_acme")
+        let session = buckets.first { $0.kind == "session" }
+        #expect((session?.percent ?? 0) >= 100)
+        #expect(session?.resetsAt == Date(timeIntervalSince1970: 1_788_000_000))
+        #expect(buckets.first { $0.kind == "weekly_all" }?.percent == 31)
+    }
+
+    /// A 429 whose headers name no full window stays a rate-limit failure on
+    /// the timed schedule, with its `Retry-After`.
+    @Test func rateLimitedProbeWithRoomInEveryWindowStaysRateLimited() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: [
+                                "Retry-After": "30",
+                                "anthropic-ratelimit-unified-5h-utilization": "0.4",
+                                "anthropic-ratelimit-unified-5h-status": "allowed",
+                             ])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+        #expect(status == .rateLimited(retryAfter: 30))
     }
 
     @Test func rateLimitedProbeWithoutRetryAfterStillMapsToRateLimited() async {
