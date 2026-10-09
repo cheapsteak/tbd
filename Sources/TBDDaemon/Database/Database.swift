@@ -714,10 +714,11 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "scratch_profile_override_id", type: .text)
         }
 
-        // Tombstones for `tbd worktree forget`: reconcile skips re-adopting a
-        // git worktree whose path has a tombstone, so forget sticks even for
-        // paths under a TBD-managed prefix. Keyed by exact absolute path;
-        // cleared when the path is deliberately re-added via adopt/create.
+        // Tombstones for `tbd worktree forget`: reconcile skips reporting a
+        // git worktree whose path has a tombstone as unmanaged, so a forgotten
+        // directory under a TBD-managed prefix stays quiet. Keyed by exact
+        // absolute path; cleared when the path is deliberately re-added via
+        // adopt/create.
         //
         // NOTE: identifier says "v35" but registers after v37 — this migration
         // shipped as v35_forgotten_worktree on pre-rebase deployments before

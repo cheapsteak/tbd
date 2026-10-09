@@ -774,6 +774,25 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Flip a recovered `.creating` row to `.active` and drop its parked first
+    /// message in one write, so a crash between the two cannot leave an active
+    /// row still holding a message that was meant for a create that never
+    /// spawned. `archivedAt` is cleared and `archivedClaudeSessions` is kept,
+    /// which for a mid-revive row is `revive(clearSessions: false)`, and for an
+    /// ordinary create changes nothing but the status and the prompt.
+    public func activateRecoveredCreate(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.status = WorktreeStatus.active.rawValue
+            record.archivedAt = nil
+            record.pending_prompt = nil
+            record.pending_prompt_submit = nil
+            try record.update(db)
+        }
+    }
+
     /// Replace the archivedClaudeSessions list with `sessions` (re-encoded as JSON).
     /// Used by the revive path when a `preferredSessionID` is supplied so the
     /// last-resumed-first ordering is persisted across re-archive.

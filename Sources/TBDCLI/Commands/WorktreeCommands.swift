@@ -478,8 +478,9 @@ struct WorktreeForget: AsyncParsableCommand {
             from TBD entirely — it will not appear in either the active or
             archived listings.
 
-            Note: a forgotten worktree whose directory lives under one of TBD's
-            own worktree prefixes may be re-adopted on the next reconcile.
+            A forgotten worktree stays untracked: TBD does not adopt a git
+            worktree on its own, even under one of its own worktree
+            directories. Run `tbd worktree adopt <path>` to track it again.
             """
     )
 

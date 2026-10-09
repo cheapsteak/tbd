@@ -6,9 +6,9 @@ import GRDB
 /// A tombstone row records that the user explicitly ran `tbd worktree forget`
 /// on a worktree at `path`. Reconcile consults these rows so a forgotten
 /// worktree that still lives under a TBD-managed prefix (and is still
-/// registered with git) is NOT re-adopted on the next sweep. The tombstone is
-/// keyed by exact absolute path — the directory is the thing being ignored,
-/// not any particular worktree row.
+/// registered with git) is not reported as unmanaged on every sweep. The
+/// tombstone is keyed by exact absolute path — the directory is the thing
+/// being ignored, not any particular worktree row.
 struct ForgottenWorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "forgotten_worktree"
 
@@ -48,7 +48,7 @@ public struct ForgottenWorktreeStore: Sendable {
     }
 
     /// All tombstoned paths, loaded as a set for O(1) membership checks in
-    /// reconcile's re-adopt loop. Deliberately NOT scoped to a repo: the
+    /// reconcile's unmanaged-tree report. Deliberately NOT scoped to a repo: the
     /// tombstone's semantic key is the directory path, and matching globally
     /// keeps forget sticky even if the repo row is ever deleted and re-added
     /// under a new UUID.

@@ -82,6 +82,7 @@ extension RPCRouter {
         // Serialize per-repo so concurrent creates don't contend on .git/index.lock.
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
+        let db = self.db
         let initialPrompt = params.prompt
         let userSpecifiedFolder = params.folder != nil
         let userSpecifiedBranch = params.branch != nil
@@ -120,9 +121,12 @@ extension RPCRouter {
                 let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay, rollBackOnFailure: false)
                 switch completion {
                 case .ready:
+                    // Re-read the row: a name-collision retry moves the
+                    // checkout off the path `pending` was minted with.
+                    let created = (try? await db.worktrees.get(id: pending.id)) ?? pending
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                         worktreeID: pending.id, repoID: pending.repoID,
-                        name: pending.name, path: pending.localPath
+                        name: created.name, path: created.localPath
                     )))
                 case .preSessionPending:
                     // The lifecycle already broadcast `.worktreeCreated` (and

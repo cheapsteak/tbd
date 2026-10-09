@@ -1294,10 +1294,10 @@ struct PreSessionHookTests {
                 "existing terminals must be left untouched")
     }
 
-    @Test func recoveryDeletesCreatingRowWithNoTerminals() async throws {
+    @Test func recoveryActivatesCreatingRowWithNoTerminals() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
-        let (tempDir, repoDir) = try await createTestRepo()
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
@@ -1305,22 +1305,70 @@ struct PreSessionHookTests {
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         // Daemon died after `git worktree add` but before any tmux spawn:
-        // checkout exists, zero terminals. Reconcile re-adopts the checkout.
-        let checkout = tempDir.appendingPathComponent("bare-checkout")
-        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        // a real checkout registered with git, zero terminals. TBD made this
+        // tree, so recovery keeps its row and activates it.
+        let base = try #require(repo.worktreeRoot)
+        try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+        let checkoutPath = (base as NSString).appendingPathComponent("bare")
+        try await shell("git worktree add -b tbd/bare '\(checkoutPath)'", at: repoDir)
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "bare", branch: "tbd/bare",
-            path: checkout.path, tmuxServer: "tbd-test", status: .creating
+            path: checkoutPath, tmuxServer: "tbd-test", status: .creating
         )
-        // A stray tab row (user-set label) must be cleaned up alongside the row.
-        try await db.tabs.setLabel(tabID: UUID(), worktreeID: wt.id, label: "stray")
+        // A tab row (user-set label) belongs to the kept row and stays with it.
+        try await db.tabs.setLabel(tabID: UUID(), worktreeID: wt.id, label: "kept")
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.isEmpty)
+        let activated = try #require(try await db.worktrees.get(id: wt.id),
+                                     "a terminal-less .creating row with a checkout must be kept")
+        #expect(activated.status == .active)
+        #expect(activated.localPath == checkoutPath)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+        #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).count == 1,
+                "the kept row's tab records are not touched")
+
+        // The startup sequence continues into reconcile: it must leave exactly
+        // this one row on the path, active, with the checkout in place.
+        try await lifecycle.reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+        let rows = try await db.worktrees.list().filter { $0.localPath == checkoutPath }
+        #expect(rows.count == 1)
+        #expect(rows.first?.id == wt.id)
+        #expect(rows.first?.status == .active)
+        #expect(FileManager.default.fileExists(atPath: checkoutPath))
+    }
+
+    /// A terminal-less `.creating` row whose path holds a directory git does not
+    /// list as a worktree is not a checkout TBD can vouch for: the row is
+    /// deleted, not activated, and the directory is not touched.
+    @Test func recoveryDeletesTerminalLessRowWhosePathIsAPlainDirectory() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let base = try #require(repo.worktreeRoot)
+        let plain = (base as NSString).appendingPathComponent("plain")
+        try FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let keep = (plain as NSString).appendingPathComponent("keep.txt")
+        try "someone's work".write(toFile: keep, atomically: true, encoding: .utf8)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "plain", branch: "tbd/plain",
+            path: plain, tmuxServer: "tbd-test", status: .creating
+        )
 
         let resumed = await lifecycle.recoverCreatingWorktrees()
         #expect(resumed.isEmpty)
         #expect(try await db.worktrees.get(id: wt.id) == nil,
-                "a terminal-less .creating row must be deleted for reconcile to re-adopt")
-        #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty,
-                "tab rows must be deleted with the worktree row")
+                "a row whose path git does not list must not be activated")
+        #expect(try String(contentsOfFile: keep, encoding: .utf8) == "someone's work",
+                "the directory and its files must be untouched")
     }
 
     @Test func recoveryDeletesCreatingRowWhoseRepoVanished() async throws {

@@ -142,7 +142,7 @@ Split across files: base struct (`WorktreeLifecycle.swift`), `+Create`, `+Archiv
 Revive recreates a worktree from an archived branch. Adopt (`worktree.adopt`) registers an existing on-disk git worktree into TBD (idempotent).
 
 ### Conflict Detection & Reconcile
-Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, adopts unknown ones, fixes stale tmux server names, and prunes dead terminal records. `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
+Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, logs (but does not adopt) git worktrees under TBD's worktree directories that have no row (`tbd worktree adopt <path>` opts one in), fixes stale tmux server names, and prunes dead terminal records. `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
 
 ## System Prompt Layers
 
