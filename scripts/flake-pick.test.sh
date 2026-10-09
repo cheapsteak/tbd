@@ -184,7 +184,7 @@ test_a_session_failure_abort_is_retried_once_without_a_new_failure() {
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one]}"
   assert_eq "one session-failure abort: picked again at once" "rc=0 #10" "$(picked "$w")"
-  mutant="$(mutant_of 's/^    if outcome == "aborted" and last.session_failed:$/    if False:/' "$PICK")"
+  mutant="$(mutant_of 's/^    if told_nothing\(last\):$/    if False:/' "$PICK")"
   assert_eq "mutation: treated as any abort it waits for a new failure" "rc=3 none" "$(picked "$w" "$mutant")"
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one, $two]}"
@@ -197,6 +197,23 @@ test_a_session_failure_abort_is_retried_once_without_a_new_failure() {
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": null')]}"
   assert_eq "an abort for any other reason still waits" "rc=3 none" "$(picked "$w")"
+}
+
+# A verified candidate that `publish` lost to `main` moving during the run (a
+# replay that conflicted, a workflow refusal that outlived the replay) said
+# nothing about the test either: retried at once, under the same bound.
+test_a_publish_race_abort_is_retried_once_without_a_new_failure() {
+  local w mutant raced session
+  raced="$(attempt aborted 2026-10-03T12:00:00Z '"publish_raced": true')"
+  session="$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": true')"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$raced]}"
+  assert_eq "one publish-race abort: picked again at once" "rc=0 #10" "$(picked "$w")"
+  mutant="$(mutant_of 's/bool\(attempt.session_failed or attempt.publish_raced\)/bool(attempt.session_failed)/' "$PICK")"
+  assert_eq "mutation: treated as any abort it waits for a new failure (the lock-out)" "rc=3 none" "$(picked "$w" "$mutant")"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$session, $raced]}"
+  assert_eq "after a session failure with no failure between: waits" "rc=3 none" "$(picked "$w")"
 }
 
 test_the_later_failure_clause_is_load_bearing() {

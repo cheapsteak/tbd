@@ -381,7 +381,9 @@ no two jobs ever edit the same comment:
   the session's notes, and one outcome:
   - `aborted` – the job ended before producing a candidate artifact (§8),
     or a fixer session failed and left no commit, which the entry marks
-    `session_failed` because nothing reached the verifier;
+    `session_failed` because nothing reached the verifier, or `main` moved
+    during the run and the verified candidate could not be replayed onto it
+    (§7), which the entry marks `publish_raced`;
   - `no-diff` – a session that finished made no commits;
   - `push-refused` – GitHub rejected the push (§8);
   - `pr-opened` – with the PR number, the scope, `N`, the false-pass
@@ -563,6 +565,10 @@ qualify and has no issue to pick. A test is **eligible** when:
     abort. A session that ran out of turns or time also counts as failed, and
     the same bound keeps one that does so on every try from holding every
     night's slot;
+  - `aborted` marked `publish_raced` – eligible at once, under the same
+    once-bound, counted together with `session_failed` aborts: `publish` lost
+    a verified candidate to `main` moving during the run (§7), which says
+    nothing about the test;
   - `pr-opened` with no close recorded yet – not eligible; the open-PR check
     above also covers it;
   - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
@@ -1112,10 +1118,53 @@ Transitions, each owned by the PR driver:
   attempt, after
   verification, so the PR's CI runs once on the final candidate rather than
   once per try.
+- **Replay at publish.** GitHub refuses the App's push of a branch whose
+  `.github/workflows/` files differ from `main`'s, whoever's commits made the
+  difference: the App has no `workflows` permission, and a candidate built
+  on a `main` that has since changed a workflow reads to GitHub as a
+  workflow edit. Run 37879620449 is the evidence: `fix` started from
+  `main` at `cda5eab3a`, #952 merged while it ran and changed
+  `.github/workflows/`, and GitHub refused a candidate that touched one
+  test file ("refusing to allow a GitHub App to create or update workflow
+  `.github/workflows/test.yml` without `workflows` permission"). So before
+  pushing, the driver fetches `main`. When the candidate leaves the run's
+  base's `.github/workflows/` files as they were – judged on its tree, not
+  on which files its commits list, because GitHub judges the tree pushed –
+  and `main`'s workflow files differ from the base, it replays the candidate's commits onto `main` as it is now –
+  cherry-picked in order, keeping each commit's author, committer, and
+  message, plus git's `(cherry picked from commit <sha>)` line naming the
+  original – and pushes the replay. When the workflow files did not move,
+  the candidate is pushed as it is, whatever else `main` gained. A replay
+  that does not apply pushes nothing and records `aborted`, marked
+  `publish_raced`, with git's reason (§5, §8); so does a failure to fetch
+  `main` or to set the replay up, which says nothing about the test either.
+  A candidate that changes `.github/workflows/` is never replayed: no replay
+  makes its push acceptable (§8).
+
+  The replayed commit is the one the PR carries, so it is the **pushed
+  SHA** for everything after the push: the `flakefix/stress` status goes on
+  it, and promotion requires it to be the PR's head with its own Test run
+  green on it, exactly as for a candidate pushed as it is. The stress
+  verdict was measured on the original base, so the status description and
+  the PR body both say "stress-checked on `<old base>`; replayed onto main
+  `<new base>` because main's workflow files changed during the run", and
+  the attempt entry's notes record it. The PR's own CI on the replayed
+  commits is the check that the replay still builds and passes; the
+  verifier's stress run is not repeated. A re-run of `publish` that finds
+  the PR open on a replay of its candidate reuses it, as it reuses a PR on
+  the candidate itself. The tip's `(cherry picked from commit …)` line only
+  locates the base the replay was made on: the driver replays the
+  candidate onto that base again and reuses the PR only if the result is
+  the PR's head exactly. A replay keeps every author, committer, and date,
+  so it is reproducible, and a head anyone amended – message intact or not
+  – is someone else's work, never stamped with the bot's status.
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA, described as "no failure
   observed in N runs", followed by the weak-evidence clause when the evidence
-  is weak (§6.5). On a fail, it sets `failure`
+  is weak (§6.5), then the replay note when the candidate was replayed. The
+  description is composed whole and then cut once at GitHub's 140
+  characters, so the cut falls on the replay note, which the PR body carries whole, and never
+  on the weak-evidence clause `promote` reads back. On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
   `failure`, whatever its stress result, with a status description naming the
@@ -1261,9 +1310,27 @@ Transitions, each owned by the PR driver:
   chose a target), finds no candidate, pushes nothing, and records `aborted`
   in the attempt comment, so the picker waits for a new failure before trying
   that test again.
-- **The push is rejected** – most likely because the candidate touched
-  `.github/workflows/`. No PR is opened; the issue gets a comment saying the fix
-  appears to need a workflow change, which is a human's job.
+- **`main`'s workflow files change while `fix` runs.** `publish` replays the
+  candidate onto `main` before pushing (§7). A replay that does not apply
+  – `main` changed the lines the candidate changed – pushes nothing and
+  records `aborted`, marked `publish_raced`, and the picker may try the
+  test again the next night (§5). The run stays green: the attempt is
+  recorded, and the next one starts from the new `main`.
+- **The push is refused as a workflow change, though the candidate changes
+  no workflow file.** `main` moved again between the fetch and the push.
+  Such a refusal is never read as the fix needing a workflow change: the
+  driver fetches `main` again and judges it afresh: it replays onto it if
+  its workflow files moved from the base, and otherwise pushes the
+  candidate itself – never a replay onto a `main` that has since moved on,
+  and no PR claims a replay that never happened. A
+  second refusal pushes nothing, records `aborted`, marked `publish_raced`,
+  with GitHub's message, and ends the run red so a human sees it.
+- **The push is rejected** for any other reason. A candidate that changes
+  `.github/workflows/`, refused with GitHub's workflow-permission
+  text, opens no PR, records `push-refused`, and its issue gets a comment
+  saying the fix appears to need a workflow change, which is a human's job.
+  Any other rejection records `push-refused` too, says it was not a workflow
+  change, and ends the run red.
 - **CI fails on the PR.** The PR stays a draft; nothing promotes it.
 
 ## 9. Cost and slots
@@ -1542,7 +1609,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
   `merged`), with and without a later failure; a `session_failed` abort,
-  retried at once, and two in a row with no failure between, which wait; a recurrence after `merged`
+  retried at once, and two in a row with no failure between, which wait; a
+  `publish_raced` abort, retried at once, and one after a `session_failed`
+  abort with no failure between, which waits; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, the
   `flake-watchlist` label, no ledger comment, a ledger comment from a login other than the bot's, an unparsable
@@ -1609,6 +1678,25 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that
   touched a protected file, which records `failure` and names the files.
+  Replay at publish, against a pre-receive hook that refuses a branch
+  whose workflow files differ from `main`'s, as GitHub does: `main` moving
+  without a workflow change, which pushes the candidate as it is; `main`'s
+  workflows moving under a candidate that touches none, which pushes a
+  replay on the new `main` that keeps the author and names the original
+  commit, sets the status on the replay with the replay note in it and in
+  the body, and is accepted on the first push; a replay that conflicts,
+  recorded `aborted` and `publish_raced` with nothing pushed; a workflow
+  refusal of a candidate that touches no workflow file, retried once and
+  then recorded `aborted` and `publish_raced`, red, never `push-refused`,
+  and one the retry clears, which opens the PR on the replay; a candidate
+  that touches a workflow file, pushed once as it is and recorded
+  `push-refused`; a fetch of `main` that fails, recorded `aborted` and
+  `publish_raced`; a refusal with `main`'s workflows unmoved, re-pushed as
+  it is with no replay note, and one during which `main` reverted its
+  workflow change, which pushes the candidate itself rather than the
+  earlier replay; and a re-run that finds its PR open on the
+  replay, which reuses it, and on a replay a human amended, which it
+  leaves alone.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1; the
   filter built from a top-level, a nested, and a suite-less ID, escaped and
   anchored, and not matching a test whose name extends the target's),
