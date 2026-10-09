@@ -107,16 +107,16 @@ struct ProfileBalancingThresholdsTests {
         let (router, db) = try makeRouterAndDB()
 
         #expect(try await call(router, RPCMethod.configSetProfileBalancingUsageCeiling,
-                               ConfigSetProfileBalancingUsageCeilingParams(percent: 92)).success)
+                               ConfigSetBalancingUsageCeilingParams(percent: 92)).success)
         #expect(try await call(router, RPCMethod.configSetProfileBalancingMaxReadingAge,
-                               ConfigSetProfileBalancingMaxReadingAgeParams(seconds: 600)).success)
+                               ConfigSetBalancingMaxReadingAgeParams(seconds: 600)).success)
         #expect(try await db.config.get().profileBalancingPolicy
             == ProfilePoolPolicy(usageCeilingPercent: 92, maxReadingAgeSeconds: 600))
 
         #expect(try await call(router, RPCMethod.configSetProfileBalancingUsageCeiling,
-                               ConfigSetProfileBalancingUsageCeilingParams(percent: nil)).success)
+                               ConfigSetBalancingUsageCeilingParams(percent: nil)).success)
         #expect(try await call(router, RPCMethod.configSetProfileBalancingMaxReadingAge,
-                               ConfigSetProfileBalancingMaxReadingAgeParams(seconds: nil)).success)
+                               ConfigSetBalancingMaxReadingAgeParams(seconds: nil)).success)
         #expect(try await db.config.get().profileBalancingPolicy == .standard)
     }
 
@@ -126,7 +126,7 @@ struct ProfileBalancingThresholdsTests {
     func rpcRefusesAnOutOfRangeCeiling(percent: Int) async throws {
         let (router, db) = try makeRouterAndDB()
         let response = try await call(router, RPCMethod.configSetProfileBalancingUsageCeiling,
-                                      ConfigSetProfileBalancingUsageCeilingParams(percent: percent))
+                                      ConfigSetBalancingUsageCeilingParams(percent: percent))
         #expect(!response.success)
         #expect(response.error?.contains("between 1 and 100") == true)
         #expect(try #require(try await fetchConfigRecord(db)).profile_balancing_usage_ceiling_percent == nil)
@@ -136,7 +136,7 @@ struct ProfileBalancingThresholdsTests {
     func rpcRefusesAnOutOfRangeReadingAge(seconds: Int) async throws {
         let (router, db) = try makeRouterAndDB()
         let response = try await call(router, RPCMethod.configSetProfileBalancingMaxReadingAge,
-                                      ConfigSetProfileBalancingMaxReadingAgeParams(seconds: seconds))
+                                      ConfigSetBalancingMaxReadingAgeParams(seconds: seconds))
         #expect(!response.success)
         #expect(try #require(try await fetchConfigRecord(db)).profile_balancing_max_reading_age_seconds == nil)
     }

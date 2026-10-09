@@ -550,7 +550,7 @@ extension RPCRouter {
     /// returns the column to NULL, the shipped default.
     func handleConfigSetProfileBalancingUsageCeiling(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
-            ConfigSetProfileBalancingUsageCeilingParams.self, from: paramsData)
+            ConfigSetBalancingUsageCeilingParams.self, from: paramsData)
         let range = ProfilePoolPolicy.usageCeilingRange
         if let percent = params.percent, !range.contains(percent) {
             return RPCResponse(
@@ -566,7 +566,7 @@ extension RPCRouter {
     /// ceiling. Nil returns the column to NULL, each kind's own window.
     func handleConfigSetProfileBalancingMaxReadingAge(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
-            ConfigSetProfileBalancingMaxReadingAgeParams.self, from: paramsData)
+            ConfigSetBalancingMaxReadingAgeParams.self, from: paramsData)
         let range = ProfilePoolPolicy.maxReadingAgeRange
         if let seconds = params.seconds, !range.contains(seconds) {
             return RPCResponse(

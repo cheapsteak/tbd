@@ -3647,7 +3647,7 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
 
 /// Params for `config.setProfileBalancingUsageCeiling`. `percent` must lie in
 /// `ProfilePoolPolicy.usageCeilingRange`; nil restores the shipped default.
-public struct ConfigSetProfileBalancingUsageCeilingParams: Codable, Sendable {
+public struct ConfigSetBalancingUsageCeilingParams: Codable, Sendable {
     public var percent: Int?
     public init(percent: Int?) { self.percent = percent }
 }
@@ -3655,7 +3655,7 @@ public struct ConfigSetProfileBalancingUsageCeilingParams: Codable, Sendable {
 /// Params for `config.setProfileBalancingMaxReadingAge`. `seconds` must lie in
 /// `ProfilePoolPolicy.maxReadingAgeRange`; nil restores each credential kind's
 /// own window.
-public struct ConfigSetProfileBalancingMaxReadingAgeParams: Codable, Sendable {
+public struct ConfigSetBalancingMaxReadingAgeParams: Codable, Sendable {
     public var seconds: Int?
     public init(seconds: Int?) { self.seconds = seconds }
 }

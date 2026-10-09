@@ -629,12 +629,12 @@ struct ProfileBalancing: AsyncParsableCommand {
         if let ceiling {
             try client.callVoid(
                 method: RPCMethod.configSetProfileBalancingUsageCeiling,
-                params: ConfigSetProfileBalancingUsageCeilingParams(percent: ceiling))
+                params: ConfigSetBalancingUsageCeilingParams(percent: ceiling))
         }
         if let maxAge {
             try client.callVoid(
                 method: RPCMethod.configSetProfileBalancingMaxReadingAge,
-                params: ConfigSetProfileBalancingMaxReadingAgeParams(seconds: maxAge))
+                params: ConfigSetBalancingMaxReadingAgeParams(seconds: maxAge))
         }
         let list = try client.call(
             method: RPCMethod.modelProfileList,
