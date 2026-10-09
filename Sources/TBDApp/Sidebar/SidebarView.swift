@@ -12,6 +12,10 @@ struct SidebarView: View {
     /// Off, the selection reveal is not even computed.
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
+    /// See `AppState.sidebarCollapseEndedSessionsKey`. With groups off and
+    /// this on, an externally selected ended session opens its Ended row.
+    @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
+    private var collapseEnded: Bool = AppState.sidebarCollapseEndedSessionsDefault
     /// Height of the scrolling repo list, measured by a `.background`
     /// GeometryReader on that list. Feeds `PinnedDockMetrics`' 40% clamp.
     /// Measured on the LIST, never on the dock — reading the dock's own
@@ -29,6 +33,21 @@ struct SidebarView: View {
         previous: SidebarGroupReveal?, reveal: SidebarGroupReveal, hasRevealed: Bool
     ) -> SidebarGroupReveal? {
         hasRevealed ? (previous ?? reveal) : nil
+    }
+
+    /// What re-evaluates the Ended reveal: a new selection event, or the
+    /// option itself turning on.
+    private struct EndedRevealKey: Equatable {
+        let generation: UInt64
+        let selection: RemoteSessionSelection?
+    }
+
+    /// Nil, reading nothing observed, unless the option is on and groups are
+    /// off, so the default path takes on no new body dependencies.
+    private var endedRevealKey: EndedRevealKey? {
+        guard !workflowGroups && collapseEnded else { return nil }
+        return EndedRevealKey(generation: appState.sidebarSelectionGeneration,
+                              selection: appState.selectedRemoteSession)
     }
 
     var filteredRepos: [Repo] {
@@ -78,6 +97,11 @@ struct SidebarView: View {
                     previous: Self.revealBaseline(previous: previous, reveal: reveal,
                                                   hasRevealed: hasRevealedInitialSelection),
                     grouped: workflowGroups)
+            }
+            .onChange(of: endedRevealKey, initial: true) { _, key in
+                guard let key else { return }
+                appState.expandedSidebarGroups.formUnion(
+                    appState.sidebarEndedRevealGroups(selection: key.selection))
             }
             .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
                 GeometryReader { geo in

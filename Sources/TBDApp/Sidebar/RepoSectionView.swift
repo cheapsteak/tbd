@@ -50,6 +50,10 @@ struct RepoSectionView: View {
     /// See `AppState.sidebarWorkflowGroupsKey`.
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
+    /// Whether ended unadopted sessions sit behind one collapsed "Ended" row.
+    /// See `AppState.sidebarCollapseEndedSessionsKey`.
+    @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
+    private var collapseEnded: Bool = AppState.sidebarCollapseEndedSessionsDefault
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -82,66 +86,13 @@ struct RepoSectionView: View {
     /// rendered after every local worktree. See
     /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
     ///
-    /// Memoized on the two arrays it derives from, because this property is
-    /// evaluated far more often than either of them changes: terminal output
-    /// flushes the SwiftUI graph continuously, and each evaluation would
-    /// otherwise re-run the filter and the date-parsing sort.
-    ///
-    /// The two comparisons are not equally cheap. `AppState` guards its
-    /// `worktrees` writes on inequality, so a refresh that changed nothing
-    /// hands back the same buffer, which `Array`'s `==` is implemented to
-    /// short-circuit on — an optimization, not a guaranteed contract, and
-    /// correctness here does not rest on it: without the short-circuit the
-    /// comparison is merely elementwise. `remoteSessions` is assigned
-    /// unconditionally on every `refreshRemote()`, so it is elementwise —
-    /// still far cheaper than the sort it replaces, and `refreshRemote()` is
-    /// driven by change events rather than a timer, so it mostly runs when a
-    /// recompute was due anyway.
+    /// Served from the memo on `AppState` (`sidebarMatchedRemoteSessions`),
+    /// which every sidebar caller shares. The memo is keyed on the fields the
+    /// filter and the sort read, so terminal-driven re-renders do not re-run
+    /// the sort.
     var matchedRemoteSessions: [RemoteSessionInfo] {
-        let sessions = appState.remoteSessions
-        let sectionWorktrees = appState.worktrees[repo.id] ?? []
-        if let cached = RepoSectionView.matchedRemoteSessionsCache[repo.id],
-           cached.sessions == sessions,
-           cached.worktrees == sectionWorktrees {
-            return cached.result
-        }
-        let result = RepoSectionView.matchedRemoteSessions(
-            sessions,
-            repoID: repo.id,
-            worktrees: sectionWorktrees
-        )
-        RepoSectionView.matchedRemoteSessionsCache[repo.id] =
-            (sessions: sessions, worktrees: sectionWorktrees, result: result)
-        return result
+        appState.sidebarMatchedRemoteSessions(repoID: repo.id)
     }
-
-    /// Backing store for the memoization above: one entry per repo section
-    /// that has rendered, replaced in place. Entries are never evicted, so the
-    /// bound is repos rendered over the life of the process, not repos
-    /// currently registered — removing a repo from the list leaves an inert
-    /// entry behind, holding the two source arrays as they stood at that
-    /// render — including a snapshot of the whole `remoteSessions` list, which
-    /// `AppState` may since have replaced — plus the derived result, which is
-    /// this cache's own. That is deliberate: repos are low-cardinality and
-    /// user-created, and a removed repo whose section renders again wants the
-    /// entry anyway.
-    ///
-    /// A plain `static var` rather than `@State`: it is written from inside a
-    /// `body` evaluation, and SwiftUI state written during a view update
-    /// faults with "Modifying state during view update" (the same hazard that
-    /// keeps `AppState`'s derived caches `@ObservationIgnored`).
-    ///
-    /// Note the getter above reads both `remoteSessions` and `worktrees`
-    /// *before* consulting this cache. It has to: they are the cache key, but
-    /// they are also what registers this view's dependency on them, and a body
-    /// served from a cache hit that read neither would drop both — see "THE
-    /// WARM-CACHE DEPENDENCY TRAP" in `AppState.swift`. `RepoSectionView`
-    /// is inferred `@MainActor` from `View`, so this storage is
-    /// main-actor-isolated and race-free; the `nonisolated` statics below
-    /// deliberately never touch it, which keeps them callable — and pure —
-    /// from a plain test context.
-    @MainActor private static var matchedRemoteSessionsCache:
-        [UUID: (sessions: [RemoteSessionInfo], worktrees: [Worktree], result: [RemoteSessionInfo])] = [:]
 
     private var activeWorktreeCount: Int {
         (appState.worktrees[repo.id] ?? [])
@@ -392,7 +343,8 @@ struct RepoSectionView: View {
     @ViewBuilder
     private var expandedContent: some View {
         let layout = appState.sidebarRepositoryLayout(
-            repoID: repo.id, grouped: workflowGroups, matchedSessions: matchedRemoteSessions)
+            repoID: repo.id, grouped: workflowGroups, collapseEnded: collapseEnded,
+            matchedSessions: matchedRemoteSessions)
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -421,11 +373,26 @@ struct RepoSectionView: View {
         // worktrees carry a user-controlled order and sessions nothing
         // comparable, so appending stays predictable after a manual reorder.
         remoteSessionRows(layout.inlineSessions, depth: 0)
+        if let ended = layout.ended {
+            endedGroupContent(ended)
+        }
         if let groups = layout.remoteGroups {
             remoteGroupContent(groups)
         }
         if let hibernation = layout.hibernation {
             hibernatedGroupContent(hibernation)
+        }
+    }
+
+    /// The collapse-ended option's "Ended" row. Collapsed, no session row
+    /// exists in the List at all, which is the point.
+    @ViewBuilder
+    private func endedGroupContent(_ ended: SidebarEndedSessions) -> some View {
+        let id = SidebarGroupID(owner: .repository(repo.id), kind: .ended)
+        SidebarGroupHeader(id: id, title: "Ended", summary: ended.summary)
+            .listRowInsets(childRowInsets)
+        if appState.expandedSidebarGroups.contains(id) {
+            remoteSessionRows(ended.ended, depth: 1)
         }
     }
 
@@ -537,28 +504,81 @@ struct RepoSectionView: View {
         repoID: UUID,
         worktrees: [Worktree]
     ) -> [RemoteSessionInfo] {
-        let adopted = Set(worktrees.map(\.location).filter { !$0.isLocal })
-        return all
-            .filter { $0.resolvedRepoID == repoID && !$0.dismissed && !$0.payload.isArchived }
-            .filter { !adopted.contains(.remote(provider: $0.provider, sessionID: $0.payload.id)) }
-            .sorted(by: RepoSectionView.isOrderedByCreation)
+        matchedRemoteSessionIndices(all, repoID: repoID, adopted: adoptedLocations(worktrees))
+            .map { all[$0] }
     }
 
-    /// Ascending creation-time ordering for two remote sessions. A session
+    /// The remote locations a section's worktree rows already stand for. The
+    /// adopted-lane half of the filter in `matchedRemoteSessionIndices`, split
+    /// out so a caller can compare it across renders without re-deriving it.
+    nonisolated static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
+        Set(worktrees.map(\.location).filter { !$0.isLocal })
+    }
+
+    /// The positions in `all` of the sessions `matchedRemoteSessions` returns,
+    /// in the same order. Each surviving session's `created_at` is parsed
+    /// exactly once, here, and the sort runs over those pre-parsed keys: the
+    /// comparator runs O(n log n) times, and parsing inside it was the
+    /// measured main-thread stall while typing. `parse` is the test seam for
+    /// counting those parses; production always takes the default.
+    nonisolated static func matchedRemoteSessionIndices(
+        _ all: [RemoteSessionInfo],
+        repoID: UUID,
+        adopted: Set<WorktreeLocation>,
+        parse: (String?) -> Date? = RepoSectionView.parsedCreatedAt
+    ) -> [Int] {
+        var keyed: [(index: Int, key: CreationKey)] = []
+        for (index, session) in all.enumerated()
+        where session.resolvedRepoID == repoID && !session.dismissed && !session.payload.isArchived
+            && !adopted.contains(.remote(provider: session.provider, sessionID: session.payload.id)) {
+            keyed.append((index, CreationKey(
+                createdAt: parse(session.payload.createdAt),
+                uuid: session.id.uuidString)))
+        }
+        keyed.sort { isOrderedByCreation($0.key, $1.key) }
+        return keyed.map(\.index)
+    }
+
+    /// The pre-parsed sort key for one session: its `created_at` (nil when
+    /// absent or unparseable) and its `id.uuidString`, the tie-break.
+    nonisolated struct CreationKey {
+        let createdAt: Date?
+        let uuid: String
+    }
+
+    /// Ascending creation-time ordering on pre-parsed keys. A session
     /// with a missing/unparseable `created_at` (allowed by the contract —
     /// `docs/remote-provider-contract.md` doesn't require it) sorts after
     /// every dated session; any remaining tie (including two undated
     /// sessions) breaks on the row's own stable `id` so ordering is fully
     /// deterministic across renders regardless of source-array order.
-    nonisolated static func isOrderedByCreation(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
-        let da = RepoSectionView.parsedCreatedAt(a.payload.createdAt)
-        let db = RepoSectionView.parsedCreatedAt(b.payload.createdAt)
-        switch (da, db) {
+    /// Keys are parsed once before sorting because this comparator runs
+    /// O(n log n) times.
+    nonisolated static func isOrderedByCreation(_ a: CreationKey, _ b: CreationKey) -> Bool {
+        switch (a.createdAt, b.createdAt) {
         case let (x?, y?) where x != y: return x < y
         case (nil, .some): return false
         case (.some, nil): return true
-        default: return a.id.uuidString < b.id.uuidString
+        default: return a.uuid < b.uuid
         }
+    }
+
+    /// Whether two mirror rows agree on every field `matchedRemoteSessionIndices`
+    /// reads: the provider and `payload.id` (which fix `id`, the tie-break
+    /// key), `payload.createdAt` (the sort key), and the three filter gates.
+    /// `AppState` clears its match memo only when this is false for some
+    /// position, so this list must equal what the filter and the sort read;
+    /// the sync-fence test in `RepoSectionMatchedSessionsTests` pins it. Fields
+    /// that change on every sighting or drive row state (`lastSeen`, `gone`,
+    /// `payload.state`, `agentState`) are deliberately absent, so a sighting
+    /// that changes only those does not force a re-sort.
+    nonisolated static func sameMatchInputs(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
+        a.provider == b.provider
+            && a.payload.id == b.payload.id
+            && a.payload.createdAt == b.payload.createdAt
+            && a.payload.isArchived == b.payload.isArchived
+            && a.dismissed == b.dismissed
+            && a.resolvedRepoID == b.resolvedRepoID
     }
 
     /// A session's `created_at`, in either ISO 8601 profile a conforming

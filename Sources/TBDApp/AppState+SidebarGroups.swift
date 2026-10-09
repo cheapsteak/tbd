@@ -8,6 +8,13 @@ struct SidebarGroupReveal: Equatable {
     let groups: Set<SidebarGroupID>
 }
 
+/// One repo's cached match result: the adopted locations it was computed
+/// against, and the positions into `remoteSessions` it selected, in sidebar order.
+struct SidebarMatchedSessionsMemo {
+    let adopted: Set<WorktreeLocation>
+    let indices: [Int]
+}
+
 extension SidebarGroupID {
     /// A stable string for persisting an expanded group across launches:
     /// `<kind>|<owner type>|<owner value>`. The provider name comes last and
@@ -18,6 +25,7 @@ extension SidebarGroupID {
         case .remote: kindName = "remote"
         case .exited: kindName = "exited"
         case .hibernated: kindName = "hibernated"
+        case .ended: kindName = "ended"
         }
         switch owner {
         case .repository(let id): return "\(kindName)|repository|\(id.uuidString)"
@@ -36,6 +44,7 @@ extension SidebarGroupID {
         case "remote": kind = .remote
         case "exited": kind = .exited
         case "hibernated": kind = .hibernated
+        case "ended": kind = .ended
         default: return nil
         }
         let value = String(parts[2])
@@ -84,6 +93,28 @@ extension AppState {
     /// touched the toggle and preserves every explicit choice.
     static let sidebarWorkflowGroupsDefault = false
 
+    /// UserDefaults key for the Settings → General toggle that moves ended
+    /// remote sessions (exited, or no longer reported by their provider)
+    /// behind one collapsed "Ended" row at the end of each project and
+    /// provider. Collapsed rows are absent from the sidebar's List, so a long
+    /// history of finished sessions stops costing every sidebar update. App-side
+    /// `UserDefaults` for the reason on `sidebarWorkflowGroupsKey`; it has no
+    /// effect while workflow groups are on.
+    ///
+    /// Three states, as for `sidebarWorkflowGroupsKey`: an absent key follows
+    /// `sidebarCollapseEndedSessionsDefault`, and the toggle stores an explicit
+    /// `true` or `false` only when flipped. Read through
+    /// `sidebarCollapseEndedSessionsEnabled(defaults:)` or an `@AppStorage`
+    /// whose default is that constant — never `bool(forKey:)`, which collapses
+    /// "unset" into `false`.
+    static let sidebarCollapseEndedSessionsKey = "sidebarCollapseEndedSessionsEnabled"
+
+    /// The one shipped default for `sidebarCollapseEndedSessionsKey`. Off: it
+    /// hides rows users already see, so nobody's sidebar changes until they
+    /// ask. Graduation is a one-line change here, which reaches everyone who
+    /// never touched the toggle and preserves every explicit choice.
+    static let sidebarCollapseEndedSessionsDefault = false
+
     /// UserDefaults key holding the expanded workflow groups, as an array of
     /// `SidebarGroupID.persistenceKey` strings. Prefixed like the other
     /// AppState-owned state keys (`layoutsKey`, `selectionOrderKey`): it is
@@ -100,6 +131,20 @@ extension AppState {
     static func sidebarWorkflowGroupsEnabled(
         stored: Bool?,
         shippedDefault: Bool = sidebarWorkflowGroupsDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
+    static func sidebarCollapseEndedSessionsEnabled(defaults: UserDefaults = .standard) -> Bool {
+        sidebarCollapseEndedSessionsEnabled(
+            stored: defaults.object(forKey: sidebarCollapseEndedSessionsKey) as? Bool)
+    }
+
+    /// The three-state decision with the shipped default injected, as for
+    /// `sidebarWorkflowGroupsEnabled(stored:shippedDefault:)`.
+    static func sidebarCollapseEndedSessionsEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = sidebarCollapseEndedSessionsDefault
     ) -> Bool {
         stored ?? shippedDefault
     }
@@ -158,20 +203,21 @@ extension AppState {
     /// `matchedSessions` is the view's memoized
     /// `RepoSectionView.matchedRemoteSessions`, evaluated only when ungrouped.
     func sidebarRepositoryLayout(
-        repoID: UUID, grouped: Bool,
+        repoID: UUID, grouped: Bool, collapseEnded: Bool,
         matchedSessions: @autoclosure () -> [RemoteSessionInfo]
     ) -> SidebarSectionLayout {
         .repository(
-            grouped: grouped, topLevel: sidebarTopLevelWorktrees(repoID: repoID),
+            grouped: grouped, collapseEnded: collapseEnded, unread: unreadByRemoteSession,
+            topLevel: sidebarTopLevelWorktrees(repoID: repoID),
             matchedSessions: matchedSessions(),
             remoteGroups: sidebarRemoteGroups(repoID: repoID),
             hibernation: sidebarHibernation(repoID: repoID))
     }
 
     /// A provider's unmatched sessions under the current grouping setting.
-    func sidebarProviderLayout(provider: String, grouped: Bool) -> SidebarSectionLayout {
+    func sidebarProviderLayout(provider: String, grouped: Bool, collapseEnded: Bool) -> SidebarSectionLayout {
         .provider(
-            grouped: grouped,
+            grouped: grouped, collapseEnded: collapseEnded, unread: unreadByRemoteSession,
             sessions: RemoteSectionView.sessions(
                 in: remoteSessions, forProvider: provider,
                 knownRepoIDs: RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)),
@@ -202,13 +248,38 @@ extension AppState {
         }
     }
 
+    /// The repo's remote sessions as the sidebar shows them: filtered and sorted
+    /// by `RepoSectionView.matchedRemoteSessionIndices`, memoized per repo.
+    ///
+    /// The memo stores positions into `remoteSessions`, not values, so a hit
+    /// returns the CURRENT elements: `state`, `agentState`, `gone` and `lastSeen`
+    /// are never stale on a hit. Positions stay valid because any change to the
+    /// per-element match inputs (`RepoSectionView.sameMatchInputs`), including a
+    /// change in count, order or identity, clears the cache in the
+    /// `remoteSessions` `didSet`. Equal inputs elementwise therefore mean the
+    /// same sessions sit at the same positions.
+    ///
+    /// Reads `remoteSessions` and `worktrees[repoID]` before consulting the memo,
+    /// for the warm-cache dependency reason in `AppState.swift`.
+    func sidebarMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
+        let sessions = remoteSessions
+        let adopted = RepoSectionView.adoptedLocations(worktrees[repoID] ?? [])
+        if let memo = sidebarMatchedSessionsCache[repoID], memo.adopted == adopted {
+            return memo.indices.map { sessions[$0] }
+        }
+        let indices = RepoSectionView.matchedRemoteSessionIndices(
+            sessions, repoID: repoID, adopted: adopted)
+        sidebarMatchedSessionsSortCount += 1
+        sidebarMatchedSessionsCache[repoID] = SidebarMatchedSessionsMemo(adopted: adopted, indices: indices)
+        return indices.map { sessions[$0] }
+    }
+
     func sidebarRemoteGroups(repoID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let rows = worktrees[repoID] ?? []
         return SidebarRemoteGroups(
             roots: Self.topLevelWorktrees(rows),
-            remainder: RepoSectionView.matchedRemoteSessions(
-                snapshot.sessionsByRepo[repoID] ?? [], repoID: repoID, worktrees: rows),
+            remainder: sidebarMatchedRemoteSessions(repoID: repoID),
             snapshot: snapshot, unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
     }
 
@@ -270,6 +341,28 @@ extension AppState {
         }
         return SidebarGroupReveal(generation: sidebarSelectionGeneration,
                                   worktreeIDs: worktreeIDs, remoteID: remoteID, groups: groups)
+    }
+
+    /// The Ended groups to open so an externally selected ended session has a
+    /// row. Empty unless `selection` names a session that is present, not
+    /// dismissed or archived, ended, and not adopted into a worktree row of
+    /// its repo's section. The owner is the repository when the session's
+    /// resolved repo has a section, otherwise its provider, matching where
+    /// the row actually renders. Never collapses anything and never expands a
+    /// collapsed project section.
+    func sidebarEndedRevealGroups(selection: RemoteSessionSelection?) -> Set<SidebarGroupID> {
+        guard let selection else { return [] }
+        let id = RemoteSessionIdentity.uuid(provider: selection.provider, sessionID: selection.sessionID)
+        guard let session = remoteSessions.first(where: { $0.id == id }),
+              !session.dismissed, !session.payload.isArchived, SidebarEndedSessions.isEnded(session)
+        else { return [] }
+        let known = RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)
+        if let repoID = session.resolvedRepoID, known.contains(repoID) {
+            let location = WorktreeLocation.remote(provider: session.provider, sessionID: session.payload.id)
+            guard !RepoSectionView.adoptedLocations(worktrees[repoID] ?? []).contains(location) else { return [] }
+            return [.init(owner: .repository(repoID), kind: .ended)]
+        }
+        return [.init(owner: .provider(session.provider), kind: .ended)]
     }
 
     /// Membership changes reveal transient groups without overriding a collapsed

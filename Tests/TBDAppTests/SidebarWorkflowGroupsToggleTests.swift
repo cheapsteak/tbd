@@ -105,7 +105,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             let fleet = makeFleet(in: state)
             let layout = state.sidebarRepositoryLayout(
-                repoID: fleet.repoID, grouped: false, matchedSessions: matched(state, fleet.repoID))
+                repoID: fleet.repoID, grouped: false, collapseEnded: false, matchedSessions: matched(state, fleet.repoID))
             #expect(layout.groupKinds.isEmpty)
             #expect(layout.remoteGroups == nil)
             #expect(layout.hibernation == nil)
@@ -121,7 +121,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             _ = makeFleet(in: state)
             state.remoteSessions.append(SidebarGroupFixtures.session("unmatched-ended", state: .exited))
-            let provider = state.sidebarProviderLayout(provider: "acme", grouped: false)
+            let provider = state.sidebarProviderLayout(provider: "acme", grouped: false, collapseEnded: false)
             #expect(provider.groupKinds.isEmpty)
             #expect(provider.inlineSessions.map(\.payload.id) == ["unmatched", "unmatched-ended"])
 
@@ -179,7 +179,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             let fleet = makeFleet(in: state)
             let layout = state.sidebarRepositoryLayout(
-                repoID: fleet.repoID, grouped: true, matchedSessions: matched(state, fleet.repoID))
+                repoID: fleet.repoID, grouped: true, collapseEnded: false, matchedSessions: matched(state, fleet.repoID))
             #expect(layout.groupKinds == [.remote, .exited, .hibernated])
             #expect(layout.inlineRoots.map(\.id) == [fleet.working.id])
             #expect(layout.inlineSessions.isEmpty)
@@ -190,7 +190,7 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(layout.remoteGroups?.exitedSessions.map(\.payload.id) == ["loose-ended"])
             #expect(layout.hibernation?.hibernatedRoots.map(\.id) == [fleet.parked.id])
 
-            let provider = state.sidebarProviderLayout(provider: "acme", grouped: true)
+            let provider = state.sidebarProviderLayout(provider: "acme", grouped: true, collapseEnded: false)
             #expect(provider.groupKinds == [.remote])
             #expect(provider.inlineSessions.isEmpty)
 
