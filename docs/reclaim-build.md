@@ -45,6 +45,7 @@ SourceKit-LSP background-indexing suppression is a **committed** `.sourcekit-lsp
 The script reclaims disk from **active, idle** worktrees:
 - **Tier 1** — `index-build/` idle > 6h → deleted (regenerates on demand). SwiftPM-only (`Package.swift`-gated).
 - **Tier 2** — whole `.build` idle > 48h AND no live Claude session → deleted (one cold rebuild next time). SwiftPM-only.
+- **dSYM** — the `*.dSYM` bundles under `.build/<triple>/debug` once the debug build has been idle past `RECLAIM_ACTIVE_GRACE`, when Tier 2 is not taking the whole `.build`. SwiftPM-only. See "Debug-symbol bundles" below for why they can go.
 - **Installs** — `node_modules`, `.terraform` idle > 48h AND no live Claude session → deleted (regenerate with npm/terraform). **Agent worktrees only** (Claude-managed one-shot sessions; TBD-managed worktrees are never orphaned, only idle). Reaps ONLY when the worktree carries a regenerating lockfile/manifest (`node_modules` needs `package.json`; `.terraform` needs `*.tf`). Idleness measured by the worktree's newest non-pruned file mtime, which tracks REAL USE (source edits, test output, logs), not the install dir's own mtime (which only moves on install). NOT gated on `Package.swift`, covering non-Swift worktrees where these directories dominate disk usage (typically ~4.3 GB vs ~2.5 GB `.build`).
 
 Safety rails applied before anything is reaped:
@@ -69,6 +70,26 @@ A project-local `.sourcekit-lsp/config.json` takes precedence over user-global S
 
 ### Migration note
 Worktrees created before this change may have an untracked `.sourcekit-lsp/config.json` left over from the old per-worktree seeding, which git will flag as colliding with the newly-tracked file on pull. Remove it (`rm .sourcekit-lsp/config.json`) and re-checkout, or leave it — its contents are identical to the committed version.
+
+## Debug-symbol bundles (`.dSYM`)
+
+A local debug build writes about 900 MB of `.dSYM` bundles into each worktree's `.build/<triple>/debug`: 646 MB for `TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM`, about 100 MB each for `TBDApp` and `TBDDaemon`, and less for the other products. Nothing local reads them, so three scripts delete them, all through `scripts/dsym-prune-lib.sh`:
+
+- **`scripts/restart.sh`** – after a successful build, before the bundle is assembled. A failed build exits first and prunes nothing.
+- **`scripts/test.sh`** – from its EXIT trap, so on a green run, a red one, and one ended by SIGTERM alike. The run's exit status is never changed by the prune.
+- **`scripts/reclaim-build.sh`** – the `dsym` tier above, for worktrees built some other way, such as a bare `scripts/swift-safe build`.
+
+Why deleting them is safe:
+
+- **lldb does not need them.** With `-g`, the swiftc link step runs `dsymutil` itself and copies the DWARF out of the `.o` files. The linked binary keeps a debug map pointing at those `.o` files, which stay in `.build`. With the bundle deleted, lldb still stops on a `file:line` breakpoint and `frame variable` still prints locals, and `atos` still resolves an address to a function and a line.
+- **Crash reports do not need them.** The app's crash reports use `callStackSymbols`, which reads the binary's symbol table, not DWARF.
+- **Builds do not bring them back early.** The bundle is a by-product of the link command, not an output llbuild tracks in `.build/debug.yaml`. A no-op build leaves it missing and re-runs nothing; the next real relink of a product writes a fresh one. That is why each script prunes after it builds, rather than once.
+
+Opt-outs:
+
+- **`TBD_KEEP_DSYM=1`** – keeps the bundles in all three scripts, for a session that wants to debug from a self-contained `.dSYM`, or move a binary away from its `.o` files. The hourly launchd run of `reclaim-build.sh` does not inherit a shell's environment, so exporting the variable does not reach it: add it to the agent plist's `EnvironmentVariables`, or drop a `RECLAIM_OPTOUT_FILE` marker in the worktree (which skips every reclaim tier for that worktree, not just this one).
+- **`CI`** – when set, none of the three prunes. Runners are ephemeral, so there is no disk to win back.
+- **A running build** – while a SwiftPM build, compile, link or `dsymutil` step whose command line names the worktree is still running, the prune leaves the bundles alone and says so: deleting a bundle `dsymutil` is still writing fails that link. The next script run or reclaim sweep picks them up.
 
 ## Install / uninstall
 ```sh

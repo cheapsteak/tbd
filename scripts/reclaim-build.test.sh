@@ -892,5 +892,80 @@ JSON
   rm -rf "$root"
 }
 
+# --- dsym tier ----------------------------------------------------------------
+# A worktree whose debug build carries a product dSYM and the test bundle's
+# nested one, both aged like the rest of the debug build.
+_mk_dsym_worktree() { # dir now index_age debug_age
+  local d="$1" now="$2" debug="$1/.build/arm64-apple-macosx/debug"
+  _mk_worktree "$@"
+  mkdir -p "$debug/App.dSYM/Contents" "$debug/Pkg.xctest/Contents/MacOS/Pkg.dSYM/Contents"
+  : > "$debug/App.dSYM/Contents/Info.plist"
+  : > "$debug/Pkg.xctest/Contents/MacOS/Pkg.dSYM/Contents/Info.plist"
+  touch_age "$debug/App.dSYM/Contents/Info.plist" "$now" "$4"
+  touch_age "$debug/Pkg.xctest/Contents/MacOS/Pkg.dSYM/Contents/Info.plist" "$now" "$4"
+}
+
+test_plan_dsym_when_debug_build_is_past_the_grace() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_dsym_worktree "$d" "$now" 60 3600   # index fresh, debug idle 1h
+  local out; out="$(CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "idle debug build with dSYMs -> dsym" "PLAN dsym $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_dsym_alongside_tier1() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_dsym_worktree "$d" "$now" 25000 3600
+  local out; out="$(CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "stale index + idle dSYMs -> both" "PLAN tier1 $d"$'\n'"PLAN dsym $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_no_dsym_within_the_grace() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_dsym_worktree "$d" "$now" 60 60   # a link that may still be writing
+  local out; out="$(CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "fresh debug build -> SKIP fresh" "SKIP fresh $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_no_dsym_when_tier2_takes_the_build() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_dsym_worktree "$d" "$now" 200000 200000
+  local out; out="$(CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "tier2 subsumes dsym" "PLAN tier2 $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_no_dsym_with_keep_dsym_or_ci() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_dsym_worktree "$d" "$now" 60 3600
+  local out
+  out="$(CI='' TBD_KEEP_DSYM=1 RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "TBD_KEEP_DSYM=1 -> no dsym plan" "SKIP fresh $d" "$out"
+  out="$(CI=true TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0 tbd)"
+  assert_eq "CI set -> no dsym plan" "SKIP fresh $d" "$out"
+  rm -rf "$d"
+}
+
+test_main_real_run_reclaims_dsyms_only() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/active-a" debug="$root/active-a/.build/arm64-apple-macosx/debug"
+  _mk_dsym_worktree "$a" "$now" 60 3600
+  # The recency guard reads the whole .build, index-build included.
+  touch_age "$a/.build/index-build/idx.o" "$now" 3600
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":1}]
+JSON
+  CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+    bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  assert_eq "product dSYM removed"  "false" "$([[ -d "$debug/App.dSYM" ]] && echo true || echo false)"
+  assert_eq "nested test dSYM removed" "false" "$([[ -d "$debug/Pkg.xctest/Contents/MacOS/Pkg.dSYM" ]] && echo true || echo false)"
+  assert_eq "debug objects kept" "true" "$([[ -f "$debug/app.o" ]] && echo true || echo false)"
+  assert_eq "index-build kept" "true" "$([[ -d "$a/.build/index-build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL
