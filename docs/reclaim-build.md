@@ -87,7 +87,7 @@ Why deleting them is safe:
 
 Opt-outs:
 
-- **`TBD_KEEP_DSYM=1`** – keeps the bundles in all three scripts, for a session that wants to debug from a self-contained `.dSYM`, or move a binary away from its `.o` files.
+- **`TBD_KEEP_DSYM=1`** – keeps the bundles in all three scripts, for a session that wants to debug from a self-contained `.dSYM`, or move a binary away from its `.o` files. The hourly launchd run of `reclaim-build.sh` does not inherit a shell's environment, so exporting the variable does not reach it: add it to the agent plist's `EnvironmentVariables`, or drop a `RECLAIM_OPTOUT_FILE` marker in the worktree (which skips every reclaim tier for that worktree, not just this one).
 - **`CI`** – when set, none of the three prunes. Runners are ephemeral, so there is no disk to win back.
 - **A running build** – while a SwiftPM build, compile, link or `dsymutil` step whose command line names the worktree is still running, the prune leaves the bundles alone and says so: deleting a bundle `dsymutil` is still writing fails that link. The next script run or reclaim sweep picks them up.
 
