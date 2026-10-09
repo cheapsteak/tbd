@@ -29,6 +29,27 @@ dsym_prune_disabled() {
     [ "${TBD_KEEP_DSYM:-}" = "1" ]
 }
 
+# Exit 0 when one of the `pid args` lines on stdin is a SwiftPM build, compile,
+# link or dsymutil step whose command line names <root>. Shared with
+# reclaim-build.sh's has_active_build. Neither grep uses -q: an early exit would
+# SIGPIPE the writer, and under `pipefail` that turns a match into a miss.
+build_procs_name() {
+    grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver|dsymutil' |
+        grep -F -- "${1:?build_procs_name needs a path}" >/dev/null
+}
+
+# Exit 0 when a build in the worktree at $1 is still running. Read once into a
+# variable for the same SIGPIPE reason. Test seam: DSYM_PRUNE_PS_CMD.
+debug_build_running() {
+    local lines
+    if [ -n "${DSYM_PRUNE_PS_CMD:-}" ]; then
+        lines="$(eval "$DSYM_PRUNE_PS_CMD")" || true
+    else
+        lines="$(ps -axo pid,args 2>/dev/null)" || true
+    fi
+    printf '%s\n' "$lines" | build_procs_name "$1"
+}
+
 # Print, one per line, every `*.dSYM` bundle under `<root>/.build/<triple>/debug`,
 # including the one nested in the test bundle
 # (`TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM`). Release
@@ -43,7 +64,10 @@ list_debug_dsyms() {
 }
 
 # Delete every bundle list_debug_dsyms finds under the worktree at $1, unless
-# dsym_prune_disabled. Prints one summary line when it removed something.
+# dsym_prune_disabled or a build in that worktree is still running: the callers
+# prune after their own build is done, but another one in the same worktree may
+# be mid-link, and deleting the bundle its dsymutil is writing fails that link.
+# Prints one line when it removed something or held off for a build.
 # Always returns 0: a leftover bundle costs disk, never correctness, so this
 # must never fail the build or test run that called it.
 prune_debug_dsyms() {
@@ -53,6 +77,10 @@ prune_debug_dsyms() {
     local bundles kb=0 count=0 bundle size
     bundles="$(list_debug_dsyms "$root")" || true
     [ -n "$bundles" ] || return 0
+    if debug_build_running "$root"; then
+        printf 'Kept the debug-symbol bundles in .build: a build in this worktree is still running\n'
+        return 0
+    fi
     while IFS= read -r bundle; do
         [ -n "$bundle" ] || continue
         size="$(du -sk "$bundle" 2>/dev/null | awk '{print $1}')" || size=0

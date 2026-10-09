@@ -84,6 +84,33 @@ test_nothing_to_do_is_silent_and_green() {
   rm -rf "$d"
 }
 
+# Another build in the same worktree may be mid-link, writing the bundle the
+# prune would delete; one in a different worktree must not hold this one off.
+test_holds_off_while_a_build_in_this_worktree_runs() {
+  local d; d="$(mktmpd)"; mk_build "$d"
+  local ps_line="4242 /usr/bin/dsymutil $d/.build/arm64-apple-macosx/debug/TBDApp -o $d/.build/arm64-apple-macosx/debug/TBDApp.dSYM"
+  local out rc
+  out="$(CI='' TBD_KEEP_DSYM='' DSYM_PRUNE_PS_CMD="printf '%s\n' '$ps_line'" prune_debug_dsyms "$d")"; rc=$?
+  assert_eq "a running dsymutil here keeps every bundle" "$ALL" "$(survivors "$d")"
+  assert_eq "and still exits 0" "0" "$rc"
+  assert_contains "and says why" "$out" "a build in this worktree is still running"
+  out="$(CI='' TBD_KEEP_DSYM='' DSYM_PRUNE_PS_CMD="printf '%s\n' '4242 /usr/bin/swift-frontend -c /elsewhere/Sources/a.swift' '4243 /bin/zsh $d'" prune_debug_dsyms "$d")"
+  assert_eq "a build elsewhere, or a non-build process here, does not hold it off" "$KEPT_ONLY" "$(survivors "$d")"
+  rm -rf "$d"
+}
+
+# Under pipefail a `grep -q` that exits on the first match SIGPIPEs the writer
+# and reports a miss; the matcher must see a match with lots of ps text after it.
+test_matcher_survives_pipefail_with_long_input() {
+  local d rc; d="$(mktmpd)"
+  { echo "1 swiftc -o /w/.build/x"
+    awk 'BEGIN { for (i = 0; i < 200000; i++) print "2 /usr/bin/swift-frontend /other/path" }'
+  } > "$d/ps"
+  ( set -o pipefail; build_procs_name /w/.build < "$d/ps" ); rc=$?
+  assert_eq "match ahead of 200k lines is still a match" "0" "$rc"
+  rm -rf "$d"
+}
+
 # Static check: restart.sh cannot be run here (it builds and launches the real
 # app). The prune must sit after the build-status gate, so a failed build exits
 # first, and before the bundle assembly.

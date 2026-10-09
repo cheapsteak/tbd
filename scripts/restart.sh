@@ -221,7 +221,8 @@ if [ "$skip_build" = false ]; then
     # shipped, so this only has to stop.
     [ "$build_status" -eq 0 ] || exit "$build_status"
 
-    # Drop the ~900 MB of .dSYM bundles the link step just wrote: lldb reads
+    # Drop the debug .dSYM bundles in .build (up to ~900 MB with the test
+    # bundle's, which test.sh's link writes): lldb reads
     # the same DWARF from the .o files through the binary's debug map, and
     # nothing ships them. Never fails the restart; skipped under CI and with
     # TBD_KEEP_DSYM=1. See scripts/dsym-prune-lib.sh.

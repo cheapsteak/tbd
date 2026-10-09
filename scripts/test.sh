@@ -729,7 +729,7 @@ asks_for_a_listing() {
 # script rather than from the repository it tests, so a fixture repository needs
 # no copy of it.
 # shellcheck source=/dev/null
-source "${BASH_SOURCE[0]%/*}/dsym-prune-lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"
 
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing

@@ -62,7 +62,7 @@ log() { printf '%s\n' "$*" >&2; }
 # list_debug_dsyms / prune_debug_dsyms / dsym_prune_disabled, shared with
 # restart.sh and test.sh.
 # shellcheck source=/dev/null
-source "${BASH_SOURCE[0]%/*}/dsym-prune-lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"
 
 # --- test seams --------------------------------------------------------------
 _now()           { printf '%s\n' "${RECLAIM_NOW:-$(date +%s)}"; }
@@ -140,9 +140,11 @@ worktree_newest_mtime() {
 }
 
 # has_active_build WORKTREE_PATH -> exit 0 if a swift build process references it
+# (or a dsymutil step). The matcher lives in dsym-prune-lib.sh, which also uses
+# it to hold the dSYM prune off a link in progress.
 has_active_build() {
-  local wt="$1"
-  _ps_lines | grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver' | grep -Fq -- "$wt"
+  local lines; lines="$(_ps_lines)" || true
+  printf '%s\n' "$lines" | build_procs_name "$1"
 }
 
 # live_cwds -> newline-separated, deduped absolute cwds of every live process,
