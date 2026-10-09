@@ -795,6 +795,17 @@ public struct GitManager: Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// The raw `git status --porcelain` output for a worktree: empty when the
+    /// tree is clean, one line per modified, staged or untracked-but-not-
+    /// ignored path otherwise. Unlike `isDirty`, a failure is thrown rather
+    /// than folded into "dirty", so a caller can tell "has work" from "could
+    /// not look". Runs with `--no-optional-locks`, so a background caller
+    /// never takes the index lock out from under a user's own git command.
+    public func uncommittedStatus(worktreePath: String) async throws -> String {
+        try await run(
+            arguments: ["--no-optional-locks", "status", "--porcelain"], at: worktreePath)
+    }
+
     /// Returns `true` if `sha` is an ancestor of (contained in) any local
     /// branch. A thrown error is treated as `false` — the orphan-GC caller
     /// treats `false` as "no branch protects this commit, create an anchor

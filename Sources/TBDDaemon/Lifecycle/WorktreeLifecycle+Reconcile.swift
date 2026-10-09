@@ -428,6 +428,19 @@ extension WorktreeLifecycle {
                 logger.debug("reconcile: skipping forgotten worktree path \(gitWt.path, privacy: .public)")
                 continue
             }
+            // `dbPaths` holds only live rows, but `path` is UNIQUE across every
+            // row, so a worktree recreated at an archived row's path cannot be
+            // adopted: the insert below would throw and abort this repo's whole
+            // reconcile, every pass, until the directory went away. Leave it
+            // unadopted and say so; reviving or forgetting the row resolves it.
+            if let holder = try await db.worktrees.findByPath(path: gitWt.path) {
+                logger.warning("""
+                reconcile: not adopting \(gitWt.path, privacy: .public) — \
+                worktree \(holder.id, privacy: .public) (\(holder.status.rawValue, privacy: .public)) \
+                still holds that path
+                """)
+                continue
+            }
 
             let name = (gitWt.path as NSString).lastPathComponent
             let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
