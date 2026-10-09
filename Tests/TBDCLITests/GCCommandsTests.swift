@@ -53,8 +53,9 @@ struct GCCommandsTests {
 
     /// The hang-stack reclaimer deletes files rather than killing anything, so
     /// it sits outside the group above — but it needs a leg for the same
-    /// reason. Its gate resolves NULL through the shipped default, which is on,
-    /// and `tbd gc hang-stacks off` is the explicit opt-out.
+    /// reason. `gcEnabled` resolves as `gc_enabled ?? true`, so this phase's
+    /// own gate is what buys it a soak at all, and `tbd gc hang-stacks on` is
+    /// the only supported way to lift that gate out of NULL.
     @Test func hangStackSwitchIsRegisteredOnTheGCGroup() {
         let names = GCCommand.configuration.subcommands.map { $0._commandName }
         #expect(names.contains("hang-stacks"))

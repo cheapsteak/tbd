@@ -420,7 +420,7 @@ than the preceding dry run predicted.
   `tbd gc retained-transcripts [on|off]`, the Settings → Cleanup toggle "Reclaim
   unreferenced retained transcripts", and the `config.setGCRetainedTranscriptsEnabled`
   RPC.
-- **`gcHangStacksEnabled`** – default `true`; `tbd gc hang-stacks [on|off]`, the
+- **`gcHangStacksEnabled`** – default `false`; `tbd gc hang-stacks [on|off]`, the
   Settings → Cleanup toggle "Reclaim old hang-stack diagnostics", and the
   `config.setGCHangStacksEnabled` RPC. It also arms the app's write-time cap.
 - **`gcGraceSeconds`** – default `3600` (1h); config table only, no UI.
@@ -458,7 +458,7 @@ tbd gc sweep [--dry-run]               # run a sweep now; --dry-run prints the p
 tbd gc profile-dirs [on|off]           # gate the profile-config-dir collector (ships off); no argument prints the current value
 tbd gc orphan-processes [on|off]       # gate the orphaned-process collector (ships off); no argument prints the current value
 tbd gc retained-transcripts [on|off]   # gate the retained-transcript collector (ships off); no argument prints the current value
-tbd gc hang-stacks [on|off]            # gate the hang-stack reclaimer (ships on); no argument prints the current value
+tbd gc hang-stacks [on|off]            # gate the hang-stack reclaimer (ships off); no argument prints the current value
 ```
 
 ## Non-goals (from the design spec)

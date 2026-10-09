@@ -94,11 +94,10 @@ struct OrphanGCHangStackTests: ~Copyable {
 
     // MARK: - Flag gates
 
-    @Test("an explicit hang-stack off: a real sweep leaves 2,000 aged files untouched")
+    @Test("the hang-stack flag ships off: a real sweep leaves 2,000 aged files untouched")
     func flagOffIsNoOp() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
-        try await db.config.setGCHangStacksEnabled(false)
         try makeTwoThousandFiles()
 
         let result = await makeGC(db: db).sweep()
@@ -113,7 +112,6 @@ struct OrphanGCHangStackTests: ~Copyable {
     func flagOffDryRunStillPlans() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
-        try await db.config.setGCHangStacksEnabled(false)
         try makeTwoThousandFiles()
 
         let result = await makeGC(db: db).sweep(dryRun: true)

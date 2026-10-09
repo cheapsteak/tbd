@@ -93,12 +93,12 @@ struct GCOrphanProcesses: AsyncParsableCommand {
 /// The soak switch for the hang-stack reclaimer. It bounds
 /// `~/Library/Logs/TBD/hang-stacks/` to 14 days and 1000 files, and the same
 /// flag turns on the app's write-time cap — one switch for both halves. It
-/// ships on, because a hang storm otherwise grows the directory without bound;
-/// `off` is the explicit opt-out.
+/// deletes persisted state from a background sweep, so it ships off and is
+/// opted into by hand.
 struct GCHangStacks: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hang-stacks",
-        abstract: "Show, enable, or disable reclaiming old hang-stack diagnostics (default on)")
+        abstract: "Show, enable, or disable reclaiming old hang-stack diagnostics (default off)")
     @Argument(help: "on | off (omit to print the current value)") var state: String?
     /// The no-argument read-back line, over the daemon's resolved `Config`.
     static func statusLine(_ config: Config) -> String {

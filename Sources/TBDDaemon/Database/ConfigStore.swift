@@ -768,9 +768,8 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the hang-stack reclaimer gate (NULL follows the shipped default,
-    /// which is on) — read on top of the GC master switch, so both must be on
-    /// for the phase to run.
+    /// Persist the hang-stack reclaimer gate (default OFF, soaking) — read on
+    /// top of the GC master switch, so both must be on for the phase to run.
     /// The same flag is mirrored into the app's write-time cap, so this one
     /// call governs both halves of the policy. The column is written on every
     /// call, because writing either value is the explicit gesture that lifts it

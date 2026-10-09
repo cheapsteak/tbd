@@ -597,12 +597,13 @@ struct ConfigStoreTests {
         )
     }
 
-    /// The shipped default is on, and a NULL column resolves to it. The shipped
-    /// default lives in one constant, and no migration forces the column.
-    @Test func gcHangStacksShipsOn() async throws {
-        #expect(Config.gcHangStacksEnabledDefault == true)
+    /// The shipped default today: OFF. The phase deletes persisted state from a
+    /// background sweep, so it soaks first. Graduation edits this constant and
+    /// nothing else.
+    @Test func gcHangStacksShipsOff() async throws {
+        #expect(Config.gcHangStacksEnabledDefault == false)
         let db = try TBDDatabase(inMemory: true)
-        #expect(try await db.config.get().gcHangStacksEnabled == true)
+        #expect(try await db.config.get().gcHangStacksEnabled == false)
     }
 
     @Test func setGCHangStacksEnabledRoundtrips() async throws {
