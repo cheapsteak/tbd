@@ -349,7 +349,7 @@ struct ContinueInClaudeTransactionTests {
         let fixture = try await makeRPCFixture(
             ownsPane: false,
             sourceWindowID: "@mock-0",
-            paneTargetOverride: .missing)
+            paneTargetOverride: .absent)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let crashedDestinationToken = UUID()
         _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
@@ -407,6 +407,31 @@ struct ContinueInClaudeTransactionTests {
         #expect(pending.kind == .codex)
         #expect(pending.pendingSessionIncarnationID != nil)
         #expect(pending.pendingSessionIncarnationID != crashedDestinationToken)
+        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+    }
+
+    @Test("recovery refuses an unreachable pane read while the tmux server may be alive")
+    func recoveryFailsClosedForUnreachablePane() async throws {
+        // `.unreachable` is a failed read, not evidence the pane is gone, and
+        // the dry-run server presence defaults to `.alive`, so no positive
+        // "no server running" answer exists to justify a second agent window.
+        let fixture = try await makeRPCFixture(
+            ownsPane: false,
+            paneTargetOverride: .unreachable)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        await fixture.router.reconcilePendingContinueInClaude()
+
+        let pending = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(pending.kind == .codex)
+        #expect(pending.pendingSessionIncarnationID != nil)
         #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
         #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
     }

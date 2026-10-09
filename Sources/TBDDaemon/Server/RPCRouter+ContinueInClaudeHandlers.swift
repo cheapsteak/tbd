@@ -589,7 +589,19 @@ extension RPCRouter {
                     "Codex recovery found a live pane owned by another terminal.")
             }
             claimedLiveWindow = windowID
-        case .missing, .dead:
+        case .absent, .dead:
+            claimedLiveWindow = nil
+        case .unreachable:
+            // The consultation failed rather than answered, so it says nothing
+            // about the pane and a live Codex process may still be behind it.
+            // Only tmux's own "no server running" answer proves there is
+            // nothing left to duplicate (the post-reboot case this recovery
+            // exists for); anything else leaves the row pending for a later
+            // pass instead of launching a second agent.
+            guard await tmux.probeServer(server: worktree.tmuxServer) == .absent else {
+                throw ContinueInClaudeError(
+                    "Codex recovery could not reach the tmux server to verify its pane; it will be retried.")
+            }
             claimedLiveWindow = nil
         }
 
@@ -613,8 +625,11 @@ extension RPCRouter {
         } else {
             let staleWindowID = row.tmuxWindowID
             let mayKillStale: Bool = switch probe.target {
-            case .missing, .dead: true
-            case .live: false
+            case .absent, .dead: true
+            // An unreachable read proves no server remains, and a stale
+            // coordinate from a vanished server can name an unrelated window
+            // on its replacement, so it is never killed.
+            case .live, .unreachable: false
             }
             let bootstrapWindowID = try await tmux.ensureServer(
                 server: worktree.tmuxServer,

@@ -50,7 +50,9 @@ struct CodexProcessGitStatusProvider: CodexContinuationGitStatusProviding {
         switch outcome {
         case .timedOut:
             throw CodexContinuationPacketError.gitStatusFailed
-        case let .completed(status, stdout, _):
+        case let .completed(status, stdout, _), let .signaled(status, stdout, _):
+            // A signaled child carries its signal number in `status`, which is
+            // never 0, so it takes the same failure path as a nonzero exit.
             guard status == 0,
                   let output = String(data: stdout, encoding: .utf8) else {
                 throw CodexContinuationPacketError.gitStatusFailed
