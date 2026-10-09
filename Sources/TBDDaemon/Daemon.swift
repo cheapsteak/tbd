@@ -2057,6 +2057,7 @@ public final class Daemon: Sendable {
             do {
                 try await NightwatchHolderBootReconcile.run(
                     db: database, subscriptions: subs,
+                    holderSupported: holderRegistry?.canSpawn == true,
                     applyMode: { await runner.apply(mode: $0) })
             } catch {
                 reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")

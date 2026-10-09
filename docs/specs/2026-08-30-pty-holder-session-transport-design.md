@@ -1048,13 +1048,23 @@ met.
   Ordinary development restarts exercise the re-adoption path continuously —
   the hardest code in the design gets adversarial testing for free.
 
-  Graduation rests on sustained field operation rather than a bench
-  measurement: continuous use over weeks on a machine carrying on the order of
-  a hundred concurrent holder-backed sessions, with every spawn kind,
-  hibernation and wake, daemon restart and re-adoption exercised daily, and no
-  latency regression perceptible to the operator typing into them. The
-  transport's justification is scaling headroom, and a fleet of that size under
-  real load is the condition the headroom was wanted for.
+  Graduation rests on sustained field operation: a real fleet, at real size,
+  for long enough that every path in the design has been walked many times.
+  The transport's justification is scaling headroom, and a fleet of that size
+  under real load is the condition the headroom was wanted for, so that is the
+  condition graduation is read from.
+
+  The evidence it was read from, and what kind each piece is. **Measured**, from
+  a development machine's live database: 56 session rows on the holder transport
+  against 9 still on tmux, with a further 34 rows predating the transport column
+  — a fleet that had converted itself by ordinary use rather than by migration,
+  which is what spawn-time-only granularity predicts. Every spawn kind,
+  hibernation and wake, and daemon restart with re-adoption exercised in daily
+  use. **Reported by the operator**: continuous use over weeks at nearly a
+  hundred concurrent sessions, with no perceptible latency regression against
+  the tmux path. The two are kept apart deliberately — a row count is a
+  measurement and a felt absence of lag is a report, and reading the second as
+  the first is how a design talks itself into a number it never took.
 
   The probes committed alongside this design —
   `scripts/diag/tmux-vs-rawpty-idle.py` for the raw-versus-tmux echo comparison
@@ -1068,12 +1078,15 @@ met.
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
   reader never sees — so an absence of corruption reports is not an absence of
-  the fault. The daemon therefore holds explicit per-session reader state, and
-  every transition into reading checks that the count was zero, incrementing a
-  violation counter and logging loudly rather than trusting the arbitration to
-  be correct. That detector is permanent rather than soak instrumentation: it
-  keeps the property observable for as long as two readers remain possible,
-  which is as long as a viewer can attach a pty the daemon may also read.
+  the fault, and no count of violations from before the detector existed means
+  anything at all. The daemon therefore holds explicit per-session reader state,
+  and every transition into reading checks that the count was zero,
+  incrementing a violation counter and logging loudly rather than trusting the
+  arbitration to be correct; the census reports that count on a timer even when
+  it is zero, so the absence is an observation rather than a silence. This is a
+  standing detector, not soak instrumentation: it keeps the property observable
+  for as long as two readers remain possible, which is as long as a viewer can
+  attach a pty the daemon may also read.
 
   **The reconcilers holding** is the other field condition: no growth in
   unclaimed holders, and no accumulating rendezvous litter — neither the socket

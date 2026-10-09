@@ -49,7 +49,9 @@ struct NightwatchHolderBootReconcileTests {
     /// captures every broadcast delta (synchronously — `broadcast(delta:)`
     /// fans out before returning, so the snapshot is complete once `run`
     /// returns) and hands both the result and the collector back.
-    private func run(_ db: TBDDatabase, _ applied: AppliedModes) async throws -> (NightwatchMode?, BroadcastDeltas) {
+    private func run(
+        _ db: TBDDatabase, _ applied: AppliedModes, holderSupported: Bool = true
+    ) async throws -> (NightwatchMode?, BroadcastDeltas) {
         let broadcasts = BroadcastDeltas()
         let subscriptions = StateSubscriptionManager()
         subscriptions.addSubscriber { data in
@@ -59,7 +61,7 @@ struct NightwatchHolderBootReconcileTests {
             return true
         }
         let result = try await NightwatchHolderBootReconcile.run(
-            db: db, subscriptions: subscriptions,
+            db: db, subscriptions: subscriptions, holderSupported: holderSupported,
             applyMode: { await applied.append($0) })
         return (result, broadcasts)
     }
@@ -92,6 +94,29 @@ struct NightwatchHolderBootReconcileTests {
         #expect(await applied.modes.isEmpty)
         #expect(broadcasts.count(matching: isModelProfilesChanged) == 1)
         #expect(broadcasts.count(matching: isNotificationReceived) == 1)
+    }
+
+    /// The same install on a daemon that could not find the `TBDHolder`
+    /// helper: no holder-backed session can be spawned, so the watch mode is
+    /// re-applied untouched and nothing is written or announced. This is the
+    /// state the graduated default makes ordinary — the flag reads on without
+    /// anybody choosing it — so a reconcile that ignored `holderSupported`
+    /// would silently stop Nightwatch on every such install.
+    @Test func anUnsupportedDaemonLeavesTheModeAlone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(true)
+        try await db.config.setNightwatchMode(.nightwatch)
+        let wt = try await makeWorktree(db)
+        let applied = AppliedModes()
+
+        let (result, broadcasts) = try await run(db, applied, holderSupported: false)
+
+        #expect(result == .nightwatch)
+        #expect(try await db.config.get().nightwatchMode == .nightwatch)
+        #expect(await applied.modes == [.nightwatch])
+        #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
+        #expect(broadcasts.count(matching: isModelProfilesChanged) == 0)
+        #expect(broadcasts.count(matching: isNotificationReceived) == 0)
     }
 
     @Test func deskScratchWorktreeIsPreferredForTheNotification() async throws {

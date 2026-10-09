@@ -49,7 +49,7 @@ private struct NightwatchStatusContent: View {
         modeButton("I'm back", mode: .off)
         modeButton("Step out", mode: .daywatch)
         modeButton("Go away for the night", mode: .nightwatch)
-        if appState.nightwatchHolderOn {
+        if appState.holderBlocksWatchModes {
             Divider()
             Button(NightwatchModePresentation.holderUnavailableCaption) {}
                 .disabled(true)
@@ -69,7 +69,9 @@ private struct NightwatchStatusContent: View {
                 Text(label)
             }
         }
-        .disabled(!NightwatchModePresentation.isEnabled(mode, holderOn: appState.nightwatchHolderOn))
-        .help(NightwatchModePresentation.effectiveHelp(mode, holderOn: appState.nightwatchHolderOn))
+        .disabled(!NightwatchModePresentation.isEnabled(
+            mode, holderBlocking: appState.holderBlocksWatchModes))
+        .help(NightwatchModePresentation.effectiveHelp(
+            mode, holderBlocking: appState.holderBlocksWatchModes))
     }
 }

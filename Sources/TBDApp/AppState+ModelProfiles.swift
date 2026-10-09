@@ -398,13 +398,30 @@ extension AppState {
         by default; turn it off to put new sessions back in tmux windows.
         """
 
-    /// Why the pty-holder toggle is inert on this daemon. Shown only when
+    /// Why the pty-holder toggle's caption appears. Shown whenever
     /// `ptyHolderSupported` is false, mirroring the control-mode toggle's
-    /// "Requires tmux 3.2 or later" caption: with the flag on and no way to
-    /// start a holder, every create falls back to tmux silently, so the switch
-    /// would change nothing at all.
+    /// "Requires tmux 3.2 or later" caption: with no way to start a holder,
+    /// every create falls back to tmux silently, so the flag's ON position
+    /// means nothing on this daemon.
     static let ptyHolderUnsupportedCaption =
         "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
+
+    /// Whether the pty-holder toggle is interactive, from what
+    /// `daemon.capabilities` reports.
+    ///
+    /// A daemon with no `TBDHolder` helper honors the flag by falling back to
+    /// tmux on every spawn, so flipping it ON there changes nothing and the
+    /// control is greyed. Flipping it OFF is a different matter: the *effective*
+    /// flag is what `NightwatchHolderGate` reads, so an install that left it at
+    /// the shipped ON has its watch modes refused and turned off at boot even
+    /// on a daemon that cannot start a holder — and the only way to get them
+    /// back is to turn the transport off. Greying the toggle out there would
+    /// name a remedy and withhold the control for it, the way the model-proxy
+    /// toggle deliberately stays usable on a daemon that cannot start a proxy.
+    /// So the toggle goes inert only where neither direction does anything.
+    static func ptyHolderToggleIsInteractive(supported: Bool, flagOn: Bool) -> Bool {
+        supported || flagOn
+    }
 
     /// Persist the pty-holder transport gate, then re-fetch capabilities so the
     /// Settings toggle reflects the daemon's persisted state.
@@ -903,11 +920,19 @@ extension AppState {
 
     // MARK: - Nightwatch Mode
 
-    /// The daemon's effective pty-holder flag, as the watch-mode controls read
-    /// it. Unfetched capabilities read as off, so the controls are not
-    /// disabled on a claim the daemon has not made.
-    var nightwatchHolderOn: Bool {
-        daemonCapabilities?.ptyHolderEnabled ?? false
+    /// Whether the pty-holder transport blocks the watch modes, as the
+    /// controls read it: the daemon's effective flag **and** its ability to
+    /// start a holder at all. Both terms, because a daemon that cannot find
+    /// the `TBDHolder` helper spawns no holder-backed session and so has no
+    /// hazard — greying the modes out there would take Nightwatch away from an
+    /// install that can still run it. Unfetched capabilities read as not
+    /// blocking, so the controls are never disabled on a claim the daemon has
+    /// not made.
+    var holderBlocksWatchModes: Bool {
+        guard let capabilities = daemonCapabilities else { return false }
+        return NightwatchHolderGate.watchModesBlocked(
+            holderEnabled: capabilities.ptyHolderEnabled,
+            holderSupported: capabilities.ptyHolderSupported)
     }
 
     /// Help text for the Settings "Nightwatch / Daywatch" toggle. A stored

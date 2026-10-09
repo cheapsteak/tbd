@@ -1098,8 +1098,9 @@ public final class RPCRouter: Sendable {
             // The same second half the spawn gate asks
             // (`WorktreeLifecycle+Create`): a registry can exist and still be
             // unable to start a holder, and with the flag on that combination
-            // falls back to tmux silently. Reported so Settings can say so
-            // instead of offering a switch that would change nothing.
+            // falls back to tmux silently. Reported so Settings can say so,
+            // and so it can grey the switch out in the one state where neither
+            // direction would change anything.
             ptyHolderSupported: holderRegistry?.canSpawn == true)
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces

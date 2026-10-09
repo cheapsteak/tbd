@@ -54,10 +54,12 @@ enum NightwatchModePresentation {
         segment == current
     }
 
-    /// Whether `mode` can be selected. With the pty-holder transport on, the
-    /// watch modes are refused (the daemon rejects them too); `.off` never is.
-    static func isEnabled(_ mode: NightwatchMode, holderOn: Bool) -> Bool {
-        !NightwatchHolderGate.refusesMode(mode, holderEnabled: holderOn)
+    /// Whether `mode` can be selected. While the pty-holder transport blocks
+    /// the watch modes they are refused (the daemon rejects them too); `.off`
+    /// never is. `holderBlocking` is `AppState.holderBlocksWatchModes`, which
+    /// asks both halves of the hazard.
+    static func isEnabled(_ mode: NightwatchMode, holderBlocking: Bool) -> Bool {
+        !NightwatchHolderGate.refusesMode(mode, whileBlocked: holderBlocking)
     }
 
     /// Tooltip for a disabled segment: the daemon's refusal text, verbatim.
@@ -72,8 +74,8 @@ enum NightwatchModePresentation {
 
     /// The tooltip a control should carry: the refusal when the mode is
     /// disabled, otherwise the mode's own help.
-    static func effectiveHelp(_ mode: NightwatchMode, holderOn: Bool) -> String {
-        isEnabled(mode, holderOn: holderOn) ? help(mode) : disabledHelp
+    static func effectiveHelp(_ mode: NightwatchMode, holderBlocking: Bool) -> String {
+        isEnabled(mode, holderBlocking: holderBlocking) ? help(mode) : disabledHelp
     }
 }
 
@@ -111,8 +113,9 @@ struct NightwatchModeToggle: View {
     private func segment(_ mode: NightwatchMode) -> some View {
         let isActive = NightwatchModePresentation.isActive(
             segment: mode, current: appState.nightwatchMode)
-        let holderOn = appState.nightwatchHolderOn
-        let enabled = NightwatchModePresentation.isEnabled(mode, holderOn: holderOn)
+        let holderBlocking = appState.holderBlocksWatchModes
+        let enabled = NightwatchModePresentation.isEnabled(
+            mode, holderBlocking: holderBlocking)
         Button {
             Task { @MainActor in
                 await appState.setNightwatchMode(mode)
@@ -134,7 +137,7 @@ struct NightwatchModeToggle: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
-        .help(NightwatchModePresentation.effectiveHelp(mode, holderOn: holderOn))
+        .help(NightwatchModePresentation.effectiveHelp(mode, holderBlocking: holderBlocking))
         .accessibilityLabel(NightwatchModePresentation.glyphLabel(mode))
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }

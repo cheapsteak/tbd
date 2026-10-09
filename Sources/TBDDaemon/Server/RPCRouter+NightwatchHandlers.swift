@@ -21,7 +21,13 @@ extension RPCRouter {
         // are never both on (docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md).
         // Nothing is written and nothing is broadcast when this refuses.
         let config = try await db.config.get()
-        if NightwatchHolderGate.refusesMode(params.mode, holderEnabled: config.ptyHolderEnabled) {
+        // Both terms, from this daemon: the effective flag, and whether it can
+        // start a holder at all. A daemon with no `TBDHolder` helper spawns no
+        // holder session, so it has no hazard to refuse.
+        let blocked = NightwatchHolderGate.watchModesBlocked(
+            holderEnabled: config.ptyHolderEnabled,
+            holderSupported: holderRegistry?.canSpawn == true)
+        if NightwatchHolderGate.refusesMode(params.mode, whileBlocked: blocked) {
             return RPCResponse(error: NightwatchHolderGate.modeRefusal)
         }
         try await db.config.setNightwatchMode(params.mode)

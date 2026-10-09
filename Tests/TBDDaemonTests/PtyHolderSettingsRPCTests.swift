@@ -158,15 +158,21 @@ struct PtyHolderSettingsRPCTests {
 
     // MARK: - Codable back-compat
 
-    /// An older daemon sends neither field. `enabled` falls through to the
-    /// shipped default rather than pretending the transport is live, and
-    /// `supported` is honestly false — which greys the toggle out instead of
-    /// offering a switch that daemon would ignore.
+    /// An older daemon sends neither field, and both absences read false
+    /// rather than resolving through the shipped default. That daemon has no
+    /// holder path, so it is running no holder-backed session whatever this
+    /// install's default says — and calling the transport live would grey out
+    /// the Nightwatch controls it can still honor. The first assertion
+    /// discriminates only because the shipped default is the opposite value,
+    /// which the second one pins.
     @Test("capabilities JSON without the pty-holder fields decodes conservatively")
     func capabilitiesDecodeBackCompat() throws {
         let json = Data(#"{"controlModeEnabled":true,"controlModeSupported":false}"#.utf8)
         let result = try JSONDecoder().decode(DaemonCapabilitiesResult.self, from: json)
-        #expect(result.ptyHolderEnabled == Config.ptyHolderDefault)
+        #expect(result.ptyHolderEnabled == false)
+        #expect(
+            Config.ptyHolderDefault == true,
+            "an absent field would otherwise be indistinguishable from the default")
         #expect(result.ptyHolderSupported == false)
     }
 
