@@ -458,7 +458,9 @@ extension WorktreeLifecycle {
                 // would hand it a correctly-fetched branch and a valid directory
                 // to destroy. Failing the create is still right (the outer catch
                 // drops the row); destroying the checkout is not.
-                await createdCheckouts.record(worktreeID: worktreeID, path: worktree.path)
+                await createdCheckouts.record(
+                    worktreeID: worktreeID, path: worktree.path,
+                    foreignHead: checkoutPRHead && worktree.prNumber != nil)
                 resultPath = worktree.path
                 resultBranch = fetchedPullHeadBranch ?? worktree.branch
                 if let fetchedPullHeadBranch {
@@ -676,7 +678,7 @@ extension WorktreeLifecycle {
         // the create it describes.
         let madeCheckout = await createdCheckouts.take(worktreeID: worktreeID)
         if let row = deleted, let madeCheckout {
-            await readoptCheckoutOfFailedCreate(row: row, checkoutPath: madeCheckout)
+            await readoptCheckoutOfFailedCreate(row: row, checkout: madeCheckout)
         }
         return WorktreeIDDelta(
             worktreeID: worktreeID, creationFailed: true,
@@ -695,13 +697,37 @@ extension WorktreeLifecycle {
     /// the old display name. A failure is logged and leaves the checkout
     /// reported by reconcile; it never propagates, because the rollback it runs
     /// inside must finish.
-    private func readoptCheckoutOfFailedCreate(row: Worktree, checkoutPath: String) async {
+    private func readoptCheckoutOfFailedCreate(
+        row: Worktree, checkout: CreatedCheckoutLedger.Checkout
+    ) async {
+        let checkoutPath = checkout.path
         guard let repoID = row.repoID else { return }
         guard FileManager.default.fileExists(atPath: checkoutPath) else { return }
         do {
             let outcome = try await adoptWorktree(
                 repoID: repoID, path: checkoutPath, displayName: row.displayName)
             let adopted = outcome.worktree
+            // A tree fetched from a fork keeps its foreign-head stamp, so folder
+            // trust is never pre-answered for it. The stamp is read from the
+            // row and from the ledger (the row's own write can be the step that
+            // failed). A failed stamp is the dangerous direction: an active,
+            // unstamped row for foreign contents. So it is never left standing:
+            // the new row is deleted again (it has no terminals, so nothing else
+            // hangs off it) and the checkout stays on disk, reported by
+            // reconcile for the user to adopt deliberately.
+            if row.foreignHead || checkout.foreignHead {
+                do {
+                    try await db.worktrees.markForeignHead(id: adopted.id)
+                } catch {
+                    logger.error("failed create \(row.id, privacy: .public): could not stamp the re-adopted fork checkout at \(checkoutPath, privacy: .public) as foreign-head (\(error.localizedDescription, privacy: .public)); removing its row so no unstamped row stands for it")
+                    do {
+                        try await db.worktrees.delete(id: adopted.id)
+                    } catch {
+                        logger.error("failed create \(row.id, privacy: .public): could not remove the unstamped row \(adopted.id, privacy: .public) for the fork checkout at \(checkoutPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                    return
+                }
+            }
             logger.info("failed create \(row.id, privacy: .public) left its checkout at \(checkoutPath, privacy: .public); tracking it as worktree \(adopted.id, privacy: .public)")
             subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
                 worktreeID: adopted.id, repoID: adopted.repoID,
