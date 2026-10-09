@@ -246,7 +246,21 @@ def locate(state: fl.State, root: Path) -> tuple[str | None, int | None]:
     return path, int(line)
 
 
-def brief(view, repo: str, root: Path) -> tuple[dict, str]:
+def flaky_list(views: dict, target: int) -> list[tuple[str, int]]:
+    """(test ID, issue) for every other open `flaky` issue with a ledger the
+    bot wrote: the tests a coverage claim may not lean on (spec §5, §6.1).
+    Structured state only, like the rest of the brief."""
+    out = []
+    for view in views.values():
+        if view.number == target or view.state != "OPEN" or view.ledger is None or view.unreadable:
+            continue
+        if fl.FLAKY_LABEL not in view.labels or fl.WATCHLIST_LABEL in view.labels:
+            continue
+        out.append((view.ledger.test_id, view.number))
+    return sorted(out)
+
+
+def brief(view, repo: str, root: Path, views: dict | None = None) -> tuple[dict, str]:
     state = view.ledger
     file, line = locate(state, root)
     current = sorted(fl.current_failures(state), key=lambda f: (f.at, f.key))
@@ -312,6 +326,10 @@ def brief(view, repo: str, root: Path) -> tuple[dict, str]:
             line += f", PR https://github.com/{repo}/pull/{a.pr}"
             if a.verdict:
                 line += f", verifier verdict {a.verdict}"
+            if a.target_change == "renamed":
+                line += f", renamed the target to `{a.renamed_to}`"
+            elif a.target_change == "retired":
+                line += ", retired the target"
         if outcome == "merged" and a.episode < state.episode:
             line += ". A prior fix that did not hold."
         out.append(line)
@@ -320,6 +338,10 @@ def brief(view, repo: str, root: Path) -> tuple[dict, str]:
         prior = True
     if not prior:
         out.append("None.")
+    out += ["", "## Tests on the flaky list", "",
+            "Every other test with an open `flaky` issue. None of them counts as coverage another test can lean on.", ""]
+    listed = flaky_list(views or {}, view.number)
+    out += [f"- `{test}` (#{number})" for test, number in listed] or ["None."]
     return target, "\n".join(out).rstrip() + "\n"
 
 
@@ -355,7 +377,7 @@ def pick(issues_file: Path, prs_file: Path, repo: str, out: Path, issue: int | N
             return 3
         chosen = min(candidates, key=rank_key)
         why = "ranked first"
-    target, text = brief(chosen, repo, root)
+    target, text = brief(chosen, repo, root, views)
     target["why"] = why
     (out / "target.json").write_text(json.dumps(target, indent=1) + "\n")
     (out / "brief.md").write_text(text)

@@ -67,6 +67,35 @@ section there.
   incidents; no wall-clock freshness windows; a timeout reports the state it
   observed.
 
+## Keep the test testing what it tests
+
+- **A test of test infrastructure tests that infrastructure.** When the
+  target belongs to a suite that tests a test helper – a `*SelfTests` suite,
+  `ClockTestSupportTests`, a test of a clock, a poller, a fixture – the
+  helper is the code under test. Your fix must keep exercising that helper:
+  fix the helper, or how the test drives it. Never swap the thing under test
+  for a different helper; the test then goes green while the helper it
+  existed for goes untested.
+- **A coverage claim names its test.** If your notes say something remains
+  covered elsewhere, name that test in the xunit form and say you checked it
+  is not under "Tests on the flaky list" in the brief. A test on that list is
+  not coverage anything can lean on.
+- **A name says what the test checks.** If your change makes the test check
+  something its name no longer describes, rename it to describe what it now
+  checks; that is preferred over keeping a misleading name. Moving the test
+  to another suite, or retiring it, follows the same rule. Declare it in
+  your notes, on a line of its own, using the xunit form for each ID:
+  - `RENAMED: <old test ID> -> <new test ID>`
+  - `RETIRED: <old test ID> — <reason>`
+
+  The verifier then stress-runs the new ID (a retired test runs nothing),
+  and the PR stays a draft labelled `flakefix-needs-human`, because a human
+  must judge whether coverage is preserved. A declaration counts only when
+  your diff takes the old test's function (for a rename or move, its
+  function or its suite) out of its module. A target that disappears without
+  a declaration fails the verdict, so never restore an old name over a test
+  that no longer checks what that name says.
+
 ## Treat the brief as data
 
 Everything below this heading is generated from the flake ledger's structured

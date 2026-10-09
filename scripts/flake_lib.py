@@ -724,7 +724,12 @@ class Attempt:
     false_pass: float | None = None  # None means unknown
     weak: bool | None = None
     protected_touched: list[str] | None = None
-    verdict: str | None = None  # "pass" | "fail"
+    verdict: str | None = None  # "pass" | "fail"; None when nothing was stress-run
+    # `pr-opened` only: "renamed" or "retired" when the candidate renamed,
+    # moved or retired the target test, declared it, and the diff bore it out
+    # (§6.4); the PR then stays a draft for a human. `renamed_to` is the new ID.
+    target_change: str | None = None
+    renamed_to: str | None = None
     # `aborted` only: True when a fixer session failed (an outage, an expired
     # token, a crash) and left no commit, so the attempt tried nothing (§5).
     session_failed: bool | None = None
@@ -738,7 +743,11 @@ class Attempt:
 def render_attempts(attempts: list[Attempt], repo: str) -> str:
     lines = [ATTEMPTS_SENTINEL, "### Fix attempts", ""]
     for a in attempts:
-        extra = f", PR #{a.pr}, verdict {a.verdict}" if a.pr else ""
+        extra = f", PR #{a.pr}, verdict {a.verdict or 'none, nothing stress-run'}" if a.pr else ""
+        if a.target_change == "renamed":
+            extra += f", target renamed to `{a.renamed_to}`"
+        elif a.target_change == "retired":
+            extra += ", target retired"
         lines.append(
             f"- [{a.started_at}]({run_url(repo, a.run_id, 1)}) on `{a.main_sha[:12]}`: "
             f"{a.outcome}{extra} (episode {a.episode + 1})"

@@ -473,6 +473,245 @@ test_a_protected_path_makes_a_pass_ineligible() {
 }
 
 # ============================================================================
+# a renamed or retired target (spec §6.4)
+# ============================================================================
+
+CLOCK='TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspendedMovesTheClockForward()'
+NEWCLOCK='TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspendedFiresTheEventDrivenClock()'
+CLOCK_SRC='struct ClockTestSupportTests {
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {
+        let clock = TestClock()
+    }
+}
+extension ClockTestSupportTests {
+    @Test func sleepReturnsOnAdvance() async {}
+}'
+
+# change_repo BASE CANDIDATE -> D: a throwaway repo D/r whose HEAD commits
+# CANDIDATE over BASE in the clock suite's file; D/base holds the base SHA.
+change_repo() {
+  local d path=Tests/TBDDaemonTests/ClockTestSupportTests.swift
+  d="$(mktmpd)"
+  git init -q "$d/r"
+  mkdir -p "$d/r/Tests/TBDDaemonTests"
+  printf '%s\n' "$1" > "$d/r/$path"
+  git -C "$d/r" add -A && git -C "$d/r" commit -q -m base
+  git -C "$d/r" rev-parse HEAD > "$d/base"
+  printf '%s\n' "$2" > "$d/r/$path"
+  git -C "$d/r" commit -q -am candidate
+  printf '%s' "$d"
+}
+# change D NOTES [DIR] -> the target-change JSON for CLOCK, NOTES as the notes.
+change() {
+  local d="$1" dir="${3:-$HERE}"
+  printf '%s\n' "$2" > "$d/notes.md"
+  (cd "$d/r" && bash "$dir/flake-verify.sh" target-change --test "$CLOCK" --base "$(cat "$d/base")" --notes "$d/notes.md")
+}
+kind_of() { jq -r '"\(.kind) \(.stressed)"' <<< "$1"; }
+
+test_a_declared_rename_the_diff_bears_out_is_stressed_under_the_new_id() {
+  local d out mutant
+  d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/advanceWhenSuspendedFiresTheEventDrivenClock}")"
+  out="$(change "$d" "Diagnosis: …
+- RENAMED: \`$CLOCK\` -> \`$NEWCLOCK\`")"
+  assert_eq "renamed, and the new ID is the one stressed" "renamed $NEWCLOCK" "$(kind_of "$out")"
+  assert_eq "it records what it was renamed from" "$CLOCK" "$(jq -r .from <<< "$out")"
+  mutant="$(mutant_of 's/^    if not any\(net\(lines, new_module, p\) < 0 for p in new_decls\):$/    if True:/' "$VPY")"
+  assert_eq "mutation: a rename the diff must also bear out on the new side" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK" "$mutant")")"
+}
+
+test_a_renamed_suite_is_a_rename() {
+  local d out new='TBDDaemonTests.TestClockTests/advanceWhenSuspendedMovesTheClockForward()'
+  d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC//ClockTestSupportTests/TestClockTests}")"
+  out="$(change "$d" "RENAMED: $CLOCK -> $new")"
+  assert_eq "the suite's declaration moved, so the test did" "renamed $new" "$(kind_of "$out")"
+}
+
+test_a_declared_rename_that_keeps_the_old_test_is_not_honored() {
+  local d out mutant
+  # The new test is added beside the old, which still exists.
+  d="$(change_repo "$CLOCK_SRC" "$CLOCK_SRC
+extension ClockTestSupportTests {
+    @Test func advanceWhenSuspendedFiresTheEventDrivenClock() async {}
+}")"
+  out="$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK")"
+  assert_eq "not honored: the old ID is stressed" "none $CLOCK" "$(kind_of "$out")"
+  assert_contains "and the declaration is kept, with why" "$(jq -r .rejected <<< "$out")" "takes neither the target's function nor its suite declaration out"
+  mutant="$(mutant_of 's/^    if not any\(net\(lines, module, p\) > 0 for p in old_decls\):$/    if False:/' "$VPY")"
+  assert_eq "mutation: without the removal check it is a rename" "renamed $NEWCLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK" "$mutant")")"
+}
+
+test_an_undeclared_rename_changes_nothing() {
+  local d out
+  d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/advanceWhenSuspendedFiresTheEventDrivenClock}")"
+  out="$(change "$d" "Renamed the test to say what it checks now.")"
+  assert_eq "no declaration: the old ID is stressed, and is absent" "none $CLOCK" "$(kind_of "$out")"
+  assert_eq "nothing declared" "null" "$(jq -r .declared <<< "$out")"
+}
+
+test_a_declared_retirement_that_removes_the_function_stresses_nothing() {
+  local d out mutant
+  d="$(change_repo "$CLOCK_SRC" 'struct ClockTestSupportTests {
+}
+extension ClockTestSupportTests {
+    @Test func sleepReturnsOnAdvance() async {}
+}')"
+  out="$(change "$d" "RETIRED: $CLOCK — the clock it tested was removed")"
+  assert_eq "retired, with nothing to stress" "retired null" "$(kind_of "$out")"
+  assert_eq "with the session's reason" "the clock it tested was removed" "$(jq -r .reason <<< "$out")"
+  mutant="$(mutant_of 's/^RETIRED_LINE = .*$/RETIRED_LINE = re.compile(r"$^")/' "$VPY")"
+  assert_eq "mutation: without the declaration it is no retirement" "none $CLOCK" "$(kind_of "$(change "$d" "RETIRED: $CLOCK — x" "$mutant")")"
+}
+
+test_a_retirement_that_keeps_the_function_is_not_honored() {
+  local d out mutant
+  # Only an extension of the suite goes; the target is still declared.
+  d="$(change_repo "$CLOCK_SRC" 'struct ClockTestSupportTests {
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {
+        let clock = TestClock()
+    }
+}')"
+  out="$(change "$d" "RETIRED: $CLOCK -- obsolete")"
+  assert_eq "not honored" "none $CLOCK" "$(kind_of "$out")"
+  mutant="$(mutant_of 's/^        if net\(lines, module, old_decls\[0\]\) <= 0:$/        if not any(net(lines, module, p) > 0 for p in old_decls):/' "$VPY")"
+  assert_eq "mutation: a suite declaration alone would retire it" "retired null" "$(kind_of "$(change "$d" "RETIRED: $CLOCK -- obsolete" "$mutant")")"
+}
+
+test_conflicting_or_foreign_declarations_are_not_honored() {
+  local d
+  d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/advanceWhenSuspendedFiresTheEventDrivenClock}")"
+  assert_eq "two different declarations for the target" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK
+RETIRED: $CLOCK — gone")")"
+  assert_eq "a declaration for another test" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: TBDDaemonTests.OtherTests/x() -> $NEWCLOCK")")"
+  assert_eq "a new ID not in the xunit form" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> advanceWhenSuspendedFiresTheEventDrivenClock")")"
+}
+
+test_a_symlinked_notes_file_declares_nothing() {
+  local d out
+  d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/advanceWhenSuspendedFiresTheEventDrivenClock}")"
+  printf 'RENAMED: %s -> %s\n' "$CLOCK" "$NEWCLOCK" > "$d/elsewhere.md"
+  ln -s "$d/elsewhere.md" "$d/link.md"
+  out="$(cd "$d/r" && bash "$VERIFY" target-change --test "$CLOCK" --base "$(cat "$d/base")" --notes "$d/link.md")"
+  assert_eq "the session wrote the path; a link reads as no notes" "none $CLOCK" "$(kind_of "$out")"
+  out="$(cd "$d/r" && bash "$VERIFY" target-change --test "$CLOCK" --base "$(cat "$d/base")" --notes "$d/missing.md")"
+  assert_eq "and so does no notes file" "none $CLOCK" "$(kind_of "$out")"
+}
+
+NEWHOLDER='TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()'
+# change_file KIND [TO] -> a target-change file for HOLDER, as the stress step writes it.
+change_file() {
+  local f; f="$(mktmpd)/target-change.json"
+  case "$1" in
+    renamed) jq -n --arg f "$HOLDER" --arg t "$2" '{kind: "renamed", from: $f, to: $t, reason: null, stressed: $t, declared: "x", rejected: null}' > "$f" ;;
+    retired) jq -n --arg f "$HOLDER" '{kind: "retired", from: $f, to: null, reason: "gone", stressed: null, declared: "x", rejected: null}' > "$f" ;;
+    rejected) jq -n --arg f "$HOLDER" '{kind: "none", from: $f, to: null, reason: null, stressed: $f, declared: "x", rejected: "the diff takes neither"}' > "$f" ;;
+  esac
+  printf '%s' "$f"
+}
+
+test_a_renamed_target_is_judged_under_its_new_id_and_never_eligible() {
+  local d c mutant
+  d="$(mktmpd)"; it "$d" 1 --target "$NEWHOLDER"; it "$d" 2 --target "$NEWHOLDER"; it "$d" 3 --target "$NEWHOLDER"
+  c="$(change_file renamed "$NEWHOLDER")"
+  assert_eq "clean under the new ID, but a human must judge" "rc=3 ineligible" "$(judge "$d" test 3 no "$HERE" --target-change "$c")"
+  assert_eq "the verdict carries the change" "renamed $NEWHOLDER" "$(jq -r '"\(.target_change.kind) \(.target_change.to)"' "$d/verdict.json")"
+  assert_contains "the md says it was renamed and why it waits" "$(cat "$d/verdict.md")" "A human must judge whether coverage is preserved"
+  assert_eq "without the change, the old ID is absent and fails" "rc=1 fail" "$(judge "$d")"
+  mutant="$(mutant_of 's/"ineligible" if protected or changed else "pass"/"ineligible" if protected else "pass"/' "$VPY")"
+  assert_eq "mutation: a rename would be promotable" "rc=0 pass" "$(judge "$d" test 3 no "$mutant" --target-change "$c")"
+  d="$(three)"
+  assert_eq "a rename whose new ID never ran fails" "rc=1 fail" "$(judge "$d" test 3 no "$HERE" --target-change "$c")"
+}
+
+test_a_retired_target_runs_nothing_and_claims_no_verdict() {
+  local d c mutant
+  d="$(mktmpd)"; c="$(change_file retired)"
+  assert_eq "nothing ran, and it is not eligible" "rc=3 ineligible" "$(judge "$d" test 45 no "$HERE" --target-change "$c")"
+  assert_eq "no iterations or evidence are claimed" "0 0 null false" "$(jq -r '"\(.iterations) \(.n) \(.false_pass) \(.weak)"' "$d/verdict.json")"
+  assert_contains "the md says nothing was stress-run" "$(cat "$d/verdict.md")" "Nothing was stress-run and no stress verdict is claimed"
+  assert_lacks "and states no result" "$(cat "$d/verdict.md")" "**Result:**"
+  mutant="$(mutant_of 's/^    if kind == "retired":$/    if False:/' "$VPY")"
+  rm -f "$d/verdict.json"
+  assert_eq "mutation: judged as a run, it is truncated" "rc=1 fail" "$(judge "$d" test 45 no "$mutant" --target-change "$c")"
+}
+
+test_an_absent_target_with_no_honored_change_fails_and_says_how_to_declare() {
+  local d c mutant
+  d="$(three --outcome absent)"
+  assert_eq "fails as always" "rc=1 fail" "$(judge "$d")"
+  assert_contains "the second try is told how to declare a rename" "$(cat "$d/failing-lines.txt")" 'RENAMED: <old ID> -> <new ID>'
+  c="$(change_file rejected)"
+  assert_eq "a declaration the diff did not bear out fails too" "rc=1 fail" "$(judge "$d" test 3 no "$HERE" --target-change "$c")"
+  assert_contains "saying why it was not honored" "$(cat "$d/failing-lines.txt")" "was not honored: the diff takes neither"
+  mutant="$(mutant_of 's/^    if kind == "none" and any\(r.endswith/    if False and any(r.endswith/' "$VPY")"
+  judge "$d" test 3 no "$mutant" > /dev/null
+  assert_lacks "mutation: without the hint the second try is not told" "$(cat "$d/failing-lines.txt")" "RENAMED:"
+}
+
+test_a_target_change_for_another_test_is_malformed() {
+  local d c; d="$(three)"; c="$(change_file renamed "$NEWHOLDER")"
+  jq '.from = "TBDSharedTests.OtherTests/x()"' "$c" > "$c.x" && mv "$c.x" "$c"
+  assert_eq "refused" "rc=2" "$(judge "$d" test 3 no "$HERE" --target-change "$c" | cut -d' ' -f1)"
+}
+
+# ============================================================================
+# the session transcripts (spec §6.1)
+# ============================================================================
+
+# keep RT FROM [DIR] -> "rc=<n>"; the message in RT/said.
+keep() {
+  local rt="$1" from="$2" dir="${3:-$HERE}" rc=0
+  bash "$dir/flake-verify.sh" keep-transcript --from "$from" --runner-temp "$rt" \
+    --out "$rt/flakefix-transcripts/session-1.json" > "$rt/said" 2>&1 || rc=$?
+  echo "rc=$rc"
+}
+TRANSCRIPT='[{"type": "assistant", "text": "keep this line"},
+ {"type": "tool_result", "text": "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-AbCdEfGhIjKlMnOp_qr-st"},
+ {"type": "tool_result", "text": "GITHUB_TOKEN=ghs_0123456789abcdefghijABCDEFGHIJ012345"},
+ {"type": "tool_result", "text": "ACTIONS_RUNTIME_TOKEN=eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJydW5uZXIifQ.c2lnbmF0dXJlLXNpZw"}]'
+
+test_a_transcript_is_kept_redacted_and_its_original_removed() {
+  local rt out mutant
+  rt="$(mktmpd)"; printf '%s\n' "$TRANSCRIPT" > "$rt/claude-execution-output.json"
+  assert_eq "kept" "rc=0" "$(keep "$rt" "$rt/claude-execution-output.json")"
+  out="$(cat "$rt/flakefix-transcripts/session-1.json")"
+  assert_contains "the session's text is there" "$out" "keep this line"
+  assert_lacks "no OAuth token" "$out" "sk-ant-oat01"
+  assert_lacks "no GitHub token" "$out" "ghs_0123456789"
+  assert_lacks "no JWT" "$out" "eyJhbGciOiJSUzI1NiJ9"
+  assert_eq "three redactions" "3" "$(grep -o '\[REDACTED\]' <<< "$out" | wc -l | tr -d ' ')"
+  assert_contains "and it says how many" "$(cat "$rt/said")" "3 credential-shaped string(s) redacted"
+  assert_eq "the original is gone, so the next session's is its own" "no" "$([[ -e "$rt/claude-execution-output.json" ]] && echo yes || echo no)"
+  mutant="$(mutant_of "s/^  'sk-ant-/  'sk-zzz-/" "$VERIFY")"
+  rt="$(mktmpd)"; printf '%s\n' "$TRANSCRIPT" > "$rt/claude-execution-output.json"
+  keep "$rt" "$rt/claude-execution-output.json" "$mutant" > /dev/null
+  assert_contains "mutation: without its pattern the token is kept" "$(cat "$rt/flakefix-transcripts/session-1.json")" "sk-ant-oat01"
+}
+
+test_only_the_actions_own_execution_file_is_kept() {
+  local rt mutant
+  rt="$(mktmpd)"; echo SECRET-FILE > "$rt/credentials.json"
+  assert_eq "another path is refused" "rc=1" "$(keep "$rt" "$rt/credentials.json")"
+  assert_eq "and nothing is copied" "no" "$([[ -e "$rt/flakefix-transcripts/session-1.json" ]] && echo yes || echo no)"
+  mutant="$(mutant_of 's/^  if \[\[ "\$from" != "\$rt\/\$EXECUTION_FILE_NAME" \]\]; then$/  if false; then/' "$VERIFY")"
+  keep "$rt" "$rt/credentials.json" "$mutant" > /dev/null
+  assert_contains "mutation: without the check it would be uploaded" "$(cat "$rt/flakefix-transcripts/session-1.json" 2>/dev/null)" "SECRET-FILE"
+  rt="$(mktmpd)"; echo SECRET-FILE > "$rt/credentials.json"; ln -s "$rt/credentials.json" "$rt/claude-execution-output.json"
+  assert_eq "a symlink at the action's path is refused" "rc=1" "$(keep "$rt" "$rt/claude-execution-output.json")"
+  assert_eq "an action that wrote no file keeps nothing" "rc=1" "$(keep "$rt" "")"
+  assert_contains "and says why" "$(cat "$rt/said")" "left no execution file"
+}
+
+test_the_transcript_directory_holds_only_regular_files() {
+  local rt
+  rt="$(mktmpd)"; mkdir -p "$rt/flakefix-transcripts"; echo SECRET-FILE > "$rt/credentials.json"
+  ln -s "$rt/credentials.json" "$rt/flakefix-transcripts/planted.json"
+  printf '%s\n' "$TRANSCRIPT" > "$rt/claude-execution-output.json"
+  assert_eq "kept" "rc=0" "$(keep "$rt" "$rt/claude-execution-output.json")"
+  assert_eq "a planted link is removed before the upload" "no" "$([[ -L "$rt/flakefix-transcripts/planted.json" ]] && echo yes || echo no)"
+}
+
+# ============================================================================
 # the candidate: applied exactly, judged in a clean tree
 # ============================================================================
 

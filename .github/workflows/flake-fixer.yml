@@ -244,9 +244,10 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # fix: one attempt, on macOS, with no write credential (§6). Its only output
-  # is two artifacts: `flakefix-pick`, uploaded the moment the picker chooses so
-  # that a run killed later still leaves a record of what it picked, and
-  # `flakefix-candidate`, the bundle, notes, baseline and verdict.
+  # is three artifacts: `flakefix-pick`, uploaded the moment the picker chooses
+  # so that a run killed later still leaves a record of what it picked,
+  # `flakefix-candidate`, the bundle, notes, baseline and verdict, and
+  # `flakefix-transcripts`, each session's transcript for a human (§6.1).
   fix:
     name: fix
     if: >-
@@ -320,6 +321,10 @@ jobs:
           base="$(git rev-parse HEAD)"
           echo "$base" > "$T/pick/base_sha"
           echo "base=$base" >> "$GITHUB_OUTPUT"
+          # The fixer sessions' model (§6.1, §9), named once for both. A step
+          # output, never `env`: a session can rewrite the environment the
+          # next session's inputs are read from, but not this.
+          echo "model=claude-opus-5-5" >> "$GITHUB_OUTPUT"
           echo "$GITHUB_RUN_ID" > "$T/pick/run_id"
           date -u +%Y-%m-%dT%H:%M:%SZ > "$T/pick/started_at"
           git clone -q --no-hardlinks "file://$GITHUB_WORKSPACE" "$VT"
@@ -539,10 +544,15 @@ jobs:
           # attempts the OIDC exchange for the Claude App's token (§6.1).
           github_token: ${{ github.token }}
           prompt: ${{ steps.prompt1.outputs.prompt }}
+          # §6.1: the session's reasoning and tool results in the step log,
+          # where the runner masks every secret; the transcript is also kept
+          # as an artifact, redacted (Keep session 1's transcript).
+          show_full_output: true
           # §6.1: the build and test scripts, local git, and file reading and
           # editing. No WebFetch, no WebSearch, no gh, no curl, no git push or
           # fetch.
           claude_args: |
+            --model ${{ steps.layout.outputs.model }}
             --max-turns 300
             --allowedTools "Bash(scripts/test.sh:*),Bash(scripts/swift-safe:*),Bash(bash scripts/nightly-flake-stress.sh:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git grep:*),Bash(git add:*),Bash(git commit:*),Bash(git restore:*),Bash(git rev-parse:*),Read,Write,Edit,Glob,Grep"
 
@@ -624,6 +634,39 @@ jobs:
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Session 1 left $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
 
+      # §6.1: the session's transcript, kept for a human as the
+      # `flakefix-transcripts` artifact. Whatever happened to the attempt, once
+      # the session's processes are ended. Only the action's own file is
+      # copied, redacted, by main's verifier copy checked against its
+      # fingerprint; a transcript that cannot be kept never fails the job.
+      - name: Keep session 1's transcript
+        if: always() && (steps.s1.outcome == 'success' || steps.s1.outcome == 'failure')
+        continue-on-error: true
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          EXECUTION_FILE: ${{ steps.s1.outputs.execution_file }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM EXECUTION_FILE "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
+          if [ "$(fingerprint "$VS")" != "$VS_SUM" ]; then
+            echo "Session 1's transcript was not kept: the verifier's copy of main's scripts changed." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          rc=0
+          said="$(bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE" --runner-temp "$RUNNER_TEMP" \
+            --out "$RUNNER_TEMP/flakefix-transcripts/session-1.json")" || rc=$?
+          echo "Session 1's transcript: $said" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
       # The stress run may outlive its allotment; the judge, not this step's
       # conclusion, decides, and an incomplete run is judged as truncated.
       - name: Stress try 1 (verification tree)
@@ -665,14 +708,31 @@ jobs:
           rc=0
           bash "$VS/scripts/flake-verify.sh" protected-touched --base "$base" > "$T/verify/protected.txt" || rc=$?
           [ "$rc" -le 1 ] || { echo "protected-touched failed" > "$T/verify/harness-error"; exit 1; }
+          # §6.4: a target the candidate renamed, moved or retired, as the
+          # notes declare and the diff bears out, is stressed under its new ID,
+          # or not at all. Anything else stresses the target's own ID, whose
+          # absence fails the verdict.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" target-change --test "$TEST_ID" --base "$base" --notes "$FLAKEFIX_NOTES" \
+            > "$T/verify/target-change.json" 2> "$T/verify/target-change-errors" || rc=$?
+          if [ "$rc" != 0 ]; then
+            { echo "target-change failed:"; cat "$T/verify/target-change-errors"; } > "$T/verify/harness-error"
+            exit 1
+          fi
+          stressed="$(jq -r '.stressed // empty' "$T/verify/target-change.json")"
+          if [ -z "$stressed" ]; then
+            # Retired: nothing to stress, and nothing to quarantine.
+            echo no > "$T/verify/quarantined"
+            exit 0
+          fi
           # Whether the target carries .flaky in the CANDIDATE decides which
           # retry records the judge expects (§6.4): a fix that adds a
           # quarantine must still show every run passing on its first try.
-          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$TEST_ID" > "$T/verify/quarantined"; then
-            echo "cannot tell whether the candidate quarantines $TEST_ID: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
+          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$stressed" > "$T/verify/quarantined"; then
+            echo "cannot tell whether the candidate quarantines $stressed: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
             exit 1
           fi
-          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" \
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed" \
             --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
 
       - name: Judge try 1
@@ -699,7 +759,8 @@ jobs:
           case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
           bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
             --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
-            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
+            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" \
+            --target-change "$T/verify/target-change.json" || rc=$?
           [ "$rc" = 2 ] && exit 2
           echo "verdict=$(jq -r .verdict "$T/verify/verdict.json")" >> "$GITHUB_OUTPUT"
           # A harness failure says nothing about the candidate: no second try.
@@ -793,7 +854,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           prompt: ${{ steps.prompt2.outputs.prompt }}
+          show_full_output: true
           claude_args: |
+            --model ${{ steps.layout.outputs.model }}
             --max-turns 300
             --allowedTools "Bash(scripts/test.sh:*),Bash(scripts/swift-safe:*),Bash(bash scripts/nightly-flake-stress.sh:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git grep:*),Bash(git add:*),Bash(git commit:*),Bash(git restore:*),Bash(git rev-parse:*),Read,Write,Edit,Glob,Grep"
 
@@ -884,6 +947,34 @@ jobs:
           # Nothing reads try 1's output from here on; none of it is uploaded.
           rm -rf "$T/verify-1"
 
+      - name: Keep session 2's transcript
+        if: always() && (steps.s2.outcome == 'success' || steps.s2.outcome == 'failure')
+        continue-on-error: true
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          EXECUTION_FILE: ${{ steps.s2.outputs.execution_file }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM EXECUTION_FILE "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
+          if [ "$(fingerprint "$VS")" != "$VS_SUM" ]; then
+            echo "Session 2's transcript was not kept: the verifier's copy of main's scripts changed." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          rc=0
+          said="$(bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE" --runner-temp "$RUNNER_TEMP" \
+            --out "$RUNNER_TEMP/flakefix-transcripts/session-2.json")" || rc=$?
+          echo "Session 2's transcript: $said" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
       - name: Stress try 2 (verification tree)
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
         continue-on-error: true
@@ -923,14 +1014,31 @@ jobs:
           rc=0
           bash "$VS/scripts/flake-verify.sh" protected-touched --base "$base" > "$T/verify/protected.txt" || rc=$?
           [ "$rc" -le 1 ] || { echo "protected-touched failed" > "$T/verify/harness-error"; exit 1; }
+          # §6.4: a target the candidate renamed, moved or retired, as the
+          # notes declare and the diff bears out, is stressed under its new ID,
+          # or not at all. Anything else stresses the target's own ID, whose
+          # absence fails the verdict.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" target-change --test "$TEST_ID" --base "$base" --notes "$FLAKEFIX_NOTES" \
+            > "$T/verify/target-change.json" 2> "$T/verify/target-change-errors" || rc=$?
+          if [ "$rc" != 0 ]; then
+            { echo "target-change failed:"; cat "$T/verify/target-change-errors"; } > "$T/verify/harness-error"
+            exit 1
+          fi
+          stressed="$(jq -r '.stressed // empty' "$T/verify/target-change.json")"
+          if [ -z "$stressed" ]; then
+            # Retired: nothing to stress, and nothing to quarantine.
+            echo no > "$T/verify/quarantined"
+            exit 0
+          fi
           # Whether the target carries .flaky in the CANDIDATE decides which
           # retry records the judge expects (§6.4): a fix that adds a
           # quarantine must still show every run passing on its first try.
-          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$TEST_ID" > "$T/verify/quarantined"; then
-            echo "cannot tell whether the candidate quarantines $TEST_ID: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
+          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$stressed" > "$T/verify/quarantined"; then
+            echo "cannot tell whether the candidate quarantines $stressed: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
             exit 1
           fi
-          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" \
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed" \
             --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
 
       - name: Judge try 2
@@ -957,7 +1065,8 @@ jobs:
           case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
           bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
             --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
-            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
+            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" \
+            --target-change "$T/verify/target-change.json" || rc=$?
           [ "$rc" = 2 ] && exit 2
           echo "verdict=$(jq -r .verdict "$T/verify/verdict.json")" >> "$GITHUB_OUTPUT"
           cat "$T/verify/verdict.md" >> "$GITHUB_STEP_SUMMARY"
@@ -1058,6 +1167,18 @@ jobs:
           path: ${{ runner.temp }}/flakefix/
           if-no-files-found: ignore
           retention-days: 7  # spec §11
+
+      # §6.1: each session's transcript, as the Keep steps left it, for a human
+      # reading why a fix took the shape it did. Repository content only, with
+      # credential-shaped strings redacted; nothing reads it back.
+      - name: Upload the session transcripts
+        if: always() && steps.pick.outputs.attempted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flakefix-transcripts
+          path: ${{ runner.temp }}/flakefix-transcripts/
+          if-no-files-found: ignore
+          retention-days: 14  # spec §11
 
       # A failed session – an outage, an expired token, a crash – would
       # otherwise leave the job green under `continue-on-error` (§8). Last, so

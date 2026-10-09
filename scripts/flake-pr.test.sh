@@ -80,6 +80,23 @@ test_the_session_prompt_states_each_tests_claude_rule() {
   done
 }
 
+test_the_session_prompt_keeps_the_test_testing_what_it_tests() {
+  local text needle
+  text="$(cat "$PROMPT")"
+  for needle in "A test of test infrastructure tests that infrastructure" "Never swap the thing under test" \
+      "A coverage claim names its test" "Tests on the flaky list" "A name says what the test checks" \
+      'RENAMED: <old test ID> -> <new test ID>' 'RETIRED: <old test ID> — <reason>' "flakefix-needs-human" \
+      "never restore an old name"; do
+    assert_contains "states: $needle" "$text" "$needle"
+  done
+  # The format the prompt teaches is the one the verifier reads.
+  assert_eq "its RENAMED line parses" "renamed" "$(python3 -c '
+import re, sys; sys.path.insert(0, sys.argv[1])
+import importlib.util as u
+s = u.spec_from_file_location("v", sys.argv[1] + "/flake-verify.py"); v = u.module_from_spec(s); sys.modules["v"] = v; s.loader.exec_module(v)
+print("renamed" if v.RENAMED_LINE.match("RENAMED: A.B/c() -> A.B/d()") and v.RETIRED_LINE.match("RETIRED: A.B/c() — gone") else "no")' "$HERE")"
+}
+
 test_the_session_prompt_has_its_placeholders() {
   local text p
   text="$(cat "$PROMPT")"
@@ -320,6 +337,56 @@ test_a_strong_candidate_gets_none_of_the_weak_markers() {
   assert_lacks "no label" "$log" "flakefix-weak-evidence"
   assert_lacks "no lead block" "$log" "**Weak evidence.**"
   assert_contains "the numbers sit under the evidence" "$log" "Numbers: scope test, baseline 1 of 20, p = 0.05, N = 59, cap 82, false-pass probability 4.9%"
+}
+
+# A candidate that renamed or retired its target (§6.4, §7): a draft, labelled
+# for a human, with the note leading the body, and never a success status.
+NEWHOLDER='TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()'
+changed_verdict() { # KIND VERDICT -> the verdict JSON
+  jq -c --arg k "$1" --arg v "$2" --arg f "$HOLDER" --arg t "$NEWHOLDER" '. + {verdict: $v, reasons: (if $v == "fail" then .reasons else [] end),
+      target_change: {kind: $k, from: $f, to: (if $k == "renamed" then $t else null end), reason: (if $k == "retired" then "the lock it tested is gone @someone" else null end),
+        stressed: (if $k == "renamed" then $t else null end), declared: "x", rejected: null}}
+    + (if $k == "retired" then {iterations: 0, n: 0, false_pass: null, weak: false, bound: null} else {} end)' <<< "$FAILED"
+}
+
+test_a_renamed_target_opens_a_draft_for_a_human() {
+  local d log body mutant; d="$(world "$(changed_verdict renamed ineligible)")"; routes "$d"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  log="$(logged "$d")"
+  assert_contains "a draft" "$log" "--draft"
+  assert_contains "never success: a human must judge the rename" "$log" "-f state=failure -f context=flakefix/stress -f description=not eligible for ready, a human must judge: target test renamed; no failure observed in 59 runs under its new ID"
+  assert_contains "the needs-human label is created" "$log" '"name": "flakefix-needs-human"'
+  assert_contains "and added to the PR" "$log" '"labels": ["flakefix-needs-human"]'
+  assert_eq "the label goes on before the status" "1" "$(awk '/issues\/77\/labels/{l=NR} /statuses\//{s=NR} END{print (l && s && l < s) ? 1 : 0}' "$d/log")"
+  body="$(awk '/pr create/{on=1; next} on && /^  STDIN /{sub(/^  STDIN /, ""); print; next} on{exit}' "$d/log")"
+  assert_contains "the body leads with the note" "$(head -1 <<< "$body")" "The target test was renamed; a human must judge whether coverage is preserved."
+  assert_contains "naming the new ID" "$body" "is now \`$NEWHOLDER\`"
+  assert_eq "recorded the rename beside a stress pass" "pr-opened pass renamed $NEWHOLDER" "$(recorded "$d" | jq -r '"\(.outcome) \(.verdict) \(.target_change) \(.renamed_to)"')"
+  mutant="$(mutant_of 's/^  if \[\[ "\$change" == renamed \|\| "\$change" == retired \]\]; then$/  if false; then/' "$PR_SH")"
+  d="$(world "$(changed_verdict renamed ineligible)")"; routes "$d"; publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: without the check no label is added" "$(logged "$d")" "flakefix-needs-human\"]"
+}
+
+test_a_retired_target_opens_a_draft_claiming_no_stress_verdict() {
+  local d log body; d="$(world "$(changed_verdict retired ineligible)")"; routes "$d"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  log="$(logged "$d")"
+  assert_contains "failure, saying nothing ran" "$log" "description=not eligible for ready, a human must judge: target test retired; nothing was stress-run"
+  assert_contains "labelled for a human" "$log" '"labels": ["flakefix-needs-human"]'
+  body="$(awk '/pr create/{on=1; next} on && /^  STDIN /{sub(/^  STDIN /, ""); print; next} on{exit}' "$d/log")"
+  assert_contains "the body says it was retired" "$(head -1 <<< "$body")" "The target test was retired; a human must judge whether coverage is preserved."
+  assert_contains "with the session's reason, defused" "$body" 'the lock it tested is gone @​someone'
+  assert_lacks "and no numbers line" "$body" "Numbers:"
+  assert_eq "recorded with no stress verdict" "pr-opened null retired null" "$(recorded "$d" | jq -r '"\(.outcome) \(.verdict) \(.target_change) \(.renamed_to)"')"
+}
+
+test_a_rename_whose_stress_failed_is_still_labelled_and_a_plain_fail_is_not() {
+  local d; d="$(world "$(changed_verdict renamed fail)")"; routes "$d"
+  publish "$d" > /dev/null
+  assert_contains "labelled" "$(logged "$d")" '"labels": ["flakefix-needs-human"]'
+  assert_eq "recorded as a failed rename" "fail renamed" "$(recorded "$d" | jq -r '"\(.verdict) \(.target_change)"')"
+  d="$(world "$FAILED")"; routes "$d"; publish "$d" > /dev/null
+  assert_lacks "a plain fail is not" "$(logged "$d")" "flakefix-needs-human"
 }
 
 test_the_pr_body_carries_every_required_field() {
@@ -875,6 +942,74 @@ session_token() {
 }
 test_the_session_gets_the_read_only_token_explicitly() { check "both sessions get github_token explicitly" session_token 'github_token: ${{ github.token }}' 'show_full_output: false'; }
 
+# The model is named once, as a step output taken before any session, and both
+# sessions use it; never through `env`, which a session can rewrite.
+session_model() {
+  local s
+  step "$1" fix "Lay out the attempt" | grep -qF 'echo "model=claude-opus-5-5" >> "$GITHUB_OUTPUT"' || return 1
+  [[ "$(grep -c -- '--model' "$1")" == 2 ]] || return 1
+  for s in "Fixer session 1" "Fixer session 2"; do
+    step "$1" fix "$s" | grep -qF -- '--model ${{ steps.layout.outputs.model }}' || return 1
+  done
+}
+test_both_sessions_run_on_the_one_named_model() {
+  check "both sessions run on the model the layout names" session_model 'echo "model=claude-opus-5-5"' 'echo "model=claude-sonnet-5-5"'
+  check "session 2 takes it from the layout too" session_model \
+    $'show_full_output: true\n          claude_args: |\n            --model ${{ steps.layout.outputs.model }}\n            --max-turns 300' \
+    $'show_full_output: true\n          claude_args: |\n            --model ${{ env.MODEL }}\n            --max-turns 300'
+}
+
+# Each session's reasoning reaches the log, and its transcript an artifact:
+# kept after the session, from the action's own file, by the checked copy.
+session_transcripts() {
+  local s i block job
+  for s in "Fixer session 1" "Fixer session 2"; do
+    step "$1" fix "$s" | grep -q '^          show_full_output: true$' || return 1
+  done
+  job="$(job_block "$1" fix)"
+  for i in 1 2; do
+    block="$(step "$1" fix "Keep session $i's transcript")"
+    grep -qF "if: always() && (steps.s$i.outcome == 'success' || steps.s$i.outcome == 'failure')" <<< "$block" &&
+      grep -qF "EXECUTION_FILE: \${{ steps.s$i.outputs.execution_file }}" <<< "$block" &&
+      grep -qF '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' <<< "$block" &&
+      grep -qF 'bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE"' <<< "$block" &&
+      grep -qF "flakefix-transcripts/session-$i.json" <<< "$block" &&
+      grep -q '^        continue-on-error: true$' <<< "$block" || return 1
+    awk -v e="name: End session $i" -v k="name: Keep session $i's transcript" \
+      'index($0, e){a=NR} index($0, k){b=NR} END{exit !(a && b && a < b)}' <<< "$job" || return 1
+  done
+  block="$(step "$1" fix "Upload the session transcripts")"
+  grep -qF 'name: flakefix-transcripts' <<< "$block" && grep -qF 'retention-days: 14' <<< "$block" &&
+    grep -qF 'path: ${{ runner.temp }}/flakefix-transcripts/' <<< "$block" && grep -qF 'if: always()' <<< "$block"
+}
+test_each_sessions_transcript_is_logged_and_kept() {
+  check "both sessions show their full output" session_transcripts 'show_full_output: true' 'show_full_output: false'
+  check "each transcript is kept only from the checked copy" session_transcripts \
+    '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' '[ "$VS" = "" ]'
+  check "and uploaded for 14 days" session_transcripts 'retention-days: 14' 'retention-days: 90'
+}
+
+# The stress steps stress what target-change names, and the judges read it.
+target_change_wired() {
+  local i block
+  for i in 1 2; do
+    block="$(step "$1" fix "Stress try $i")"
+    awk '/flake-verify.sh" target-change --test "\$TEST_ID" --base "\$base" --notes "\$FLAKEFIX_NOTES"/{c=NR}
+         /flake-verify.sh" quarantined --test "\$stressed"/{q=NR}
+         /flake-verify.sh" stress .*--test "\$stressed"/{s=NR}
+         END{exit !(c && q && s && c < q && q < s)}' <<< "$block" || return 1
+    grep -qF 'stressed="$(jq -r '"'"'.stressed // empty'"'"' "$T/verify/target-change.json")"' <<< "$block" || return 1
+    step "$1" fix "Judge try $i" | grep -qF -- '--target-change "$T/verify/target-change.json"' || return 1
+  done
+}
+test_a_renamed_target_is_stressed_under_the_id_target_change_names() {
+  check "the stress steps stress the ID target-change names" target_change_wired \
+    'flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed"' \
+    'flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID"'
+  check "and the judges read it" target_change_wired \
+    '            --target-change "$T/verify/target-change.json" || rc=$?' '            || rc=$?' all
+}
+
 tools_clean() {
   local tools
   tools="$(job_block "$1" fix | grep -- '--allowedTools')"
@@ -987,7 +1122,7 @@ test_the_verifier_fingerprint_sees_edits_new_files_and_symlinks() {
   local fn vs a b c d
   fn="$(fingerprint_fn "$WORKFLOW")"
   assert_contains "the fingerprint is written in the workflow" "$fn" 'fingerprint() {'
-  assert_eq "every step that fingerprints uses the same function" "3" "$(grep -cF -- "$fn" "$WORKFLOW")"
+  assert_eq "every step that fingerprints uses the same function" "5" "$(grep -cF -- "$fn" "$WORKFLOW")"
   assert_eq "and none takes it from the environment" "0" "$(grep -c 'VS_FINGERPRINT' "$WORKFLOW")"
   vs="$(mktmpd)"; mkdir -p "$vs/scripts"; echo one > "$vs/scripts/flake-verify.sh"
   a="$(bash -c "$fn"'; fingerprint "$1"' _ "$vs")"
@@ -1587,6 +1722,15 @@ test_a_weak_evidence_clean_pr_still_promotes() {
   mutant="$(mutant_of 's/if WEAK_CLAUSE in/if False and WEAK_CLAUSE in/' "$PR_PY")"
   d="$(pworld . "$weak")"; promote "$d" "$mutant" > /dev/null
   assert_lacks "mutation: without the weak check no label is added" "$(logged "$d")" "issues/77/labels"
+}
+
+test_a_needs_human_pr_is_never_promoted() {
+  # Even with every other condition met, a success status among them.
+  skips "a renamed or retired target" 's/^        if NEEDS_HUMAN_LABEL in pr\["labels"\]:$/        if False:/' '.labels = [{name: "flakefix-needs-human"}]'
+  local d; d="$(PMODE=status pworld '.labels = [{name: "flakefix-needs-human"}]')"
+  PMODE=status promote "$d" > /dev/null
+  assert_eq "under the status trigger too" "no" "$(promoted "$d")"
+  assert_contains "naming the label" "$(cat "$d/out")" "labelled flakefix-needs-human"
 }
 
 test_promote_writes_no_ledger_or_attempt_state() {
