@@ -155,21 +155,47 @@ why a profile was passed over:
 3. Not opted out; otherwise `optedOut`.
 4. Not in the excluded account set (limit suggestion only); otherwise
    `sameAccount`.
-5. The snapshot exists and its `fetchedAt` is within the staleness window —
-   five minutes for `.oauth`, fifteen for `.oauthToken`, the same
-   cadence-relative thresholds `ProfileUsagePresentation.staleAge` uses;
-   otherwise `noFreshReading`. A reading TBD would not present as current is
-   not a reading it should route on. A reading that stays stale usually
-   means a lapsed login or a failing poll, which only the person can fix, so
-   the skip is surfaced rather than silent (§6.1).
-6. Headroom is above the floor; otherwise `exhausted`.
+5. The snapshot exists and its `fetchedAt` is within the maximum reading age
+   (§5.1) — by default five minutes for `.oauth` and fifteen for
+   `.oauthToken`, the same cadence-relative thresholds
+   `ProfileUsagePresentation.staleAge` uses; otherwise `noFreshReading`. A
+   reading TBD would not present as current is not a reading it should route
+   on. A reading that stays stale usually means a lapsed login or a failing
+   poll, which only the person can fix, so the skip is surfaced rather than
+   silent (§6.1).
+6. Usage is below the ceiling (§5.1) in every binding window; otherwise
+   `exhausted`.
 
 **Headroom** is `1 − max(percent)/100` over the snapshot's `session`,
 `weekly_all`, and active `weekly_scoped` buckets. The binding window is the
 one that will refuse the next request, whichever it is, so the most-used
-window decides. The floor is 5%: a profile at 95% or more of any window is treated as
-full rather than ranked last, because a session landing there will die on its
-first long turn.
+window decides. A profile at or above the usage ceiling — 85% by default — in
+any window is treated as full rather than ranked last. The margin is wide on
+purpose: a reading trails the work that moves it, because it is minutes old
+when it is read and every session already on the account keeps spending while
+a new one starts. A session placed at 90% of a 5-hour window can be out of room
+before its first long turn finishes.
+
+### 5.1 The thresholds
+
+The two thresholds rules 5 and 6 apply are one value type,
+`ProfilePoolPolicy`, passed to every caller of the picker — the spawn-time
+pick, the limit suggestion (§7), and the app's display of both (§3), so the
+app's "balanced pick" cannot disagree with the daemon's:
+
+- **Usage ceiling** – a whole percent, 1–100, default 85. Stored in
+  `config.profile_balancing_usage_ceiling_percent`.
+- **Maximum reading age** – whole seconds, 60–86,400, applied to every kind
+  alike when set. Unset keeps each kind's cadence-relative window. Stored in
+  `config.profile_balancing_max_reading_age_seconds`.
+
+Both columns are nullable with no SQL default, and NULL resolves to the
+shipped value in exactly one place, `ProfilePoolPolicy.resolved`, so a later
+change to a default reaches every install that never chose. The setters refuse
+an out-of-range value rather than clamping it — a typo should say so, not
+quietly become some other threshold — and a value outside the range that
+reached the row some other way resolves to the default rather than to a
+ceiling of zero or a reading age of nothing.
 
 **Score** is `(accountLiveSessions + 1) / headroom`, lower is better, where
 `accountLiveSessions` is the sum of `liveSessions` across the candidate's
@@ -206,11 +232,13 @@ A new tri-state config flag, `profile_balancing_enabled` (shipped default
 - **At step 2 and step 3** — where the chain would return the global default
   or nothing — when the flag is on, the resolver builds the candidate set
   (profiles, snapshots, live counts) and asks the picker. A pick resolves that
-  profile through `loadResolved` exactly as the default would have been. No
-  pick falls through to today's behavior: the global default if configured,
-  else ambient. The policy fails toward the behavior the person had before
-  enabling it, never toward a refusal — a single-user tool with nothing
-  eligible should still spawn a session.
+  profile through `loadResolved` exactly as the default would have been. When
+  nothing is eligible, the session takes the picker's fallback (§6.3) if the
+  pool has any account turned away only for its reading; with no such account
+  it falls through to the global default if configured, else ambient. The
+  policy never refuses — a single-user tool with nothing eligible should still
+  spawn a session — and it never places a session against its own advice
+  silently.
 
 The candidate set is assembled by a small daemon-side helper,
 `ProfilePoolCandidateSource`, from `ModelProfileStore.list()`,
@@ -286,6 +314,40 @@ them, and by then every placed session is either a row or never started.
 Only the spawn-time pick reserves; the limit suggestion (§7) names an account
 without placing anything on it.
 
+### 6.3 When nothing is eligible
+
+Every account in the pool can be skipped at once: all at or over the ceiling,
+all with stale readings, or some of each. Falling through to the global default
+then is the wrong answer more often than not, because the default is usually
+the account that took the most sessions, and so the one most likely to be full.
+Instead the picker names a **fallback** among the candidates turned away only
+for their reading — `exhausted` or `noFreshReading`, never one that is opted
+out, has no credential, is the wrong kind, or is in an excluded account — in
+three tiers:
+
+1. **Over the ceiling but not full** – a fresh reading under 100% in every
+   window. The least loaded wins, by the same `(accountLiveSessions + 1) /
+   headroom` score the pick uses, so a burst of fallback spawns still spreads.
+2. **No fresh reading** – ranked by the same score over the last reading; a
+   profile that has never had a reading comes after every profile that has.
+3. **Full** – a fresh reading at 100% in some window, ranked by load. Reached
+   only when every account in the pool is known to be at its limit.
+
+Within a tier the pick's tie-breaks apply, so the fallback is deterministic. A
+fallback places a session, so it takes a pick reservation (§6.2) exactly as a
+pick does. The limit suggestion (§7) never uses it: a suggestion says "has
+room", and a fallback is by definition an account that does not.
+
+A fallback is never silent. The resolver logs every one at `.warning`, and the
+daemon posts one `.attentionNeeded` notification on the spawning worktree
+naming why, where, and the reading — "No account is under the 85% balancing
+limit with a fresh reading — this session started on Spare, the least used (5h
+88%)". An in-memory latch keyed by profile holds that to once per account per
+episode: a burst that all falls back to one account tells the person once, a
+fallback to a different account tells them again, and the latch clears whole
+when a balanced pick next finds an eligible account. Like the stale-account
+latch it lives only in memory, and a restart costs at most one repeat.
+
 ## 7. The switch offer on a hard limit
 
 Whenever a hard limit is reported for a terminal, `handleRateLimitDetected`
@@ -337,8 +399,10 @@ the `queuedPromptToggle` shape:
 - **Balance new Claude sessions across accounts** –
   `config.setProfileBalancingEnabled`. Help text: "When a new session would
   use the global default, pick the signed-in profile with the most room
-  instead. Repo overrides and explicit picks still win. Off by default
-  (soaking)."
+  instead, skipping any at or above 85% of a usage window or with a stale
+  reading (thresholds: `tbd profile balancing`). Repo overrides and explicit
+  picks still win. Off by default (soaking)." The ceiling in the text is the
+  one in effect.
 
 The limit offer (§7) has no toggle: it acts only on a click, so there is
 nothing for a switch to make safer.
@@ -367,21 +431,29 @@ indicator and are unchanged. The limit banner (§7) is new.
 
 ### 8.4 CLI
 
-- `tbd profile balancing on|off` – the flag, under the profile noun per the
-  soak-flag convention.
+- `tbd profile balancing [on|off] [--usage-ceiling <percent>|default]
+  [--max-reading-age <minutes>|default]` – the flag, under the profile noun
+  per the soak-flag convention, and the two thresholds of §5.1 (minutes on
+  the command line, seconds on the wire). Every option is parsed before
+  anything is written, and the command always ends by printing the settings
+  in effect; with no arguments that is all it does.
 - `tbd profile pool <name> include|exclude` – the per-profile opt-out.
 - `tbd profile list` gains a `live` column and, in `--json`, a
   `liveSessions` integer per profile plus a top-level `balancing` object
-  `{ enabled }`. This is an additive change to the
-  capacity-facts contract and is recorded in `docs/capacity-facts.md` as
-  such.
+  `{ enabled, usageCeilingPercent, maxReadingAgeSeconds }` — the ceiling in
+  effect always, the reading age only when one is set. This is an additive
+  change to the capacity-facts contract and is recorded in
+  `docs/capacity-facts.md` as such.
 
 ## 9. Data model
 
-Two migrations, each one `.sql` file with no `DEFAULT` clause:
+Three migrations, each one `.sql` file with no `DEFAULT` clause:
 
 - `config.profile_balancing_enabled INTEGER` – tri-state flag.
 - `model_profiles.pool_opt_out INTEGER` – per-profile opt-out, NULL ≡ 0.
+- `config.profile_balancing_usage_ceiling_percent INTEGER` and
+  `config.profile_balancing_max_reading_age_seconds INTEGER` – the thresholds
+  of §5.1, NULL meaning the shipped value.
 
 `ConfigRecord`, `Config`, `DaemonCapabilitiesResult`, `ModelProfileRecord`
 and `ModelProfile` gain the matching fields, decoded with `decodeIfPresent`
@@ -392,7 +464,7 @@ One new `StateDelta` case, `terminalLimitHit(TerminalLimitHitDelta)`,
 appended after the existing cases (case names are wire-visible).
 
 No new durable external resource is created. Pick reservations and the
-stale-notification latch live in daemon memory. The swap path the limit
+stale-account and fallback latches live in daemon memory. The swap path the limit
 offer reuses
 respawns into an existing tmux window and row, both already reconciled by
 `WorktreeLifecycle+Reconcile` and `AgentReaper`; the transcript copy into the
@@ -406,7 +478,9 @@ Both branches of every flag, per the repo rule.
 - **Picker** (`Tests/TBDSharedTests/ProfilePoolPickerTests.swift`) – each
   eligibility rule rejects with its own reason and admits when satisfied:
   wrong kind, missing credential, opted out, excluded account, stale
-  snapshot for each kind at its own threshold, exhausted at the floor.
+  snapshot for each kind at its own threshold, exhausted at exactly the
+  ceiling and eligible just under it, in the weekly window as in the 5-hour
+  one.
   Scoring: an empty profile beats a loaded one at equal usage; a lower-usage
   profile beats a higher one at equal load; the binding window is the
   maximum across buckets, with an inactive scoped bucket ignored. Account
@@ -414,6 +488,23 @@ Both branches of every flag, per the repo rule.
   and excluding one excludes the other. Tie-break: default, then sort order,
   then id, and the same input always yields the same output. Empty and
   all-ineligible inputs return nil with the verdicts populated.
+- **Thresholds** – the default policy is 85% with per-kind ages; a raised
+  ceiling admits and a lowered one excludes; a reading-age override applies
+  to both kinds; unset and out-of-range stored values resolve to the shipped
+  policy; the columns read NULL before any gesture; the RPC setters round-trip,
+  reset with nil and refuse out-of-range values without writing;
+  `daemon.capabilities` and `modelProfile.list` carry the stored values, and
+  results from an older daemon resolve to the shipped policy; the CLI parses
+  percents, minutes and `default`, and its status marks defaults.
+- **Fallback** – none when anything is eligible; over-the-ceiling accounts
+  fall back to the least loaded; a fresh over-ceiling reading beats a stale
+  one, a stale one beats a full one, and a never-read profile comes last;
+  opted-out, credential-less, wrong-kind and excluded profiles are never
+  chosen; ties break deterministically. Through the resolver: the session
+  lands on the fallback rather than the default, holds a reservation, and
+  notifies once per account per episode; an eligible pick ends the episode;
+  a nil worktree notifies nobody; balancing off, or a pool with nothing in it,
+  still returns the default.
 - **Flag** (`Tests/TBDDaemonTests/Config/ProfileBalancingFlagTests.swift`) –
   the three-state roster the retained-transcripts flag uses: NULL before any
   gesture, NULL survives a row written before the migration, explicit
@@ -489,9 +580,20 @@ per-profile opt-out is not a flag and has no graduation.
   and is explainable from the screen.
 - **Failing closed when no profile is eligible.** Correct for an unattended
   fleet where a wrong account is worse than no session. Wrong for a person at
-  a keyboard, who would rather have a session on the default and a
-  notification than no session; and the fallback is precisely the behavior
-  they had before enabling the flag.
+  a keyboard, who would rather have a session somewhere and a notification
+  than no session.
+- **Falling back to the global default when no profile is eligible.** It is
+  the behavior the person had before turning balancing on, which makes it
+  look safe. But the default is the account every unbalanced spawn landed on,
+  so when the whole pool is skipped it is usually the fullest account of all.
+  The fallback of §6.3 keeps the "never refuse" property and lands on the
+  least bad account instead.
+- **A fixed 5% headroom floor.** Treats an account at 94% as having room. A
+  reading is minutes old and every session already on the account keeps
+  spending, so a session placed there routinely runs out before its first
+  long turn ends; the ceiling has to leave margin for the lag, and the right
+  margin depends on how hard a fleet drives its accounts, so it is
+  configurable.
 - **Balancing above repo overrides.** Tempting because it balances more, but
   a repo override is the person telling TBD which account a repo's work
   belongs on. Overriding it silently is the kind of surprise a load
@@ -545,13 +647,16 @@ own.
 - **Headroom is measured on the binding window.** The fuller of the 5-hour
   and weekly windows decides: a profile with 5-hour room and no weekly room
   dies on its next long turn, and the weekly limit takes days to clear.
-- **Full means 95% of any window.** The 5% headroom floor is fixed; a
-  profile past it is skipped rather than ranked last, because a session
-  placed there dies on its first long turn.
+- **Full means 85% of any window, and the person can move it.** A profile at
+  or over the ceiling is skipped rather than ranked last, because a reading
+  trails the work that moves it and a session placed near the limit dies on
+  its first long turn (§5.1).
 - **A reading is current for five minutes (signed-in) or fifteen
   (setup-token)** — the thresholds the UI already uses to mark a reading
-  stale. An account skipped for a stale reading is surfaced once as a
-  notification and continuously as a Settings badge (§6.1), because only the
-  person can fix what keeps it stale.
-- **If nothing is eligible, the session starts where it would have without
-  balancing** (§12, failing closed).
+  stale — unless the person sets one age for every kind. An account skipped
+  for a stale reading is surfaced once as a notification and continuously as
+  a Settings badge (§6.1), because only the person can fix what keeps it
+  stale.
+- **If nothing is eligible, the session still starts, on the least bad
+  account in the pool, and the person is told** (§6.3). Only a pool with no
+  account in it at all falls through to the global default.

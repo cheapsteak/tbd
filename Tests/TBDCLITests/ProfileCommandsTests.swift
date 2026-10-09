@@ -216,6 +216,58 @@ struct ProfileCommandsTests {
                           "ProfileBalancing", "ProfilePool"])
     }
 
+    // MARK: - profile balancing
+
+    @Test func balancingParsesBareStateAndThresholdOptions() throws {
+        let bare = try ProfileBalancing.parse([])
+        #expect(bare.state == nil)
+        #expect(bare.usageCeiling == nil)
+        #expect(bare.maxReadingAge == nil)
+
+        let full = try ProfileBalancing.parse(["on", "--usage-ceiling", "90", "--max-reading-age", "default"])
+        #expect(full.state == "on")
+        #expect(full.usageCeiling == "90")
+        #expect(full.maxReadingAge == "default")
+    }
+
+    @Test func usageCeilingArgumentAcceptsPercentsAndDefault() throws {
+        #expect(try parseUsageCeilingArgument("85") == 85)
+        #expect(try parseUsageCeilingArgument("90%") == 90)
+        #expect(try parseUsageCeilingArgument("100") == 100)
+        #expect(try parseUsageCeilingArgument("default") == nil)
+        #expect(try parseUsageCeilingArgument("DEFAULT") == nil)
+        for bad in ["0", "101", "abc", "85.5", ""] {
+            #expect(throws: (any Error).self) { try parseUsageCeilingArgument(bad) }
+        }
+    }
+
+    @Test func maxReadingAgeArgumentTakesMinutesAndStoresSeconds() throws {
+        #expect(try parseMaxReadingAgeArgument("30") == 1800)
+        #expect(try parseMaxReadingAgeArgument("1") == 60)
+        #expect(try parseMaxReadingAgeArgument("1440") == 86_400)
+        #expect(try parseMaxReadingAgeArgument("default") == nil)
+        for bad in ["0", "1441", "-5", "ten"] {
+            #expect(throws: (any Error).self) { try parseMaxReadingAgeArgument(bad) }
+        }
+    }
+
+    @Test func balancingStatusNamesTheThresholdsAndMarksDefaults() {
+        let shipped = profileBalancingStatus(ModelProfileListResult(
+            profiles: [], profileBalancingEnabled: true))
+        #expect(shipped.contains("Profile balancing: on"))
+        #expect(shipped.contains("85% (default)"))
+        #expect(shipped.contains("5 min signed-in, 15 min token (default)"))
+
+        var tuned = ModelProfileListResult(profiles: [], profileBalancingEnabled: false)
+        tuned.profileBalancingUsageCeilingPercent = 90
+        tuned.profileBalancingMaxReadingAgeSeconds = 1800
+        let custom = profileBalancingStatus(tuned)
+        #expect(custom.contains("Profile balancing: off"))
+        #expect(custom.contains("90% —"))
+        #expect(!custom.contains("90% (default)"))
+        #expect(custom.contains("30 min, every profile"))
+    }
+
     @Test func setDefaultParsesClearFlag() throws {
         let cmd = try ProfileSetDefault.parse(["--clear"])
         #expect(cmd.clear)

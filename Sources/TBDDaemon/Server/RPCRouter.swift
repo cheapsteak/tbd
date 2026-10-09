@@ -504,6 +504,8 @@ public final class RPCRouter: Sendable {
             candidateSource: resolvedCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions)),
+            fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
@@ -937,6 +939,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetProfileBalancingEnabled:
                 return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
+            case RPCMethod.configSetProfileBalancingUsageCeiling:
+                return try await handleConfigSetProfileBalancingUsageCeiling(request.paramsData)
+            case RPCMethod.configSetProfileBalancingMaxReadingAge:
+                return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
@@ -1107,6 +1113,8 @@ public final class RPCRouter: Sendable {
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
+        result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
+        result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         return try RPCResponse(result: result)
     }
 

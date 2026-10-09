@@ -544,6 +544,39 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist balancing's usage ceiling (design 2026-09-05 §5). A value outside
+    /// `ProfilePoolPolicy.usageCeilingRange` is refused rather than clamped: a
+    /// typo should say so, not quietly become some other threshold. Nil
+    /// returns the column to NULL, the shipped default.
+    func handleConfigSetProfileBalancingUsageCeiling(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetProfileBalancingUsageCeilingParams.self, from: paramsData)
+        let range = ProfilePoolPolicy.usageCeilingRange
+        if let percent = params.percent, !range.contains(percent) {
+            return RPCResponse(
+                error: "Usage ceiling must be between \(range.lowerBound) and \(range.upperBound) percent, got \(percent)")
+        }
+        try await db.config.setProfileBalancingUsageCeilingPercent(params.percent)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist balancing's maximum reading age. Refused outside
+    /// `ProfilePoolPolicy.maxReadingAgeRange`, for the same reason as the
+    /// ceiling. Nil returns the column to NULL, each kind's own window.
+    func handleConfigSetProfileBalancingMaxReadingAge(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetProfileBalancingMaxReadingAgeParams.self, from: paramsData)
+        let range = ProfilePoolPolicy.maxReadingAgeRange
+        if let seconds = params.seconds, !range.contains(seconds) {
+            return RPCResponse(
+                error: "Maximum reading age must be between \(range.lowerBound) and \(range.upperBound) seconds, got \(seconds)")
+        }
+        try await db.config.setProfileBalancingMaxReadingAgeSeconds(params.seconds)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the schedule-based PR polling gate (default OFF, soaking) and
     /// apply it at once: the daemon stops the running PR driver and starts the
     /// other (`PRPollDriverSwitch`). The write happens inside the switch's

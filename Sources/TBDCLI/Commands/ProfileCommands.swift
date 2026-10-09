@@ -140,6 +140,12 @@ struct ProfileListJSONPayload: JSONObjectPayload {
 
     private struct Balancing: Encodable {
         let enabled: Bool
+        /// The usage ceiling in effect, in percent: the stored value, or the
+        /// shipped default when none is set.
+        let usageCeilingPercent: Int
+        /// The maximum reading age in seconds, present only when set; absent
+        /// means each credential kind keeps its own window.
+        let maxReadingAgeSeconds: Int?
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -151,8 +157,12 @@ struct ProfileListJSONPayload: JSONObjectPayload {
         var container = encoder.container(keyedBy: CodingKeys.self)
         // A daemon that sends no flag predates balancing, so nothing on it
         // balances: `false`, not the shipped default a newer daemon resolves.
+        let policy = result.profileBalancingPolicy
         try container.encode(
-            Balancing(enabled: result.profileBalancingEnabled ?? false),
+            Balancing(
+                enabled: result.profileBalancingEnabled ?? false,
+                usageCeilingPercent: policy.usageCeilingPercent,
+                maxReadingAgeSeconds: policy.maxReadingAgeSeconds),
             forKey: .balancing)
     }
 }
@@ -527,28 +537,109 @@ struct ProfileLogin: AsyncParsableCommand {
 
 // MARK: - profile balancing
 
+/// Parse `--usage-ceiling`: a whole percent in
+/// `ProfilePoolPolicy.usageCeilingRange`, or `default` (returned as nil) to
+/// restore the shipped value.
+func parseUsageCeilingArgument(_ raw: String) throws -> Int? {
+    if raw.lowercased() == "default" { return nil }
+    let range = ProfilePoolPolicy.usageCeilingRange
+    guard let percent = Int(raw.trimmingCharacters(in: CharacterSet(charactersIn: "%"))),
+          range.contains(percent) else {
+        throw ValidationError(
+            "--usage-ceiling takes a whole percent from \(range.lowerBound) to \(range.upperBound), or 'default'; got: \(raw)")
+    }
+    return percent
+}
+
+/// Parse `--max-reading-age`: whole minutes, converted to the seconds the
+/// daemon stores and bounded by `ProfilePoolPolicy.maxReadingAgeRange`, or
+/// `default` (returned as nil) to restore each credential kind's own window.
+func parseMaxReadingAgeArgument(_ raw: String) throws -> Int? {
+    if raw.lowercased() == "default" { return nil }
+    let range = ProfilePoolPolicy.maxReadingAgeRange
+    guard let minutes = Int(raw), range.contains(minutes * 60) else {
+        throw ValidationError(
+            "--max-reading-age takes whole minutes from \(range.lowerBound / 60) to \(range.upperBound / 60), or 'default'; got: \(raw)")
+    }
+    return minutes * 60
+}
+
+/// What `tbd profile balancing` prints with no arguments: the gate and the
+/// two thresholds in effect, each marked when it is the shipped default.
+func profileBalancingStatus(_ result: ModelProfileListResult) -> String {
+    let policy = result.profileBalancingPolicy
+    let enabled = result.profileBalancingEnabled ?? false
+    let ceilingNote = result.profileBalancingUsageCeilingPercent == nil ? " (default)" : ""
+    let age: String
+    if let seconds = policy.maxReadingAgeSeconds {
+        age = "\(seconds / 60) min, every profile"
+    } else {
+        let signedIn = Int(ProfilePoolPicker.stalenessWindow(for: .oauth)) / 60
+        let token = Int(ProfilePoolPicker.stalenessWindow(for: .oauthToken)) / 60
+        age = "\(signedIn) min signed-in, \(token) min token (default)"
+    }
+    return """
+        Profile balancing: \(enabled ? "on" : "off")
+          Usage ceiling:   \(policy.usageCeilingPercent)%\(ceilingNote) — skip an account at or above this in its 5-hour or weekly window
+          Reading age:     \(age) — skip an account whose usage reading is older
+        """
+}
+
 struct ProfileBalancing: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "balancing",
-        abstract: "Enable or disable spreading new sessions across profiles (default off)",
+        abstract: "Show or set how new sessions spread across profiles (default off)",
         discussion: """
             When on, new sessions land on the eligible profile with the most \
             room in its usage window, adjusted for how many sessions that \
-            account already carries.
+            account already carries. An account is skipped when its 5-hour or \
+            weekly usage is at or above the usage ceiling, or when its usage \
+            reading is older than the maximum reading age. When every account \
+            is skipped, the session goes to the least-used one and TBD posts a \
+            notification saying so.
+
+            With no arguments, prints the current settings.
             """
     )
-    @Argument(help: "on | off") var state: String
+    @Argument(help: "on | off") var state: String?
+    @Option(name: .long, help: "Skip accounts at or above this percent of any usage window (1-100, or 'default' for 85)")
+    var usageCeiling: String?
+    @Option(name: .long, help: "Skip accounts whose usage reading is older than this many minutes (1-1440, or 'default' for 5 signed-in / 15 token)")
+    var maxReadingAge: String?
+
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
+        let enabled: Bool?
+        switch state?.lowercased() {
+        case nil: enabled = nil
         case "on", "true", "enable": enabled = true
         case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state ?? "")")
         }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetProfileBalancingEnabled,
-            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
-        print("Profile balancing \(enabled ? "enabled" : "disabled").")
+        // Parse everything before writing anything, so a bad second option
+        // cannot leave the first one applied.
+        let ceiling = try usageCeiling.map { try parseUsageCeilingArgument($0) }
+        let maxAge = try maxReadingAge.map { try parseMaxReadingAgeArgument($0) }
+
+        let client = SocketClient()
+        if let enabled {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingEnabled,
+                params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
+        }
+        if let ceiling {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingUsageCeiling,
+                params: ConfigSetProfileBalancingUsageCeilingParams(percent: ceiling))
+        }
+        if let maxAge {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingMaxReadingAge,
+                params: ConfigSetProfileBalancingMaxReadingAgeParams(seconds: maxAge))
+        }
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self)
+        print(profileBalancingStatus(list))
     }
 }
 

@@ -72,7 +72,7 @@ struct ModelProfilesSettingsView: View {
                 set: { newValue in Task { await appState.setProfileBalancingEnabled(newValue) } }
             ))
             .font(.caption)
-            .help("When a new session would use the global default, pick the signed-in profile with the most room instead. Repo overrides and explicit picks still win. Off by default (soaking).")
+            .help("When a new session would use the global default, pick the signed-in profile with the most room instead, skipping any at or above \((capabilities?.profileBalancingPolicy ?? .standard).usageCeilingPercent)% of a usage window or with a stale reading (thresholds: `tbd profile balancing`). Repo overrides and explicit picks still win. Off by default (soaking).")
         }
     }
 
@@ -243,7 +243,8 @@ struct ModelProfileRow: View {
             entries: appState.modelProfiles,
             balancingOn: appState.daemonCapabilities?.profileBalancingEnabled ?? false,
             defaultProfileID: appState.defaultProfileID,
-            now: Date()
+            now: Date(),
+            policy: appState.daemonCapabilities?.profileBalancingPolicy ?? .standard
         ).contains(profile.id)
     }
 

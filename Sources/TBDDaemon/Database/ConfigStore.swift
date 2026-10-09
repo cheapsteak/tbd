@@ -166,6 +166,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.profileBalancingEnabledDefault`, never through
     /// `?? false`.
     var profile_balancing_enabled: Bool?
+    /// Balancing's usage ceiling, in percent (design 2026-09-05 §5). NULL
+    /// means never set; `ProfilePoolPolicy.resolved` supplies the shipped 85.
+    var profile_balancing_usage_ceiling_percent: Int?
+    /// Balancing's maximum reading age, in seconds. NULL means never set,
+    /// which keeps each credential kind's own cadence-relative window.
+    var profile_balancing_max_reading_age_seconds: Int?
     /// Schedule-based PR polling gate. **Genuinely tri-state**: the
     /// `20261002143454_config_pr_poll_schedule` migration carries no SQL default, so
     /// `nil` means "never chose". Resolve it through
@@ -362,6 +368,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
+        // Passed straight through as well: `Config.profileBalancingPolicy`
+        // resolves NULL, and a hand-edited out-of-range value, to the shipped
+        // thresholds in one place.
+        config.profileBalancingUsageCeilingPercent = profile_balancing_usage_ceiling_percent
+        config.profileBalancingMaxReadingAgeSeconds = profile_balancing_max_reading_age_seconds
         return config
     }
 }
@@ -850,6 +861,30 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist balancing's usage ceiling, in percent; nil returns the column to
+    /// NULL, which follows the shipped default. The RPC handler validates the
+    /// range before calling.
+    public func setProfileBalancingUsageCeilingPercent(_ percent: Int?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_usage_ceiling_percent = ? WHERE id = ?",
+                arguments: [percent, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist balancing's maximum reading age, in seconds; nil returns the
+    /// column to NULL, which keeps each credential kind's own window. The RPC
+    /// handler validates the range before calling.
+    public func setProfileBalancingMaxReadingAgeSeconds(_ seconds: Int?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_max_reading_age_seconds = ? WHERE id = ?",
+                arguments: [seconds, Self.singletonID]
             )
         }
     }

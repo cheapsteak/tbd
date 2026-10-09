@@ -318,6 +318,14 @@ public enum RPCMethod {
     /// its own: `config.get` already carries the resolved value, as does
     /// `daemon.capabilities`.
     public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
+    /// Balancing's usage ceiling (`profile_balancing_usage_ceiling_percent`):
+    /// the percent of any window at or above which an account counts as full
+    /// (design 2026-09-05 §5). Nil restores the shipped default.
+    public static let configSetProfileBalancingUsageCeiling = "config.setProfileBalancingUsageCeiling"
+    /// Balancing's maximum reading age
+    /// (`profile_balancing_max_reading_age_seconds`). Nil restores each
+    /// credential kind's own window.
+    public static let configSetProfileBalancingMaxReadingAge = "config.setProfileBalancingMaxReadingAge"
     /// The schedule-based PR polling gate (`pr_poll_schedule_enabled`). Takes
     /// effect at once: the daemon stops the running PR driver and starts the
     /// other. Reading needs no method of its own: `config.get` and
@@ -910,6 +918,11 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// Whether profile balancing is enabled. Absent on older daemons (fall
     /// through to the shipped default on the app side).
     public let profileBalancingEnabled: Bool?
+    /// Balancing's usage ceiling and maximum reading age as stored: nil when
+    /// never set (or from an older daemon). `profileBalancingPolicy` resolves
+    /// them.
+    public var profileBalancingUsageCeilingPercent: Int?
+    public var profileBalancingMaxReadingAgeSeconds: Int?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -923,7 +936,9 @@ public struct ModelProfileListResult: Codable, Sendable {
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
         globalRemoteCreateDefaults: [String: String] = [:],
-        profileBalancingEnabled: Bool? = nil
+        profileBalancingEnabled: Bool? = nil,
+        profileBalancingUsageCeilingPercent: Int? = nil,
+        profileBalancingMaxReadingAgeSeconds: Int? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -938,6 +953,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
         self.profileBalancingEnabled = profileBalancingEnabled
+        self.profileBalancingUsageCeilingPercent = profileBalancingUsageCeilingPercent
+        self.profileBalancingMaxReadingAgeSeconds = profileBalancingMaxReadingAgeSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -976,6 +993,17 @@ public struct ModelProfileListResult: Codable, Sendable {
         // the app falls through to the shipped defaults on the Config side.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled)
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+    }
+
+    /// The thresholds balancing applies, resolved from the stored values.
+    public var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
     }
 }
 
@@ -3617,6 +3645,21 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProfileBalancingUsageCeiling`. `percent` must lie in
+/// `ProfilePoolPolicy.usageCeilingRange`; nil restores the shipped default.
+public struct ConfigSetProfileBalancingUsageCeilingParams: Codable, Sendable {
+    public var percent: Int?
+    public init(percent: Int?) { self.percent = percent }
+}
+
+/// Params for `config.setProfileBalancingMaxReadingAge`. `seconds` must lie in
+/// `ProfilePoolPolicy.maxReadingAgeRange`; nil restores each credential kind's
+/// own window.
+public struct ConfigSetProfileBalancingMaxReadingAgeParams: Codable, Sendable {
+    public var seconds: Int?
+    public init(seconds: Int?) { self.seconds = seconds }
+}
+
 /// Params for `config.setPRPollScheduleEnabled` — the gate for schedule-based PR
 /// polling, which checks each pull request as often as its status needs within
 /// a GitHub API budget instead of every worktree on a fixed interval (default
@@ -4011,6 +4054,19 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `modelProxyEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
+    /// Balancing's usage ceiling and maximum reading age as stored, nil when
+    /// never set, so the app runs the picker under the daemon's thresholds.
+    /// Assigned after construction, for the type-checker reason
+    /// `modelProxyEnabled` gives. `profileBalancingPolicy` resolves them.
+    public var profileBalancingUsageCeilingPercent: Int?
+    public var profileBalancingMaxReadingAgeSeconds: Int?
+
+    /// The thresholds balancing applies, resolved from the stored values.
+    public var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
+    }
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4140,6 +4196,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        // Absent from a daemon that predates the thresholds: the shipped ones.
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
     }
 }
 
