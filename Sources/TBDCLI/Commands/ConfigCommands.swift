@@ -25,6 +25,7 @@ struct ConfigGet: AsyncParsableCommand {
             "update-mode: \(config.updateMode.rawValue)",
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
             "transcript-prompt-answer: \(config.transcriptPromptAnswerEnabled ? "on" : "off")",
+            "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
 
@@ -52,17 +53,18 @@ struct ConfigSet: AsyncParsableCommand {
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
         "transcript-prompt-answer",
+        "clone-checkout",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        transcript-prompt-answer, update-mode)
+        transcript-prompt-answer, clone-checkout, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults, pr-poll-schedule and transcript-prompt-answer; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer and clone-checkout; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -89,6 +91,13 @@ struct ConfigSet: AsyncParsableCommand {
         case ("transcript-prompt-answer", .off):
             return "Set transcript-prompt-answer to off. Prompts can no longer be answered from "
                 + "the transcript. Sessions already running keep their hooks until they restart."
+        case ("clone-checkout", .on):
+            return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
+                + "checkout where the volume supports it, so unchanged files share disk blocks. "
+                + "Takes effect at the next worktree."
+        case ("clone-checkout", .off):
+            return "Set clone-checkout to off. New worktrees write every tracked file with "
+                + "git worktree add. Takes effect at the next worktree."
         default:
             return "Set \(key) default to \(value.rawValue)."
         }
@@ -158,6 +167,11 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
                 params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
+        case "clone-checkout":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetCloneCheckoutEnabled,
+                params: ConfigSetCloneCheckoutEnabledParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)

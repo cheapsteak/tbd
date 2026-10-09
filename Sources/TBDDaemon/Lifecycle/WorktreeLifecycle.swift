@@ -115,6 +115,12 @@ public struct WorktreeLifecycle: Sendable {
     /// of this struct — and the router and hibernation coordinator it is
     /// handed to — shares one record. See `ClaudeSessionTitle`.
     public let sessionTitles = ClaudeSessionTitleStore()
+    /// Per-repo template checkouts that fresh creates clone from while
+    /// `clone_checkout_enabled` is on. Production passes the process-wide
+    /// instance, so every copy of this struct — and every `WorktreeLifecycle`
+    /// the daemon builds — shares one set of clone/refresh exclusions; tests
+    /// inject one rooted in a temp dir.
+    let checkoutTemplates: CheckoutTemplateStore
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
@@ -242,6 +248,7 @@ public struct WorktreeLifecycle: Sendable {
         preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
         preSessionPollInterval: TimeInterval = 0.5,
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
+        checkoutTemplates: CheckoutTemplateStore = .shared,
         reaperGraceAttempts: Int = 30,
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
@@ -263,6 +270,7 @@ public struct WorktreeLifecycle: Sendable {
         self.preSessionTimeout = preSessionTimeout
         self.preSessionPollInterval = preSessionPollInterval
         self.processSignaller = processSignaller
+        self.checkoutTemplates = checkoutTemplates
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
         self.codexExecutableResolver = codexExecutableResolver ?? {

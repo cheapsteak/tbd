@@ -768,8 +768,8 @@ extension WorktreeLifecycle {
                 expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
             )
             do {
-                try await git.worktreeAdd(
-                    repoPath: repoPath,
+                try await addFreshWorktree(
+                    repo: repo,
                     worktreePath: worktreePath,
                     branch: branch,
                     baseBranch: baseBranch
@@ -879,8 +879,8 @@ extension WorktreeLifecycle {
                 expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
             )
             do {
-                try await git.worktreeAdd(
-                    repoPath: repoPath,
+                try await addFreshWorktree(
+                    repo: repo,
                     worktreePath: retryPath,
                     branch: retryBranch,
                     baseBranch: baseBranch

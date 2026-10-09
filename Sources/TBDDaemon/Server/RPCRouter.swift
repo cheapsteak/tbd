@@ -1086,6 +1086,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
                 return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
+            case RPCMethod.configSetCloneCheckoutEnabled:
+                return try await handleConfigSetCloneCheckoutEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
