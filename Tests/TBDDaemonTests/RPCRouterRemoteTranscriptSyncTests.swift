@@ -329,6 +329,291 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         ])
     }
 
+    // MARK: - remote.transcriptLoadEarlier
+
+    private func loadEarlier(_ r: RPCRouter) async -> RPCResponse {
+        await r.handle(RPCRequest(
+            method: RPCMethod.remoteTranscriptLoadEarlier,
+            params: #"{"provider": "agentbox", "sessionID": "s-1"}"#))
+    }
+
+    private var transcriptCache: RemoteTranscriptCache {
+        RemoteTranscriptCache(provider: "agentbox", sessionID: "s-1", environment: ["TBD_HOME": home.path])
+    }
+
+    /// A cache as a tail reset leaves it: one record, forward cursor `c-1`,
+    /// earlier history above it at `b-1` — or, with `before: nil`, a cache
+    /// built by a forward read.
+    @discardableResult
+    private func seedTailCache(before: String? = "b-1") throws -> RemoteTranscriptCacheState {
+        let cache = transcriptCache
+        return try cache.reset(
+            to: Data("{\"n\":5}\n".utf8), cursor: "c-1", before: before, from: try cache.load())
+    }
+
+    private static let tailAndRead = [RemoteCapability.transcriptRead, RemoteCapability.transcriptTail]
+
+    private static let beforeB1 = ["transcript", "read", "s-1", "--before", "b-1", "--tail", "12"]
+
+    /// Never touched (NULL) and explicitly off both refuse before any
+    /// provider call; `loadEarlierPrependsAPage` is the flag-on branch.
+    @Test(arguments: [nil, false] as [Bool?])
+    func loadEarlierIsRefusedWithTheFlagOff(_ flag: Bool?) async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        if let flag { try await db.config.setRemoteTranscriptLiveSyncEnabled(flag) }
+        try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(Self.tailAndRead)])
+        let r = router(await manager(invoker))
+
+        let response = await loadEarlier(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.loadEarlierFlagOffRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+    }
+
+    @Test func loadEarlierIsRefusedWhileRemoteBackendsAreOff() async throws {
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [])
+        let r = router(await manager(invoker, describe: false))
+
+        #expect(await loadEarlier(r).error == "remote backends disabled")
+        #expect(invoker.callsSnapshot().isEmpty)
+    }
+
+    @Test func loadEarlierIsRefusedWithoutTranscriptTail() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRead])])
+        let r = router(await manager(invoker))
+
+        let response = await loadEarlier(r)
+
+        #expect(response.success == false)
+        #expect(response.error?.contains(RemoteCapability.transcriptTail) == true)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+    }
+
+    @Test func loadEarlierIsRefusedForADismissedSession() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "agentbox",
+            sessions: [RemoteSessionPayload(id: "s-1", state: .running)], now: Date())
+        _ = try await db.remoteSessions.dismiss(provider: "agentbox", sessionID: "s-1")
+        try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(Self.tailAndRead)])
+        let r = router(await manager(invoker))
+
+        let response = await loadEarlier(r)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+    }
+
+    /// No cache at all, and a cache built by a forward read: nothing above it
+    /// to load, and no provider call.
+    @Test func loadEarlierIsRefusedWithANullBefore() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(Self.tailAndRead)])
+        let r = router(await manager(invoker))
+
+        #expect(await loadEarlier(r).error == RPCRouter.loadEarlierNothingAboveRefusal)
+        try seedTailCache(before: nil)
+        #expect(await loadEarlier(r).error == RPCRouter.loadEarlierNothingAboveRefusal)
+        #expect(invoker.callsSnapshot() == [["describe"]])
+    }
+
+    /// The flag-on branch end to end: a real sync tail-resets the cache, and
+    /// the load runs `--before` with the cached cursor and prepends the page.
+    @Test func loadEarlierPrependsAPage() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(Self.tailAndRead),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":5}\n".utf8), stderr: #"{"cursor":"c","before":"b-1"}"#),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":4}\n".utf8), stderr: #"{"before":"b-0"}"#),
+        ])
+        let r = router(await manager(invoker))
+
+        let synced = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        #expect(synced.hasEarlier)
+        let result = try await loadEarlier(r).decodeResult(RemoteTranscriptLoadEarlierResult.self)
+
+        #expect(result == RemoteTranscriptLoadEarlierResult(
+            generation: synced.generation, head: 1, reachedStart: false, expired: false))
+        #expect(invoker.callsSnapshot() == [
+            ["describe"], RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12), Self.beforeB1,
+        ])
+        #expect(try String(contentsOf: transcriptCache.transcriptURL, encoding: .utf8)
+            == "{\"n\":4}\n{\"n\":5}\n")
+        #expect(transcriptCache.peekState()?.before == "b-0")
+    }
+
+    @Test func loadEarlierReportsReachedStart() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let seeded = try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(Self.tailAndRead),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":4}\n".utf8), stderr: ""),
+        ])
+        let r = router(await manager(invoker))
+
+        let result = try await loadEarlier(r).decodeResult(RemoteTranscriptLoadEarlierResult.self)
+
+        #expect(result == RemoteTranscriptLoadEarlierResult(
+            generation: seeded.generation, head: 1, reachedStart: true, expired: false))
+        #expect(invoker.callsSnapshot() == [["describe"], Self.beforeB1])
+        #expect(transcriptCache.peekState()?.before == nil)
+    }
+
+    @Test func loadEarlierReportsExpired() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let seeded = try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(Self.tailAndRead),
+            ProviderResult(
+                exitCode: 1, stdout: Data(#"{"error":{"code":"cursor_expired","message":"gone"}}"#.utf8),
+                stderr: ""),
+        ])
+        let r = router(await manager(invoker))
+
+        let result = try await loadEarlier(r).decodeResult(RemoteTranscriptLoadEarlierResult.self)
+
+        #expect(result == RemoteTranscriptLoadEarlierResult(
+            generation: seeded.generation, head: seeded.head, reachedStart: true, expired: true))
+        #expect(transcriptCache.peekState()?.before == nil)
+    }
+
+    /// A failure other than `cursor_expired` is an error, and writes nothing.
+    @Test func loadEarlierSurfacesAProviderFailure() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let seeded = try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(Self.tailAndRead),
+            ProviderResult(
+                exitCode: 1, stdout: Data(#"{"error":{"code":"internal","message":"boom"}}"#.utf8),
+                stderr: ""),
+        ])
+        let r = router(await manager(invoker))
+
+        let response = await loadEarlier(r)
+
+        #expect(response.success == false)
+        #expect(response.error == "boom")
+        #expect(transcriptCache.peekState() == seeded)
+    }
+
+    /// The generation is noted as the request arrives. A sync queued ahead of
+    /// the load that resets the cache makes the load return the new
+    /// generation, with no `--before` call and `reachedStart` false.
+    @Test func aGenerationChangeBeforeTheLoadRunsReturnsTheNewGenerationWithoutFetching() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let seeded = try seedTailCache()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(Self.tailAndRead),
+            ProviderResult(exitCode: 0, stdout: Data("{\"r\":1}\n".utf8), stderr: #"{"cursor":"c","reset":true}"#),
+        ])
+        let trace = Trace()
+        let gate = Gate()
+        invoker.onCall = { verb in
+            guard verb.first == "transcript" else { return }
+            let isFirst = await trace.enter()
+            if isFirst { await gate.wait() }
+            await trace.exit()
+        }
+        let r = router(await manager(invoker))
+        let lanes = try #require(r.remoteTranscriptSync)
+
+        let syncRequest = RPCRequest(
+            method: RPCMethod.remoteTranscriptSync,
+            params: #"{"provider": "agentbox", "sessionID": "s-1"}"#)
+        let loadRequest = RPCRequest(
+            method: RPCMethod.remoteTranscriptLoadEarlier,
+            params: #"{"provider": "agentbox", "sessionID": "s-1"}"#)
+        async let synced = r.handle(syncRequest)
+        let syncHeld = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await trace.events == ["in"]
+        }
+        async let loaded = r.handle(loadRequest)
+        let loadQueued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await lanes.laneWaiterCount(provider: "agentbox", sessionID: "s-1") == 1
+        }
+        await gate.open()
+        let syncResponse = await synced
+        let loadResponse = await loaded
+
+        #expect(syncHeld == .satisfied)
+        #expect(loadQueued == .satisfied)
+        #expect(syncResponse.success)
+        let result = try loadResponse.decodeResult(RemoteTranscriptLoadEarlierResult.self)
+        #expect(result.generation == seeded.generation + 1)
+        #expect(!result.reachedStart)
+        #expect(!result.expired)
+        #expect(invoker.callsSnapshot() == [
+            ["describe"], RemoteVerb.transcriptRead(sessionID: "s-1", since: "c-1"),
+        ])
+    }
+
+    // MARK: - Background sync through the router
+
+    /// `config.setRemoteTranscriptLiveSyncEnabled` with `false` empties the
+    /// background queue at once, before any dequeue could read the flag; with
+    /// `true` the queue is left alone and drains.
+    @Test(arguments: [false, true])
+    func theFlagSetterDropsTheBackgroundQueueOnlyWhenTurningItOff(_ enabled: Bool) async throws {
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let tail = ProviderResult(
+            exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor":"c","before":"b"}"#)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(Self.tailAndRead), tail, tail, tail])
+        let trace = Trace()
+        let gate = Gate()
+        invoker.onCall = { verb in
+            guard verb.first == "transcript" else { return }
+            let isFirst = await trace.enter()
+            if isFirst { await gate.wait() }
+            await trace.exit()
+        }
+        let r = router(await manager(invoker))
+        let background = try #require(r.remoteTranscriptBackgroundSync)
+        func sighting(_ id: String) -> RemoteSessionPayload {
+            RemoteSessionPayload(id: id, state: .running, transcript: RemoteTranscriptHint(id: id, size: 1))
+        }
+
+        await background.observe(sessions: [sighting("s-a")], provider: "agentbox")
+        let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await trace.events == ["in"]
+        }
+        await background.observe(sessions: [sighting("s-b"), sighting("s-c")], provider: "agentbox")
+        let queuedBefore = await background.queuedSessions(provider: "agentbox")
+        let response = await r.handle(try RPCRequest(
+            method: RPCMethod.configSetRemoteTranscriptLiveSyncEnabled,
+            params: ConfigSetRemoteLiveSyncEnabledParams(enabled: enabled)))
+        let queuedAfter = await background.queuedSessions(provider: "agentbox")
+        await gate.open()
+        await background.waitUntilIdle()
+
+        #expect(held == .satisfied)
+        #expect(response.success)
+        #expect(queuedBefore == ["s-b", "s-c"])
+        let syncedSessions = invoker.callsSnapshot().filter { $0.first == "transcript" }.map { $0[2] }
+        if enabled {
+            #expect(queuedAfter == ["s-b", "s-c"])
+            #expect(syncedSessions == ["s-a", "s-b", "s-c"])
+        } else {
+            #expect(queuedAfter.isEmpty)
+            #expect(syncedSessions == ["s-a"])
+        }
+    }
+
     // MARK: - remote.sendMessage refusals
 
     @Test func sendIsRefusedWithoutSendSubmit() async throws {

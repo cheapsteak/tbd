@@ -130,6 +130,33 @@ struct RemoteTranscriptSyncWireTests {
         #expect(decoded.hasEarlier)
     }
 
+    @Test func loadEarlierIsProviderNamed() {
+        #expect(RPCMethod.remoteTranscriptLoadEarlier == "remote.transcriptLoadEarlier")
+        #expect(RPCMethod.providerNamedRemoteMethods.contains(RPCMethod.remoteTranscriptLoadEarlier))
+    }
+
+    @Test func loadEarlierParamsRoundTrip() throws {
+        let params = RemoteTranscriptLoadEarlierParams(provider: "acme", sessionID: "s-1")
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptLoadEarlierParams.self, from: JSONEncoder().encode(params))
+        #expect(decoded.provider == "acme")
+        #expect(decoded.sessionID == "s-1")
+    }
+
+    @Test func loadEarlierResultRoundTrips() throws {
+        let result = RemoteTranscriptLoadEarlierResult(generation: 3, head: 2, reachedStart: true, expired: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptLoadEarlierResult.self, from: JSONEncoder().encode(result))
+        #expect(decoded == result)
+    }
+
+    @Test func loadEarlierResultDecodesTheDocumentedKeys() throws {
+        let json = #"{"generation":4,"head":1,"reachedStart":false,"expired":false}"#
+        let result = try JSONDecoder().decode(RemoteTranscriptLoadEarlierResult.self, from: Data(json.utf8))
+        #expect(result == RemoteTranscriptLoadEarlierResult(
+            generation: 4, head: 1, reachedStart: false, expired: false))
+    }
+
     @Test func sendMessageParamsRoundTrip() throws {
         let params = RemoteSendMessageParams(
             provider: "acme", sessionID: "s-1", text: "line one\nline two")

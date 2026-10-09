@@ -599,12 +599,17 @@ extension RPCRouter {
 
     /// Persist the live remote transcript sync gate (default OFF, soaking).
     /// Nothing caches it: every decision reads it fresh, so it applies on the
-    /// next sync without a restart. Design:
+    /// next sync without a restart. Turning it off also drops background
+    /// sync's queue at once, rather than leaving it to the next dequeue's
+    /// read of the flag. Design:
     /// docs/specs/2026-09-25-remote-session-transcript-design.md § Gating.
     func handleConfigSetRemoteTranscriptLiveSyncEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetRemoteLiveSyncEnabledParams.self, from: paramsData)
         try await db.config.setRemoteTranscriptLiveSyncEnabled(params.enabled)
+        if !params.enabled {
+            await remoteTranscriptBackgroundSync?.dropAll()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

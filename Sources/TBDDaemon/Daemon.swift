@@ -1167,6 +1167,15 @@ public final class Daemon: Sendable {
         // `remoteManager.start()`, so no snapshot is applied without it.
         await remoteManager?.setProviderPRBinder(
             ProviderPRBinder(db: database, coordinator: rpcRouter.prBindingCoordinator))
+        // Remote transcript background sync reads the sightings the manager
+        // already processes, and feeds the hint store the router's transcript
+        // sync reads. Installed before `remoteManager.start()` for the same
+        // reason: no sighting is processed without it.
+        if let background = rpcRouter.remoteTranscriptBackgroundSync {
+            await remoteManager?.setTranscriptSightingObserver { sessions, provider in
+                await background.observe(sessions: sessions, provider: provider)
+            }
+        }
         // And the holder registry, for the same reason and on the same terms:
         // the park path reads a holder session's screen through the reader the
         // spawn path registered, so all three must hold ONE registry.

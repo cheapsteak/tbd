@@ -375,6 +375,13 @@ public enum RPCMethod {
     /// provider declares `transcript.read`. Design:
     /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
     public static let remoteTranscriptSync = "remote.transcriptSync"
+    /// Prepends one page of earlier history to a session's transcript cache
+    /// through `transcript read <id> --before <cursor> --tail 12`, on the
+    /// session's lane. Refused while `remote_transcript_live_sync_enabled` is
+    /// off, unless the provider declares `transcript.tail`, for a dismissed
+    /// session, and when the cache holds no `before`. The result is a
+    /// `RemoteTranscriptLoadEarlierResult`.
+    public static let remoteTranscriptLoadEarlier = "remote.transcriptLoadEarlier"
     /// Submits a message to a remote session through `send <id> --submit`, the
     /// provider pasting it and pressing Enter. Distinct from `remote.send`,
     /// which delivers raw keystrokes. Refused unless the provider declares
@@ -421,7 +428,7 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
-        remoteTranscriptSync, remoteSendMessage,
+        remoteTranscriptSync, remoteSendMessage, remoteTranscriptLoadEarlier,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
@@ -1928,6 +1935,40 @@ public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
         caughtUp = try c.decode(Bool.self, forKey: .caughtUp)
         head = try c.decodeIfPresent(Int.self, forKey: .head) ?? 0
         hasEarlier = try c.decodeIfPresent(Bool.self, forKey: .hasEarlier) ?? false
+    }
+}
+
+/// Params for `remote.transcriptLoadEarlier` — prepend one page of earlier
+/// history to a session's transcript cache. The result is a
+/// `RemoteTranscriptLoadEarlierResult`.
+public struct RemoteTranscriptLoadEarlierParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcriptLoadEarlier`.
+///
+/// - `generation` — the cache's generation after the call. One that differs
+///   from the reader's means a sync replaced the file before the load ran: the
+///   load fetched nothing, and the reader discards what it holds and rereads.
+/// - `head` — bumped by every prepend. A reader whose `head` differs rereads
+///   the file while holding its top visible row still.
+/// - `reachedStart` — nothing earlier remains to load: the cache holds the
+///   conversation's beginning, or the history above it can no longer be
+///   fetched.
+/// - `expired` — the provider answered `cursor_expired`; implies
+///   `reachedStart`. The pane says earlier history is no longer available.
+public struct RemoteTranscriptLoadEarlierResult: Codable, Sendable, Equatable {
+    public let generation: Int
+    public let head: Int
+    public let reachedStart: Bool
+    public let expired: Bool
+    public init(generation: Int, head: Int, reachedStart: Bool, expired: Bool) {
+        self.generation = generation; self.head = head
+        self.reachedStart = reachedStart; self.expired = expired
     }
 }
 

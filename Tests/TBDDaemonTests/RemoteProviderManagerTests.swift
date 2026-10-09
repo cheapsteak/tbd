@@ -326,6 +326,68 @@ struct RemoteProviderManagerTests {
         #expect(sessionsChangedCount() > baseline)
     }
 
+    /// What the transcript sighting observer was handed, in order.
+    private actor SightingLog {
+        private(set) var providers: [String] = []
+        private(set) var batches: [[RemoteSessionPayload]] = []
+
+        func append(_ sessions: [RemoteSessionPayload], provider: String) {
+            providers.append(provider)
+            batches.append(sessions)
+        }
+    }
+
+    /// Both convergence points hand their sightings to the observer with the
+    /// hint intact — the mirror strips it, the observer must not see it
+    /// stripped.
+    @Test func theSightingObserverSeesSnapshotsAndUpsertsWithTheirHints() async throws {
+        let log = SightingLog()
+        let m = manager(FakeProviderInvoker(script: []))
+        await m.setTranscriptSightingObserver { sessions, provider in
+            await log.append(sessions, provider: provider)
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = RemoteTranscriptHint(id: "conv-a", size: 10)
+        let second = RemoteTranscriptHint(id: "conv-b", size: 20)
+
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .running, transcript: first)],
+            provider: "fake", now: now)
+        await m.applyUpsert(
+            RemoteSessionPayload(id: "b", state: .running, transcript: second),
+            provider: "fake", date: now)
+
+        #expect(await log.providers == ["fake", "fake"])
+        let batches = await log.batches
+        #expect(batches.map { $0.map(\.id) } == [["a"], ["b"]])
+        let expectedHints: [[RemoteTranscriptHint?]] = [[first], [second]]
+        #expect(batches.map { $0.map(\.transcript) } == expectedHints)
+    }
+
+    /// A sighting suppressed as predating its delete never reaches the
+    /// observer, through either path; its siblings in the same snapshot do.
+    @Test func aDeletedSessionIsNotObserved() async throws {
+        let log = SightingLog()
+        let m = manager(FakeProviderInvoker(script: []))
+        await m.setTranscriptSightingObserver { sessions, provider in
+            await log.append(sessions, provider: provider)
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        await m.noteDeletion(provider: "fake", sessionID: "a", at: now)
+
+        try await m.apply(
+            snapshot: [
+                RemoteSessionPayload(id: "a", state: .running, transcript: RemoteTranscriptHint(id: "x", size: 1)),
+                RemoteSessionPayload(id: "b", state: .running, transcript: RemoteTranscriptHint(id: "y", size: 1)),
+            ],
+            provider: "fake", now: now, requestStartedAt: now.addingTimeInterval(-5))
+        await m.applyUpsert(
+            RemoteSessionPayload(id: "a", state: .running, transcript: RemoteTranscriptHint(id: "x", size: 2)),
+            provider: "fake", date: now, composedSince: now.addingTimeInterval(-5))
+
+        #expect(await log.batches.map { $0.map(\.id) } == [["b"]])
+    }
+
     @Test func authFailureMarksNeedsAuthAndSuccessClears() async throws {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(
