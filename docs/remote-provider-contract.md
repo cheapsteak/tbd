@@ -488,19 +488,27 @@ A provider without incremental support emits no envelope and remains fully confo
 
 ### `--tail` and `--before` (optional)
 
-The `transcript.tail` capability admits two forms of `transcript read` that read a conversation from its end rather than its beginning, so a caller can show the latest part of a long conversation without fetching all of it. Both count in **conversation records**: JSONL records whose `type` is `user` or `assistant`. Records between them — tool results and records of any other type — come along with the conversation records they sit among.
+The `transcript.tail` capability admits two forms of `transcript read` that read a conversation from its end rather than its beginning, so a caller can show the latest part of a long conversation without fetching all of it. Both count in **message records**: JSONL records that a reader sees as a message. A record is a message record when both of these hold:
 
-- **`transcript read <id> --tail <n>`** returns the end of the session's current conversation, starting at the record boundary of the n-th-from-last conversation record and including everything after it. It is always a reset, whether or not `reset` is set. The envelope carries `cursor`, which continues forward on `--since` exactly as for any other call, and `before`, for the history above this output. It never sets `more`.
-- **`transcript read <id> --before <cursor> --tail <n>`** returns the n conversation records, with the records among them, that end immediately before `<cursor>`. Its envelope carries only `before`, absent once the output reaches the conversation's beginning; it carries no `cursor`, and a caller keeps the forward cursor it already holds.
+- it does not carry `"isSidechain": true`, and
+- it is one of:
+  - a `type: "assistant"` record whose `message.content` is a non-empty string, or an array holding at least one `text` block with non-empty `text`;
+  - a `type: "user"` record whose `message.content` is a non-empty string, or an array holding at least one `text` block with non-empty `text` — an array of only `tool_result` blocks does not count — unless that text (the string, or the array's first `text` block) begins with `<system-reminder`, `<local-command-`, `<environment_details`, `<task-notification`, `<tool_result`, `[SYSTEM NOTIFICATION`, or `Base directory for this skill:`, which mark injected context rather than a message;
+  - a `type: "attachment"` record whose `attachment.type` is `queued_command`, which is how Claude Code records a prompt typed while the agent was mid-turn.
+
+Every other record — tool calls, tool results, thinking, injected context, and records of any other type — comes along with the message records it sits among, and is not counted.
+
+- **`transcript read <id> --tail <n>`** returns the end of the session's current conversation, starting at the record boundary of the n-th-from-last message record and including everything after it, or the whole conversation when it holds fewer than n. It is always a reset, whether or not `reset` is set. The envelope carries `cursor`, which continues forward on `--since` exactly as for any other call, and `before`, for the history above this output. It never sets `more`.
+- **`transcript read <id> --before <cursor> --tail <n>`** returns the n message records, with the records among them, that end immediately before `<cursor>`, or everything from the conversation's beginning when fewer than n remain. Its envelope carries only `before`, absent once the output reaches the conversation's beginning; it carries no `cursor`, and a caller keeps the forward cursor it already holds.
 
 Rules common to both forms:
 
-- **Paging always progresses.** A provider MAY return fewer than n conversation records to stay within its own byte budget, but MUST return at least one record when one exists before the requested position — even a single record of several megabytes.
+- **Paging always progresses.** A provider MAY return fewer than n message records to stay within its own byte budget, but MUST return at least one message record, with the records among them, when one exists before the requested position — even when that record or its neighbors run to several megabytes. When no message record remains before the requested position, the provider MUST return every record from the conversation's beginning up to it, so the output reaches the beginning and the next `before` is absent.
 - **`--tail` is not combined with `--since`.** A caller MUST NOT pass both.
 - **A `before` cursor names a position in one specific conversation.** It stays valid after the session moves to a new conversation (`/clear`, a resume), because it still points into the conversation it came from. A provider that can no longer serve one fails with `code: "cursor_expired"` (see Error model below), a permanent error. A `before` cursor is opaque on the same terms as a forward cursor.
 - A caller MUST NOT pass `--tail` or `--before` to a provider that has not declared `transcript.tail`. `transcript.tail` is meaningful only alongside `transcript.read`, and a provider SHOULD NOT declare it without also declaring `transcript.read`.
 
-The unit is the conversation record because it maps to roughly one message in a reader's view, and a provider can count records without knowing how any caller renders them. `n` is the caller's choice, not a constant of this contract.
+The unit is the message record because it maps to one message in a reader's view. A caller that folds tool activity into collapsed rows sees nothing per tool call or result, so a count that included them could fill a page with no visible message. The rule reads only a record's own JSON, so a provider applies it without knowing how any caller renders. Its edges are not load-bearing: a provider whose count differs from a caller's renderer on a rare record changes only how many records a page carries, never which positions the cursors name. `n` is the caller's choice, not a constant of this contract.
 
 **`transcript read` and `log` are different data, not two encodings of the same data.** `log` is raw ANSI scrollback bytes for a read-only terminal view; `transcript read` returns structured conversation records for a message-level view. Structured records poured into a scrollback view lose every tool card; ANSI bytes fed to a transcript renderer produce garbage. A provider MAY implement either, both, or neither, and a caller MUST NOT substitute one for the other.
 
