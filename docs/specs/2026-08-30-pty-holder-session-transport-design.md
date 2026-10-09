@@ -820,8 +820,9 @@ the process table — the same argument as every other resource here.
   no such anchor, and **the creation lock is what bounds it.** The flock is
   taken by the spawner before the lock file has any sibling, travels to the
   holder as an inherited descriptor on the same open file description, and is
-  released only when the holder dies — so a spawn is lock-held at every instant
-  of itself, and a pair whose lock is free is a pair no spawn is behind.
+  released only when the holder dies — so a spawn in flight is lock-held for
+  all but the one instant named in the residuals below, and a pair whose lock is
+  free is a pair no spawn is behind.
 
   Two things about the other gates follow from that, and stating them the other
   way round would be wrong:
@@ -831,22 +832,26 @@ the process table — the same argument as every other resource here.
     log and no row. What the row covers is the wake and respawn paths, where
     the row precedes the holder, and the far more common case of a session TBD
     has finished with.
-  - **The grace window is reinforcement, not the bound.** It is user-settable
-    with no floor, so an argument that leaned on it would be an argument a
-    configuration change could remove. At its default it makes the only
-    remaining coincidence — a spawn beginning for a UUID whose residue is
-    already an hour old — one the spawn path does not produce, since a spawn
-    mints a fresh UUID that has no residue at all.
+  - **The grace window is reinforcement everywhere but the two residuals
+    below.** It is user-settable with no floor, so an argument that leaned on it
+    for the ordinary case would be an argument a configuration change could
+    remove.
 
-  The residual, stated rather than papered over: `lockIsHeld` can read a free
-  lock an instant before a spawner takes it, and the unlink then lands on a
-  file that spawner holds. It cannot be closed with `flock` — holding the lock
+  Three residuals, stated rather than papered over. Two are one syscall pair
+  wide and sit on either side of the same gap: `lockIsHeld` can read a free lock
+  an instant before a spawner takes it, and `HolderLock.acquire` opens the lock
+  file with `O_CREAT` *before* it flocks it, so for the instant in between the
+  file exists and is free. Neither is closable with `flock` — holding the lock
   across the unlink only moves the hazard, leaving a waiting spawner to lock an
-  unlinked inode — and it is accepted on the coincidence argument above. The
-  same probe also, for one syscall pair, holds a lock a concurrent
-  `HolderLock.acquire` would then refuse as `alreadyHeld`; that surfaces as a
-  visible spawn failure rather than as two holders, and it is a property the
-  socket arm's identical probe already has.
+  unlinked inode. What covers both is a coincidence the spawn path does not
+  produce: a spawn beginning, in that one instant, for a UUID whose residue is
+  already past the grace window, while a spawn mints a fresh UUID with no
+  residue at all. **This is the one place the grace window is load-bearing**,
+  and the reason to keep it large relative to a spawn. The third is benign by
+  comparison: the probe itself briefly holds a lock a concurrent
+  `HolderLock.acquire` would then refuse as `alreadyHeld`, which surfaces as a
+  visible spawn failure rather than as two holders, and is a property the socket
+  arm's identical probe already has.
 
   Reclamation is by unlink rather than quarantine, as on the socket arm. A lock
   file is empty by construction, and a holder log's only value is postmortem,

@@ -86,8 +86,9 @@ public struct HolderRendezvousOrphanPair: Sendable, Equatable {
 /// itself is what bounds it**: the flock is taken by the spawner before the
 /// lock file's siblings exist, travels to the holder as an inherited
 /// descriptor on the same open file description, and is released only by the
-/// holder's death — so a spawn in flight, at every instant of it, presents a
-/// held lock. The row gate and the grace window are the reinforcement, not the
+/// holder's death — so a spawn in flight presents a held lock for all but the
+/// one instant named below. The row gate and the grace window are the
+/// reinforcement, not the
 /// argument: a fresh spawn's row is written *after* the holder
 /// (`WorktreeLifecycle+SpawnTerminal`), so the row covers the wake and respawn
 /// paths, where the row precedes the holder, and says of everything else that
@@ -95,14 +96,18 @@ public struct HolderRendezvousOrphanPair: Sendable, Equatable {
 /// against both, and a socket that appeared since the listing is a late gate in
 /// front of the unlink itself.
 ///
-/// The residual is a one-syscall-pair window: `lockIsHeld` reads a free lock,
-/// a spawner takes it, and the unlink lands on the file that spawner holds. It
-/// is accepted rather than closed, because closing it is not possible with
-/// `flock` — holding the lock across the unlink leaves a waiting spawner
-/// locking an unlinked inode, which is the same hazard — and because the
-/// grace window makes the coincidence it needs (a spawn beginning for a UUID
-/// whose residue is already an hour old) one nothing in the spawn path
-/// produces.
+/// Two residuals follow, both one syscall pair wide and both accepted rather
+/// than closed. `lockIsHeld` can read a free lock an instant before a spawner
+/// takes it, and the unlink then lands on the file that spawner holds; and
+/// `HolderLock.acquire` opens the lock file with `O_CREAT` *before* it flocks
+/// it, so for the instant in between the file exists and is free. Neither is
+/// closable with `flock` — holding the lock across the unlink leaves a waiting
+/// spawner locking an unlinked inode, which is the same hazard. What covers
+/// both is that each needs a coincidence the spawn path does not produce: a
+/// spawn beginning, in that one instant, for a UUID whose residue is already
+/// past the grace window — while a spawn mints a fresh UUID with no residue at
+/// all. This is the one place the grace window is load-bearing rather than
+/// reinforcement, and it is why it should stay large relative to a spawn.
 ///
 /// **The log is swept, though the design spec predates it.** It is created by
 /// `HolderSpawner` under the same `<session-uuid>.<ext>` rule in the same
