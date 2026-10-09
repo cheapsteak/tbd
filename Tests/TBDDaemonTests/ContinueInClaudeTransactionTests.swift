@@ -374,6 +374,35 @@ struct ContinueInClaudeTransactionTests {
             worktreeID: fixture.terminal.worktreeID).count == 1)
     }
 
+    @Test("recovery leaves a live owned pane alone while its rollout shows a turn in flight")
+    func recoveryLeavesBusyLivePaneAlone() async throws {
+        // A daemon that died before the respawn leaves the original Codex
+        // running, and the user may have resumed work in it. Persisted activity
+        // is frozen while the row is pending, so the rollout is the evidence.
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+        let started = """
+            {"type":"event_msg","payload":{"type":"task_started","turn_id":"live-turn","started_at":20}}
+            """
+        try append(started + "\n", to: fixture.rollout)
+
+        await fixture.router.reconcilePendingContinueInClaude()
+
+        let after = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.kind == .codex)
+        #expect(after.pendingSessionIncarnationID == crashedDestinationToken,
+                "a deferred recovery must leave the pending row untouched")
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(!fixture.recorder.commands.contains { $0.contains("kill-window") })
+    }
+
     @Test("recovery adopts a live exact-stamped pane in its actual window")
     func recoveryAdoptsExactStampedPaneWindow() async throws {
         let fixture = try await makeRPCFixture(

@@ -392,6 +392,8 @@ existing alert path.
   reasoning content and exercises credential assignments, authorization values, private
   keys, credentialed URLs, service-token prefixes, and git-status redaction.
 - A content-free rollout and a failed git-status command fail packet preparation.
+- Pending recovery leaves a live, attributed Codex pane untouched, with its pending row
+  unchanged, while the rollout shows a turn in flight.
 - A packet well over the tmux command limit reaches Claude through a launch file: the
   recorded `respawn-window` argv stays under 15,000 bytes without the packet text, the
   staged file holds the packet while Claude starts, and the file is gone once the
@@ -452,7 +454,12 @@ two things:
 - **Recovery that restores Codex.** The startup and hourly reconcile pass acts only on a
   row that a user's own earlier Continue already staged as pending. It never starts a
   Claude replacement, only respawns the source Codex thread under a rotated token, and it
-  refuses to touch a live pane it cannot attribute to that terminal. It adds no new timer:
+  refuses to touch a live pane it cannot attribute to that terminal. A live pane that is
+  attributed to the terminal is also left alone, with the row still pending, while the
+  immutable rollout shows a turn in flight or cannot be read: a daemon that died before the
+  respawn leaves the original Codex running, and persisted activity cannot answer this
+  because hook writes are refused for a pending row. Dead and absent panes are recovered
+  regardless, and the next pass looks again. It adds no new timer:
   it is the first iteration of the existing hourly maintenance task, which runs after
   the socket is bound and off the boot path, so a slow readiness wait never delays the
   daemon becoming answerable.

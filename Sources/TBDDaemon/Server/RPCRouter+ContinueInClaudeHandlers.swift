@@ -623,6 +623,36 @@ extension RPCRouter {
                   current.kind == .codex,
                   !current.isParked,
                   current.pendingSessionIncarnationID == oldPendingToken else { return }
+
+            // A pending row marks an unfinished transaction; it is not proof
+            // that the process behind it needs replacing. A daemon that died
+            // before the respawn left the original Codex running, and the
+            // user may have resumed work in it since. While that pane is live,
+            // still ours, and the immutable rollout shows a turn in flight (or
+            // cannot be read), leave it alone: the row stays pending and the
+            // next pass looks again. Persisted activity cannot answer this,
+            // since hook writes are refused for a pending row. A dead or
+            // absent pane carries no such risk and is recovered below.
+            let pane = try await self.tmux.paneSendProbe(
+                server: worktree.tmuxServer, paneID: current.tmuxPaneID)
+            if case .live(let stampedTerminalID) = pane.target,
+               let stampedTerminalID,
+               stampedTerminalID.caseInsensitiveCompare(current.id.uuidString)
+                   == .orderedSame {
+                let observed = await self.codexActivityTracker.observe(
+                    transcripts: [.init(
+                        transcriptPath: sourceRolloutPath,
+                        worktreeID: current.worktreeID,
+                        terminalID: current.id,
+                        sessionGeneration: current.sessionOrderObservedAt,
+                        transcriptBoundaryOffset: current.codexTranscriptBoundaryOffset)])
+                guard observed[sourceRolloutPath] == .idle else {
+                    continueInClaudeLogger.info(
+                        "Pending Codex recovery for terminal \(current.id, privacy: .public) leaves a live pane alone while its turn may be in flight")
+                    return
+                }
+            }
+
             let recoveryToken = UUID()
             guard let recoveryRow = try await self.db.terminals
                 .rotateContinueInClaudeToCodexRecovery(
