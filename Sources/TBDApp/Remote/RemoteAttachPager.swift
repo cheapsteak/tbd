@@ -66,6 +66,49 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(_ vc: NSTabViewController, context: Context) {
+        Self.update(
+            vc,
+            coordinator: context.coordinator,
+            mounts: mounts,
+            activeSelection: activeSelection,
+            appState: appState,
+            resolve: { selection in
+                RemoteAttachPreflight.resolve(
+                    selection: selection,
+                    providers: appState.remoteProviders,
+                    sessions: appState.remoteSessions)
+            },
+            makeTerminalController: { key, config in
+                NSHostingController(
+                    rootView: Self.makeTerminalView(for: key, provider: config, appState: appState)
+                        .environment(appState)
+                        .environmentObject(appearance)
+                )
+            })
+    }
+
+    /// One render's worth of pager policy: re-resolve the diagnosis tabs,
+    /// apply the mount-set diff, decide for each new key between a live
+    /// terminal and a diagnosis view, and prune the diagnosis bookkeeping.
+    ///
+    /// This is `updateNSViewController`'s whole body, lifted out because that
+    /// method takes a SwiftUI `Context`, which has no public initializer — so
+    /// the diagnosis-tab lifecycle could not be driven by a test. The two
+    /// closures are the only things it needs from the environment:
+    /// `resolve` is `RemoteAttachPreflight.resolve` against the live registry
+    /// and mirror, and `makeTerminalController` wraps the terminal view in the
+    /// `NSHostingController` that needs `AppearanceSettings` (which a test
+    /// cannot supply without touching `UserDefaults.standard`).
+    @MainActor
+    static func update(
+        _ vc: NSTabViewController,
+        coordinator: Coordinator,
+        mounts: [RemoteAttachMountKey],
+        activeSelection: RemoteSessionSelection?,
+        appState: AppState,
+        resolve: (RemoteSessionSelection) -> RemoteAttachPreflight.Diagnosis,
+        makeTerminalController: (RemoteAttachMountKey, RemoteProviderConfig) -> NSViewController
+    ) {
         // 0. Re-resolve every tab that is currently showing a diagnosis, and
         //    drop it when the answer has changed — the `reconcile` add loop
         //    below then rebuilds it, as a live terminal once the preflight
@@ -73,20 +116,16 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         //    owns a live PTY, and tearing it down because a provider's
         //    registration momentarily looked different would kill the
         //    connection this pager exists to keep alive.
-        for (selection, shown) in context.coordinator.diagnosed {
-            let current = RemoteAttachPreflight.resolve(
-                selection: selection,
-                providers: appState.remoteProviders,
-                sessions: appState.remoteSessions)
-            guard current != shown else { continue }
+        for (selection, shown) in coordinator.diagnosed {
+            guard resolve(selection) != shown else { continue }
             if let idx = vc.tabViewItems.firstIndex(
                 where: { ($0.identifier as? RemoteAttachMountKey)?.selection == selection }) {
                 vc.removeTabViewItem(vc.tabViewItems[idx])
             }
-            context.coordinator.diagnosed[selection] = nil
+            coordinator.diagnosed[selection] = nil
         }
 
-        Self.reconcile(vc, mounts: mounts, activeSelection: activeSelection, appState: appState) { key in
+        reconcile(vc, mounts: mounts, activeSelection: activeSelection, appState: appState) { key in
             // Resolution goes through `RemoteAttachPreflight`, which matches
             // the registry key exactly or fails by name — it has no
             // expression for attaching through a provider other than the
@@ -95,24 +134,22 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
             // should be. Now the pane says which provider was asked and what
             // stopped it, and 0. above re-checks it on every later render.
             let selection = key.selection
-            let diagnosis = RemoteAttachPreflight.resolve(
-                selection: selection,
-                providers: appState.remoteProviders,
-                sessions: appState.remoteSessions)
+            let diagnosis = resolve(selection)
             guard let config = diagnosis.readyConfig else {
-                context.coordinator.diagnosed[selection] = diagnosis
+                coordinator.diagnosed[selection] = diagnosis
                 let host = NSHostingController(
                     rootView: RemoteAttachDiagnosisView(selection: selection, diagnosis: diagnosis))
                 let item = NSTabViewItem(viewController: host)
                 item.identifier = key
                 return item
             }
-            let host = NSHostingController(
-                rootView: Self.makeTerminalView(for: key, provider: config, appState: appState)
-                    .environment(appState)
-                    .environmentObject(appearance)
-            )
-            let item = NSTabViewItem(viewController: host)
+            // A live terminal is not a diagnosis tab. A selection can arrive
+            // here still carrying a diagnosis recorded for a PREVIOUS key —
+            // a reconnect superseding the generation swaps the old key out and
+            // this one in within a single update — and a stale record would
+            // make 0. above tear this fresh terminal down on the next render.
+            coordinator.diagnosed[selection] = nil
+            let item = NSTabViewItem(viewController: makeTerminalController(key, config))
             item.identifier = key
             return item
         }
@@ -122,7 +159,7 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         // but has no coordinator to clear. Nothing reads a stale entry, but
         // without this the dictionary only ever grows.
         let mountedSelections = Set(mounts.map(\.selection))
-        context.coordinator.diagnosed = context.coordinator.diagnosed.filter { mountedSelections.contains($0.key) }
+        coordinator.diagnosed = coordinator.diagnosed.filter { mountedSelections.contains($0.key) }
     }
 
     /// The bare attach terminal for one mount key, with both AppState bridges
@@ -182,10 +219,9 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
     /// item's `identifier`, which is how a later diff recognises it — or nil
     /// to add no item at all. This function has no opinion on why a key would
     /// resolve to nil or to a diagnosis-view item rather than a live
-    /// terminal — that policy lives in `updateNSViewController`'s own
-    /// `makeItem` closure — so a test can drive the mount-set diff itself
-    /// with a stub `makeItem` and a real `NSTabViewController`, without a
-    /// SwiftUI `Context`.
+    /// terminal — that policy lives in `update`'s own `makeItem` closure — so
+    /// a test can drive the mount-set diff itself with a stub `makeItem` and a
+    /// real `NSTabViewController`, without a SwiftUI `Context`.
     @MainActor
     static func reconcile(
         _ vc: NSTabViewController,
@@ -232,7 +268,7 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
 
         // 2. Add tab items for newly-mounted keys. What `makeItem` builds for
         //    an unresolvable key is its own caller's decision — see
-        //    `updateNSViewController`'s closure.
+        //    `update`'s closure.
         for key in mounts where !currentKeys.contains(key) {
             guard let item = makeItem(key) else { continue }
             vc.addTabViewItem(item)
