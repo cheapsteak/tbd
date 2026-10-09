@@ -720,6 +720,15 @@ extension WorktreeLifecycle {
                     try await db.worktrees.markForeignHead(id: adopted.id)
                 } catch {
                     logger.error("failed create \(row.id, privacy: .public): could not stamp the re-adopted fork checkout at \(checkoutPath, privacy: .public) as foreign-head (\(error.localizedDescription, privacy: .public)); removing its row so no unstamped row stands for it")
+                    // Only a row this adopt just inserted is ours to delete.
+                    // `.revived` and `.unchanged` hand back a row that existed
+                    // before the rollback, with its history. In practice the
+                    // outcome is always `.inserted`: the path is UNIQUE and the
+                    // rolled-back row was its only holder.
+                    guard case .inserted = outcome else {
+                        logger.error("failed create \(row.id, privacy: .public): the row \(adopted.id, privacy: .public) holding the fork checkout at \(checkoutPath, privacy: .public) predates this rollback and could not be stamped foreign-head; leaving it in place")
+                        return
+                    }
                     do {
                         try await db.worktrees.delete(id: adopted.id)
                     } catch {
