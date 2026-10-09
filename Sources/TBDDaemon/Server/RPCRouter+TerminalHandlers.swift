@@ -4135,14 +4135,23 @@ extension RPCRouter {
     ///
     /// The oracle is consulted at composition time, which is a moment, and the
     /// child can change a mode between that moment and the write. **How wide
-    /// that window is depends on which store answered.** A live store — the
-    /// daemon's own emulator, or a viewer that answered the pull — leaves only
-    /// the moment between the read and the write, which is the window tmux has
-    /// too: its server reads the pane's mode when it pastes, not when the bytes
-    /// land. A `staleDaemon` reading leaves the whole attach, because that
+    /// that window is depends on which store answered**, and for a session
+    /// somebody has open the answer is ordinarily the live one: the oracle asks
+    /// that viewer for a modes-only reading over the sidecar, and a `.viewer`
+    /// answer leaves only the moment between the read and the write — the
+    /// window tmux has too, since its server reads the pane's mode when it
+    /// pastes, not when the bytes land. A detached session's `.daemon` reading
+    /// is the same width, from the emulator the daemon is draining.
+    ///
+    /// `staleDaemon` is now the **pull-failure** arm rather than the ordinary
+    /// shape of an attached send: the viewer did not answer inside
+    /// `sendPathScreenPullBound`, so this is the emulator as it stood when that
+    /// viewer attached. The window is then the whole attach, because that
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
-    /// the child changed since then is invisible here for as long as the viewer
-    /// holds it — possibly hours.
+    /// the child changed since is invisible here for as long as the viewer
+    /// holds it — possibly hours. It stays reachable forever — a napping,
+    /// wedged or mid-paste app is exactly the moment supervision wants to send
+    /// — which is why the rule below is not going anywhere.
     ///
     /// **So a stale reading is trusted in one direction only.** A viewer
     /// ordinarily takes the pty within milliseconds of a spawn or a wake,
@@ -4519,13 +4528,23 @@ extension RPCRouter {
     /// What the child's modes are, as best this daemon can say.
     ///
     /// The seam first so a test can pin all three answers without a real
-    /// holder; otherwise the registry's reader for this session, which is
-    /// retained across an attach and so answers for an open session as well as
-    /// a detached one — `.daemon` while the daemon is draining, `.staleDaemon`
-    /// while a viewer holds the pty.
+    /// holder; otherwise `HolderScreenResolver`, which asks the store that
+    /// holds the pty. A session the daemon is draining answers `.daemon` from
+    /// its live emulator with no frame sent. A session somebody has open is
+    /// asked, over the sidecar, for a modes-only reading — `.viewer`, bounded
+    /// by `sendPathScreenPullBound` — and falls back to the daemon's retained
+    /// emulator, `.staleDaemon`, when no answer arrives inside it.
+    ///
+    /// With no resolver wired — mock mode, or a daemon with no sidecar — this
+    /// reads the registry's reader directly, which is what it did before the
+    /// pull existed: `.daemon` while draining, `.staleDaemon` while a viewer
+    /// holds the pty.
     private func holderModeReading(terminalID: UUID) async -> TerminalModeReading? {
         if let holderModeOracle {
             return await holderModeOracle(terminalID)
+        }
+        if let holderScreenResolver {
+            return await holderScreenResolver.modeReading(terminalID: terminalID)
         }
         guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
         return await reader.modeReading()

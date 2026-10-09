@@ -176,7 +176,9 @@ actor HolderScreenPull {
     ///
     /// - Parameter lines: how many lines of scrollback-plus-viewport the
     ///   caller wants. `0` is a modes-only reading: the shared projection's
-    ///   `maxLines <= 0` arm yields no lines, so the app walks nothing.
+    ///   `TerminalScreenProjection.project` returns before walking the buffer,
+    ///   so the app does no per-row work at all — which is the point, not the
+    ///   smaller reply.
     /// - Parameter retainedScrollbackLines: the daemon's own retained depth.
     ///   `SidecarScreenRequest`'s initializer clamps `lines` to it, so the
     ///   answer a reader gets does not depend on who happens to be looking at

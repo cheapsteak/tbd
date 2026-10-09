@@ -120,4 +120,42 @@ public enum HolderInputTiming {
     /// So the wait is bounded against the close rather than against the value
     /// of the answer.
     public static let closedTerminalPullBound: Duration = .milliseconds(250)
+
+    /// How long the daemon waits for a viewer's answer when the question is
+    /// being asked **to compose a send**, rather than to answer a read.
+    ///
+    /// The tightest of the four, and the asymmetry is the point. Three things
+    /// differ between this and the read bound:
+    ///
+    /// - **A read has nobody waiting on it; a send does.** `terminal.output` is
+    ///   answered when it is answered — a supervisor polling a fleet absorbs
+    ///   half a second without noticing. A `terminal.send` is a person or a
+    ///   rail trying to make something happen, and the wait lands in front of
+    ///   the act itself.
+    /// - **The send pays twice in the worst case.** A nudge to a session
+    ///   somebody has open waits this bound for the modes, and then the
+    ///   injection ack's five seconds for the write. The read pays once.
+    /// - **Expiry here is a defined behaviour, not a failure.** It falls
+    ///   through to the `staleDaemon` rule: proceed on the frozen modes,
+    ///   trusting a stale "on" and treating a stale "off" as not known, and
+    ///   record the source on the actuation row. That rule was built for
+    ///   exactly this branch. A read that gives up has a weaker story — its
+    ///   answer is simply older.
+    ///
+    /// So the trade is a rare stale composition, visible afterwards in the
+    /// recorded `modeSource`, against latency on **every** send to an attached
+    /// session. 150 ms is five to ten main-actor turns of headroom for an awake
+    /// app, while an app that is napping, wedged or mid-paste was never going
+    /// to answer inside half a second either.
+    ///
+    /// **It is a ceiling on waiting, not on work.** A modes-only request makes
+    /// the answering viewer read a handful of properties —
+    /// `TerminalScreenProjection.project` returns before it walks the buffer
+    /// when no lines are asked for — so what this bound covers is scheduling
+    /// and the sidecar round trip, not a projection. That is what makes it
+    /// generous rather than tight.
+    ///
+    /// Shorter than `screenPullBound` is the relationship that matters, not the
+    /// number; `HolderInputTimingTests` pins it.
+    public static let sendPathScreenPullBound: Duration = .milliseconds(150)
 }

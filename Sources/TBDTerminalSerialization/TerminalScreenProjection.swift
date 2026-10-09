@@ -93,26 +93,60 @@ public enum TerminalScreenProjection {
     /// lock.
     ///
     /// `maxLines` caps how many lines come back, keeping the **tail**: the
-    /// newest rows are what a reader asking for 50 lines wants. `maxLines <= 0`
-    /// yields no lines at all, which is what makes a modes-only reading free —
-    /// the walk still runs, but nothing is projected and nothing is returned.
+    /// newest rows are what a reader asking for 50 lines wants.
     ///
-    /// The line walk enumerates from `totalLinesTrimmed`, the absolute index of
-    /// the oldest line still held, until `getScrollInvariantLine` returns nil,
-    /// because there is no public line count and `Buffer.lines` is internal.
-    public static func project(_ terminal: Terminal, maxLines: Int) -> ProjectedScreen {
+    /// **`maxLines <= 0` returns before touching the buffer**, which is what
+    /// makes a modes-only reading genuinely cheap rather than merely cheap on
+    /// the wire. The input path's oracle asks with `0` before composing every
+    /// message to a session a viewer holds, and the viewer answers on its main
+    /// actor under the terminal lock — so a walk there would cost a `rowText`
+    /// call per retained row, thousands of them, inside a 150 ms bound.
+    /// Exceeding that bound drops the send back onto the frozen modes, which is
+    /// the exact failure the pull exists to remove. Returning *after* the walk
+    /// would make the request small and the work unchanged.
+    ///
+    /// The early return is **not** a second answer. With no lines the tail cut
+    /// drops every enumerated row, so `droppedFromFront` equals the whole count
+    /// and `viewportStart` reduces to `-rows` whatever the buffer holds.
+    /// `TerminalScreenProjectionParityTests` compares this against the full
+    /// walk at depth `0` over every fixture, and counts row accesses to prove
+    /// the walk did not run.
+    ///
+    /// The line walk, when there is one, enumerates from `totalLinesTrimmed` —
+    /// the absolute index of the oldest line still held — until
+    /// `getScrollInvariantLine` returns nil, because there is no public line
+    /// count and `Buffer.lines` is internal.
+    ///
+    /// - Parameter onRowAccess: called once per row the walk touches. A test
+    ///   seam, defaulted so no production call site mentions it, and the only
+    ///   way to assert that the modes-only path does **not** walk: equality
+    ///   cannot show which branch ran, and SwiftTerm's row accessors are
+    ///   `public` rather than `open`, so they cannot be intercepted by a
+    ///   subclass. A counter here fails the moment somebody moves the guard
+    ///   below the loop — which is the regression this parameter exists for.
+    public static func project(
+        _ terminal: Terminal, maxLines: Int, onRowAccess: (() -> Void)? = nil
+    ) -> ProjectedScreen {
+        guard maxLines > 0 else {
+            return ProjectedScreen(
+                lines: [],
+                viewportStart: -terminal.rows,
+                cursorRow: terminal.buffer.y,
+                cursorColumn: terminal.buffer.x,
+                size: TerminalScreen.Size(columns: terminal.cols, rows: terminal.rows),
+                modes: modes(of: terminal))
+        }
         var enumerated: [String] = []
         var row = terminal.buffer.totalLinesTrimmed
         while let line = terminal.getScrollInvariantLine(row: row) {
+            onRowAccess?()
             enumerated.append(rowText(line))
             row += 1
         }
         let enumeratedCount = enumerated.count
 
         var lines = enumerated
-        if maxLines <= 0 {
-            lines = []
-        } else if lines.count > maxLines {
+        if lines.count > maxLines {
             lines.removeFirst(lines.count - maxLines)
         }
         let droppedFromFront = enumeratedCount - lines.count

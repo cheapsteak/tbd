@@ -41,6 +41,12 @@ struct HolderScreenResolverTests {
         var daemonScreenAfterPull: TerminalScreen?
         /// The reader's construction fact.
         var observedChildFromStart = true
+        /// The daemon reader's own mode answer, used by the `modeReading`
+        /// cases. Defaulted so the screen cases need not set it.
+        var daemonModes = TerminalModeReading(
+            modes: TerminalScreen.ChildModes(
+                bracketedPaste: false, applicationCursor: false, alternateScreen: false),
+            modesObserved: true, source: .staleDaemon, ageMilliseconds: 90_000)
         /// When set, the reader's screen throws it — a projection bug.
         var screenError: Error?
 
@@ -73,6 +79,7 @@ struct HolderScreenResolverTests {
                             guard let screen = daemonScreen else { throw NoPublishedReader() }
                             return screen
                         },
+                        modeReading: { [self] in daemonModes },
                         observedChildFromStart: observedChildFromStart)
                 },
                 pull: pull,
@@ -108,13 +115,15 @@ struct HolderScreenResolverTests {
     }
 
     private static func payload(
-        lines: [String], age: Int = 7, bracketedPaste: Bool = true
+        lines: [String], age: Int = 7, bracketedPaste: Bool = true,
+        applicationCursor: Bool = false
     ) -> ViewerScreenPayload {
         ViewerScreenPayload(
             lines: lines, viewportStart: 0, cursorRow: 2, cursorColumn: 5,
             cursorVisible: true, cursorVisibleObserved: false,
             columns: 80, rows: 24,
-            bracketedPaste: bracketedPaste, applicationCursor: false, alternateScreen: false,
+            bracketedPaste: bracketedPaste, applicationCursor: applicationCursor,
+            alternateScreen: false,
             ageMilliseconds: age)
     }
 
@@ -356,6 +365,178 @@ struct HolderScreenResolverTests {
         await #expect(throws: TerminalScreen.ValidationError.self) {
             _ = try await answer.value
         }
+    }
+
+    // MARK: - The mode oracle
+
+    /// The oracle's ordinary fleet case, and the negative assertion is again
+    /// the one that matters: composing a message for a detached session must
+    /// not cost a sidecar round trip.
+    @Test("a detached session's modes come from the reader, with no frame sent")
+    func detachedModesComeFromTheReaderWithNoFrame() async throws {
+        let harness = Harness()
+        harness.role = .daemon
+        harness.daemonScreen = try Self.screen(lines: ["live"], source: .daemon)
+        harness.daemonModes = TerminalModeReading(
+            modes: TerminalScreen.ChildModes(
+                bracketedPaste: true, applicationCursor: true, alternateScreen: false),
+            modesObserved: true, source: .daemon, ageMilliseconds: 4)
+        let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
+
+        let reading = try #require(await resolver.modeReading(terminalID: UUID()))
+
+        #expect(reading.source == .daemon)
+        #expect(reading.modes.bracketedPaste)
+        #expect(reading.modes.applicationCursor)
+        #expect(harness.sendCount == 0, "a detached send must not wait on the app")
+    }
+
+    /// The whole point of this PR: a session somebody has open composes against
+    /// the modes that viewer's terminal is actually in.
+    ///
+    /// Also pins the wire shape the oracle asks for — `lines: 0`, the
+    /// modes-only reading, which is what keeps the request a few hundred bytes
+    /// instead of a scrollback walk per message composed.
+    @Test("an attached session's modes come from the viewer, asked with no lines")
+    func attachedModesComeFromTheViewer() async throws {
+        let harness = Harness()
+        harness.role = .viewer(attach: 3)
+        harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        let pull = harness.makePull(clock: TestClock())
+        let resolver = harness.makeResolver(pull: pull)
+        let terminalID = UUID()
+
+        let answer = Task { await resolver.modeReading(terminalID: terminalID) }
+        try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
+
+        let request = try harness.decodeRequest()
+        #expect(request.lines == 0, "the oracle asks for modes, not for a screen")
+        #expect(!request.wantStyledCapture)
+        pull.record(
+            SidecarScreenReply(
+                requestID: request.requestID, terminalID: terminalID,
+                screen: Self.payload(
+                    lines: [], bracketedPaste: true, applicationCursor: true)),
+            epoch: 1)
+
+        let reading = try #require(await answer.value)
+        #expect(reading.source == .viewer)
+        #expect(reading.modes.bracketedPaste, "the viewer's live flag, not the frozen one")
+        // The frozen reading says false on both; a resolver that forwarded the
+        // reader's modes while merely relabelling the source would fail here.
+        // `applicationCursor` has its own consumer — `HolderNamedKeys` picks
+        // `ESC O A` over `ESC [ A` on it, and the spec calls the key table
+        // load-bearing on the oracle's accuracy.
+        #expect(reading.modes.applicationCursor)
+        #expect(reading.ageMilliseconds == 7)
+        #expect(reading.modesObserved, "from the reader's construction fact")
+    }
+
+    /// The pull-failure arm, which is the branch the stale-modes rule was
+    /// written for and which stays reachable forever. Driven to exactly the
+    /// **send-path** bound, so a resolver that asked with the read bound would
+    /// leave this unresolved and hang out to the suite's limit.
+    @Test("a silent viewer leaves the oracle on the frozen modes after the send bound")
+    func silentViewerLeavesTheOracleOnFrozenModes() async throws {
+        let harness = Harness()
+        harness.role = .viewer(attach: 3)
+        harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        let clock = TestClock<Duration>()
+        let pull = harness.makePull(clock: clock)
+        let resolver = harness.makeResolver(pull: pull)
+
+        let answer = Task { await resolver.modeReading(terminalID: UUID()) }
+        try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
+
+        await clock.advanceWhenSuspended(by: HolderInputTiming.sendPathScreenPullBound)
+
+        let reading = try #require(await answer.value)
+        #expect(reading.source == .staleDaemon)
+        #expect(reading.ageMilliseconds == 90_000)
+    }
+
+    /// The other half of the bound pin, and the direction that costs
+    /// something: the oracle must not give up *early*, or every attached send
+    /// would compose against frozen modes while a live answer was on its way.
+    @Test("the oracle's bound is not reached before the send-path bound")
+    func oracleBoundIsNotReachedEarly() async throws {
+        let harness = Harness()
+        harness.role = .viewer(attach: 3)
+        harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        let clock = TestClock<Duration>()
+        let pull = harness.makePull(clock: clock)
+        let resolver = harness.makeResolver(pull: pull)
+        let terminalID = UUID()
+
+        let answer = Task { await resolver.modeReading(terminalID: terminalID) }
+        try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
+        let request = try harness.decodeRequest()
+
+        await clock.advanceWhenSuspended(
+            by: HolderInputTiming.sendPathScreenPullBound - .milliseconds(1))
+        pull.record(
+            SidecarScreenReply(
+                requestID: request.requestID, terminalID: terminalID,
+                screen: Self.payload(lines: [], bracketedPaste: true)),
+            epoch: 1)
+
+        let reading = try #require(await answer.value)
+        #expect(reading.source == .viewer)
+        #expect(await pull.lateRepliesObserved == 0,
+                "the oracle gave up early, so the viewer's answer arrived late")
+    }
+
+    /// The provenance rule on the mode path. It matters more here than on the
+    /// read path: `HolderSendComposition` keys its entire decision on
+    /// `modesObserved`, so a re-adopted session whose viewer answers must still
+    /// report its flags as defaults rather than as the child's own.
+    @Test("a viewer's mode answer takes modesObserved from the reader")
+    func viewerModeAnswerTakesProvenanceFromTheReader() async throws {
+        let harness = Harness()
+        harness.role = .viewer(attach: 3)
+        harness.observedChildFromStart = false
+        harness.daemonScreen = try Self.screen(
+            lines: ["inherited"], source: .staleDaemon, observed: false)
+        let pull = harness.makePull(clock: TestClock())
+        let resolver = harness.makeResolver(pull: pull)
+        let terminalID = UUID()
+
+        let answer = Task { await resolver.modeReading(terminalID: terminalID) }
+        try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
+        let request = try harness.decodeRequest()
+        pull.record(
+            SidecarScreenReply(
+                requestID: request.requestID, terminalID: terminalID,
+                screen: Self.payload(lines: [], bracketedPaste: true)),
+            epoch: 1)
+
+        let reading = try #require(await answer.value)
+        #expect(reading.source == .viewer)
+        #expect(!reading.modesObserved,
+                "a re-adopted emulator's flags stay defaults through a viewer answer")
+    }
+
+    @Test("no published reader answers nil modes, so the send proceeds rather than refusing")
+    func noReaderAnswersNilModes() async throws {
+        let harness = Harness()
+        harness.daemonScreen = nil
+        let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
+
+        #expect(await resolver.modeReading(terminalID: UUID()) == nil)
+        #expect(harness.sendCount == 0)
+    }
+
+    @Test("a resolver with no pull answers modes from the reader")
+    func noPullAnswersModesFromTheReader() async throws {
+        let harness = Harness()
+        harness.role = .viewer(attach: 3)
+        harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        let resolver = harness.makeResolver(pull: nil)
+
+        let reading = try #require(await resolver.modeReading(terminalID: UUID()))
+
+        #expect(reading.source == .staleDaemon)
+        #expect(harness.sendCount == 0)
     }
 
     /// A daemon with no pull wired — the tmux-only configuration — resolves

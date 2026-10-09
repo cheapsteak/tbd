@@ -72,4 +72,32 @@ struct HolderInputTimingTests {
             answer nobody is watching render.
             """)
     }
+
+    /// The send path waits less than the read path for the same answer, because
+    /// a read has nobody waiting on it and a send does — and because the send's
+    /// expiry lands on a defined behaviour (the stale-modes rule) rather than
+    /// merely on an older answer.
+    ///
+    /// Pinned as a relationship, not a number: the constants may be tuned, but
+    /// a send that waited *longer* than a read would have the asymmetry
+    /// backwards, and the cost would land on every message composed for a
+    /// session somebody has open.
+    ///
+    /// Asserts the **production constants**, like the tests above.
+    @Test("The send path's pull bound is shorter than the read path's")
+    func sendPathBoundIsShorterThanTheReadPathBound() {
+        #expect(
+            HolderInputTiming.sendPathScreenPullBound < HolderInputTiming.screenPullBound,
+            """
+            the oracle waits \(HolderInputTiming.sendPathScreenPullBound) in front of every \
+            holder send to an attached session, while a read waits \
+            \(HolderInputTiming.screenPullBound) with nobody blocked on it; a send waiting the \
+            longer of the two has the asymmetry backwards.
+            """)
+        // Still a real wait, not a token one: an awake app answers in one or
+        // two main-actor turns, and a bound under that would make the stale
+        // fallback the ordinary answer for an open tab — the exact branch the
+        // pull exists to stop being ordinary.
+        #expect(HolderInputTiming.sendPathScreenPullBound > .milliseconds(32))
+    }
 }
