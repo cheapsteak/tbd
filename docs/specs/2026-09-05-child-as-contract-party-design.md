@@ -310,6 +310,45 @@ design builds is the pull the model has always required.
 - **No reader at all** – the session is gone or never adopted. An error, as
   today, and the error says which.
 
+### Who is reading is asked once, of the ledger that knows
+
+The four cases above are a routing decision, and it is taken in exactly one
+place — `HolderScreenResolver` — from exactly one fact: the reader-count
+census's per-session answer, `HolderRegistry.ptyReader(for:)`, which says
+`daemon`, `viewer(attach:)` or nobody. That matters because the registry holds
+three other facts that each *look* like the answer and are not. `reader(for:)`
+answers for a suspended reader as well as a draining one, so it cannot tell a
+frozen store from a live one. `viewerAttachment(for:)` answers "a viewer *may*
+hold this pty", deliberately conflating an acknowledged attach with one that
+timed out. `isDraining` describes a loop rather than a store. Composing the
+answer out of them at each call site is how a second answer to the census's
+question gets written, and a second answer is free to drift from the first —
+which is the shape of every double-reader bug this transport's census exists to
+catch.
+
+The division that follows is worth stating as a rule, because the two halves
+read as interchangeable and are not: **the ledger decides whether to pull; the
+answering store stamps what it honestly is.** `HolderReader.screen` reads its
+own drain state for `source`, and the resolver never overrides it — the one
+source the resolver sets itself is `viewer`, which no reader can produce
+because it names an answer that did not come from one. So a screen's `source`
+is always the claim of whichever store rendered it, and the routing above
+decides only which store is asked.
+
+Two consequences follow, and both are behaviour a reader will otherwise find
+surprising. A **pull that does not answer** re-reads the daemon's reader and
+takes whatever source it reports *then* — normally `staleDaemon`, but `daemon`
+if the viewer detached while the pull was in flight and the reader has resumed
+draining; labelling a resumed live emulator stale would make the hibernation
+rail refuse a park it could safely take. And a **viewer's answer carries the
+daemon reader's provenance**: `modesObserved` and `contentObserved` come from
+the reader, not the reply, because a viewer's emulator was seeded by this
+reader's attach preamble and can hand back no more than it was given. "The app
+answered, so the screen must be observed" is the plausible wrong reading, and
+it is wrong in exactly the case that matters — a re-adopted session answers
+false on both axes for that emulator's whole life, and attaching a viewer to it
+earns no provenance the daemon never had.
+
 Each consumer declares what it does with `.staleDaemon`, and the declaration
 is in the consumer, where a reviewer can see it:
 

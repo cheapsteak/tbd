@@ -339,6 +339,17 @@ public final class RPCRouter: Sendable {
     /// input path in this daemon rather than being silently dropped.
     nonisolated(unsafe) var holderInjectionCourier: HolderInjectionCourier?
 
+    /// Answers a machine read of a holder-backed session from whichever store
+    /// is live — the daemon's emulator while detached, a viewer's SwiftTerm
+    /// while attached. Set by `Daemon` after construction, beside the registry
+    /// and the courier it is built from.
+    ///
+    /// `nil` in mock mode and in tests that never exercise the transport, where
+    /// `terminal.output` falls back to asking the registry's reader directly:
+    /// exactly the behaviour it had before the pull existed, which is the right
+    /// answer for a daemon that has no sidecar to pull over.
+    nonisolated(unsafe) var holderScreenResolver: HolderScreenResolver?
+
     /// Answers what modes a holder-backed session's child is in, for the send
     /// path to compose against. A **test seam only** — production leaves it
     /// nil and `performHolderSend` falls through to the registry's own reader,

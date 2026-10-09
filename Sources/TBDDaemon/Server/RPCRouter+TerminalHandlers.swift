@@ -1863,16 +1863,21 @@ extension RPCRouter {
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
     }
 
-    /// The holder half of `terminal.output`: the typed screen, from the
-    /// daemon's own emulator.
+    /// The holder half of `terminal.output`: the typed screen, from whichever
+    /// of the transport's two stores is live.
     ///
-    /// **A session a person has open is answerable.** The daemon's reader is
-    /// retained across an attach — suspended, holding the screen as it stood
-    /// when the viewer arrived — so this reads it and labels the answer
-    /// `staleDaemon` with an age rather than failing. Before the reader was
-    /// retained, a machine read of any open session returned an error saying
-    /// the session was gone, which was both wrong and the most comfortable
-    /// possible wrong answer.
+    /// **A session a person has open answers from the screen they are looking
+    /// at.** `HolderScreenResolver` asks the registry's census who is reading
+    /// that pty: the daemon, and its live emulator answers; a viewer, and the
+    /// daemon pulls the screen over the fd sidecar and labels it `viewer`. A
+    /// viewer that does not answer within the pull's bound leaves the daemon's
+    /// retained emulator as the answer — suspended since the attach, labelled
+    /// `staleDaemon` with an age. All three are answers with their provenance
+    /// attached, and which one a consumer got is a field rather than a guess.
+    ///
+    /// With no resolver wired — mock mode, or a daemon with no sidecar — this
+    /// asks the reader directly, which is what it did before the pull existed
+    /// and is the honest answer for a daemon that has nothing to pull over.
     ///
     /// A missing reader is still reported rather than papered over. It means
     /// the registry has no reader to hand out: the holder is gone, startup
@@ -1894,24 +1899,35 @@ extension RPCRouter {
             return RPCResponse(
                 error: "Holder transport is not wired in this daemon: \(terminal.id)")
         }
-        guard let reader = await holderRegistry.reader(for: terminal.id) else {
-            return RPCResponse(
-                error: "No live holder reader for terminal \(terminal.id); "
-                    + "its session is gone, was never adopted, or is mid-transition "
-                    + "(being adopted or released); retry if it was just created "
-                    + "or is being closed")
-        }
         let lines = params.lines ?? 50
         // Rendered to the requested depth directly. The tmux path asks for a
         // whole pane and trims afterwards because `capture-pane` has no such
         // knob; the emulator does, and going through it means the scrollback
         // above the viewport is available rather than discarded.
-        let screen: TerminalScreen
+        //
+        // The two arms differ only in which store may answer, so the "no
+        // reader" and "refused projection" errors below are shared: a resolver
+        // answers nil for exactly the sessions `reader(for:)` answers nil for,
+        // and throws exactly what the screen type's construction refuses.
+        let screen: TerminalScreen?
         do {
-            screen = try await reader.screen(maxLines: lines)
+            if let holderScreenResolver {
+                screen = try await holderScreenResolver.screen(
+                    terminalID: terminal.id, maxLines: lines)
+            } else {
+                screen = try await holderRegistry.reader(for: terminal.id)?
+                    .screen(maxLines: lines)
+            }
         } catch {
             return RPCResponse(
                 error: "Could not project terminal \(terminal.id)'s screen: \(error)")
+        }
+        guard let screen else {
+            return RPCResponse(
+                error: "No live holder reader for terminal \(terminal.id); "
+                    + "its session is gone, was never adopted, or is mid-transition "
+                    + "(being adopted or released); retry if it was just created "
+                    + "or is being closed")
         }
         return try RPCResponse(result: TerminalOutputResult(screen: screen))
     }

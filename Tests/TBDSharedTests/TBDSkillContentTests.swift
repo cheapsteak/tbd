@@ -36,6 +36,31 @@ import Foundation
     #expect(body.contains("--help"))
 }
 
+/// The screen paragraph tells an agent which store answered its read, and all
+/// three sources have to survive an edit of it.
+///
+/// Pinned because the text is the only place an agent learns the distinction,
+/// and it was wrong for as long as `viewer` was unreachable — it named two
+/// sources and called `staleDaemon` the thing a reader should watch for. An
+/// unpinned paragraph can drift back to that quietly, and the reader who pays
+/// for it is an agent acting on a half-typed composer line as if it were the
+/// session's settled state.
+@Test func bodyNamesAllThreeScreenSources() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("Three stores can answer"))
+    // Each source's own spelling, which is also the `--json` field's value, so
+    // a script correlating on one finds the other.
+    #expect(body.contains("`daemon` — the daemon is reading"))
+    #expect(body.contains("`viewer` — somebody has the session open"))
+    #expect(body.contains("`staleDaemon` — somebody has the session open"))
+    // The caveat a `viewer` answer carries, which is the one an agent gets
+    // wrong: live is not the same as settled.
+    #expect(body.contains("a person is at that keyboard"))
+    // The two fields that carry the provenance machine-readably.
+    #expect(body.contains("screen.source"))
+    #expect(body.contains("screen.ageMilliseconds"))
+}
+
 @Test func bodyContainsSiblingMessagingSection() {
     let body = TBDSkillContent.body
     #expect(body.contains("### Message a sibling session"))
