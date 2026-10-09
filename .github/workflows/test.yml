@@ -241,6 +241,11 @@ jobs:
       # paying a cold build, too many churns main's entry out of a 10 GB store,
       # and neither shows up in a suite.
       #
+      # `sweep-foreign-worktrees.test.sh` also needs `jq` (preinstalled on the
+      # runner). Its fixtures are real repos with real linked worktrees in a
+      # temp dir, and every tool it would otherwise reach — `tbd`, `gh`, `lsof`
+      # — is a fake behind a seam, with failing shims first on PATH.
+      #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -256,6 +261,7 @@ jobs:
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/sweep-foreign-worktrees.test.sh
           bash scripts/cache-save-policy.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/flake-ledger.test.sh
