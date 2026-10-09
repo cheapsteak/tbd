@@ -1228,7 +1228,9 @@ Transitions, each owned by the PR driver:
   because a `ready_for_review` event raised by `GITHUB_TOKEN` would not
   start `claude-review`.
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so
-  the gate judges the PR once it is ready, like any other.
+  the gate judges the PR once it is ready, like any other. The review action
+  refuses non-human actors by default, so the gate's workflow names this App,
+  and only this App, in the action's `allowed_bots` input.
 - **Merge or close.** A human does either. `Fixes #N` closes the issue on
   merge. The next `ledger` run records `merged` or `closed-unmerged` from the
   PR's state (§4.4). A recurrence on a commit containing the fix reopens the

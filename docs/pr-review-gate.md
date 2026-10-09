@@ -43,6 +43,14 @@ why, and for what reviving it actually takes.
    forks and harmless for same-repo branches. The default `GITHUB_TOKEN` reads this
    endpoint with only `contents: read` — verified in Actions — so the reviewer App
    token is still minted after the gate rather than before it.
+
+   Bot authors pass through this gate the same way, but
+   `anthropics/claude-code-action` refuses any non-human actor that its
+   `allowed_bots` input does not name. That input lists exactly one App,
+   `tbd-flake-fixer`, whose same-repo flake-fix PRs
+   ([spec](specs/2026-10-07-flake-autofix-design.md) §7) must pass this required
+   check. It is never `*`, because on a public repo that would let any installed
+   App start a review session.
 3. **Prepare.** `prepare.py` resolves the PR's merge base with the base branch and
    pins that SHA for the rest of the run, computes the head diff's patch-id over
    it, and reads the markers off the newest prior review comment. When the
