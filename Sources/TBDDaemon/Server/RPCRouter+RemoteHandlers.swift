@@ -914,6 +914,77 @@ extension RPCRouter {
         return response
     }
 
+    /// `remote.transcriptLoadEarlier` — one page of history above the cache,
+    /// fetched with `transcript read <id> --before <before> --tail 12` and
+    /// prepended on the session's lane
+    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md` § RPCs).
+    ///
+    /// Gate order: remote backends, the cloud gate, the live-sync flag (read
+    /// now, never cached), `transcript.tail`, dismissal, then a cache holding a
+    /// `before`. `RemoteTranscriptSync.loadEarlier` checks none of these
+    /// itself.
+    ///
+    /// The cache's `generation` is noted here, as the request arrives. When a
+    /// sync queued ahead of the load on the lane changes it, the load makes no
+    /// provider call and the result carries the new generation and head with
+    /// `reachedStart` false — the pane handles it as any generation change.
+    func handleRemoteTranscriptLoadEarlier(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate(), let sync = remoteTranscriptSync else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteTranscriptLoadEarlierParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard try await db.config.get().remoteTranscriptLiveSyncEnabled else {
+            return RPCResponse(error: Self.loadEarlierFlagOffRefusal)
+        }
+        guard await declaredCapabilities(manager, provider: params.provider)
+            .contains(RemoteCapability.transcriptTail) else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: RemoteCapability.transcriptTail,
+                section: "transcript read --tail and --before")
+        }
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        let cache = sync.cache(provider: params.provider, sessionID: params.sessionID)
+        guard let state = cache.peekState(), state.before != nil, !state.pendingPrepend else {
+            return RPCResponse(error: Self.loadEarlierNothingAboveRefusal)
+        }
+        let response: RPCResponse
+        do {
+            let outcome = try await sync.loadEarlier(
+                provider: params.provider, sessionID: params.sessionID,
+                requestGeneration: state.generation)
+            response = try RPCResponse(result: RemoteTranscriptLoadEarlierResult(
+                generation: outcome.generation, head: outcome.head,
+                reachedStart: outcome.reachedStart, expired: outcome.expired))
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.transcriptLoadEarlier provider=\(params.provider, privacy: .public) timed out")
+            response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        } catch let error as RemoteTranscriptSyncError {
+            response = RPCResponse(error: error.localizedDescription)
+        }
+        // Checked again once the page is written, for the same race
+        // `handleRemoteTranscriptSync` closes: a dismiss landing after the
+        // check above must not leave a prepended page behind.
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            await sync.discard(provider: params.provider, sessionID: params.sessionID)
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        return response
+    }
+
+    /// What `remote.transcriptLoadEarlier` answers while
+    /// `remote_transcript_live_sync_enabled` is off.
+    static let loadEarlierFlagOffRefusal =
+        "loading earlier transcript history is off (remote_transcript_live_sync_enabled)"
+
+    /// What `remote.transcriptLoadEarlier` answers for a cache with no
+    /// `before`: one built by forward reads, one that already reached the
+    /// conversation's beginning, or none at all.
+    static let loadEarlierNothingAboveRefusal = "no earlier transcript history to load"
+
     private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
         try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
     }
