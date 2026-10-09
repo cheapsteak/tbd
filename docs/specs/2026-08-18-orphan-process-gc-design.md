@@ -287,20 +287,55 @@ sweep of a phase that never ran.
 
 These are the safety core, and the first is not hypothetical.
 
-- **The daemon and the app.** `TBDDaemon` runs at `ppid=1` with its cwd inside a
-  TBD-managed tree — measured at `ppid=1, cwd=/Users/<user>/projects/tbd`, and
-  when `scripts/restart.sh` is run from a worktree the daemon's cwd is that
-  worktree. Archiving it would otherwise have the sweep SIGKILL the live daemon
-  that is running the sweep. `TBDDaemon`, `TBDApp`, `getpid()` and its ancestors
-  are never signalled.
+- **TBD's own long-lived binaries: the daemon, the app and the model proxy.**
+  `TBDDaemon` runs at `ppid=1` with its cwd inside a TBD-managed tree — measured
+  at `ppid=1, cwd=/Users/<user>/projects/tbd`, and when `scripts/restart.sh` is
+  run from a worktree the daemon's cwd is that worktree. Archiving it would
+  otherwise have the sweep SIGKILL the live daemon that is running the sweep.
+  `TBDModelProxy` has the same shape: it outlives the daemon at `ppid=1`, is
+  adopted by the next one, and its lifecycle belongs to the proxy supervisor.
+  `TBDDaemon`, `TBDApp`, `TBDModelProxy`, `getpid()` and its ancestors are never
+  signalled.
 
   `getpid()` and its ancestors cover the running daemon; the binary-name check
-  is what covers `TBDApp` and any sibling worktree's daemon, neither of which is
-  in this process's ancestry. It matches the basename of any path component in
-  the command line, not just of the first token: `ps` prints argv space-joined
-  and unquoted, so a home directory with a space in it would otherwise split
-  argv[0] and leave the app unrecognized. Over-matching is the keep-favoring
-  direction and is accepted.
+  is what covers `TBDApp`, the model proxy and any sibling worktree's daemon,
+  none of which is in this process's ancestry. It matches the basename of any
+  path component in the command line, not just of the first token: `ps` prints
+  argv space-joined and unquoted, so a home directory with a space in it would
+  otherwise split argv[0] and leave the app unrecognized. Over-matching is the
+  keep-favoring direction and is accepted.
+- **The holder and job of every live holder-transport session.** A `TBDHolder`
+  also sits at `ppid=1`, by design, and its job is its child. Neither is ever
+  signalled while it serves a holder-transport `terminal` row whose worktree is
+  not archived — keyed on "not archived" rather than "listed as live", so a row
+  the phase cannot place is spared rather than exposed. Identity decides which
+  processes those are:
+  - **The holder** — its command line names the session, `--session <terminal
+    id>`, which only one process can carry because the holder's creation lock
+    admits one per session. Every holder in the `ps` snapshot is tested, so one
+    is spared even when its row's `holderPID` is stale or unwritten; a recorded
+    holder pid whose snapshot command line is unreadable keeps as well.
+  - **The job** — `ProcessIdentityCheck`, as `AgentReaper`'s holder leg uses it:
+    started within `AgentReaper.defaultHolderIdentityWindow` of the row's
+    `holderChildStartedAt ?? createdAt`, and running an executable a holder's
+    job could have. Only an answer that the pid now names a different process
+    (gone, a different start time, a different executable) withholds the
+    exemption; an unreadable start time or command line protects.
+
+  Holders are deliberately **not** protected by name. A holder whose session row
+  is gone is a real orphan, and the sweep must still be able to reach it. The
+  exemption is built only once the phase has a candidate, because the job check
+  costs a `ps` per session.
+- **Nothing TBD spawns to outlive the daemon carries a worktree cwd.**
+  `HolderSpawner` and `ModelProxySpawner` start their process in `/` through a
+  `posix_spawn` chdir file action, and a spawn whose chdir cannot be recorded
+  fails rather than inheriting the daemon's cwd. Without it, both would carry
+  the cwd of whichever worktree launched the daemon, and archiving that worktree
+  would make every one of them look like an escaped job of a dead worktree. A
+  holder's job still starts in its session's working directory, set by the
+  holder between fork and exec. A cwd is fixed at spawn, so a holder or proxy
+  started by a daemon built without this keeps its launching worktree's cwd for
+  as long as it runs — which is why the two exclusions above do not rely on cwd.
 - **pid <= 1**, already refused inside `ProcessSignaller`.
 - **Processes not owned by our uid.** The gate sits in the protected set, next
   to the binary-name check, rather than only on the orphan root — a root-only
@@ -382,8 +417,10 @@ The flag gates the collector **on top of** `gcEnabled`, the same way
 Migration, GRDB record and Codable model land in one commit, with the model
 field optional so existing rows and JSON still decode.
 
-**Enabling it for a soak:** call the `config.setGCOrphanProcessesEnabled` RPC,
-which writes `gc_orphan_processes_enabled` on the singleton `config` row. It has
+**Enabling it for a soak:** `tbd gc orphan-processes on` (no argument prints
+the current value) or the Settings → Cleanup toggle "Reclaim orphaned
+processes". Both call the `config.setGCOrphanProcessesEnabled` RPC, which
+writes `gc_orphan_processes_enabled` on the singleton `config` row. It has
 an RPC for the same reason its sibling gates do — the one phase whose mistakes
 cannot be undone should not also be the one whose only switch is behind a
 hand-edit of `state.db`. **Graduation:** once reap records across a soak show it

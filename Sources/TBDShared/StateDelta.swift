@@ -62,6 +62,11 @@ public enum StateDelta: Codable, Sendable {
     /// decode it and drops the line, like any unknown delta — the request is
     /// then simply not acted on.
     case remoteSessionReconnectRequested(RemoteSessionReconnectDelta)
+    /// A terminal hit a hard usage limit — session limit reached or similar
+    /// (design 2026-09-05 §7). Carries the terminal, the suggested profile,
+    /// and reset time so the app can show the limit banner and offer the
+    /// one-click switch.
+    case terminalLimitHit(TerminalLimitHitDelta)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
@@ -346,23 +351,41 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// legitimate cancel is indistinguishable from a git failure by status
     /// alone. Only the daemon knows which happened, so it says so here.
     public let creationFailed: Bool
+    /// Where the daemon saved the first message parked in this row, when a
+    /// failed creation deleted the row with the message in it
+    /// (`UnsentPromptFile`). Nil when nothing was parked, when the save
+    /// failed, and on every deliberate archive. Optional so payloads from a
+    /// daemon that predates it still decode.
+    public let unsentPromptPath: String?
+    /// True when the row may have held a first message the daemon could not
+    /// save: the save failed, the row had no repo to save under, or the
+    /// rollback could not read the row at all. Absent (older daemons) reads
+    /// as false.
+    public let unsentPromptLost: Bool
 
-    public init(worktreeID: UUID, creationFailed: Bool = false) {
+    public init(
+        worktreeID: UUID, creationFailed: Bool = false,
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
+    ) {
         self.worktreeID = worktreeID
         self.creationFailed = creationFailed
+        self.unsentPromptPath = unsentPromptPath
+        self.unsentPromptLost = unsentPromptLost
     }
 
     // Explicit decoding: a synthesized `init(from:)` ignores property defaults
     // and would throw `keyNotFound` against an older daemon that never sends
     // this key. Absent means "not a creation failure".
     private enum CodingKeys: String, CodingKey {
-        case worktreeID, creationFailed
+        case worktreeID, creationFailed, unsentPromptPath, unsentPromptLost
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
         self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
+        self.unsentPromptPath = try c.decodeIfPresent(String.self, forKey: .unsentPromptPath)
+        self.unsentPromptLost = try c.decodeIfPresent(Bool.self, forKey: .unsentPromptLost) ?? false
     }
 }
 
@@ -522,5 +545,37 @@ public struct RemoteSessionAttentionDelta: Codable, Sendable {
         self.provider = provider; self.sessionID = sessionID
         self.title = title; self.kind = kind; self.reason = reason
         self.exitCode = exitCode
+    }
+}
+
+/// A terminal hit a hard usage limit (session limit, weekly limit, etc.).
+/// Carries the terminal and worktree IDs, the session's pinned profile, the
+/// limit reset time, and the suggested profile so the app can show a banner
+/// and offer a one-click switch (design 2026-09-05 §7.1). The daemon never
+/// switches the session itself.
+public struct TerminalLimitHitDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    /// The profile the session is running on, when it is pinned. Nil for
+    /// ambient sessions.
+    public let profileID: UUID?
+    /// When the limit resets.
+    public let resetsAt: Date
+    /// The limit type: "session" or "weekly_all" or another label the
+    /// daemon's rate-limit detector names (used for the banner).
+    public let limitType: String
+    /// The profile the daemon would suggest switching to, or nil when no
+    /// profile is eligible. The app offers it as the banner's switch button.
+    public let suggestedProfileID: UUID?
+
+    public init(terminalID: UUID, worktreeID: UUID, profileID: UUID?,
+                resetsAt: Date, limitType: String,
+                suggestedProfileID: UUID? = nil) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.profileID = profileID
+        self.resetsAt = resetsAt
+        self.limitType = limitType
+        self.suggestedProfileID = suggestedProfileID
     }
 }

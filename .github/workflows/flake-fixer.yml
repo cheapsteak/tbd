@@ -1,0 +1,1285 @@
+name: Flake fixer
+
+# docs/specs/2026-10-07-flake-autofix-design.md. The spec's jobs share this one
+# file (§3):
+#   - `ledger` reads per-test results from the nightly and from rerun-erased CI
+#     runs and keeps one issue per flaky test (§4);
+#   - `ledger-notice` reports a red `ledger` run (§8);
+#   - `fix` picks one qualifying test a night, measures a pre-fix baseline, runs
+#     a Claude session to fix it, and stress-verifies the result (§5, §6). It
+#     holds no write credential and writes nothing to GitHub; its result is an
+#     artifact;
+#   - `publish` turns that artifact into a branch, a draft PR, a commit status
+#     and an attempt record, with the App token, on a runner no model touched
+#     (§7);
+#   - `promote` marks that draft ready for review once the PR's own `test.yml`
+#     run passes on the head the verifier passed (§7). The run's completion and
+#     the bot's `flakefix/stress` status each start it, so whichever lands last
+#     promotes.
+#
+# OFF BY DEFAULT (§10). With FLAKE_LEDGER_ENABLED unset, or anything other than
+# 'true', the ledger runs report-only: it computes everything, writes it to the
+# job summary, and writes no issue (§4.5). Report-only needs no App token. With
+# FLAKE_FIXER_ENABLED 'true' the ledger job first reclaims orphaned flakefix/*
+# branches (§11), and `fix` and `publish` run; `fix` refuses, red, while the
+# ledger is off.
+#
+# ONLY THE BOT'S OWN COMMENTS ARE STATE (§4.4). Every ledger write uses the
+# tbd-flake-fixer App's token, so its comments are authored by
+# `tbd-flake-fixer[bot]`, and the step after minting checks that the App's slug
+# names exactly the login the readers trust (`flake_lib.BOT_LOGIN`).
+#
+# A RED LEDGER RUN IS REPORTED IN EITHER MODE (§8), by `ledger-notice`. Without
+# an App token whose login checked out – report-only mode, or a mint that
+# failed – it posts with the job token, as github-actions[bot]. That one
+# comment on the tracking issue is the only issue write the job token makes,
+# and `ledger-notice` is the only job whose token may write issues.
+#
+# `workflow_run`, `status` and `schedule` fire only from this file as it exists
+# on `main`, so nothing here runs before merge.
+
+on:
+  # §3, §9: one attempt a night, early in the UTC day, so the fix job's
+  # timeout ends it before the nightly's 11:00 schedule.
+  schedule:
+    - cron: '0 6 * * *'
+  # Nightly completions start `ledger`; Test completions on a flakefix/issue-<N>
+  # PR start `promote`. The branch filter matches the triggering run's head
+  # branch and serves both workflows:
+  #   - Nightly: only a run on main wakes the ledger. Its schedule always runs
+  #     on main; a Nightly dispatched on another branch tests unmerged code,
+  #     which the ledger discards anyway (flake-ledger.py), so there is
+  #     nothing for it to wake for.
+  #   - Test: only the bot's flakefix/issue-<N> PRs can be promoted, so no
+  #     other PR's Test runs start a run of this file. A Test run on main
+  #     (its push trigger) still starts one, all of whose jobs are skipped
+  #     without a runner.
+  workflow_run:
+    workflows: [Nightly, Test]
+    types: [completed]
+    branches: [main, 'flakefix/issue-*']
+  # The bot's `flakefix/stress` status also starts `promote` (§7), for a status
+  # that lands after the PR's Test run completed. `publish` sets it with the
+  # App token; one set with GITHUB_TOKEN would start nothing. `status` takes
+  # no filter, so every commit status in the repository starts a run of this
+  # file; for any other context, all its jobs are skipped without a runner.
+  status:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which job to run'
+        type: choice
+        required: true
+        options: [ledger, fix]
+      issue:
+        description: 'fix only: the issue number to attempt (optional)'
+        type: string
+        required: false
+
+permissions: {}
+
+# ONE ATTEMPT AT A TIME, FROM PICK TO PUBLISH. A run that can start `fix` (the
+# schedule, or a dispatch of `fix`) takes the whole-run lock
+# `flake-fixer-attempt`; every other run gets a group of its own and never
+# queues. The lock is the run's, not a job's, because the picker learns that a
+# test is taken only from what `publish` writes – the open PR and the attempt
+# record – so a second `fix` that started while the first run's `publish` was
+# still pending or running could pick the same test. Two job-level groups
+# cannot close that gap: `fix` B would start the moment `fix` A ended, ahead of
+# `publish` A.
+#
+# No cancel-in-progress, so a run that holds the lock is never cancelled and
+# its `publish` always runs. GitHub does cancel a PENDING run when a newer one
+# queues in the same group; such a run has started no job, picked nothing and
+# recorded nothing, so no state is lost. A scheduled run's work is the newer
+# run's too, since it picks afresh. A dispatch that named an `issue` is not:
+# that issue is not attempted, and the cancelled run in the Actions list is
+# the only trace, so dispatch one issue at a time and re-dispatch a cancelled
+# one.
+concurrency:
+  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.job == 'fix')) && 'flake-fixer-attempt' || format('flake-fixer-run-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  ledger:
+    name: ledger
+    if: >-
+      github.repository == 'cheapsteak/tbd' &&
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Nightly') ||
+       (github.event_name == 'workflow_dispatch' && inputs.job == 'ledger'))
+    runs-on: ubuntu-latest
+    # Reads a week of runs and their artifacts, then one write per changed
+    # issue; minutes, not tens of them.
+    timeout-minutes: 30
+    # Two ledger runs must not race to create the same issue (§11).
+    concurrency:
+      group: flake-ledger-state
+      cancel-in-progress: false
+    # The job token reads; issue writes use the App token. `contents: write`
+    # is for the flakefix/* reclaimer's ref deletions alone.
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+      actions: read
+    env:
+      LEDGER_ENABLED: ${{ vars.FLAKE_LEDGER_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Reclaim flakefix/* branches no open PR uses
+        if: vars.FLAKE_FIXER_ENABLED == 'true'
+        # A sweep that keeps or fails to delete a ref exits non-zero; that is
+        # the reclaimer's business and must not stop the ledger behind it. Its
+        # step stays red in the run for a human to read.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The sweep deletes with `git push`, and the checkout persisted no
+          # credential. Grant one for this step only.
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader || true' EXIT
+          bash scripts/sweep-preflight-refs.sh --namespace flakefix/ --min-age-seconds 86400 --apply
+
+      - name: Mint the tbd-flake-fixer App token
+        id: app-token
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+
+      - name: Check the App token's bot login
+        id: bot-login
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::error::the App token's login is not the one the ledger's readers trust (scripts/flake_lib.py BOT_LOGIN)"
+            exit 1
+          fi
+
+      - name: Ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLAKE_WRITE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$LEDGER_ENABLED" = "true" ]; then
+            python3 scripts/flake-ledger.py run --repo "$GITHUB_REPOSITORY" --work-dir "$RUNNER_TEMP/flake-ledger" --write
+          else
+            python3 scripts/flake-ledger.py run --repo "$GITHUB_REPOSITORY" --work-dir "$RUNNER_TEMP/flake-ledger"
+          fi
+
+  # §8: one comment on the tracking issue for the first red `ledger` run after
+  # a green one, and nothing for later consecutive reds. A job of its own so
+  # that only it holds `issues: write` on the job token: the `ledger` job, which
+  # runs the whole ledger, cannot write an issue with it.
+  ledger-notice:
+    name: ledger-notice
+    needs: ledger
+    if: always() && github.repository == 'cheapsteak/tbd' && needs.ledger.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    env:
+      TRACKING_ISSUE: '519'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # With the ledger on, the comment comes from the bot like every other
+      # ledger write. A mint that fails, or a token from the wrong App, falls
+      # back to the job token rather than leaving the red run unreported.
+      - name: Mint the App token for the notice
+        id: notice-app-token
+        if: vars.FLAKE_LEDGER_ENABLED == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+
+      - name: Check the notice token's bot login
+        id: notice-bot-login
+        if: steps.notice-app-token.outcome == 'success'
+        continue-on-error: true
+        env:
+          APP_SLUG: ${{ steps.notice-app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::warning::the App token's login is not the trusted one; the notice uses the job token"
+            exit 1
+          fi
+
+      - name: Report the first red ledger run after a green one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.notice-app-token.outputs.token }}
+          USE_APP_TOKEN: ${{ steps.notice-bot-login.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # The token is chosen once; the job token always carries --job-token,
+          # so its comment says how it was posted.
+          if [ "$USE_APP_TOKEN" = "true" ]; then
+            token="$APP_TOKEN"; extra=()
+          else
+            token="$GH_TOKEN"; extra=(--job-token)
+          fi
+          FLAKE_WRITE_TOKEN="$token" python3 scripts/flake-ledger.py report-red-run \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --issue "$TRACKING_ISSUE" "${extra[@]}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # fix: one attempt, on macOS, with no write credential (§6). Its only output
+  # is two artifacts: `flakefix-pick`, uploaded the moment the picker chooses so
+  # that a run killed later still leaves a record of what it picked, and
+  # `flakefix-candidate`, the bundle, notes, baseline and verdict.
+  fix:
+    name: fix
+    if: >-
+      vars.FLAKE_FIXER_ENABLED == 'true' && github.repository == 'cheapsteak/tbd' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.job == 'fix'))
+    runs-on: macos-26
+    outputs:
+      # The packaged attempt's sums, which publish checks the artifact against.
+      sums: ${{ steps.package.outputs.sums }}
+    # §9: builds (15 warm, 22 cold), the baseline (10), two 60-minute sessions,
+    # two verifier runs of 24 each, and 20 for checkouts, ending the
+    # session's processes, and the artifacts.  Worst case 235.
+    timeout-minutes: 240
+    # Serialized by the run's attempt lock (top of file), which also covers
+    # this run's `publish`.
+    # Read scopes only, and no id-token: the session's GITHUB_TOKEN cannot
+    # write, and claude-code-action cannot trade OIDC for the Claude App's
+    # installation token (§6.1).
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    env:
+      # The verifier copy is fingerprinted (below); a .pyc written into it by a
+      # later import would read as tampering.
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      # §10: the fixer refuses to start without the ledger, on schedule and on
+      # dispatch alike. A step rather than a job-level if:, because a skipped
+      # job is easy to miss and a red one is not.
+      - name: Refuse to run without the ledger
+        if: vars.FLAKE_LEDGER_ENABLED != 'true'
+        run: |
+          echo "The flake fixer is on but the ledger is off: set FLAKE_LEDGER_ENABLED to 'true'. The fixer reads ledger comments that report-only mode never writes." >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::FLAKE_FIXER_ENABLED is on but FLAKE_LEDGER_ENABLED is not"
+          exit 1
+
+      # The session tree (§6.1): the workspace root, so the SwiftPM cache paths
+      # match the ones test.yml saved. Full history for git-restore-mtime.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The verification tree is a second clone at the same SHA, under
+      # $RUNNER_TEMP, outside the workspace, which the session is never pointed
+      # at. Main's scripts are copied out of it now, before any session runs:
+      # every verifier call below runs from that copy ($VS), never from the
+      # candidate (§6.4). The paths go into $GITHUB_ENV for the steps before
+      # session 1; every step after it takes them from the environment
+      # recorded before the session ("Record the verifier's environment"), and
+      # every `with:` or `working-directory:` names them from `runner.temp`.
+      - name: Lay out the attempt, the verification tree, and the verifier copy
+        id: layout
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/flakefix"
+          VT="$RUNNER_TEMP/flakefix-verify"
+          VS="$RUNNER_TEMP/flakefix-verifier-scripts"
+          rm -rf "$T" "$VT" "$VS"
+          mkdir -p "$T/pick" "$VS"
+          {
+            echo "T=$T"
+            echo "VT=$VT"
+            echo "VS=$VS"
+            echo "FLAKEFIX_NOTES=$T/flakefix-notes.md"
+          } >> "$GITHUB_ENV"
+          base="$(git rev-parse HEAD)"
+          echo "$base" > "$T/pick/base_sha"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_RUN_ID" > "$T/pick/run_id"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$T/pick/started_at"
+          git clone -q --no-hardlinks "file://$GITHUB_WORKSPACE" "$VT"
+          git -C "$VT" checkout -q --detach "$base"
+          cp -R "$VT/scripts" "$VS/scripts"
+          mkdir -p "$VS/.github"
+          cp -R "$VT/.github/flake-fixer" "$VS/.github/flake-fixer"
+
+      - name: Pick tonight's target
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          set -uo pipefail
+          rc=0
+          python3 "$VS/scripts/flake-pick.py" run --repo "$GITHUB_REPOSITORY" --out-dir "$T/pick" \
+            --root "$GITHUB_WORKSPACE" ${ISSUE:+--issue "$ISSUE"} || rc=$?
+          if [ "$rc" = 3 ]; then
+            echo "attempted=false" >> "$GITHUB_OUTPUT"
+            echo "No test is eligible for a fix attempt tonight." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$rc" = 0 ] || exit "$rc"
+          {
+            echo "attempted=true"
+            echo "issue=$(jq -r .issue "$T/pick/target.json")"
+            echo "test_id=$(jq -r .test_id "$T/pick/target.json")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Picked #$(jq -r .issue "$T/pick/target.json"): \`$(jq -r .test_id "$T/pick/target.json")\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # Persisted before anything slow: `publish` runs on any outcome of this
+      # job and records `aborted` from this artifact alone when the candidate
+      # never arrives, so a timeout or a cancel cannot leave the picker to
+      # choose the same test again on the same evidence (§8).
+      - name: Persist the pick
+        if: steps.pick.outputs.attempted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flakefix-pick
+          path: ${{ runner.temp }}/flakefix/pick/
+          retention-days: 7
+
+      - name: Restore source mtimes from git commit times
+        if: steps.pick.outputs.attempted == 'true'
+        uses: chetan/git-restore-mtime-action@d186aca54f8760da4dec55313195e51ed3ebb0b3 # v2
+
+      - name: Install tmux
+        if: steps.pick.outputs.attempted == 'true'
+        run: brew install tmux
+
+      - name: Select Xcode 26.6 (Swift 6.3.3)
+        if: steps.pick.outputs.attempted == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Capture Swift toolchain version
+        if: steps.pick.outputs.attempted == 'true'
+        run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> "$GITHUB_ENV"
+
+      # RESTORE-ONLY, as in the nightly: this job benefits from the cache and
+      # never reshapes it.
+      - name: Restore SwiftPM build cache (read-only)
+        if: steps.pick.outputs.attempted == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: |
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
+
+      - name: Repair the restored SwiftPM workspace if it is damaged
+        if: steps.pick.outputs.attempted == 'true'
+        run: bash scripts/repair-spm-workspace.sh
+
+      - name: Build the session tree (warm)
+        if: steps.pick.outputs.attempted == 'true'
+        timeout-minutes: 15
+        run: scripts/swift-safe build --build-tests
+
+      - name: Build the verification tree (cold)
+        if: steps.pick.outputs.attempted == 'true'
+        timeout-minutes: 22
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        run: '"$VS/scripts/swift-safe" build --build-tests'
+
+      # §6.3: 20 test-alone iterations on main, which choose the scope and size
+      # N. More than two excluded iterations abort the attempt before any
+      # session starts.
+      - name: Pre-fix baseline and N (verification tree)
+        id: baseline
+        if: steps.pick.outputs.attempted == 'true'
+        timeout-minutes: 10
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        env:
+          TEST_ID: ${{ steps.pick.outputs.test_id }}
+        run: |
+          set -uo pipefail
+          abort() { echo "$1" > "$T/abort_reason"; echo "::error::$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" quarantined --test "$TEST_ID" > "$T/quarantined" || rc=$?
+          [ "$rc" = 0 ] || abort "Cannot tell whether $TEST_ID is quarantined ($(cat "$T/quarantined")); the retry check needs to know."
+          bash "$VS/scripts/flake-verify.sh" baseline --test "$TEST_ID" --quarantined "$(cat "$T/quarantined")" --out-dir "$T/baseline" || rc=$?
+          [ "$rc" = 4 ] && abort "The baseline excluded more than 2 of its 20 iterations, so it is not measuring the test."
+          [ "$rc" = 0 ] || abort "The baseline's stress loop failed on main (exit $rc): a build or harness problem, not a flake."
+          bash "$VS/scripts/flake-verify.sh" plan-iterations --scope "$(cat "$T/baseline/scope")" \
+            --baseline-dir "$T/baseline" --out "$T/plan.json" || abort "Cannot plan the iteration count."
+          cat "$T/baseline/baseline.md" >> "$GITHUB_STEP_SUMMARY"
+          # Everything the verifier reads after a session, as step outputs,
+          # which no session can rewrite. Each "End session" step puts these
+          # back over the files before anything reads them.
+          delim="FLAKEFIX_MD_$(openssl rand -hex 16)"
+          {
+            echo "scope=$(cat "$T/baseline/scope")"
+            echo "f=$(cat "$T/baseline/f")"
+            echo "v=$(cat "$T/baseline/v")"
+            echo "quarantined=$(cat "$T/quarantined")"
+            echo "plan=$(jq -c . "$T/plan.json")"
+            echo "md<<$delim"; cat "$T/baseline/baseline.md"; echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the working branch
+        if: steps.pick.outputs.attempted == 'true'
+        env:
+          ISSUE: ${{ steps.pick.outputs.issue }}
+        run: |
+          set -euo pipefail
+          git switch -c "flakefix/issue-$ISSUE"
+          git config user.name "tbd-flake-fixer[bot]"
+          git config user.email "tbd-flake-fixer[bot]@users.noreply.github.com"
+
+      # Two sums, held in step outputs the session cannot rewrite. The verifier
+      # copy's fingerprint: every path in it (so a planted file or symlink
+      # shows, such as a json.py Python would import ahead of the standard
+      # library), every regular file's contents, and every symlink's target.
+      # The function is written out in each step that uses it, never taken
+      # from the environment. And the verification tree's digest – its
+      # checkout, its .git, and its warm .build – which the verifier executes
+      # and which therefore must be the tree the baseline ran in (§6.4).
+      - name: Fingerprint the verifier copy and the verification tree
+        if: steps.pick.outputs.attempted == 'true'
+        id: vsfp
+        run: |
+          set -euo pipefail
+          fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
+          echo "sum=$(fingerprint "$VS")" >> "$GITHUB_OUTPUT"
+          vt="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$VT")"
+          echo "vt=$vt" >> "$GITHUB_OUTPUT"
+
+      # The environment every step after session 1 runs in, recorded while
+      # nothing a session wrote can be in it. A session can append to
+      # $GITHUB_ENV and $GITHUB_PATH, and the runner hands both to every later
+      # step: PYTHONPATH, BASH_ENV, DYLD_*, a PATH entry ahead of git or
+      # python3, new values for T, VT and VS. So every later `run:` step runs
+      # under `bash -p`, which reads no BASH_ENV or ENV and imports no
+      # function, and begins by re-running itself under `env -i` with only
+      # the ones its own `env:` sets and this record (§6.4). `env -i` rather
+      # than `unset`: an entry such as BASH_FUNC_x%% is no shell variable, so
+      # no `unset` reaches it, and every child bash would import it.
+      - name: Record the verifier's environment
+        if: steps.pick.outputs.attempted == 'true'
+        id: cleanenv
+        run: |
+          set -euo pipefail
+          # NAME=VALUE entries, NUL-separated, then base64 for a one-line
+          # output. Left out: the per-step file-command paths (each step gets
+          # its own) and the variables bash acts on as it starts. Added: no
+          # global or system git config for the verifier's git, since a
+          # session can write ~/.gitconfig (the tests' git never reads it,
+          # under test.sh's fenced HOME).
+          # A function, so no `case` sits inside the command substitution: the
+          # runner's /bin/bash is 3.2, which ends a `$(` at a case pattern's
+          # unpaired `)` and fails the step (scripts/flake-bash32.test.sh).
+          record() {
+            local v
+            for v in $(compgen -e); do
+              case "$v" in
+                (GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_|GIT_CONFIG_*) ;;
+                (*) printf '%s=%s\0' "$v" "${!v}" ;;
+              esac
+            done
+            printf '%s\0' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+          }
+          rec="$(record | base64 | tr -d '\n')"
+          [ -n "$rec" ]
+          echo "env=$rec" >> "$GITHUB_OUTPUT"
+
+      # ── Try 1 (§6.6) ─────────────────────────────────────────────────────────
+      - name: Snapshot processes before session 1
+        id: snap1
+        if: steps.pick.outputs.attempted == 'true'
+        run: |
+          set -euo pipefail
+          bash "$VS/scripts/flake-verify.sh" snapshot-processes --out "$T/procs-before-1"
+          echo "sum=$(shasum -a 256 < "$T/procs-before-1" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Compose the session 1 prompt
+        if: steps.pick.outputs.attempted == 'true'
+        id: prompt1
+        run: |
+          set -euo pipefail
+          python3 "$VS/scripts/flake-pick.py" compose-prompt --template "$VS/.github/flake-fixer/session-prompt.md" \
+            --brief "$T/pick/brief.md" --baseline "$T/baseline/baseline.md" --notes-path "$FLAKEFIX_NOTES" --out "$T/prompt1.txt"
+          delim="FLAKEFIX_PROMPT_$(openssl rand -hex 16)"
+          { echo "prompt<<$delim"; cat "$T/prompt1.txt"; echo "$delim"; } >> "$GITHUB_OUTPUT"
+
+      - name: Fixer session 1
+        id: s1
+        if: steps.pick.outputs.attempted == 'true'
+        continue-on-error: true
+        timeout-minutes: 60
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The job's read-only token, passed explicitly so the action never
+          # attempts the OIDC exchange for the Claude App's token (§6.1).
+          github_token: ${{ github.token }}
+          prompt: ${{ steps.prompt1.outputs.prompt }}
+          # §6.1: the build and test scripts, local git, and file reading and
+          # editing. No WebFetch, no WebSearch, no gh, no curl, no git push or
+          # fetch.
+          claude_args: |
+            --max-turns 300
+            --allowedTools "Bash(scripts/test.sh:*),Bash(scripts/swift-safe:*),Bash(bash scripts/nightly-flake-stress.sh:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git grep:*),Bash(git add:*),Bash(git commit:*),Bash(git restore:*),Bash(git rev-parse:*),Read,Write,Edit,Glob,Grep"
+
+      # From here on every `run:` step starts the same way: its own `env:`
+      # names in `keep`, then a re-run of itself under `env -i` with those
+      # and the recorded environment, in place of whatever the runner handed
+      # it (see "Record the verifier's environment"). T, VT, VS and
+      # FLAKEFIX_NOTES come from that record.
+      - name: End session 1, bundle its commits
+        if: steps.pick.outputs.attempted == 'true'
+        id: c1
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          VT_SUM: ${{ steps.vsfp.outputs.vt }}
+          SNAP_SUM: ${{ steps.snap1.outputs.sum }}
+          BASE: ${{ steps.layout.outputs.base }}
+          SCOPE: ${{ steps.baseline.outputs.scope }}
+          BASELINE_F: ${{ steps.baseline.outputs.f }}
+          BASELINE_V: ${{ steps.baseline.outputs.v }}
+          BASELINE_MD: ${{ steps.baseline.outputs.md }}
+          QUARANTINED: ${{ steps.baseline.outputs.quarantined }}
+          PLAN: ${{ steps.baseline.outputs.plan }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM SNAP_SUM BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
+          # Only this step decides an abort; a leftover file is the session's.
+          rm -f "$T/abort_reason"
+          rc=0
+          fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
+          # The kill runs from a private copy of the verifier and the snapshot,
+          # in a directory the session never knew, each checked against the
+          # sum taken before the session; the shared copy is checked again
+          # once nothing of the session is left to change it back.
+          own="$(mktemp -d)"
+          mkdir "$own/vs" || abort "Cannot copy the verifier."
+          cp -R "$VS/." "$own/vs/" || abort "Cannot copy the verifier."
+          cp "$T/procs-before-1" "$own/procs-before" || abort "Cannot copy the process snapshot."
+          [ "$(fingerprint "$own/vs")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
+          [ "$(shasum -a 256 < "$own/procs-before" | cut -d' ' -f1)" = "$SNAP_SUM" ] \
+            || abort "The process snapshot changed during session 1."
+          bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
+          [ "$rc" = 0 ] || abort "A process session 1 started survived SIGKILL (exit $rc); nothing is verified with one alive."
+          # Checked once no session process is left to swap it after the check.
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 1"; exit 1; fi
+          # The verification tree – checkout, .git, .build – must be the one
+          # the baseline ran in: the verifier runs its git and its build.
+          [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$VT")" = "$VT_SUM" ] \
+            || abort "The verification tree changed during session 1."
+          # Results the session could have planted: only the verifier writes these.
+          rm -rf "$T/verify" "$T/verify-1"
+          # The session could reach these files; put back what was measured.
+          # Each is removed first, so a symlink the session left cannot carry
+          # the write somewhere else, such as into the verifier copy.
+          rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
+          mkdir "$T/baseline" || abort "Cannot reset the measured records."
+          printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
+          printf '%s\n' "$BASELINE_V" > "$T/baseline/v"; printf '%s\n' "$BASELINE_MD" > "$T/baseline/baseline.md"
+          printf '%s\n' "$QUARANTINED" > "$T/quarantined"; printf '%s\n' "$PLAN" > "$T/plan.json"
+          printf '%s\n' "$BASE" > "$T/pick/base_sha"
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 1."
+          base="$BASE"
+          n="$(git rev-list --count "$base"..HEAD)" || abort "Cannot count session 1's commits."
+          echo "commits=$n" >> "$GITHUB_OUTPUT"
+          rm -f "$T/candidate.bundle" "$T/head_sha"
+          if [ "$n" != 0 ]; then
+            git bundle create -q "$T/candidate.bundle" "$base"..HEAD
+            git rev-parse HEAD > "$T/head_sha"
+          fi
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Session 1 left $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The stress run may outlive its allotment; the judge, not this step's
+      # conclusion, decides, and an incomplete run is judged as truncated.
+      - name: Stress try 1 (verification tree)
+        if: steps.pick.outputs.attempted == 'true' && steps.c1.outputs.commits != '0'
+        continue-on-error: true
+        # The allotment R (§9): an overrun ends the run, and the judge fails
+        # it as truncated.
+        timeout-minutes: 24
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          TEST_ID: ${{ steps.pick.outputs.test_id }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          base="$(cat "$T/pick/base_sha")"
+          mkdir -p "$T/verify"
+          # Exit 3 is the candidate's own failure: it commits into a build
+          # directory, so it is never applied. Its paths become the protected
+          # list and its reason the verdict's, and a second try may follow.
+          # Any other refusal is the harness's.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors" || rc=$?
+          if [ "$rc" = 3 ]; then
+            mv "$T/verify/applied" "$T/verify/protected.txt"
+            cp "$T/verify/apply-errors" "$T/verify/candidate-refused"
+            exit 1
+          elif [ "$rc" != 0 ]; then
+            { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
+            exit 1
+          fi
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" protected-touched --base "$base" > "$T/verify/protected.txt" || rc=$?
+          [ "$rc" -le 1 ] || { echo "protected-touched failed" > "$T/verify/harness-error"; exit 1; }
+          # Whether the target carries .flaky in the CANDIDATE decides which
+          # retry records the judge expects (§6.4): a fix that adds a
+          # quarantine must still show every run passing on its first try.
+          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$TEST_ID" > "$T/verify/quarantined"; then
+            echo "cannot tell whether the candidate quarantines $TEST_ID: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
+            exit 1
+          fi
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" \
+            --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
+
+      - name: Judge try 1
+        if: steps.pick.outputs.attempted == 'true' && steps.c1.outputs.commits != '0'
+        id: v1
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          TEST_ID: ${{ steps.pick.outputs.test_id }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          rc=0
+          # The candidate's own quarantine answer. Anything but yes or no
+          # comes with a harness-error marker, which fails the run by itself.
+          q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"
+          # A refused candidate was never asked: its marker fails the run.
+          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
+          bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
+            --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
+            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
+          [ "$rc" = 2 ] && exit 2
+          echo "verdict=$(jq -r .verdict "$T/verify/verdict.json")" >> "$GITHUB_OUTPUT"
+          # A harness failure says nothing about the candidate: no second try.
+          if [ -f "$T/verify/harness-error" ]; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
+          cat "$T/verify/verdict.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Try 2 (§6.6): only after a failing verdict that measured the
+      # candidate. An `ineligible` one (a protected file touched) would not
+      # change on a retry, and a harness failure measured nothing. Same scope,
+      # same N.
+      #
+      # Session 2 can reach every file try 1 left, so this step takes two
+      # digests into step outputs before it starts: try 1's verifier output,
+      # which an unchanged try 2 inherits as its verdict, and the verification
+      # tree as try 1 left it. "End session 2" checks both before using either.
+      - name: Prepare try 2
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        id: prep2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -euo pipefail
+          mv "$T/verify" "$T/verify-1"
+          verify1="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$T/verify-1")"
+          vt="$(python3 -I -S -B "$VS/scripts/flake-verify.py" tree-digest "$VT")"
+          { echo "verify1=$verify1"; echo "vt=$vt"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "The verifier failed your first try. Its findings, then your notes from that try:"
+            echo
+            echo '````text'
+            head -200 "$T/verify-1/failing-lines.txt"
+            echo '````'
+            echo
+            cat "$FLAKEFIX_NOTES" 2>/dev/null || echo "(you wrote no notes)"
+          } > "$T/prior-try.md"
+
+      - name: Snapshot processes before session 2
+        id: snap2
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -euo pipefail
+          bash "$VS/scripts/flake-verify.sh" snapshot-processes --out "$T/procs-before-2"
+          echo "sum=$(shasum -a 256 < "$T/procs-before-2" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Compose the session 2 prompt
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        id: prompt2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -euo pipefail
+          python3 "$VS/scripts/flake-pick.py" compose-prompt --template "$VS/.github/flake-fixer/session-prompt.md" \
+            --brief "$T/pick/brief.md" --baseline "$T/baseline/baseline.md" --notes-path "$FLAKEFIX_NOTES" \
+            --prior-try "$T/prior-try.md" --out "$T/prompt2.txt"
+          delim="FLAKEFIX_PROMPT_$(openssl rand -hex 16)"
+          { echo "prompt<<$delim"; cat "$T/prompt2.txt"; echo "$delim"; } >> "$GITHUB_OUTPUT"
+
+      - name: Fixer session 2
+        id: s2
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        continue-on-error: true
+        timeout-minutes: 60
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: ${{ steps.prompt2.outputs.prompt }}
+          claude_args: |
+            --max-turns 300
+            --allowedTools "Bash(scripts/test.sh:*),Bash(scripts/swift-safe:*),Bash(bash scripts/nightly-flake-stress.sh:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git grep:*),Bash(git add:*),Bash(git commit:*),Bash(git restore:*),Bash(git rev-parse:*),Read,Write,Edit,Glob,Grep"
+
+      - name: End session 2, bundle its commits
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true'
+        id: c2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          VS_SUM: ${{ steps.vsfp.outputs.sum }}
+          VT_SUM: ${{ steps.prep2.outputs.vt }}
+          TRY1_VERIFY_SUM: ${{ steps.prep2.outputs.verify1 }}
+          SNAP_SUM: ${{ steps.snap2.outputs.sum }}
+          TRY1_HEAD: ${{ steps.c1.outputs.head }}
+          BASE: ${{ steps.layout.outputs.base }}
+          SCOPE: ${{ steps.baseline.outputs.scope }}
+          BASELINE_F: ${{ steps.baseline.outputs.f }}
+          BASELINE_V: ${{ steps.baseline.outputs.v }}
+          BASELINE_MD: ${{ steps.baseline.outputs.md }}
+          QUARANTINED: ${{ steps.baseline.outputs.quarantined }}
+          PLAN: ${{ steps.baseline.outputs.plan }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM TRY1_VERIFY_SUM SNAP_SUM TRY1_HEAD BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          abort() { echo "$1" > "$T/abort_reason"; rm -f "$T/candidate.bundle"; echo "::error::$1"; exit 1; }
+          # Only this step decides an abort; a leftover file is the session's.
+          rm -f "$T/abort_reason"
+          rc=0
+          fingerprint() { (cd "$1" && { find . -print | LC_ALL=C sort; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256; find . -type l -print0 | LC_ALL=C sort -z | xargs -0 -n1 readlink 2>/dev/null; } | shasum -a 256 | cut -d' ' -f1); }
+          # The kill runs from a private copy of the verifier and the snapshot,
+          # in a directory the session never knew, each checked against the
+          # sum taken before the session; the shared copy is checked again
+          # once nothing of the session is left to change it back.
+          own="$(mktemp -d)"
+          mkdir "$own/vs" || abort "Cannot copy the verifier."
+          cp -R "$VS/." "$own/vs/" || abort "Cannot copy the verifier."
+          cp "$T/procs-before-2" "$own/procs-before" || abort "Cannot copy the process snapshot."
+          [ "$(fingerprint "$own/vs")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
+          [ "$(shasum -a 256 < "$own/procs-before" | cut -d' ' -f1)" = "$SNAP_SUM" ] \
+            || abort "The process snapshot changed during session 2."
+          bash "$own/vs/scripts/flake-verify.sh" end-session-processes --before "$own/procs-before" || rc=$?
+          [ "$rc" = 0 ] || abort "A process session 2 started survived SIGKILL (exit $rc); nothing is verified with one alive."
+          # Checked once no session process is left to swap it after the check.
+          if [ -L "$T" ] || [ -L "$T/pick" ]; then echo "::error::the attempt directory was replaced by a symlink during session 2"; exit 1; fi
+          [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$VT")" = "$VT_SUM" ] \
+            || abort "The verification tree changed during session 2."
+          # Results the session could have planted: only the verifier writes these.
+          rm -rf "$T/verify"
+          # The session could reach these files; put back what was measured.
+          # Each is removed first, so a symlink the session left cannot carry
+          # the write somewhere else, such as into the verifier copy.
+          rm -rf "$T/baseline" "$T/plan.json" "$T/quarantined" "$T/pick/base_sha" || abort "Cannot reset the measured records."
+          mkdir "$T/baseline" || abort "Cannot reset the measured records."
+          printf '%s\n' "$SCOPE" > "$T/baseline/scope"; printf '%s\n' "$BASELINE_F" > "$T/baseline/f"
+          printf '%s\n' "$BASELINE_V" > "$T/baseline/v"; printf '%s\n' "$BASELINE_MD" > "$T/baseline/baseline.md"
+          printf '%s\n' "$QUARANTINED" > "$T/quarantined"; printf '%s\n' "$PLAN" > "$T/plan.json"
+          printf '%s\n' "$BASE" > "$T/pick/base_sha"
+          [ "$(fingerprint "$VS")" = "$VS_SUM" ] || abort "The verifier's copy of main's scripts changed during session 2."
+          base="$BASE"
+          n="$(git rev-list --count "$base"..HEAD)" || abort "Cannot count the sessions' commits."
+          rm -f "$T/candidate.bundle" "$T/head_sha"
+          if [ "$n" != 0 ]; then
+            git bundle create -q "$T/candidate.bundle" "$base"..HEAD
+            git rev-parse HEAD > "$T/head_sha"
+          fi
+          if [ "$(git rev-parse HEAD)" = "$TRY1_HEAD" ]; then
+            # Session 2 changed nothing: the candidate is try 1's, and so is
+            # its verdict. Stressing it again could only let a chance pass
+            # overwrite a failure already observed. Session 2 could reach try
+            # 1's output, so it is used only if it is byte for byte what
+            # "Prepare try 2" digested before the session started.
+            [ "$(python3 -I -S -B "$own/vs/scripts/flake-verify.py" tree-digest "$T/verify-1")" = "$TRY1_VERIFY_SUM" ] \
+              || abort "Try 1's verifier output changed during session 2."
+            mv "$T/verify-1" "$T/verify" || abort "Cannot restore try 1's verdict."
+            echo "commits=0" >> "$GITHUB_OUTPUT"
+            echo "Session 2 made no new commit; try 1's verdict stands." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "commits=$n" >> "$GITHUB_OUTPUT"
+            echo "After session 2 the branch holds $n commit(s)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Nothing reads try 1's output from here on; none of it is uploaded.
+          rm -rf "$T/verify-1"
+
+      - name: Stress try 2 (verification tree)
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
+        continue-on-error: true
+        # The allotment R (§9): an overrun ends the run, and the judge fails
+        # it as truncated.
+        timeout-minutes: 24
+        working-directory: ${{ runner.temp }}/flakefix-verify
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          TEST_ID: ${{ steps.pick.outputs.test_id }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          base="$(cat "$T/pick/base_sha")"
+          mkdir -p "$T/verify"
+          # Exit 3 is the candidate's own failure: it commits into a build
+          # directory, so it is never applied. Its paths become the protected
+          # list and its reason the verdict's, and a second try may follow.
+          # Any other refusal is the harness's.
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" apply-candidate --bundle "$T/candidate.bundle" --base "$base" > "$T/verify/applied" 2> "$T/verify/apply-errors" || rc=$?
+          if [ "$rc" = 3 ]; then
+            mv "$T/verify/applied" "$T/verify/protected.txt"
+            cp "$T/verify/apply-errors" "$T/verify/candidate-refused"
+            exit 1
+          elif [ "$rc" != 0 ]; then
+            { echo "apply-candidate refused the bundle:"; cat "$T/verify/apply-errors"; } > "$T/verify/harness-error"
+            exit 1
+          fi
+          rc=0
+          bash "$VS/scripts/flake-verify.sh" protected-touched --base "$base" > "$T/verify/protected.txt" || rc=$?
+          [ "$rc" -le 1 ] || { echo "protected-touched failed" > "$T/verify/harness-error"; exit 1; }
+          # Whether the target carries .flaky in the CANDIDATE decides which
+          # retry records the judge expects (§6.4): a fix that adds a
+          # quarantine must still show every run passing on its first try.
+          if ! bash "$VS/scripts/flake-verify.sh" quarantined --test "$TEST_ID" > "$T/verify/quarantined"; then
+            echo "cannot tell whether the candidate quarantines $TEST_ID: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
+            exit 1
+          fi
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" \
+            --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
+
+      - name: Judge try 2
+        if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
+        id: v2
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+          TEST_ID: ${{ steps.pick.outputs.test_id }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          rc=0
+          # The candidate's own quarantine answer. Anything but yes or no
+          # comes with a harness-error marker, which fails the run by itself.
+          q="$(cat "$T/verify/quarantined" 2>/dev/null || true)"
+          # A refused candidate was never asked: its marker fails the run.
+          case "$q" in yes|no) ;; *) q=no; [ -f "$T/verify/harness-error" ] || [ -f "$T/verify/candidate-refused" ] || echo "no quarantine answer" > "$T/verify/harness-error" ;; esac
+          bash "$VS/scripts/flake-verify.sh" judge --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID" --dir "$T/verify" \
+            --iterations "$(jq -r .n "$T/plan.json")" --quarantined "$q" \
+            --protected-touched "$T/verify/protected.txt" --plan "$T/plan.json" --baseline-md "$T/baseline/baseline.md" || rc=$?
+          [ "$rc" = 2 ] && exit 2
+          echo "verdict=$(jq -r .verdict "$T/verify/verdict.json")" >> "$GITHUB_OUTPUT"
+          cat "$T/verify/verdict.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Data only: the bundle, notes, baseline, plan and verdict. The verifier
+      # copy lives outside $T and is not uploaded. This step runs after any
+      # outcome, including one where the environment was never recorded, so
+      # it restores no record: it needs only the system's own tools and the
+      # runner's own path.
+      - name: Package the attempt
+        if: always() && steps.pick.outputs.attempted == 'true'
+        id: package
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          C1: ${{ steps.c1.outcome }}
+          TRY2: ${{ steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' }}
+          C2: ${{ steps.c2.outcome }}
+          # Each session step's own result, which `continue-on-error` hides
+          # from the job: the runner's outcome, and the action's `conclusion`
+          # output, which matters as much – the action fails its step only
+          # when it throws, not when Claude Code itself ends in failure. The
+          # toJSON round trip only reads an output actionlint's copy of the
+          # action's metadata does not list yet.
+          S1: ${{ steps.s1.outcome }}
+          S1_CONCLUSION: ${{ fromJSON(toJSON(steps.s1.outputs)).conclusion }}
+          S2: ${{ steps.s2.outcome }}
+          S2_CONCLUSION: ${{ fromJSON(toJSON(steps.s2.outputs)).conclusion }}
+        run: |
+          if [ "${1-}" != --clean-env ]; then
+            exec /usr/bin/env -i PATH=/usr/bin:/bin GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+              C1="$C1" TRY2="$TRY2" C2="$C2" S1="$S1" S1_CONCLUSION="$S1_CONCLUSION" S2="$S2" S2_CONCLUSION="$S2_CONCLUSION" \
+              /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          T='${{ runner.temp }}/flakefix'
+          set -uo pipefail
+          # Only this step writes the kind; a leftover file is the session's.
+          rm -f "$T/abort_kind"
+          # The session that failed, if one did: a step that did not succeed,
+          # or an action that did not report success – an expired token, an API
+          # outage, a crash, the turn limit or the step's timeout – which
+          # `continue-on-error` hides. An action that reports no conclusion at
+          # all counts as failed: the job then goes red, which is how a change
+          # to the action's outputs would show. A skipped session never ran: an
+          # earlier step failed, which already ends the job red and is the
+          # abort reason below, not a session's failure.
+          failed_session=""
+          if [ "$S1" != skipped ] && { [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; }; then
+            failed_session="1 (step $S1, Claude Code ${S1_CONCLUSION:-reported nothing})"
+          elif [ "$TRY2" = true ] && [ "$S2" != skipped ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
+            failed_session="2 (step $S2, Claude Code ${S2_CONCLUSION:-reported nothing})"
+          fi
+          if [ -f "$T/abort_reason" ]; then
+            echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
+          elif [ ! -f "$T/plan.json" ]; then
+            echo "The job ended before the baseline finished (a failed build or step)." > "$T/abort_reason"
+            echo aborted > "$T/outcome"
+          elif [ "$C1" != success ] || { [ "$TRY2" = true ] && [ "$C2" != success ]; }; then
+            # Timed out, cancelled, or a step failed before a session's commits
+            # were collected: whatever is on disk is not a finished attempt.
+            echo "The job ended before a session's commits were collected (a timeout, a cancellation, or a failed step)." > "$T/abort_reason"
+            echo aborted > "$T/outcome"; rm -f "$T/candidate.bundle"
+          elif [ -f "$T/candidate.bundle" ]; then
+            # A failed session's commits are still a candidate (§8).
+            echo candidate > "$T/outcome"
+          elif [ -n "$failed_session" ]; then
+            # No commit from a session that never finished is not a finding
+            # about the test: not `no-diff`, which would wait for a new failure.
+            echo "Fixer session $failed_session did not finish and left no commit, so nothing reached the verifier." > "$T/abort_reason"
+            echo session > "$T/abort_kind"
+            echo aborted > "$T/outcome"
+          else
+            echo no-diff > "$T/outcome"
+          fi
+          echo "Outcome: $(cat "$T/outcome")" >> "$GITHUB_STEP_SUMMARY"
+          # Whatever the outcome – a failed session 2 leaves try 1's candidate –
+          # a failed session ends the job red, so an outage shows.
+          if [ -n "$failed_session" ]; then
+            echo "Fixer session $failed_session failed." >> "$GITHUB_STEP_SUMMARY"
+            echo "session_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # Every file publish reads, summed into a step output no later step can
+          # rewrite. The upload below is a `uses:` step, which still runs in
+          # whatever environment a session left, so publish checks the
+          # artifact against these sums before it trusts it.
+          sums=""
+          for f in outcome abort_reason abort_kind candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
+            if [ -f "$T/$f" ]; then sums="$sums$f:$(shasum -a 256 < "$T/$f" | cut -d' ' -f1);"; else sums="$sums$f:-;"; fi
+          done
+          echo "sums=$sums" >> "$GITHUB_OUTPUT"
+
+      # The path is the runner's own, never $T from the environment, which a
+      # session can rewrite through $GITHUB_ENV.
+      - name: Upload the candidate
+        if: always() && steps.pick.outputs.attempted == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flakefix-candidate
+          path: ${{ runner.temp }}/flakefix/
+          if-no-files-found: ignore
+          retention-days: 7  # spec §11
+
+      # A failed session – an outage, an expired token, a crash – would
+      # otherwise leave the job green under `continue-on-error` (§8). Last, so
+      # the artifact is already uploaded.
+      - name: End red when a session failed
+        if: always() && steps.package.outputs.session_failed == 'true'
+        shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          CLEAN_ENV: ${{ steps.cleanenv.outputs.env }}
+        run: |
+          keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
+          if [ "${1-}" != --clean-env ]; then
+            restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
+            while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
+            exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
+          fi
+          set -uo pipefail
+          echo "::error::a fixer session failed; see the Package step's summary for the attempt's outcome"
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # publish: every write an attempt makes, with the App token, on ubuntu, after
+  # `fix` has ended on its own runner (§7). It runs whatever `fix` concluded —
+  # failed, timed out, cancelled — so the `flakefix-pick` artifact alone is
+  # enough to record an `aborted` attempt (§8).
+  publish:
+    name: publish
+    needs: fix
+    if: always() && vars.FLAKE_FIXER_ENABLED == 'true' && github.repository == 'cheapsteak/tbd' && needs.fix.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No job-level concurrency group: the run already holds the attempt lock
+    # (top of file), and any group publish queued in would be one where GitHub
+    # could cancel it while pending, recording nothing. It writes only the
+    # attempt comment and its own comments, never the ledger comment or an
+    # issue, so it need not queue behind `ledger` either.
+    # The job token reads nothing it needs; every write uses the App token.
+    permissions:
+      contents: read
+    steps:
+      - name: Download the pick
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: flakefix-pick
+          path: ${{ runner.temp }}/flakefix-pick
+
+      - name: Check whether the fix run picked a target
+        id: picked
+        run: |
+          if [ -f "$RUNNER_TEMP/flakefix-pick/target.json" ]; then
+            echo "picked=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "picked=false" >> "$GITHUB_OUTPUT"
+            echo "The fix run picked no target; nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The base commit must be here for the bundle to apply on top of it.
+      - uses: actions/checkout@v4
+        if: steps.picked.outputs.picked == 'true'
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the candidate
+        if: steps.picked.outputs.picked == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: flakefix-candidate
+          path: ${{ runner.temp }}/flakefix-candidate
+
+      - name: Mint the tbd-flake-fixer App token
+        if: steps.picked.outputs.picked == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+
+      - name: Check the App token's bot login
+        if: steps.picked.outputs.picked == 'true'
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::error::the App token's login is not the one the readers trust (scripts/flake_lib.py BOT_LOGIN)"
+            exit 1
+          fi
+
+      # The artifact must be what `fix` packaged: its upload ran in the
+      # environment a session left. A mismatch, or no sums at all, discards
+      # the candidate and records the attempt `aborted`, saying why.
+      - name: Check the candidate against the fix job's sums
+        if: steps.picked.outputs.picked == 'true'
+        env:
+          SUMS: ${{ needs.fix.outputs.sums }}
+        run: |
+          set -euo pipefail
+          A="$RUNNER_TEMP/flakefix-candidate"
+          [ -d "$A" ] || exit 0
+          got=""
+          for f in outcome abort_reason abort_kind candidate.bundle head_sha verify/verdict.json verify/verdict.md verify/protected.txt verify/failing-lines.txt baseline/f baseline/v flakefix-notes.md; do
+            if [ -f "$A/$f" ]; then got="$got$f:$(shasum -a 256 < "$A/$f" | cut -d' ' -f1);"; else got="$got$f:-;"; fi
+          done
+          if [ "$got" != "$SUMS" ]; then
+            echo "::error::the candidate artifact is not what the fix job packaged; it is discarded and the attempt recorded aborted"
+            rm -rf "$A"; mkdir -p "$A"
+            echo aborted > "$A/outcome"
+            echo "The candidate artifact did not match what the fix job packaged, so it was discarded unread." > "$A/abort_reason"
+          fi
+
+      # Runs whether or not the candidate arrived: without it, the attempt is
+      # recorded `aborted` from the pick alone.
+      - name: Push, open the draft PR, record the attempt
+        if: steps.picked.outputs.picked == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flakefix-candidate"
+          bash scripts/flake-pr.sh open --pick-dir "$RUNNER_TEMP/flakefix-pick" \
+            --attempt-dir "$RUNNER_TEMP/flakefix-candidate" --repo "$GITHUB_REPOSITORY"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # promote: when a flakefix/issue-<N> PR's own `test.yml` run completes, or
+  # the bot sets `flakefix/stress` = success on a flakefix/issue-<N> commit,
+  # mark the draft ready for review if the PR's own Test run passed on the
+  # head the verifier passed (§7). Whichever of the two lands last promotes;
+  # the first skips. Weak evidence is promoted too, carrying its label and
+  # status text (§6.5). A PR a human returned to draft is held and never
+  # promoted again. It writes no ledger or attempt state (§4.4); a skip
+  # changes nothing.
+  # The status leg does not filter on the event's `branches`: GitHub lists at
+  # most 10 branches there, so a commit on more could hide its flakefix/issue-
+  # branch. `promote --from-status` resolves the PR from the commit itself and
+  # skips cleanly when there is none.
+  promote:
+    name: promote
+    if: >-
+      vars.FLAKE_FIXER_ENABLED == 'true' &&
+      github.repository == 'cheapsteak/tbd' &&
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.name == 'Test' &&
+        startsWith(github.event.workflow_run.path, '.github/workflows/test.yml') &&
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        startsWith(github.event.workflow_run.head_branch, 'flakefix/issue-') &&
+        github.event.workflow_run.head_repository.full_name == github.repository) ||
+       (github.event_name == 'status' &&
+        github.event.context == 'flakefix/stress' &&
+        github.event.state == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No concurrency group. Each promote decides for its own run's head SHA,
+    # so a group would let GitHub cancel a pending promote for the current
+    # head in favour of a newer one queued for an older SHA, which skips.
+    # Two promotes of one head may overlap: the label and the ready are
+    # idempotent.
+    # The job token reads; the ready (and a missing weak label) uses the App
+    # token, because a ready_for_review raised by GITHUB_TOKEN starts no
+    # claude-review (§7).
+    # `actions: read` lists the PR's Test runs on the head; `issues: read`,
+    # its timeline (who returned it to draft).
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+      actions: read
+      issues: read
+    steps:
+      # main's scripts, never the candidate's: the protected list promote
+      # checks against is main's.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Mint the tbd-flake-fixer App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLAKE_FIXER_APP_ID }}
+          private-key: ${{ secrets.FLAKE_FIXER_APP_PRIVATE_KEY }}
+          # Only what promote writes: the ready (and its undo) and the label.
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Check the App token's bot login
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/flake_lib.py check-app-slug "$APP_SLUG"; then
+            echo "::error::the App token's login is not the one the readers trust (scripts/flake_lib.py BOT_LOGIN)"
+            exit 1
+          fi
+
+      # The branch is attacker-adjacent text: it reaches the script through
+      # env, never as an expression inside `run:`. A status names a commit,
+      # not a branch: the script finds the one open bot PR whose head it is,
+      # and skips when there is none.
+      - name: Promote if verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          TRIGGER: ${{ github.event_name }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          STATUS_SHA: ${{ github.event.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$TRIGGER" = status ]; then
+            bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --sha "$STATUS_SHA" --from-status
+          else
+            bash scripts/flake-pr.sh promote --repo "$GITHUB_REPOSITORY" --branch "$BRANCH" --sha "$SHA" \
+              --conclusion "$CONCLUSION" --event "$RUN_EVENT" --run-id "$RUN_ID" --run-created-at "$RUN_CREATED_AT"
+          fi

@@ -34,14 +34,6 @@ struct HoverCardRow: Equatable {
     var tint: HoverCardTint
     /// Muted caption line under the value (drift warnings, staleness notes).
     var caption: String?
-    /// Another string this row's `value` may swap to while the card is up.
-    ///
-    /// Drawn **hidden but laid out**, so the row reserves the larger of the two
-    /// in both axes and the card is exactly the same size whichever is showing.
-    /// A card that resized on a swap would jump under the pointer that summoned
-    /// it — the jitter a live-updating row exists to avoid, not to cause. Set it
-    /// on both states of a swapping row, each naming the other.
-    var alternateValue: String?
 
     init(label: String? = nil,
          value: String,
@@ -49,8 +41,7 @@ struct HoverCardRow: Equatable {
          valueStyle: HoverCardTextStyle = .plain,
          monospacedDigits: Bool = false,
          tint: HoverCardTint = .normal,
-         caption: String? = nil,
-         alternateValue: String? = nil) {
+         caption: String? = nil) {
         self.label = label
         self.value = value
         self.chip = chip
@@ -58,8 +49,22 @@ struct HoverCardRow: Equatable {
         self.monospacedDigits = monospacedDigits
         self.tint = tint
         self.caption = caption
-        self.alternateValue = alternateValue
     }
+}
+
+/// Point sizes for a hover card's text.
+///
+/// `.compact` is for cards raised from the status bar, so the card reads at the
+/// size of the text it explains. Everything else uses `.regular`.
+enum HoverCardTextSize: Equatable {
+    case regular
+    case compact
+
+    var title: CGFloat { self == .regular ? 12 : 11 }
+    var rowValue: CGFloat { self == .regular ? 12 : 11 }
+    var rowLabel: CGFloat { self == .regular ? 11 : 10 }
+    var caption: CGFloat { 10 }
+    var chip: CGFloat { self == .regular ? 10 : 9 }
 }
 
 /// The full content of a hover card: a title slot plus structured rows.
@@ -70,15 +75,18 @@ struct HoverCardModel: Equatable {
     /// Muted caption line directly under the title.
     var titleCaption: String?
     var rows: [HoverCardRow]
+    var textSize: HoverCardTextSize
 
     init(title: String? = nil,
          titleStyle: HoverCardTextStyle = .plain,
          titleCaption: String? = nil,
-         rows: [HoverCardRow] = []) {
+         rows: [HoverCardRow] = [],
+         textSize: HoverCardTextSize = .regular) {
         self.title = title
         self.titleStyle = titleStyle
         self.titleCaption = titleCaption
         self.rows = rows
+        self.textSize = textSize
     }
 }
 
@@ -201,6 +209,17 @@ struct HoverDwellReducer: Equatable {
         if distance >= timing.movementThreshold {
             restingSince = now
         }
+    }
+
+    /// A menu opened while this hover was still dwelling. Latches the gate
+    /// shut until the pointer leaves and comes back, exactly as a shown card
+    /// latches it: a pull-down menu opens beside its anchor, so the pointer
+    /// never exits and, with no `mouseMoved` arriving during menu tracking,
+    /// it reads as at rest — without this the card would open over the menu
+    /// the moment the interaction suppression lapsed.
+    mutating func interrupted() {
+        guard enteredAt != nil else { return }
+        didShow = true
     }
 
     /// Pointer left the anchor — clears all state.
@@ -383,7 +402,7 @@ struct HoverCardView: View {
                     styledText(title,
                                style: model.titleStyle,
                                monospacedDigits: false)
-                        .font(.system(size: 12,
+                        .font(.system(size: model.textSize.title,
                                       weight: model.titleStyle == .mutedItalic ? .regular : .semibold))
                         .foregroundStyle(model.titleStyle == .mutedItalic ? Color.secondary : Color.primary)
                     if let caption = model.titleCaption {
@@ -397,7 +416,7 @@ struct HoverCardView: View {
                         GridRow {
                             if let label = row.label {
                                 Text(label)
-                                    .font(.system(size: 11))
+                                    .font(.system(size: model.textSize.rowLabel))
                                     .foregroundStyle(.secondary)
                                     .gridColumnAlignment(.leading)
                                 valueCell(row)
@@ -435,7 +454,7 @@ struct HoverCardView: View {
                 valueText(row)
                 if let chip = row.chip {
                     Text(chip)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: model.textSize.chip, weight: .medium))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Color.primary.opacity(0.08)))
@@ -448,27 +467,9 @@ struct HoverCardView: View {
         }
     }
 
-    /// The value, over an invisible copy of whatever it may swap to. `.hidden()`
-    /// removes the peer from the drawing but not from the layout, so the row is
-    /// sized for both strings at once and a swap moves no pixel but the text.
-    @ViewBuilder
     private func valueText(_ row: HoverCardRow) -> some View {
-        if let alternate = row.alternateValue {
-            ZStack(alignment: .topLeading) {
-                styledText(alternate, style: row.valueStyle, monospacedDigits: row.monospacedDigits)
-                    .font(.system(size: 12))
-                    .hidden()
-                    .accessibilityHidden(true)
-                visibleValue(row)
-            }
-        } else {
-            visibleValue(row)
-        }
-    }
-
-    private func visibleValue(_ row: HoverCardRow) -> some View {
         styledText(row.value, style: row.valueStyle, monospacedDigits: row.monospacedDigits)
-            .font(.system(size: 12))
+            .font(.system(size: model.textSize.rowValue))
             .foregroundStyle(valueColor(row))
     }
 
@@ -490,7 +491,7 @@ struct HoverCardView: View {
 
     private func captionText(_ string: String) -> some View {
         Text(string)
-            .font(.system(size: 10))
+            .font(.system(size: model.textSize.caption))
             .foregroundStyle(.tertiary)
     }
 }
@@ -563,6 +564,12 @@ final class HoverCardController {
     private var interactionHooksInstalled = false
     private var menuObserver: NSObjectProtocol?
     private var mouseMonitor: Any?
+    /// The anchors whose dwell is still running — pointer over them, card not
+    /// yet shown. A set, not one slot: AppKit can deliver the next anchor's
+    /// `mouseEntered` before the last one's `mouseExited`. A menu opening
+    /// cancels every such dwell (`HoverDwellReducer.interrupted`) so a click
+    /// made before a card appeared cannot raise it over the menu.
+    private let dwellingAnchors = NSHashTable<HoverCardAnchorNSView>.weakObjects()
 
     /// How long a click / menu-open suppresses the tooltip's warm reshow.
     /// Comfortably longer than the warm-grace window so a click can't be
@@ -589,7 +596,10 @@ final class HoverCardController {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.dismissForInteraction()
+                guard let self else { return }
+                for anchor in self.dwellingAnchors.allObjects { anchor.cancelDwell() }
+                self.dwellingAnchors.removeAllObjects()
+                self.dismissForInteraction()
             }
         }
 
@@ -633,6 +643,16 @@ final class HoverCardController {
     func requestShow(anchor: NSView, model: HoverCardModel) {
         if let suppressUntil, Date() < suppressUntil { return }
         show(anchor: anchor, model: model)
+    }
+
+    /// An anchor's pointer entered and its dwell timer started.
+    fileprivate func dwellStarted(anchor: HoverCardAnchorNSView) {
+        dwellingAnchors.add(anchor)
+    }
+
+    /// An anchor's dwell stopped — its card showed, or the pointer left.
+    fileprivate func dwellStopped(anchor: HoverCardAnchorNSView) {
+        dwellingAnchors.remove(anchor)
     }
 
     func hoverEnded(anchor: NSView) {
@@ -786,6 +806,15 @@ private final class HoverCardAnchorNSView: NSView {
         // Common mode so the poll keeps ticking during scrolls/tracking loops.
         RunLoop.main.add(timer, forMode: .common)
         dwellTimer = timer
+        HoverCardController.shared.dwellStarted(anchor: self)
+    }
+
+    /// A menu opened before this anchor's card showed: stop polling and keep
+    /// the card down until the pointer leaves and returns.
+    func cancelDwell() {
+        dwellTimer?.invalidate()
+        dwellTimer = nil
+        reducer.interrupted()
     }
 
     private func evaluateDwell() {
@@ -801,6 +830,7 @@ private final class HoverCardAnchorNSView: NSView {
             controller.requestShow(anchor: self, model: model)
             dwellTimer?.invalidate()
             dwellTimer = nil
+            controller.dwellStopped(anchor: self)
         }
     }
 
@@ -809,6 +839,7 @@ private final class HoverCardAnchorNSView: NSView {
         dwellTimer = nil
         lastMouseLocation = nil
         reducer.exited()
+        HoverCardController.shared.dwellStopped(anchor: self)
         HoverCardController.shared.hoverEnded(anchor: self)
     }
 }

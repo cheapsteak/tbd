@@ -30,6 +30,9 @@ These get reaped:
 - **Unreferenced retained transcripts** — JSONL files under `~/tbd/transcripts/` that no
   `retained_transcript` row points at, and receipt rows whose provider-stated expiry has
   passed (see below).
+- **Untracked remote transcript caches** — `~/tbd/remote-transcripts/<provider>/<session>/`
+  directories that no undismissed `remote_session` row or unarchived `worktree` row refers
+  to and that nothing has written to within `gcGraceSeconds` (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -165,8 +168,9 @@ the rest of the sweep: `tbd gc sweep --dry-run` prints the `REAP profile-dir` an
 `PURGE quarantine` lines this phase *would* act on with the flag off, so the decision to
 enable a default-off switch can be made against real candidates rather than blind.
 Planning touches neither disk nor the database. Enable it for a soak with
-`tbd gc profile-dirs on` (RPC
-`config.setGCProfileDirsEnabled`); there is no Settings toggle. The column carries no SQL
+`tbd gc profile-dirs on` or the Settings → Cleanup toggle "Reclaim orphaned profile
+config dirs" (both call `config.setGCProfileDirsEnabled`); `tbd gc profile-dirs` with no
+argument prints the current value. The column carries no SQL
 default, so an install nobody has touched reads NULL and resolves through
 `Config.gcProfileDirsEnabledDefault` — graduation is a one-line change to that constant,
 reaching everyone who never flipped the switch while preserving every explicit opt-out.
@@ -240,17 +244,17 @@ the CLI is where a quarantine path is read.
 
 ## Retained transcripts
 
-A provider that declares `retain`, `import` or `recall` can hold a conversation in its
-own durable store and hand back an opaque key; TBD records the receipt in
-`retained_transcript` and a `recall` writes the JSONL under
+A provider that declares `transcript.retain`, `transcript.import` or
+`transcript.recall` can hold a conversation in its own durable store and hand back an opaque key; TBD records the receipt in
+`retained_transcript` and a `transcript recall` writes the JSONL under
 `~/tbd/transcripts/<provider>/<key>.jsonl`. Both halves are durable resources with no
 owner once the thing that motivated them is gone, so `OrphanGC` is their named
 reconciler — see
 [`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`](specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md),
 "Reclamation".
 
-**Why it is load-bearing rather than tidiness.** The teleport flow calls `import` and
-then `create`. A `create` that fails after a successful `import` leaves a retained blob
+**Why it is load-bearing rather than tidiness.** The teleport flow calls `transcript import`
+and then `create`. A `create` that fails after a successful `transcript import` leaves a retained blob
 on the provider and a row here that nothing will ever use, because the session it was
 going to seed was never made. No creation path can close that window — the provider
 commits its side before TBD learns whether the second call will succeed — so the standing
@@ -266,14 +270,15 @@ constant, reaching everyone who never flipped the switch while preserving every 
 opt-out. A dry run bypasses the flag exactly as it bypasses `gcEnabled`:
 `tbd gc sweep --dry-run` prints the `REAP retained-transcript` and
 `REAP retained-transcript-row` lines the leg *would* act on, so the decision to enable it
-can be made against real candidates. There is no Settings toggle; enable it for a soak
-from the CLI, which is the supported path:
+can be made against real candidates. Enable it for a soak from the Settings → Cleanup
+toggle "Reclaim unreferenced retained transcripts" or from the CLI:
 
 ```sh
 tbd gc retained-transcripts on
+tbd gc retained-transcripts      # prints the current value, e.g. "Retained-transcript GC: on (default off)"
 ```
 
-That calls `config.setGCRetainedTranscriptsEnabled`, which writes the column and
+Both call `config.setGCRetainedTranscriptsEnabled`, which writes the column and
 broadcasts the config change so a running app reloads. `off` writes an explicit `0`,
 which is honored through graduation rather than following the shipped default.
 
@@ -294,8 +299,8 @@ reason:
   because the contract gives no way to enumerate a provider's keys. Dropping such a row
   strands the blob forever.
 - **Grace window** (`grace`) — a file whose newer of creation and modification is younger
-  than `gcGraceSeconds` (default 3600s / 1h) is kept. `recall` writes the file before it
-  records the path on the row, and this is the window that covers it. A file whose dates
+  than `gcGraceSeconds` (default 3600s / 1h) is kept. `transcript recall` writes the file
+  before it records the path on the row, and this is the window that covers it. A file whose dates
   cannot be read keeps as `unknown-age`.
 - **Unreadable rows skip the leg** (`rows-unreadable`) — never read as "no file is
   referenced".
@@ -309,13 +314,62 @@ by the worktree a reap removed, and neither half here has one. Nothing is lost t
 restore could return either: the transcript still lives on the provider until its own
 expiry, and `tbd remote recall <key>` fetches it again.
 
+## Remote transcript caches
+
+`remote.transcriptSync` keeps a remote session's conversation in
+`~/tbd/remote-transcripts/<provider>/<session>/` (`transcript.jsonl` beside
+`state.json`), and a directory outlives the request that created it. `OrphanGC` is its
+named reconciler — see
+[`docs/specs/2026-09-25-remote-session-transcript-design.md`](specs/2026-09-25-remote-session-transcript-design.md),
+"Reclaiming the cache". A successful `remote.delete` or `remote.dismiss` removes the
+session's directory at once (`RemoteTranscriptSync.discard`, which also stops a fetch in
+flight for that session from writing its page back); that is prompt cleanup, best effort,
+and the sweep is the guarantee behind it.
+
+**Under `gcEnabled` alone**, with no soak flag of its own: the cache is a rebuildable copy of
+the provider's transcript, so a session un-dismissed or unarchived after its cache was
+reclaimed simply refetches.
+A dry run plans without touching disk, as every leg does.
+
+A session is tracked while a `remote_session` row for it has `dismissed = 0` or a
+`worktree` row for it has a status other than `archived`. A directory is reclaimed
+(`REAP remote-transcript-cache`) only when all three hold:
+
+- **No unarchived `worktree` row refers to it** by `providerName` / `providerSessionID`.
+  The pairs are read as raw columns, so an unarchived row that fails to decode still
+  counts.
+- **No undismissed `remote_session` row refers to it.** An undismissed `gone` row still
+  counts: the session is still listed.
+- **Nothing in it was written within `gcGraceSeconds`** (default 3600s / 1h), the grace
+  window every other leg uses — the newest creation or modification date of the directory
+  and its entries, against the date seam. The window keeps a sync that raced a dismiss
+  from losing its file mid-write.
+
+Row absence alone would not do. Dismissing sets `dismissed = 1` and keeps the row, and
+archiving keeps the worktree row, so a sweep that waited for rows to disappear would never
+reclaim a dismissed or archived session's cache — which is what a dismiss whose eager
+removal failed, or a delete that timed out after the provider acted, leaves behind.
+`remote.transcriptSync` refuses a dismissed session, so a pane still open after a dismiss
+cannot rebuild its cache.
+
+Directory names are the escaped components `TBDConstants.remoteTranscriptDir` writes, so
+the leg compares each row by the path that helper gives it under the same root the walk
+reads, never by unescaping a name found on disk. Every doubt keeps: a tracked session
+(`tracked-session`), a directory inside the grace window or undatable (`grace`,
+`unknown-age`), unreadable
+rows (`rows-unreadable`, which skips the leg), and a failed removal (`remove-failed`).
+Only `<root>/<provider>/<session>` directories are candidates; stray files and emptied
+provider directories are left alone. No reap record is written: nothing here could be
+restored that a sync would not rebuild.
+
 ## Cadence and the `gcEnabled` gate
 
 `gcEnabled` (config-table boolean, **default on**) is the single master switch — it
 gates the hourly sweep **and** event-driven scratchpad cleanup. When off, a non-dry-run
-sweep does nothing at all — not even the `lsof` pass. Toggle it in Settings
+sweep does nothing at all — not even the `lsof` pass. Toggle it in Settings → Cleanup
 ("Automatically clean up orphaned agent worktrees") or via the `config.setGCEnabled`
-RPC.
+RPC. The opt-in collector toggles listed under that switch are disabled while it is off,
+since the daemon reads each of them on top of it.
 
 ### Why default-on, despite the default-off house rule
 
@@ -354,13 +408,27 @@ than the preceding dry run predicted.
 
 ## Config knobs
 
-| Key | Default | Where |
-|---|---|---|
-| `gcEnabled` | `true` | Settings toggle + `config.setGCEnabled` RPC |
-| `gcProfileDirsEnabled` | `false` | `tbd gc profile-dirs on\|off` + `config.setGCProfileDirsEnabled` RPC, no UI |
-| `gcRetainedTranscriptsEnabled` | `false` | `tbd gc retained-transcripts on\|off` + `config.setGCRetainedTranscriptsEnabled` RPC, no UI |
-| `gcGraceSeconds` | `3600` (1h) | config table only, no UI |
-| `gcSnapshotRetentionDays` | `30` | config table only, no UI |
+- **`gcEnabled`** – default `true`; the Settings → Cleanup master toggle and the
+  `config.setGCEnabled` RPC.
+- **`gcProfileDirsEnabled`** – default `false`; `tbd gc profile-dirs [on|off]`, the
+  Settings → Cleanup toggle "Reclaim orphaned profile config dirs", and the
+  `config.setGCProfileDirsEnabled` RPC.
+- **`gcOrphanProcessesEnabled`** – default `false`; `tbd gc orphan-processes [on|off]`,
+  the Settings → Cleanup toggle "Reclaim orphaned processes", and the
+  `config.setGCOrphanProcessesEnabled` RPC.
+- **`gcRetainedTranscriptsEnabled`** – default `false`;
+  `tbd gc retained-transcripts [on|off]`, the Settings → Cleanup toggle "Reclaim
+  unreferenced retained transcripts", and the `config.setGCRetainedTranscriptsEnabled`
+  RPC.
+- **`gcHangStacksEnabled`** – default `false`; `tbd gc hang-stacks [on|off]`, the
+  Settings → Cleanup toggle "Reclaim old hang-stack diagnostics", and the
+  `config.setGCHangStacksEnabled` RPC. It also arms the app's write-time cap.
+- **`gcGraceSeconds`** – default `3600` (1h); config table only, no UI.
+- **`gcSnapshotRetentionDays`** – default `30`; config table only, no UI.
+
+Each `tbd gc <collector>` subcommand prints its current value when given no argument,
+e.g. `Orphan-process GC: off (default off)`, so the CLI and the Settings toggle can be
+checked against each other. The four opt-in collectors only act while `gcEnabled` is on.
 
 Deliberately **not** configurable, as safety invariants rather than knobs: whether a
 dirty worktree gets snapshotted before delete (always), the detection gates
@@ -387,7 +455,10 @@ Restore is available for `agentWorktree` records only.
 tbd gc list [--repo <path>] [--json]   # list reap records (id, kind, path, size, snapshot state, restored, quarantine path)
 tbd gc restore <uuid>                  # restore a reaped agent worktree
 tbd gc sweep [--dry-run]               # run a sweep now; --dry-run prints the plan, mutates nothing
-tbd gc profile-dirs on|off             # gate the profile-config-dir collector (ships off)
+tbd gc profile-dirs [on|off]           # gate the profile-config-dir collector (ships off); no argument prints the current value
+tbd gc orphan-processes [on|off]       # gate the orphaned-process collector (ships off); no argument prints the current value
+tbd gc retained-transcripts [on|off]   # gate the retained-transcript collector (ships off); no argument prints the current value
+tbd gc hang-stacks [on|off]            # gate the hang-stack reclaimer (ships off); no argument prints the current value
 ```
 
 ## Non-goals (from the design spec)

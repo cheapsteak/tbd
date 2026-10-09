@@ -4,7 +4,7 @@ import Testing
 @testable import TBDDaemonLib
 import TBDShared
 
-/// `terminal.completions` — its flag gate, its unknown-terminal answer, and the
+/// `terminal.completions` — its inventory, its unknown-terminal answer, and the
 /// fields it resolves for the service.
 @Suite("terminal.completions handler")
 struct TerminalCompletionsHandlerTests {
@@ -63,25 +63,8 @@ struct TerminalCompletionsHandlerTests {
             label: "claude", claudeSessionID: "sess-1", profileID: profileID, kind: .claude)
     }
 
-    /// **Both branches of the flag.** With it off the verb answers with an error
-    /// rather than an empty inventory, so a caller cannot mistake "the feature is
-    /// off" for "this session knows no commands".
-    @Test func theFlagOffRefusesTheVerb() async throws {
+    @Test func aClaudeTerminalIsServedTheInventory() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let terminal = try await makeTerminal(db)
-        let router = makeRouter(db: db)
-        let data = try JSONEncoder().encode(
-            TerminalCompletionsParams(terminalID: terminal.id))
-
-        let response = try await router.handleTerminalCompletions(data)
-
-        #expect(!response.success)
-        #expect(try #require(response.error).contains("transcript composer"))
-    }
-
-    @Test func theFlagOnServesTheInventory() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let terminal = try await makeTerminal(db)
         let router = makeRouter(db: db)
         let data = try JSONEncoder().encode(
@@ -98,7 +81,6 @@ struct TerminalCompletionsHandlerTests {
 
     @Test func anUnknownTerminalIsAnError() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let router = makeRouter(db: db)
         let data = try JSONEncoder().encode(
             TerminalCompletionsParams(terminalID: UUID()))
@@ -112,7 +94,6 @@ struct TerminalCompletionsHandlerTests {
     /// for the composer entirely, and a probe against them is meaningless.
     @Test func aShellTerminalIsRefused() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktree = try await db.worktrees.createScratch(
             name: "wt", displayName: "wt",
             path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
@@ -137,7 +118,6 @@ struct TerminalCompletionsHandlerTests {
     /// layered on top so an override cannot redirect the probe.
     @Test func theProbeRunsInTheSessionsEnvironment() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         try await db.config.setEnvOverrides(["TBD_TEST_GLOBAL": "global", "TBD_TEST_SCOPE": "global"])
 
         let profile = try await db.modelProfiles.create(name: "p", kind: .oauth)
@@ -190,7 +170,6 @@ struct TerminalCompletionsHandlerTests {
     /// non-secret keys only, and the spawn builder assigns the secret itself.
     @Test func theProbeCarriesTheProfilesRoutingEnv() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
 
         let profile = try await db.modelProfiles.create(
             name: "bedrock", kind: .bedrock, model: "acme.claude-model",
@@ -227,27 +206,5 @@ struct TerminalCompletionsHandlerTests {
         #expect(
             environment["CLAUDE_CODE_OAUTH_TOKEN"]
                 == daemonEnvironment["CLAUDE_CODE_OAUTH_TOKEN"])
-    }
-
-    /// The gate is read PER REQUEST, not cached at router construction: one
-    /// router, refused before the column is flipped and answering after. A
-    /// daemon lives for days, so a toggle has to take effect without a restart.
-    @Test func theFlagIsReadPerRequest() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let terminal = try await makeTerminal(db)
-        let router = makeRouter(db: db)
-        let data = try JSONEncoder().encode(
-            TerminalCompletionsParams(terminalID: terminal.id))
-
-        let refused = try await router.handleTerminalCompletions(data)
-        #expect(!refused.success)
-
-        try await db.config.setTranscriptComposerEnabled(true)
-
-        let served = try await router.handleTerminalCompletions(data)
-        #expect(served.success)
-        let result = try JSONDecoder().decode(
-            TerminalCompletionsResult.self, from: Data((served.result ?? "{}").utf8))
-        #expect(result.commands.map(\.name) == ["compact"])
     }
 }

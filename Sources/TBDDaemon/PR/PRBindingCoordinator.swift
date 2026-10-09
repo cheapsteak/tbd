@@ -8,6 +8,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "prBinding")
 /// worktree's own repo, a tombstone is only cleared by an explicit attach, and
 /// an unresolvable repo defers rather than rejects.
 ///
+/// The own-repo rule has two exemptions. A `.provider` binding is named by a
+/// remote provider's URL, which may point at another repository or host, so
+/// the URL itself is the identity. And a PR this worktree already has a row
+/// for (live or tombstoned) is its own record, so an attach can revive a
+/// foreign tombstone — the same rule `detach` follows.
+///
 /// The tombstone rule is what makes a user's detach durable. Discovery is
 /// continuous — the branch matcher re-runs on every poll, the hook re-fires on
 /// every `gh pr create`, and `seedProvenance` reconciles `Worktree.prNumber` on
@@ -95,37 +101,36 @@ public actor PRBindingCoordinator {
 
     private func bind(worktreeID: UUID, parsed: ParsedPRURL, source: PRBindingSource,
                       mayReviveTombstone: Bool) async -> BindOutcome {
-        guard let own = await resolveRepo(worktreeID) else {
-            logger.debug("deferring PR #\(parsed.number, privacy: .public): repo unresolved for worktree \(worktreeID.uuidString, privacy: .public)")
-            return .deferredUnknownRepo
-        }
-        let other = "\(parsed.owner)/\(parsed.repo)"
-        guard own.owner.lowercased() == parsed.owner.lowercased(),
-              own.name.lowercased() == parsed.repo.lowercased() else {
-            logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is in \(other, privacy: .public), worktree is in \(own.owner, privacy: .public)/\(own.name, privacy: .public)")
-            return .rejectedWrongRepo(other)
-        }
-        switch await hostAgreement(worktreeID: worktreeID, own: own.host, parsed: parsed.host) {
-        case .agree:
-            break
-        case .disagree:
-            // The owner and name are identical here, so naming them alone would
-            // read as nonsense — the host is the whole disagreement.
-            let elsewhere = "\(parsed.host)/\(other)"
-            logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is on \(elsewhere, privacy: .public), worktree is on \(own.host, privacy: .public)")
-            return .rejectedWrongRepo(elsewhere)
-        case .undetermined:
-            logger.debug("deferring PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): the forge of \(own.host, privacy: .public) could not be determined")
-            return .deferredUnknownRepo
-        }
-
         let candidate = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
             repo: parsed.repo, number: parsed.number, url: parsed.url, source: source)
 
+        // Read this worktree's own record for the identity FIRST, tombstones
+        // included: whether one exists decides whether repo validation applies.
+        let existing: PRBinding?
         do {
-            let existing = try await store.list(worktreeID: worktreeID, includeDetached: true)
+            existing = try await store.list(worktreeID: worktreeID, includeDetached: true)
                 .first { $0.identityKey == candidate.identityKey }
+        } catch {
+            logger.warning("failed to read bindings for PR #\(parsed.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .deferredUnknownRepo
+        }
+
+        // Repo validation guards CREATION from an inference about which repo a
+        // PR belongs to. It does not apply to:
+        //  - `.provider`: the provider named the PR by URL, and by contract it
+        //    may be in another repository or on another host; the URL is the
+        //    identity. Its status comes from its own lookup.
+        //  - a row this worktree already holds: that is this worktree's own
+        //    record (the rule `detach` follows), so a foreign tombstone stays
+        //    revivable by `tbd pr attach`, and a live one reports `.alreadyBound`.
+        if source != .provider && existing == nil {
+            if let refusal = await validateOwnRepo(worktreeID: worktreeID, parsed: parsed) {
+                return refusal
+            }
+        }
+
+        do {
             if let existing {
                 guard existing.detached else { return .alreadyBound }
                 guard mayReviveTombstone else {
@@ -147,6 +152,34 @@ public actor PRBindingCoordinator {
             return .bound(stored)
         } catch {
             logger.warning("failed to bind PR #\(parsed.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .deferredUnknownRepo
+        }
+    }
+
+    /// The own-repo and host check a new binding must pass: the outcome to
+    /// report when it may not bind, or nil when it may.
+    private func validateOwnRepo(worktreeID: UUID, parsed: ParsedPRURL) async -> BindOutcome? {
+        guard let own = await resolveRepo(worktreeID) else {
+            logger.debug("deferring PR #\(parsed.number, privacy: .public): repo unresolved for worktree \(worktreeID.uuidString, privacy: .public)")
+            return .deferredUnknownRepo
+        }
+        let other = "\(parsed.owner)/\(parsed.repo)"
+        guard own.owner.lowercased() == parsed.owner.lowercased(),
+              own.name.lowercased() == parsed.repo.lowercased() else {
+            logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is in \(other, privacy: .public), worktree is in \(own.owner, privacy: .public)/\(own.name, privacy: .public)")
+            return .rejectedWrongRepo(other)
+        }
+        switch await hostAgreement(worktreeID: worktreeID, own: own.host, parsed: parsed.host) {
+        case .agree:
+            return nil
+        case .disagree:
+            // The owner and name are identical here, so naming them alone would
+            // read as nonsense — the host is the whole disagreement.
+            let elsewhere = "\(parsed.host)/\(other)"
+            logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is on \(elsewhere, privacy: .public), worktree is on \(own.host, privacy: .public)")
+            return .rejectedWrongRepo(elsewhere)
+        case .undetermined:
+            logger.debug("deferring PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): the forge of \(own.host, privacy: .public) could not be determined")
             return .deferredUnknownRepo
         }
     }

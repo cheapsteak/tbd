@@ -226,7 +226,8 @@ struct MergedTransitionPrecedenceTests {
         let bound = try await deps.db.prBindings.list(worktreeID: wtID)
         await trigger.retainBound(polled: [wtID], bound: [wtID])
         await trigger.evaluate(worktreeID: wtID, bindings: bound,
-                               branchCandidates: ["b"], provenancePRNumber: nil)
+                               branchCandidates: ["b"], provenancePRNumber: nil,
+                               ownRepo: ("acme", "acme-prod", "github.com"))
 
         #expect(try await deps.db.worktrees.get(id: wtID)?.status == .archived)
         let requests = try actuationRequests(at: deps.actuationLogPath)

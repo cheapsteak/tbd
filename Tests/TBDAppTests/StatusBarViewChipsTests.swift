@@ -84,6 +84,44 @@ struct StatusBarViewChipsTests {
         #expect(model.overflow == 7)
     }
 
+    @Test("finished PRs past the threshold leave the chip row for the done chip")
+    func finishedPRsFoldIntoDone() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable),
+                        binding(3, .closed), binding(4, nil)]
+        let model = StatusBarView.prChips(bindings)
+        #expect(model.chips.map(\.label) == ["#2", "#4"])
+        #expect(model.overflow == 0)
+        #expect(model.overflowMenu.map(\.number) == [2, 4])
+        #expect(model.done.map(\.number) == [1, 3])
+    }
+
+    @Test("with finished PRs folded, the +N chip's wording counts open PRs")
+    func groupedOverflowWordingSaysOpen() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable),
+                        binding(3, .closed), binding(4, .draft),
+                        binding(5, .mergeable)]
+        let model = StatusBarView.prChips(bindings, limit: 1)
+        #expect(model.overflow == 2)
+        // The same composition `PRChipCluster` performs.
+        let openOnly = !model.done.isEmpty
+        #expect(openOnly)
+        #expect(PRBindingPresentation.overflowChipTooltip(
+            total: model.overflowMenu.count, overflow: model.overflow, openOnly: openOnly)
+            == "Show all 3 open pull requests (2 not shown here)")
+        #expect(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: model.overflowMenu.count, overflow: model.overflow, openOnly: openOnly)
+            == "Show all 3 open pull requests, 2 not shown here")
+    }
+
+    @Test("a lone merged PR keeps its chip and nothing folds")
+    func loneMergedKeepsChip() {
+        let bindings = [binding(1, .merged), binding(2, .mergeable)]
+        let model = StatusBarView.prChips(bindings)
+        #expect(model.chips.map(\.label) == ["#1", "#2"])
+        #expect(model.done.isEmpty)
+        #expect(model.overflowMenu == bindings)
+    }
+
     @Test("a chip id is its binding's id, so the row is stable across refreshes")
     func chipIDMatchesBinding() {
         let one = binding(412, .mergeable)
@@ -159,46 +197,76 @@ struct StatusBarViewChipsTests {
         ]).chips[0]
     }
 
-    @Test("the overlay's headline names the PR, its state and its title on one line")
-    func overlayWithTitle() {
-        let now = Date(timeIntervalSince1970: 1_700_007_200)
+    /// A fixed clock for the overlay tests, so every age is exact.
+    private static let now = Date(timeIntervalSince1970: 1_700_007_200)
+
+    /// A reading taken a minute before `now` — well inside the quiet window.
+    private static let freshlyObserved = now.addingTimeInterval(-60)
+
+    @Test("a titled chip leads with its title, with the reference and state beneath it")
+    func overlayLeadsWithTheTitle() {
         let card = StatusBarView.chipHoverCard(
             chip(state: .checksFailed,
                  title: "Fix the login timeout",
-                 observedAt: now.addingTimeInterval(-7200)),
-            now: now)
-        #expect(card.title == "PR#412 (\(PRMergeableState.checksFailed.displayReason))"
-                + " - Fix the login timeout")
-        // No labelled grid: the three facts are the headline, and the only row
-        // left is the one naming the click.
-        #expect(card.rows.count == 1)
-        #expect(card.rows.allSatisfy { $0.label == nil })
-        // The age rides under the headline — a display-tier cache is never
-        // rendered as current truth. Shared wording with the toolbar and sidebar.
-        #expect(card.titleCaption == "checked 2h ago")
-        #expect(card.titleCaption == PRFreshness.checkedLabel(
-            observedAt: now.addingTimeInterval(-7200), now: now))
+                 observedAt: Self.freshlyObserved),
+            now: Self.now)
+        #expect(card.title == "Fix the login timeout")
+        #expect(card.titleCaption
+                == "PR#412 · \(PRMergeableState.checksFailed.displayReason)")
+        // A fresh reading says nothing about its age, and nothing on the card
+        // describes the click — the chip's own targets say that.
+        #expect(card.rows.isEmpty)
     }
 
-    /// Every part of the headline but the number is optional, and an absent one
-    /// is *omitted* rather than filled: no empty `()`, and no dangling ` - `.
-    @Test("the headline degrades to whichever of state and title were observed")
+    @Test("the chip card is sized to the status bar's text; a default card is regular")
+    func overlayTextSize() {
+        let card = StatusBarView.chipHoverCard(
+            chip(state: .merged, title: "Fix it"), now: Self.now)
+        #expect(card.textSize == .compact)
+        #expect(HoverCardModel().textSize == .regular)
+    }
+
+    @Test("an untitled chip's title line is the reference and state, with no line beneath")
+    func overlayWithoutTitle() {
+        let card = StatusBarView.chipHoverCard(
+            chip(state: .merged, title: nil, observedAt: Self.freshlyObserved),
+            now: Self.now)
+        #expect(card.title == "PR#412 (\(PRMergeableState.merged.displayReason))")
+        // The reference is already the title, so it is not repeated under it.
+        #expect(card.titleCaption == nil)
+        #expect(card.rows.isEmpty)
+    }
+
+    @Test("a chip with no observed state names only its number, on either line")
+    func overlayWithoutState() {
+        let titled = StatusBarView.chipHoverCard(
+            chip(state: nil, title: "Relay the GitHub event"), now: Self.now)
+        #expect(titled.title == "Relay the GitHub event")
+        #expect(titled.titleCaption == "PR#412")
+
+        let bare = StatusBarView.chipHoverCard(chip(state: nil, title: nil), now: Self.now)
+        #expect(bare.title == "PR#412")
+        #expect(bare.titleCaption == nil)
+    }
+
+    /// Every part but the number is optional, and an absent one is *omitted*
+    /// rather than filled: no empty `()`, and no dangling ` · `.
+    @Test("the title and reference lines degrade to whichever facts were observed")
     func headlineDegradesByOmission() {
         let state = PRMergeableState.merged.displayReason
-        #expect(StatusBarView.chipHeadline(
-            chip(state: .merged, title: "Relay the GitHub event"))
-            == "PR#412 (\(state)) - Relay the GitHub event")
-        #expect(StatusBarView.chipHeadline(chip(state: .merged, title: nil))
-                == "PR#412 (\(state))")
-        #expect(StatusBarView.chipHeadline(chip(state: nil, title: "Relay the GitHub event"))
-                == "PR#412 - Relay the GitHub event")
+        #expect(StatusBarView.chipHeadline(chip(state: .merged, title: "Relay the GitHub event"))
+                == "Relay the GitHub event")
+        #expect(StatusBarView.chipHeadline(chip(state: .merged, title: nil)) == "PR#412 (\(state))")
         #expect(StatusBarView.chipHeadline(chip(state: nil, title: nil)) == "PR#412")
-        // …and no combination leaves a separator with nothing after it.
-        for headline in [StatusBarView.chipHeadline(chip(state: .merged, title: nil)),
-                         StatusBarView.chipHeadline(chip(state: nil, title: nil)),
-                         StatusBarView.chipHeadline(chip(state: nil, title: "x"))] {
-            #expect(headline.hasSuffix(" - ") == false)
-            #expect(headline.contains("()") == false)
+        #expect(StatusBarView.chipReference(chip(state: .merged)) == "PR#412 · \(state)")
+        #expect(StatusBarView.chipReference(chip(state: nil)) == "PR#412")
+        for line in [StatusBarView.chipHeadline(chip(state: nil, title: nil)),
+                     StatusBarView.chipHeadline(chip(state: .merged, title: nil)),
+                     StatusBarView.chipReference(chip(state: nil)),
+                     StatusBarView.chipReference(chip(state: .merged))] {
+            #expect(line.contains("()") == false)
+            #expect(line.hasSuffix(" · ") == false)
+            #expect(line.hasSuffix(" ·") == false)
         }
     }
 
@@ -206,7 +274,7 @@ struct StatusBarViewChipsTests {
     func overlayBlankTitle() {
         let card = StatusBarView.chipHoverCard(chip(state: nil, title: "   \n"))
         #expect(card.title == "PR#412")
-        #expect(card.title?.contains("-") == false)
+        #expect(card.titleCaption == nil)
     }
 
     /// The overflow menu and the toolbar dropdown render `reason ?? state`, so
@@ -225,6 +293,7 @@ struct StatusBarViewChipsTests {
         let headline = StatusBarView.chipHeadline(chip)
         #expect(headline == "PR#412 (Changes requested by reviewer)")
         #expect(headline.contains(PRMergeableState.blocked.displayReason) == false)
+        #expect(StatusBarView.chipReference(chip) == "PR#412 · Changes requested by reviewer")
         // …and it is the same string the overflow menu row is built from.
         #expect(PRBindingPresentation.menuRows([binding])[0].title
             .contains("Changes requested by reviewer"))
@@ -234,37 +303,71 @@ struct StatusBarViewChipsTests {
             == "Open PR #412 — Changes requested by reviewer")
     }
 
-    @Test("a chip with no observed status still gets a number, and says the age is unknown")
-    func overlayWithoutStatus() {
-        let card = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
-        #expect(card.title == "PR#412")
-        // A missing stamp is an unknown check time rather than silence — the
-        // card never renders a state, or the absence of one, without its age.
-        #expect(card.titleCaption == PRFreshness.checkedLabel(observedAt: nil, now: Date()))
-        #expect(card.titleCaption == "last checked at an unknown time")
+    // MARK: - The freshness warning
+
+    @Test("a fresh reading does not show its age")
+    func freshReadingHidesItsAge() {
+        let justInside = Self.now.addingTimeInterval(-(StatusBarView.chipStaleAfter - 1))
+        for observedAt in [Self.freshlyObserved, justInside, Self.now] {
+            let one = chip(state: .mergeable, title: "Fix the login timeout", observedAt: observedAt)
+            #expect(StatusBarView.chipFreshnessWarning(one, now: Self.now) == nil)
+            #expect(StatusBarView.chipHoverCard(one, now: Self.now).rows.isEmpty)
+        }
+    }
+
+    /// `PRStatus` is a display-tier cache, measured reading "Ready to merge"
+    /// days after a merge — so past the threshold the card must not show a
+    /// state without its age, and says so in the caution tint.
+    @Test("a stale reading shows its age, in the caution tint")
+    func staleReadingShowsItsAge() {
+        let stale = chip(state: .mergeable, title: "Fix the login timeout",
+                         observedAt: Self.now.addingTimeInterval(-7200))
+        #expect(StatusBarView.chipHoverCard(stale, now: Self.now).rows
+                == [HoverCardRow(value: "checked 2h ago", tint: .caution)])
+
+        // The threshold is inclusive, and its first age is the first bucket
+        // `PRFreshness.checkedLabel` stops calling "just now".
+        let atThreshold = chip(state: .mergeable,
+                               observedAt: Self.now.addingTimeInterval(-StatusBarView.chipStaleAfter))
+        #expect(StatusBarView.chipFreshnessWarning(atThreshold, now: Self.now) == "checked 5m ago")
+        #expect(StatusBarView.chipStaleAfter == 300)
+    }
+
+    @Test("a chip with no observed status says the age is unknown")
+    func neverObservedSaysSo() {
+        let card = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil), now: Self.now)
+        #expect(card.rows.first?.value == "last checked at an unknown time")
+        #expect(card.rows.first?.value
+                == PRFreshness.checkedLabel(observedAt: nil, now: Self.now))
+        #expect(card.rows.first?.tint == .caution)
     }
 
     /// The toolbar and sidebar both append "last check did not resolve" after
     /// the age. A chip that dropped it would render the more confident of two
     /// readings of one fact — the exact drift `PRFreshness` exists to prevent.
-    @Test("the overlay says when the last poll attempt did not resolve")
-    func overlayCarriesTheUndeterminedClause() {
-        let now = Date(timeIntervalSince1970: 1_700_007_200)
-        let observed = now.addingTimeInterval(-7200)
+    /// It shows even over a fresh reading, and always with the age it qualifies.
+    @Test("an undetermined last poll is always named, with the reading's age")
+    func undeterminedObservationShowsItsClause() {
         let observation = PRObservation(
-            outcome: .undetermined(cause: "gh unauthenticated"), observedAt: observed)
-        let model = StatusBarView.prChips(
-            [binding(412, .mergeable, observedAt: observed)], observation: observation)
+            outcome: .undetermined(cause: "gh unauthenticated"), observedAt: Self.now)
 
-        let caption = StatusBarView.chipHoverCard(model.chips[0], now: now).titleCaption
-        #expect(caption == "checked 2h ago · last check did not resolve (gh unauthenticated)")
+        let fresh = StatusBarView.prChips(
+            [binding(412, .mergeable, observedAt: Self.freshlyObserved)],
+            observation: observation).chips[0]
+        #expect(StatusBarView.chipHoverCard(fresh, now: Self.now).rows.first?.value
+                == "checked just now · last check did not resolve (gh unauthenticated)")
+
+        let stale = StatusBarView.prChips(
+            [binding(412, .mergeable, observedAt: Self.now.addingTimeInterval(-7200))],
+            observation: observation).chips[0]
+        #expect(StatusBarView.chipHoverCard(stale, now: Self.now).rows.first?.value
+                == "checked 2h ago · last check did not resolve (gh unauthenticated)")
 
         // A settled attempt adds nothing — the clause is a caveat, not a field.
         let settled = StatusBarView.prChips(
-            [binding(412, .mergeable, observedAt: observed)],
-            observation: PRObservation(outcome: .none, observedAt: observed))
-        #expect(StatusBarView.chipHoverCard(settled.chips[0], now: now)
-            .titleCaption == "checked 2h ago")
+            [binding(412, .mergeable, observedAt: Self.freshlyObserved)],
+            observation: PRObservation(outcome: .none, observedAt: Self.now)).chips[0]
+        #expect(StatusBarView.chipHoverCard(settled, now: Self.now).rows.isEmpty)
     }
 
     // MARK: - The two click targets
@@ -305,107 +408,6 @@ struct StatusBarViewChipsTests {
                 != StatusBarView.iconSlotLabel(one, isHovering: false))
     }
 
-    // MARK: - Naming the click under the pointer
-
-    /// The chip packs two click targets into about twenty points, and the
-    /// tooltip that would have distinguished them loses a race it cannot win:
-    /// the macOS help-tag delay is longer than the card's 0.55s floor, so the
-    /// card is already up by the time a tag would appear. The card therefore
-    /// has to say it itself.
-    @Test("the overlay names the untrack gesture while the pointer is on the xmark")
-    func overlayNamesTheUntrackAction() {
-        let card = StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"),
-                                               untrackTarget: true)
-        #expect(card.rows.last?.value == "Click to stop tracking this PR in this worktree")
-        // It names the worktree scope for the same reason `untrackLabel` does:
-        // the gesture removes an association, not the pull request.
-        #expect(card.rows.last?.value.contains("this worktree") == true)
-    }
-
-    @Test("the overlay names the open gesture anywhere else on the chip")
-    func overlayNamesTheOpenAction() {
-        let card = StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"))
-        #expect(card.rows.last?.value == "Click to open this PR on GitHub")
-        // Default: a chip is an open target until the pointer reaches the slot.
-        #expect(card.rows.last?.value
-                == StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"),
-                                               untrackTarget: false).rows.last?.value)
-    }
-
-    /// A row that appeared and disappeared would resize the card under the
-    /// pointer — the jitter this line exists to cure. So the row is always
-    /// there, in the same place, and only its sentence swaps.
-    @Test("only the action row's text differs between the two states")
-    func onlyTheActionRowDiffers() {
-        let now = Date(timeIntervalSince1970: 1_700_007_200)
-        let one = chip(state: .checksFailed,
-                       title: "Fix the login timeout",
-                       observedAt: now.addingTimeInterval(-7200))
-        let open = StatusBarView.chipHoverCard(one, untrackTarget: false, now: now)
-        let untrack = StatusBarView.chipHoverCard(one, untrackTarget: true, now: now)
-
-        // The headline and its age are untouched…
-        #expect(open.title == untrack.title)
-        #expect(open.titleCaption == untrack.titleCaption)
-        #expect(open.titleCaption == "checked 2h ago")
-        #expect(open.rows.count == untrack.rows.count)
-        #expect(open.rows.count == 1)
-        // …and only the action row's sentence differs.
-        #expect(open.rows[0].value != untrack.rows[0].value)
-        // The card is re-rendered on model INEQUALITY, so the swap only reaches
-        // the screen because the two models genuinely differ.
-        #expect(open != untrack)
-    }
-
-    /// The card is sized to fit its content, so two sentences of different
-    /// length would resize it as the pointer crossed onto the slot. Each state
-    /// carries the other sentence as a laid-out-but-hidden peer, which pins the
-    /// row — and therefore the card — to the larger of the two in both axes.
-    @Test("each action row reserves room for the sentence it can swap to")
-    func actionRowReservesBothSentences() {
-        let open = StatusBarView.chipHoverCard(chip()).rows.last
-        let untrack = StatusBarView.chipHoverCard(chip(), untrackTarget: true).rows.last
-        #expect(open?.alternateValue == untrack?.value)
-        #expect(untrack?.alternateValue == open?.value)
-        // The reservation is worth having only because the two differ enough to
-        // reflow — a peer equal to the value would be decoration.
-        #expect(open?.value != untrack?.value)
-        // It is the card's only row, so the reservation covers every row that
-        // could resize it — the headline and its age do not swap.
-        #expect(StatusBarView.chipHoverCard(chip()).rows.count == 1)
-    }
-
-    @Test("the action line is a function of which target the pointer is on")
-    func chipActionValueFollowsTheTarget() {
-        #expect(StatusBarView.chipActionValue(untrackTarget: true, forge: .github)
-                == StatusBarView.chipUntrackActionValue(.github))
-        #expect(StatusBarView.chipActionValue(untrackTarget: false, forge: .github)
-                == StatusBarView.chipOpenActionValue(.github))
-        #expect(StatusBarView.chipActionValue(untrackTarget: true, forge: .github)
-                != StatusBarView.chipActionValue(untrackTarget: false, forge: .github))
-        // Both describe the click rather than restating the PR's number or
-        // state, which the rows above them already carry.
-        #expect(StatusBarView.chipOpenActionValue(.github).hasPrefix("Click to"))
-        #expect(StatusBarView.chipUntrackActionValue(.github).hasPrefix("Click to"))
-        #expect(StatusBarView.chipOpenActionValue(.github).contains("#412") == false)
-    }
-
-    /// A synthetic chip has no title and a never-polled one has no status, and
-    /// both are still clickable — the line that says what the click does cannot
-    /// be a passenger of the rows that happen to be missing.
-    @Test("a chip with no title and one with no status still say what a click does")
-    func actionRowSurvivesAbsentFields() {
-        let untitled = StatusBarView.chipHoverCard(chip(title: nil), untrackTarget: true)
-        #expect(untitled.title?.contains(" - ") == false)
-        #expect(untitled.rows.last?.value == StatusBarView.chipUntrackActionValue(.github))
-
-        let unobserved = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
-        #expect(unobserved.title == "PR#412")
-        #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue(.github))
-        #expect(unobserved.rows.last?.alternateValue
-                == StatusBarView.chipUntrackActionValue(.github))
-    }
-
     // MARK: - The merge queue
 
     /// The chip cannot derive the queue from `state`: a queued PR reports
@@ -435,11 +437,10 @@ struct StatusBarViewChipsTests {
         // survives beside the queue sentence.
         #expect(StatusBarView.chipHeadline(queued)
             .contains(PRMergeableState.pending.displayReason) == false)
-        // The title still follows the clause, so the queue does not cost the
-        // headline its third fact.
-        #expect(StatusBarView.chipHeadline(
+        // Under a title, the reference line carries the same clause.
+        #expect(StatusBarView.chipReference(
             chip(state: .pending, title: "Fix the login timeout", mergeQueuePosition: 3))
-            == "PR#412 (In merge queue, position 3) - Fix the login timeout")
+            == "PR#412 · In merge queue, position 3")
     }
 
     /// Every state other than `.pending` is computed independently of queue
@@ -562,11 +563,11 @@ struct StatusBarViewChipsTests {
     @Test("an unqueued chip's headline and open label are untouched")
     func unqueuedChipIsUnchanged() {
         let plain = chip(state: .checksFailed, title: "Fix the login timeout")
-        #expect(StatusBarView.chipHeadline(plain)
-            == "PR#412 (\(PRMergeableState.checksFailed.displayReason)) - Fix the login timeout")
+        #expect(StatusBarView.chipReference(plain)
+            == "PR#412 · \(PRMergeableState.checksFailed.displayReason)")
         #expect(StatusBarView.openLabel(plain)
             == "Open PR #412 — \(PRMergeableState.checksFailed.displayReason)")
-        #expect(StatusBarView.chipHeadline(plain).contains("merge queue") == false)
+        #expect(StatusBarView.chipReference(plain).contains("merge queue") == false)
         #expect(StatusBarView.openLabel(plain).contains("merge queue") == false)
         // A chip with no status at all still says only what it observed.
         #expect(StatusBarView.chipHeadline(chip(state: nil)) == "PR#412")
@@ -575,50 +576,40 @@ struct StatusBarViewChipsTests {
 
     // MARK: - Forge vocabulary
 
-    /// The card's action row names the request the way its own forge does. It
-    /// is the last chip surface that did not: the tooltip and the accessibility
-    /// label already read `MR !412` for a merge request, and a card beside them
-    /// promising to "open this PR on GitHub" would be plainly false.
-    @Test("a GitHub chip's action row says PR and GitHub")
-    func actionRowSpeaksGitHub() {
-        let card = StatusBarView.chipHoverCard(chip())
-        #expect(card.rows.last?.value == "Click to open this PR on GitHub")
-        #expect(StatusBarView.chipHoverCard(chip(), untrackTarget: true).rows.last?.value
-                == "Click to stop tracking this PR in this worktree")
-    }
-
-    /// The headline is the card's own name for the request, so it speaks the
-    /// chip's forge like every other sentence on the card. It read `PR#412`
-    /// under a GitLab chip whose action row, one line below, offered to open
-    /// that same request on GitLab — the card contradicting itself twice in
-    /// three lines, on the surface built so a user need not open a browser to
-    /// tell which change a chip is.
-    ///
-    /// The noun is glued to the number the chip is already drawing, which is
-    /// the bare `#412` on both forges — hence `refNoun` and not `refLabel`,
-    /// whose `!412` would disagree with the chip under the pointer.
-    @Test("the headline names the request in its own forge's vocabulary")
+    /// The card names the request in its own forge's vocabulary on whichever
+    /// line carries the reference. The noun is glued to the number the chip is
+    /// already drawing, which is the bare `#412` on both forges — hence
+    /// `refNoun` and not `refLabel`, whose `!412` would disagree with the chip
+    /// under the pointer.
+    @Test("the title and reference lines name the request in its own forge's vocabulary")
     func headlineSpeaksTheChipsForge() {
         let state = PRMergeableState.mergeable.displayReason
         #expect(StatusBarView.chipHeadline(chip()) == "PR#412 (\(state))")
         #expect(StatusBarView.chipHeadline(gitlabChip()) == "MR#412 (\(state))")
+        #expect(StatusBarView.chipReference(chip()) == "PR#412 · \(state)")
+        #expect(StatusBarView.chipReference(gitlabChip()) == "MR#412 · \(state)")
 
         // Every degradation arm carries the noun too: a chip with neither state
-        // nor title is the shortest headline there is, and still not a "PR".
+        // nor title is the shortest line there is, and still not a "PR".
         #expect(StatusBarView.chipHeadline(gitlabChip(state: nil)) == "MR#412")
-        #expect(StatusBarView.chipHeadline(gitlabChip(state: nil, title: "Trim the relay"))
-                == "MR#412 - Trim the relay")
-        #expect(StatusBarView.chipHeadline(gitlabChip(state: .merged, title: "Trim the relay"))
-                == "MR#412 (\(PRMergeableState.merged.displayReason)) - Trim the relay")
+        #expect(StatusBarView.chipReference(gitlabChip(state: nil)) == "MR#412")
+    }
 
-        // The card renders that headline rather than composing its own, and the
-        // whole card speaks ONE forge — no headline may say "PR" over an action
-        // row that says "GitLab", which is the defect this pins.
-        let mr = gitlabChip(title: "Trim the relay")
-        let card = StatusBarView.chipHoverCard(mr)
-        #expect(card.title == StatusBarView.chipHeadline(mr))
-        #expect(card.title?.contains("PR") == false)
-        #expect(card.rows.last?.value.contains("GitLab") == true)
+    @Test("a GitLab chip's card says MR, never PR")
+    func gitlabCardSaysMR() {
+        let titled = gitlabChip(state: .merged, title: "Trim the relay")
+        #expect(titled.forge == .gitlab)
+        let card = StatusBarView.chipHoverCard(titled)
+        #expect(card.title == "Trim the relay")
+        #expect(card.titleCaption == "MR#412 · \(PRMergeableState.merged.displayReason)")
+
+        let untitled = StatusBarView.chipHoverCard(gitlabChip(state: .merged))
+        #expect(untitled.title == "MR#412 (\(PRMergeableState.merged.displayReason))")
+        #expect(untitled.titleCaption == nil)
+
+        for line in [card.title, card.titleCaption, untitled.title] {
+            #expect(line?.contains(Forge.github.refNoun) == false)
+        }
     }
 
     /// The chip itself draws the bare number on both forges, so the number
@@ -652,38 +643,127 @@ struct StatusBarViewChipsTests {
         }
     }
 
-    @Test("a GitLab chip's action row says MR and GitLab")
-    func actionRowSpeaksGitLab() {
-        let mr = gitlabChip()
-        #expect(mr.forge == .gitlab)
-        #expect(mr.refLabel == "MR !412")
-        let card = StatusBarView.chipHoverCard(mr)
-        #expect(card.rows.last?.value == "Click to open this MR on GitLab")
-        #expect(StatusBarView.chipHoverCard(mr, untrackTarget: true).rows.last?.value
-                == "Click to stop tracking this MR in this worktree")
-        // The vocabulary is the forge's own, not a second table beside it.
-        #expect(card.rows.last?.value.contains(Forge.gitlab.refNoun) == true)
-        #expect(card.rows.last?.value.contains("GitHub") == false)
+    // MARK: - The done chip's hover card
+
+    private func finished(
+        _ number: Int,
+        _ state: PRMergeableState = .merged,
+        title: String? = nil,
+        headBranch: String? = nil,
+        gitlab: Bool = false
+    ) -> PRBinding {
+        let url = gitlab
+            ? "https://gitlab.acme.example/acme/group/acme-prod/-/merge_requests/\(number)"
+            : "https://github.com/acme/acme-prod/pull/\(number)"
+        return PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+            number: number, url: url,
+            headBranch: headBranch,
+            title: title,
+            status: PRStatus(number: number, url: url, state: state),
+            source: .hook
+        )
     }
 
-    /// The reservation is per chip, and a chip has exactly one forge, so the
-    /// hidden peer is the other sentence *for that same forge* — the pair a
-    /// pointer can actually swap between. Asserted on both forges because a
-    /// mechanism that reserved GitHub's wording under a GitLab chip would still
-    /// pin a width, just the wrong one.
-    @Test("the width reservation still pairs the two sentences of one forge")
-    func reservationHoldsPerForge() {
-        for target in [chip(), gitlabChip()] {
-            let open = StatusBarView.chipHoverCard(target).rows.last
-            let untrack = StatusBarView.chipHoverCard(target, untrackTarget: true).rows.last
-            #expect(open?.alternateValue == untrack?.value)
-            #expect(untrack?.alternateValue == open?.value)
-            #expect(open?.value != untrack?.value)
-            // Both halves speak the chip's own forge — neither the visible
-            // sentence nor its hidden peer borrows the other forge's noun.
-            #expect(open?.value.contains(target.forge.refNoun) == true)
-            #expect(open?.alternateValue?.contains(target.forge.refNoun) == true)
-            #expect(StatusBarView.chipHoverCard(target).rows.count == 1)
+    @Test("the done card counts the PRs and lists each title over its reference, in bind order")
+    func doneCardListsTitlesInBindOrder() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(930, title: "Fix the login timeout", headBranch: "fix-login"),
+            finished(912, .closed, title: "  Trim the relay  "),
+            finished(901, title: "Add retries"),
+        ])
+        #expect(card.title == "3 merged or closed pull requests")
+        #expect(card.title == PRBindingPresentation.doneChipCardTitle(count: 3))
+        #expect(card.titleCaption == nil)
+        #expect(card.rows.map(\.value) == ["Fix the login timeout", "Trim the relay", "Add retries"])
+        #expect(card.rows.map(\.caption) == [
+            "PR #930 · Merged",
+            "PR #912 · Closed",
+            "PR #901 · Merged",
+        ])
+        #expect(card.rows.allSatisfy { $0.valueStyle == .plain && $0.tint == .normal })
+    }
+
+    @Test("the done card's caption ends the done menu's row for the same PR")
+    func doneCardCaptionMatchesMenuRow() throws {
+        let bindings = [finished(930, title: "Fix it"),
+                        finished(41, .closed, title: "Trim the relay", gitlab: true)]
+        let card = StatusBarView.doneChipHoverCard(bindings)
+        let menu = PRBindingPresentation.doneMenuRows(bindings)
+        for (row, menuRow) in zip(card.rows, menu) {
+            let caption = try #require(row.caption)
+            #expect(menuRow.title == "\(row.value)  \(caption)")
         }
+    }
+
+    @Test("an untitled finished PR falls back to its branch, then to its reference alone")
+    func doneCardTitleFallback() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(1, title: "   ", headBranch: "fix-login"),
+            finished(2, headBranch: "  "),
+            finished(3),
+        ])
+        #expect(card.rows.map(\.value) == ["fix-login", "PR #2 · Merged", "PR #3 · Merged"])
+        // The reference is the value, so it is not repeated beneath it.
+        #expect(card.rows.map(\.caption) == ["PR #1 · Merged", nil, nil])
+    }
+
+    @Test("a GitLab row in the done card says MR, never PR")
+    func doneCardGitLabSaysMR() {
+        let card = StatusBarView.doneChipHoverCard([
+            finished(41, title: "Trim the relay", gitlab: true),
+            finished(42, gitlab: true),
+        ])
+        #expect(card.rows[0].caption == "MR !41 · Merged")
+        #expect(card.rows[1].value == "MR !42 · Merged")
+        #expect(card.rows[1].caption == nil)
+        for row in card.rows {
+            #expect(row.value.contains(Forge.github.refNoun) == false)
+            #expect((row.caption ?? "").contains(Forge.github.refNoun) == false)
+        }
+    }
+
+    @Test("the done card lists ten PRs, then a muted 'and N more'")
+    func doneCardCapsAtTen() {
+        let bindings = (1...13).map { finished($0, title: "PR \($0)") }
+        let card = StatusBarView.doneChipHoverCard(bindings)
+        #expect(StatusBarView.doneCardRowLimit == 10)
+        #expect(card.title == "13 merged or closed pull requests")
+        #expect(card.rows.count == 11)
+        #expect(card.rows.prefix(10).map(\.value) == (1...10).map { "PR \($0)" })
+        let more = card.rows[10]
+        #expect(more.value == "and 3 more")
+        #expect(more.valueStyle == .mutedItalic)
+        #expect(more.caption == nil)
+    }
+
+    @Test("exactly ten finished PRs fill the done card with no summary row")
+    func doneCardExactlyTen() {
+        let card = StatusBarView.doneChipHoverCard((1...10).map { finished($0, title: "PR \($0)") })
+        #expect(card.rows.count == 10)
+        #expect(card.rows.contains { $0.value.hasPrefix("and ") } == false)
+    }
+
+    @Test("a done-card title collapses internal whitespace and is cut short past the card's limit")
+    func doneCardTitleIsBounded() {
+        let limit = StatusBarView.doneCardLeadLimit
+        let card = StatusBarView.doneChipHoverCard([
+            finished(1, title: "Fix the\nlogin\t\ttimeout"),
+            finished(2, title: String(repeating: "x", count: limit)),
+            finished(3, title: String(repeating: "y", count: limit + 1)),
+        ])
+        #expect(card.rows.map(\.value) == [
+            "Fix the login timeout",
+            String(repeating: "x", count: limit),
+            String(repeating: "y", count: limit - 1) + "\u{2026}",
+        ])
+        // The caption is never cut.
+        #expect(card.rows[2].caption == "PR #3 · Merged")
+    }
+
+    @Test("the done card is sized to the status bar's text")
+    func doneCardTextSize() {
+        let card = StatusBarView.doneChipHoverCard([finished(1), finished(2)])
+        #expect(card.textSize == .compact)
     }
 }

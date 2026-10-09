@@ -46,6 +46,10 @@ struct RepoSectionView: View {
     /// `chevronButton`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    /// Whether remote, exited and hibernated rows file under group headers.
+    /// See `AppState.sidebarWorkflowGroupsKey`.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -71,12 +75,6 @@ struct RepoSectionView: View {
     var mainWorktree: Worktree? {
         (appState.worktrees[repo.id] ?? [])
             .first { $0.status == .main }
-    }
-
-    var topLevelWorktrees: [Worktree] {
-        (appState.worktrees[repo.id] ?? [])
-            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
-            .sorted { $0.sortOrder < $1.sortOrder }
     }
 
     /// Remote sessions resolved to this repo (`RemoteSessionInfo.resolvedRepoID
@@ -386,11 +384,15 @@ struct RepoSectionView: View {
             trailing: 0)
     }
 
-    /// Local roots retain their order; remote roots and unadopted sessions
-    /// share one disclosure without changing their underlying ownership.
+    /// Main row, then the section's top-level rows. With workflow groups off
+    /// (the default) every active root and unadopted remote session renders
+    /// inline, local and remote alike, sessions last. With them on, remote
+    /// work and wholly parked local work move under their disclosures. See
+    /// `SidebarSectionLayout`.
     @ViewBuilder
     private var expandedContent: some View {
-        let groups = appState.sidebarRemoteGroups(repoID: repo.id)
+        let layout = appState.sidebarRepositoryLayout(
+            repoID: repo.id, grouped: workflowGroups, matchedSessions: matchedRemoteSessions)
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -402,7 +404,7 @@ struct RepoSectionView: View {
                 .listRowBackground(Color.clear)
                 .tag(main.id)
         }
-        ForEach(groups.localRoots) { wt in
+        ForEach(layout.inlineRoots) { wt in
             WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
@@ -412,11 +414,38 @@ struct RepoSectionView: View {
                 repoID: repo.id,
                 fromOffsets: source,
                 toOffset: destination,
-                visibleIDs: groups.localRoots.map(\.id)
+                visibleIDs: layout.reorderVisibleIDs
             )
         }
-        if !groups.isEmpty {
+        // Inline sessions render AFTER the worktree rows, never interleaved:
+        // worktrees carry a user-controlled order and sessions nothing
+        // comparable, so appending stays predictable after a manual reorder.
+        remoteSessionRows(layout.inlineSessions, depth: 0)
+        if let groups = layout.remoteGroups {
             remoteGroupContent(groups)
+        }
+        if let hibernation = layout.hibernation {
+            hibernatedGroupContent(hibernation)
+        }
+    }
+
+    @ViewBuilder
+    private func hibernatedGroupContent(_ partition: SidebarHibernationPartition) -> some View {
+        let id = SidebarGroupID(owner: .repository(repo.id), kind: .hibernated)
+        SidebarGroupHeader(id: id, title: "Hibernated (\(partition.hibernatedCount))")
+            .listRowInsets(childRowInsets)
+        if appState.expandedSidebarGroups.contains(id) {
+            ForEach(partition.hibernatedRoots) { worktree in
+                WorktreeSubtreeView(worktree: worktree, depth: 0, sectionRepoID: repo.id)
+                    .padding(.leading, 16)
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
+                    .onHover { onSectionHoverChange($0) }
+            }
+            .onMove { source, destination in
+                appState.reorderTopLevelWorktrees(
+                    repoID: repo.id, fromOffsets: source, toOffset: destination,
+                    visibleIDs: partition.hibernatedRoots.map(\.id))
+            }
         }
     }
 

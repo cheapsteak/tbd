@@ -73,6 +73,14 @@ public actor OrphanGC {
     /// the process-global one.
     private let attachmentsBase: URL
     private let rowlessHolderCollector: RowlessHolderCollector
+    /// Resolves the remote-transcript cache root AND each row's cache path
+    /// through `TBDConstants`, so the walk and the reference set cannot
+    /// disagree on where a session's directory is. The process environment in
+    /// production; tests pass a temp `TBD_HOME`.
+    private let remoteTranscriptsEnvironment: [String: String]
+    /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
+    /// production; tests pass a temp directory.
+    private let unsentPromptsReposBase: URL
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -167,6 +175,8 @@ public actor OrphanGC {
         modelProxyBase: URL? = nil,
         streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
+        remoteTranscriptsEnvironment: [String: String]? = nil,
+        reposBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -227,6 +237,9 @@ public actor OrphanGC {
         self.attachmentsCollector = AttachmentsCollector(
             base: resolvedAttachmentsBase, now: resolvedNow)
         self.hangStackCollector = HangStackCollector(base: resolvedHangStackBase)
+        self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
+            ?? ProcessInfo.processInfo.environment
+        self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -253,6 +266,9 @@ public actor OrphanGC {
         // They are still added to the returned total so `tbd gc sweep` reports
         // honestly.
         var hangStacksReaped = 0
+        // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
+        // `ReapRecord`.
+        var unsentPromptsReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -346,9 +362,13 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
-        await reclaimAttachments(
+        await reclaimRemoteTranscriptCaches(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
+
+        await reclaimAttachments(dryRun: dryRun, planned: &planned, reaped: &reaped)
+
+        reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
@@ -361,7 +381,73 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+    }
+
+    // MARK: - Unsent first messages
+
+    /// How long an unsent first message is kept before the sweep reclaims it:
+    /// 30 days. The root `CLAUDE.md` OrphanGC entry states the same figure.
+    static let unsentPromptRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Reclaims files under `~/tbd/repos/<repoID>/unsent-prompts/` older than
+    /// `unsentPromptRetention` (30 days) by modification date — the named reconciler for
+    /// the first messages written there when a worktree creation fails: by the
+    /// daemon for a message parked in the row it deletes, by the app for a
+    /// composer draft or a refused park.
+    ///
+    /// Under `gcEnabled` alone, with no flag of its own: each file is a copy
+    /// the operator was told about (alert, path, pasteboard) when it was
+    /// written, and a month is long enough to have acted on it. `dryRun` plans
+    /// without touching disk, as everywhere in `sweep`.
+    ///
+    /// Only regular files directly inside an `unsent-prompts` directory are
+    /// candidates; anything else there is left alone, and an unreadable date
+    /// keeps. Repo directories are walked whether or not a repo row still
+    /// exists, since a removed repo's drafts age out the same way.
+    ///
+    /// No `ReapRecord`: there is no worktree to key one by.
+    private func reclaimUnsentPrompts(dryRun: Bool, planned: inout [String], reaped: inout Int) {
+        let fm = FileManager.default
+        guard let repoDirs = try? fm.contentsOfDirectory(atPath: unsentPromptsReposBase.path) else {
+            return
+        }
+        let asOf = now()
+        for repoDir in repoDirs.sorted() where !repoDir.hasPrefix(".") {
+            let dir = unsentPromptsReposBase
+                .appendingPathComponent(repoDir)
+                .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+            guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            for name in names.sorted() {
+                let path = dir.appendingPathComponent(name).path
+                guard let attributes = try? fm.attributesOfItem(atPath: path),
+                      attributes[.type] as? FileAttributeType == .typeRegular
+                else { continue }
+                guard let modified = attributes[.modificationDate] as? Date else {
+                    planned.append("KEEP unknown-age \(path)")
+                    continue
+                }
+                guard asOf.timeIntervalSince(modified) >= Self.unsentPromptRetention else {
+                    planned.append("KEEP retention \(path)")
+                    continue
+                }
+                planned.append("REAP unsent-prompt \(path)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                do {
+                    try fm.removeItem(atPath: path)
+                    reaped += 1
+                    logger.info("gc: reclaimed unsent first message \(path, privacy: .public)")
+                } catch {
+                    planned.append("KEEP remove-failed \(path)")
+                    logger.warning("""
+                    gc: could not remove \(path, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                }
+            }
+        }
     }
 
     /// Reclaims hang-stack diagnostic files under
@@ -957,8 +1043,8 @@ public actor OrphanGC {
     /// Gated by `gcRetainedTranscriptsEnabled` on top of `gcEnabled`, both
     /// because every new background sweep that unlinks files and deletes rows
     /// soaks behind its own switch, and because the exchange whose residue it
-    /// reclaims only exists on a provider declaring `retain`, `import` or
-    /// `recall` — a machine with no such provider has nothing here for this leg
+    /// reclaims only exists on a provider declaring `transcript.retain`,
+    /// `transcript.import` or `transcript.recall` — a machine with no such provider has nothing here for this leg
     /// to be right or wrong about.
     ///
     /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
@@ -1093,6 +1179,166 @@ public actor OrphanGC {
         }
     }
 
+    // MARK: - Remote transcript caches
+
+    /// Reclaims `~/tbd/remote-transcripts/<provider>/<sessionID>/` directories
+    /// whose session TBD no longer tracks — the named reconciler for the
+    /// remote transcript cache (`docs/specs/2026-09-25-remote-session-transcript-design.md`,
+    /// "Reclaiming the cache"). Its event-driven sibling is the eager removal a
+    /// successful `remote.delete` or `remote.dismiss` performs
+    /// (`RemoteTranscriptSync.discard`); that is prompt cleanup, and this is
+    /// the guarantee behind it.
+    ///
+    /// A session is tracked while a `remote_session` row for it has
+    /// `dismissed = 0` or a `worktree` row for it has a status other than
+    /// `archived`. Row absence alone would not do: dismissing keeps the row
+    /// with `dismissed = 1`, and archiving keeps the worktree row, so a sweep
+    /// that waited for rows to disappear would never reclaim a dismissed or
+    /// archived session's cache. An undismissed `gone` row is still tracked:
+    /// the session is still listed, and its transcript may come back.
+    ///
+    /// Under `gcEnabled` alone, with no soak flag of its own: the cache is a
+    /// rebuildable copy of the provider's transcript, so a session un-dismissed
+    /// or unarchived after its cache was reclaimed simply refetches. `dryRun`
+    /// plans without touching disk, as everywhere in `sweep`.
+    ///
+    /// A directory is reclaimed only when all three hold, and every doubt
+    /// keeps:
+    ///
+    ///   - **No unarchived `worktree` row refers to it** by `providerName` /
+    ///     `providerSessionID`.
+    ///   - **No undismissed `remote_session` row refers to it.**
+    ///   - **Nothing in it was written within `gcGraceSeconds`**, the grace
+    ///     window every other leg uses, measured by the date seam against the
+    ///     newest creation or modification date of the directory and its
+    ///     entries. The window keeps a sync that raced a dismiss from losing
+    ///     its file mid-write. An unreadable date keeps.
+    ///
+    /// Either row list failing to read skips the whole leg, rather than
+    /// reading an empty list as "nothing is referenced".
+    ///
+    /// Directory names are the escaped components `TBDConstants` writes, so
+    /// rows are compared by the path `TBDConstants.remoteTranscriptDir` gives
+    /// them under the same root the walk reads — never by unescaping a name
+    /// found on disk. Only `<root>/<provider>/<session>` directories are
+    /// candidates; stray files and emptied provider directories are left alone
+    /// (one per provider ever used, bounded by hand-registered providers).
+    ///
+    /// No `ReapRecord`: nothing here could be restored that a sync would not
+    /// rebuild.
+    private func reclaimRemoteTranscriptCaches(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let environment = remoteTranscriptsEnvironment
+        let root = TBDConstants.remoteTranscriptsDir(environment: environment).path
+        let candidates = Self.remoteTranscriptCacheDirectories(root: root)
+        guard !candidates.isEmpty else { return }
+
+        let referenced: Set<String>
+        do {
+            let lanes = try await db.worktrees.remoteSessionReferences()
+            let sessions = try await db.remoteSessions.list()
+                .filter { !$0.dismissed }
+            let references = lanes + sessions.map {
+                RemoteSessionReference(provider: $0.provider, sessionID: $0.sessionID)
+            }
+            referenced = Set(references.map {
+                TBDConstants.remoteTranscriptDir(
+                    provider: $0.provider, sessionID: $0.sessionID, environment: environment).path
+            })
+        } catch {
+            logger.error("""
+            gc: rows unreadable this sweep (\(error.localizedDescription, privacy: .public)) \
+            — skipping the remote-transcript cache phase
+            """)
+            planned.append("KEEP rows-unreadable remote-transcript-caches")
+            return
+        }
+
+        let asOf = now()
+        for directory in candidates {
+            guard !referenced.contains(directory) else {
+                planned.append("KEEP tracked-session \(directory)")
+                continue
+            }
+            if let reason = Self.youngRemoteTranscriptCacheKeepReason(
+                directory: directory, asOf: asOf, graceSeconds: config.gcGraceSeconds) {
+                planned.append("KEEP \(reason) \(directory)")
+                logger.debug("gc: keep \(reason, privacy: .public) \(directory, privacy: .public)")
+                continue
+            }
+            planned.append("REAP remote-transcript-cache \(directory)")
+            // The outer `gcEnabled || dryRun` guard means every line below
+            // runs only with gcEnabled == true.
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: directory)
+                reaped += 1
+                logger.info("gc: reclaimed remote transcript cache \(directory, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(directory)")
+                logger.warning("""
+                gc: could not remove \(directory, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    /// Every `<root>/<provider>/<session>` directory, as a path string composed
+    /// from the root exactly as `TBDConstants.remoteTranscriptDir` composes
+    /// one, so the two compare as strings. An unreadable or absent root yields
+    /// nothing, which classifies nothing.
+    private static func remoteTranscriptCacheDirectories(root: String) -> [String] {
+        let fm = FileManager.default
+        func isDirectory(_ path: String) -> Bool {
+            var flag: ObjCBool = false
+            return fm.fileExists(atPath: path, isDirectory: &flag) && flag.boolValue
+        }
+        guard let providers = try? fm.contentsOfDirectory(atPath: root) else { return [] }
+        var directories: [String] = []
+        for provider in providers where !provider.hasPrefix(".") {
+            let providerPath = "\(root)/\(provider)"
+            guard isDirectory(providerPath),
+                  let sessions = try? fm.contentsOfDirectory(atPath: providerPath)
+            else { continue }
+            for session in sessions where !session.hasPrefix(".") {
+                let sessionPath = "\(providerPath)/\(session)"
+                if isDirectory(sessionPath) { directories.append(sessionPath) }
+            }
+        }
+        return directories.sorted()
+    }
+
+    /// A keep reason when anything in the directory — the directory itself or
+    /// one of its entries — was created or modified within the grace window, or
+    /// when a date cannot be read; `nil` when it is old enough to reclaim.
+    /// The directory's own dates move when a reset renames a file into it, and
+    /// an entry's move when a page is appended, so together they cover every
+    /// write the cache makes.
+    private static func youngRemoteTranscriptCacheKeepReason(
+        directory: String, asOf: Date, graceSeconds: Int
+    ) -> String? {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: directory) else {
+            return "unknown-age"
+        }
+        var newest: Date?
+        for path in [directory] + entries.map({ "\(directory)/\($0)" }) {
+            guard let attributes = try? fm.attributesOfItem(atPath: path) else {
+                return "unknown-age"
+            }
+            let dates = [
+                attributes[.creationDate] as? Date,
+                attributes[.modificationDate] as? Date,
+            ].compactMap { $0 }
+            guard let latest = dates.max() else { return "unknown-age" }
+            newest = max(newest ?? latest, latest)
+        }
+        guard let newest else { return "unknown-age" }
+        return asOf.timeIntervalSince(newest) < Double(graceSeconds) ? "grace" : nil
+    }
+
     // MARK: - Composer attachments
 
     /// Reclaims `~/tbd/attachments/<worktreeID>/` directories whose worktree is
@@ -1108,13 +1354,8 @@ public actor OrphanGC {
     /// filesystem cannot be transactional, so the sweep is the mechanism and
     /// create-time cleanup is the optimisation.
     ///
-    /// Gated by `transcriptComposerEnabled` on top of `gcEnabled`, because the
-    /// feature that writes these files is itself behind that flag — a machine
-    /// that has never opened the composer has nothing here for this phase to be
-    /// right or wrong about. `dryRun` bypasses the flag exactly as `sweep` lets
-    /// it bypass `gcEnabled`: planning is read-only, and someone deciding whether
-    /// to enable a default-off flag needs to see what enabling it would reclaim.
-    /// A NON-dry run still requires the flag.
+    /// Gated by `gcEnabled` alone, like the agent-worktree loop: the composer
+    /// that writes these files has no gate of its own.
     ///
     /// **An unreadable worktree list skips the whole leg**, rather than reading
     /// an empty list as "no worktree is live" and reaping every directory.
@@ -1135,10 +1376,8 @@ public actor OrphanGC {
     /// message in a worktree that no longer exists — or, for a per-file reap,
     /// for one nobody sent in two weeks.
     private func reclaimAttachments(
-        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+        dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.transcriptComposerEnabled || dryRun else { return }
-
         let live: Set<UUID>
         do {
             live = Set(try await db.worktrees.list().map(\.id))
@@ -1163,8 +1402,6 @@ public actor OrphanGC {
                 """)
             case .reap:
                 planned.append("REAP attachments \(candidate.path)")
-                // This leg's guard is `transcriptComposerEnabled || dryRun`, so
-                // every line below runs only with the flag actually on.
                 guard !dryRun else { continue }
                 guard attachmentsCollector.reap(candidate) else {
                     planned.append("KEEP unlink-failed \(candidate.path)")
@@ -1406,7 +1643,8 @@ public actor OrphanGC {
             return
         }
         guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true),
-              let archived = try? await db.worktrees.list(status: .archived) else {
+              let archived = try? await db.worktrees.list(status: .archived),
+              let terminals = try? await db.terminals.list() else {
             logger.warning("gc: orphan-process phase skipped — DB read failed")
             planned.append("KEEP db-unavailable orphan-processes")
             return
@@ -1414,7 +1652,7 @@ public actor OrphanGC {
 
         let (roots, repoPathByPool) = orphanProcessRoots(
             repos: repos, archived: archived, liveRows: liveRows)
-        let candidates = orphanProcessCollector.candidates(
+        let unexempted = orphanProcessCollector.candidates(
             processes: processes,
             cwdByPID: live.cwdByPID,
             cwdsCapturedAt: live.capturedAt,
@@ -1423,10 +1661,28 @@ public actor OrphanGC {
             ourPID: getpid(),
             graceSeconds: config.gcGraceSeconds
         )
+        guard !unexempted.isEmpty else { return }
+
+        // Holders and their jobs serving any session whose worktree is not
+        // positively archived are never this phase's to signal, whatever their
+        // cwd says — see `liveHolderSessionPIDs`. Built only once there is a
+        // candidate to spare, because the job identity check costs a `ps` per
+        // session. Keyed on "not archived" rather than "in the live list", so a
+        // row this phase cannot place (a remote or not-yet-listed worktree) is
+        // spared, not exposed.
+        let archivedIDs = Set(archived.map(\.id))
+        let holderSessions = terminals
+            .filter { $0.transport == .holder && !archivedIDs.contains($0.worktreeID) }
+            .map(LiveHolderSession.init)
+        let exempt = orphanProcessCollector.liveHolderSessionPIDs(
+            holderSessions, processes: processes)
+        // Equivalent to passing `exempt` to `candidates`, whose only use of the
+        // protected set on a candidate root is membership.
+        let candidates = unexempted.filter { !exempt.contains($0.pid) }
         guard !candidates.isEmpty else { return }
 
         let protected = orphanProcessCollector.protectedPIDs(
-            processes: processes, ourPID: getpid(), ourUID: getuid())
+            processes: processes, ourPID: getpid(), ourUID: getuid(), exempt: exempt)
         // Every tree is planned from the ONE snapshot before anything is
         // signalled, so the plan is a single consistent reading of the process
         // graph rather than one that interleaves with its own destruction.
@@ -1761,12 +2017,6 @@ public actor OrphanGC {
 
         // Attachments first: it is one `removeItem` and cannot fail the
         // scratchpad reclaim below.
-        //
-        // NOT additionally gated on the composer flag. The directory exists only
-        // because the composer wrote into it, and a person who turned the
-        // composer off afterwards would otherwise leave images behind
-        // permanently — a flag that gates CREATION must not gate the reclaim of
-        // what was already created.
         let attachments = attachmentsBase.appendingPathComponent(worktreeID.uuidString)
         if FileManager.default.fileExists(atPath: attachments.path) {
             do {
@@ -1875,7 +2125,7 @@ public actor OrphanGC {
         case .timedOut:
             logger.error("gc: lsof timed out after 60s")
             return nil
-        case .completed(let status, let stdout, _):
+        case .completed(let status, let stdout, _), .signaled(let status, let stdout, _):
             guard status == 0 else {
                 logger.error("gc: lsof exited \(status, privacy: .public) — treating live cwds as unavailable")
                 return nil

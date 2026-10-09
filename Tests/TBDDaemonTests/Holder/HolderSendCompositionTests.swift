@@ -326,20 +326,80 @@ import Testing
             HolderSendComposition.bracketedPaste(for: nil, unobservedShouldWrap: false) == false)
     }
 
-    /// An observed flag is evidence about the child, so it is simply obeyed and
-    /// `unobservedShouldWrap` does not enter into it — asserted with the flag
-    /// set both ways to show it is ignored when the modes are observed.
-    @Test("an observed mode is taken at its word, and the child-kind flag is ignored")
+    /// A live observed flag is evidence about the child as it stands, so it is
+    /// simply obeyed and `unobservedShouldWrap` does not enter into it —
+    /// asserted for both live sources, with the flag set both ways to show it
+    /// is ignored when the modes are observed by a store still watching.
+    @Test("a live observed mode is taken at its word, and the child-kind flag is ignored")
     func observedModeIsObeyed() {
+        for source in [TerminalScreen.Source.daemon, .viewer] {
+            for unobservedShouldWrap in [true, false] {
+                #expect(
+                    HolderSendComposition.bracketedPaste(
+                        for: Self.reading(bracketedPaste: true, modesObserved: true, source: source),
+                        unobservedShouldWrap: unobservedShouldWrap),
+                    "a live \(source) 'on' was not obeyed")
+                #expect(
+                    HolderSendComposition.bracketedPaste(
+                        for: Self.reading(bracketedPaste: false, modesObserved: true, source: source),
+                        unobservedShouldWrap: unobservedShouldWrap) == false,
+                    "a live \(source) 'off' was not obeyed")
+            }
+        }
+    }
+
+    /// The field defect. A viewer takes the pty milliseconds after a spawn, so
+    /// the frozen emulator's `bracketedPaste: false` predates the agent TUI
+    /// turning bracketing on — yet it is `modesObserved: true`, because that
+    /// emulator did watch the child from birth. Obeyed, it composed the body and
+    /// its `\r` bare in one write and the TUI swallowed the Enter. A stale "off"
+    /// is not evidence, so an agent session wraps.
+    @Test("a stale 'off' wraps an agent session rather than composing bare")
+    func staleOffWrapsAnAgentSession() {
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: false, modesObserved: true, source: .staleDaemon),
+                unobservedShouldWrap: true))
+    }
+
+    /// The same stale "off" for a shell lands where the unobserved rule puts a
+    /// shell: bare, because its line editor submits bare input of any length
+    /// and markers would only be printed at whatever prompt it is showing.
+    @Test("a stale 'off' stays bare for a shell")
+    func staleOffStaysBareForAShell() {
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: false, modesObserved: true, source: .staleDaemon),
+                unobservedShouldWrap: false) == false)
+    }
+
+    /// A stale "on" is still obeyed for every child: the child was seen to ask
+    /// for bracketing, and if it has since turned it off the cost is markers
+    /// somebody can see, never a swallowed Enter. A shell is the case that
+    /// shows it is obeyed rather than merely agreeing with the agent fallback.
+    @Test("a stale 'on' is obeyed for every child")
+    func staleOnIsObeyed() {
         for unobservedShouldWrap in [true, false] {
             #expect(
                 HolderSendComposition.bracketedPaste(
-                    for: Self.reading(bracketedPaste: true, modesObserved: true),
-                    unobservedShouldWrap: unobservedShouldWrap))
-            #expect(
-                HolderSendComposition.bracketedPaste(
-                    for: Self.reading(bracketedPaste: false, modesObserved: true),
-                    unobservedShouldWrap: unobservedShouldWrap) == false)
+                    for: Self.reading(bracketedPaste: true, modesObserved: true, source: .staleDaemon),
+                    unobservedShouldWrap: unobservedShouldWrap),
+                "a stale 'on' was not obeyed with unobservedShouldWrap: \(unobservedShouldWrap)")
+        }
+    }
+
+    /// A stale reading that never observed the child is the unobserved case,
+    /// and its flag — a fresh terminal's default — moves nothing.
+    @Test("a stale unobserved reading follows the child-kind flag alone")
+    func staleUnobservedFollowsTheFlag() {
+        for flag in [true, false] {
+            for unobservedShouldWrap in [true, false] {
+                #expect(
+                    HolderSendComposition.bracketedPaste(
+                        for: Self.reading(
+                            bracketedPaste: flag, modesObserved: false, source: .staleDaemon),
+                        unobservedShouldWrap: unobservedShouldWrap) == unobservedShouldWrap)
+            }
         }
     }
 

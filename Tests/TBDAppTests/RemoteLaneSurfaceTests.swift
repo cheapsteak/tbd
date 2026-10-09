@@ -137,10 +137,8 @@ struct RemoteLaneSurfaceTests {
         }
     }
 
-    /// The bookkeeping that makes the surface work is shared with the
-    /// Remote-section row, so a lane row cannot reach the same view in a
-    /// different state: unread cleared, keep-alive recency touched (this is
-    /// what mounts the attach), detach flag cleared on a genuine transition.
+    /// Adopted lanes share the same browsing semantics as remote rows:
+    /// clear unread state while leaving connection intent and detach intact.
     @Test func selectingALaneRowRunsTheSameSurfaceBookkeepingAsASessionRow() async {
         await withStateAsync { state in
             let repoID = UUID()
@@ -154,8 +152,38 @@ struct RemoteLaneSurfaceTests {
             state.selectedWorktreeIDs = [row.id]
 
             #expect(state.unreadByRemoteSession[selection] == nil)
-            #expect(state.recentlyAttachedRemoteSessions.first == selection)
-            #expect(state.explicitlyDetachedRemoteSessions[selection] == nil)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.explicitlyDetachedRemoteSessions[selection] != nil)
+        }
+    }
+
+    @Test func browsingAnAttachCapableLaneDoesNotOpenAConnection() async {
+        await withStateAsync { state in
+            let repoID = UUID()
+            let row = lane(repoID: repoID)
+            let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            state.worktrees[repoID] = [row]
+            state.remoteProviders = [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/usr/bin/true"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["attach", "log"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil
+            )]
+            state.remoteSessions = [RemoteSessionInfo(
+                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+                gone: false, dismissed: false, lastSeen: Date()
+            )]
+
+            state.selectedWorktreeIDs = [row.id]
+
+            #expect(state.selectedRemoteSession == selection)
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+
+            // The detail picker's Attach gesture keeps the owning row selected.
+            state.showRemoteSessionSurface(selection, reattach: true)
+            #expect(state.selectedWorktreeIDs == [row.id])
+            #expect(state.attachedRemoteSelections == [selection])
         }
     }
 

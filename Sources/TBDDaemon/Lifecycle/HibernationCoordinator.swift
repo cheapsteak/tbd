@@ -312,6 +312,13 @@ public actor HibernationCoordinator {
     /// A throw means the same thing as a refused projection.
     var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
 
+    /// Whether a recorded holder pid is still a live `TBDHolder` — the
+    /// holder half of `HolderChildDisposition.sessionHasEnded`. Production uses the shared
+    /// `HolderSpawner.isLiveHolder`; tests replace it through
+    /// `setHolderProcessIsLive`, because a fixture's holder pid is a number
+    /// the real kernel answers for.
+    var holderProcessIsLive: @Sendable (Int32) -> Bool = { HolderSpawner.isLiveHolder(pid: $0) }
+
     /// How the holder park observes and ends a child process. Injected so a
     /// test can state "the job declined `/exit`" in one line instead of
     /// arranging a real one.
@@ -406,6 +413,11 @@ public actor HibernationCoordinator {
     /// each mint routes the other's proxy has never heard of.
     func setModelProxySupervisor(_ supervisor: (any ModelProxyRouting)?) {
         modelProxySupervisor = supervisor
+    }
+
+    /// Replace the holder liveness check. Tests only — see `holderProcessIsLive`.
+    func setHolderProcessIsLive(_ isLive: @escaping @Sendable (Int32) -> Bool) {
+        holderProcessIsLive = isLive
     }
 
     /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
@@ -1654,13 +1666,18 @@ public actor HibernationCoordinator {
                 // it first would destroy the session and make createWindow
                 // fail on every retry; killing after the new window exists
                 // can never leave the session windowless.
-                if !claimedByOther {
+                // A restarted tmux server can reuse the parked row's stale id
+                // for the replacement we just created. In that ABA shape the
+                // old and replacement ids are textually identical, so cleanup
+                // must not kill the fresh inert pane before it is respawned.
+                if !claimedByOther, windowID != window.windowID {
                     try? await tmux.killWindow(server: server, windowID: windowID)
                 }
                 // ensureServer returns the untracked bootstrap window id when
                 // it just created the server; kill it now that the real
                 // window exists (mirrors WorktreeLifecycle+PreSession).
-                if let bootstrapWindowID, !bootstrapWindowID.isEmpty {
+                if let bootstrapWindowID, !bootstrapWindowID.isEmpty,
+                   bootstrapWindowID != window.windowID {
                     try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
                 }
                 let preparedIncarnationID: UUID?

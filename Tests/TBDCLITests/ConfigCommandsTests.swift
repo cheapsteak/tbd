@@ -115,6 +115,34 @@ struct ConfigCommandsTests {
         #expect(rendered.contains("auto-archive-on-merge: off"))
     }
 
+    // MARK: - pr-poll-schedule: the soak switch for schedule-based PR polling
+
+    @Test func prPollScheduleDescribesBothStates() {
+        #expect(ConfigSet.confirmation(key: "pr-poll-schedule", value: .on)
+            == "Set pr-poll-schedule to on. TBD checks each pull request as often as its "
+            + "status needs, within a GitHub API budget. Takes effect now.")
+        #expect(ConfigSet.confirmation(key: "pr-poll-schedule", value: .off)
+            == "Set pr-poll-schedule to off. TBD checks every worktree's pull request "
+            + "every 30 seconds while the app is in front, and every 5 minutes otherwise. "
+            + "Takes effect now.")
+    }
+
+    @Test func prPollScheduleIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("pr-poll-schedule"))
+        #expect(try ConfigSet.parseOnOff("on", key: "pr-poll-schedule") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "pr-poll-schedule") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "pr-poll-schedule")
+        }
+    }
+
+    @Test func configGetPrintsPRPollScheduleInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("pr-poll-schedule: off"))
+        config.prPollScheduleEnabled = true
+        #expect(ConfigGet.render(config).contains("pr-poll-schedule: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

@@ -37,6 +37,17 @@ struct TabCloseContext: Equatable {
     let tabID: UUID
 }
 
+/// In-memory limit-hit state for a terminal (app-local, not persisted).
+/// Built from a `TerminalLimitHitDelta` and used to render the limit banner
+/// in `TerminalPanelView`.
+struct TerminalLimitHit: Equatable {
+    let profileID: UUID?
+    let resetsAt: Date
+    let limitType: String
+    let suggestedProfileID: UUID?
+    let receivedAt: Date
+}
+
 /// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
 /// unique within one server, so it is always paired with `worktreeID` — the
 /// same keying as the daemon router and `SidecarInputHeader`.
@@ -132,14 +143,18 @@ final class AppState {
             childrenIndexCache = nil
             allWorktreesCache = nil
             sidebarRemoteSnapshotCache = nil
+            sidebarHibernationCache.removeAll()
         }
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
     var scratchWorktrees: [Worktree] = [] {
-        // Only `allWorktrees` reads this — `childrenIndex()` is dict-only by
-        // design (see `children(of:)`), so its cache survives scratch churn.
-        didSet { allWorktreesCache = nil }
+        // `childrenIndex()` is dict-only by design (see `children(of:)`),
+        // so its cache survives scratch churn. The shelf also reads Scratch.
+        didSet {
+            allWorktreesCache = nil
+            sidebarHibernationCache.removeAll()
+        }
     }
 
     // MARK: - Derived worktree caches
@@ -210,7 +225,14 @@ final class AppState {
         childrenIndexCache = index
         return index
     }
-    var terminals: [UUID: [Terminal]] = [:]
+    var terminals: [UUID: [Terminal]] = [:] {
+        didSet { sidebarHibernationCache.removeAll() }
+    }
+    /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
+    /// ID to the limit hit information. Cleared when the terminal starts working,
+    /// changes profile, is removed, or the user dismisses. Used to render the
+    /// limit banner.
+    var limitHits: [UUID: TerminalLimitHit] = [:]
     /// Ordering watermark for transcript presentation snapshots whose value
     /// did not change. Kept outside `Terminal` so a two-second poll confirming
     /// the same state does not publish a different row solely because its
@@ -587,11 +609,19 @@ final class AppState {
     /// to scroll the worktree row into view, then clears the value.
     var pendingScrollToWorktreeID: UUID?
 
-    /// Transient disclosures. Polling preserves the user's expansion choices.
-    var expandedSidebarGroups: Set<SidebarGroupID> = []
+    /// Expanded workflow-group disclosures. Polling preserves the user's
+    /// choices, and every change is written to `sidebarExpandedGroupsKey` so
+    /// a restart reopens the same groups; `init` restores it.
+    var expandedSidebarGroups: Set<SidebarGroupID> = [] {
+        didSet {
+            guard expandedSidebarGroups != oldValue else { return }
+            persistExpandedSidebarGroups()
+        }
+    }
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
+    @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
@@ -744,6 +774,14 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
+    /// Whether a remote session's detail pane shows its transcript beside the
+    /// terminal. One standing preference for every remote session, not a
+    /// per-session fact, so a newly viewed session follows it. Unset reads as
+    /// open, so the first remote session a user views shows its transcript;
+    /// the toolbar toggle stores an explicit `true`/`false`.
+    var remoteTranscriptOpen: Bool = true {
+        didSet { userDefaults.set(remoteTranscriptOpen, forKey: Self.remoteTranscriptOpenKey) }
+    }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -853,17 +891,21 @@ final class AppState {
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
-    /// Per-terminal composer drafts. `@ObservationIgnored` because each
+    /// Composer drafts, keyed by target. `@ObservationIgnored` because each
     /// `ComposerDraft` is itself `@Observable` — an observable registry would
     /// republish every composer in the app whenever any one of them appeared.
-    @ObservationIgnored var composerDrafts: [UUID: ComposerDraft] = [:]
-    /// Weak composer text views keyed by terminal, so Cmd+/ can move focus into
+    @ObservationIgnored var composerDrafts: [ComposerKey: ComposerDraft] = [:]
+    /// Weak composer text views keyed by target, so Cmd+/ can move focus into
     /// one. `@ObservationIgnored` for the same reason `terminalFocusTargets` is:
     /// focus is not state anything renders from.
-    @ObservationIgnored var composerFocusTargets: [UUID: ComposerFocusTarget] = [:]
-    /// Weak transcript tables keyed by terminal, so Escape in the composer can
+    @ObservationIgnored var composerFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// Weak transcript tables keyed by composer target, so Escape in the composer can
     /// hand focus back to what the person was reading.
-    @ObservationIgnored var transcriptFocusTargets: [UUID: ComposerFocusTarget] = [:]
+    @ObservationIgnored var transcriptFocusTargets: [ComposerKey: ComposerFocusTarget] = [:]
+    /// The sync driver behind each remote transcript pane on screen, held
+    /// weakly — the pane owns it — so a composer send can ask for an
+    /// immediate sync without a reference to the pane.
+    @ObservationIgnored var remoteTranscriptSyncDrivers: [RemoteSessionSelection: WeakRemoteTranscriptSyncDriver] = [:]
     /// Suspended callers waiting for one spawn's `SessionStart`, keyed by
     /// terminal. `@ObservationIgnored` for the same reason as the two above:
     /// nothing renders from it.
@@ -979,6 +1021,15 @@ final class AppState {
     /// Whether ordinary new worktrees start with an empty Notes tab. Loaded
     /// from the daemon alongside the other config-backed worktree defaults.
     var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
+    /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
+    /// `gcEnabled` by the daemon). Loaded via `loadGCConfig()`.
+    var gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault
+    var gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault
+    var gcRetainedTranscriptsEnabled: Bool = Config.gcRetainedTranscriptsEnabledDefault
+    var gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault
+    /// Bumped by each `loadGCConfig()` before it fetches, so a load whose
+    /// fetch returns after a newer one started applies nothing.
+    @ObservationIgnored var gcConfigLoadGeneration: UInt64 = 0
     var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
@@ -1073,26 +1124,16 @@ final class AppState {
 
     // MARK: - Remote attach lifecycle (see `AppState+RemoteAttach.swift`)
 
-    /// Raw most-recent-first log of recently-VIEWED remote sessions, the
-    /// recency input to `RemoteAttachLifecycle.attachedSelections`. Mirrors
-    /// `recentlyVisitedWorktreeIDs`'s split from the computed mount set —
-    /// `attachedRemoteSelections` re-merges the current selection (protected)
-    /// and eligibility/detach state on every read, so this log alone doesn't
-    /// say what's actually attached right now.
+    /// Bounded most-recent-first log of explicit attachment requests. Plain
+    /// browsing does not add entries. This records connection intent rather
+    /// than live connections: eligibility, detach and reconnect state still
+    /// determine the mount set, and the selected requested session is protected.
     private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
 
-    /// Sessions whose attach terminal ended (pty exit — clean or not; the
-    /// pane exiting never means the remote session died, only that the
-    /// LOCAL viewer process stopped) and must NOT be silently re-attached
-    /// merely by staying the current selection. Cleared only by an explicit
-    /// user gesture — see `activateRemoteSession`'s doc comment for exactly
-    /// which gestures qualify, and `reattachRemoteSession` for the Reattach
-    /// button's path. This is the state that makes "select = auto-attach"
-    /// safe: without it, a pty exiting while its row is still selected would
-    /// re-enter `attachedRemoteSelections` (still protected) and the pager
-    /// would spawn a fresh process every render, an unbounded respawn loop
-    /// against a resource this codebase must not spam (SSM/ssh concurrency
-    /// and cost — see `RemoteAttachLifecycle`'s doc comment).
+    /// Sessions whose local viewer ended cleanly and must stay detached
+    /// through browsing or history navigation. An explicit Attach or Reattach
+    /// action clears this flag. It also prevents a selected connection from
+    /// respawning indefinitely when its provider attach process exits.
     private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
 
     /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
@@ -1127,9 +1168,9 @@ final class AppState {
     private(set) var remoteAttachGenerations: [RemoteSessionSelection: RemoteAttachGeneration] = [:]
 
     /// Cap on how many WARM BACKGROUND remote sessions may keep a live
-    /// attach terminal around at once. The current selection is separately
-    /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
-    /// this budget, so the real ceiling on concurrent provider `attach`
+    /// attach terminal around at once. The current selection, if previously
+    /// requested, is separately force-protected (see `RemoteAttachLifecycle`)
+    /// and does NOT consume this budget, so the real ceiling on concurrent provider `attach`
     /// processes is `remoteAttachKeepAliveLimit + 1` — 4 at the constant's
     /// current value of 3 — which matters because this is exactly the
     /// billed, concurrency-limited resource the rest of this comment is
@@ -1260,13 +1301,9 @@ final class AppState {
         }
     }
 
-    /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
-    /// once a session has detached. Clears BOTH detach flags AND re-touches
-    /// recency (so a session that had aged toward eviction gets a fresh
-    /// position at the front) — an unambiguous user gesture, always allowed
-    /// to re-attach immediately regardless of the transition/`.attach`-tab
-    /// rule `activateRemoteSession` applies to selection itself, and
-    /// regardless of any still-pending reconnect backoff window.
+    /// Explicit Attach/Reattach button action. Records connection intent and
+    /// clears both clean-detach and pending-reconnect state, bypassing the
+    /// backoff window. Provider eligibility still gates the resulting mount.
     func reattachRemoteSession(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
@@ -1474,14 +1511,9 @@ final class AppState {
         return restarted
     }
 
-    /// Clears a stale explicit-detach flag for `selection`, if present —
-    /// the narrow write `activateRemoteSession` (in
-    /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
-    /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
-    /// has exactly one file's worth of direct mutators. Deliberately does
-    /// NOT touch `pendingReconnectRemoteSessions` — re-selecting (even via a
-    /// genuine transition) must not bypass provider-health/backoff gating
-    /// the way an explicit Reattach click does; see `reattachRemoteSession`.
+    /// Clears a clean-detach flag for an explicit Attach tab/menu request.
+    /// This path retains pending reconnect backoff; the explicit Reattach
+    /// button above is the existing override for that backoff.
     func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
     }
@@ -1655,8 +1687,14 @@ final class AppState {
     @ObservationIgnored var terminalRecoveryBudget = TerminalRecoveryBudget()
 
     // Alert state for user feedback
-    var alertMessage: String? = nil
+    var alertMessage: String? = nil {
+        didSet { if alertMessage == nil { alertRevealPath = nil } }
+    }
     var alertIsError: Bool = false
+    /// A file the current alert is about. When set, the alert offers Copy
+    /// Path and Reveal in Finder beside OK. Cleared whenever the alert is, so
+    /// a later plain alert can never inherit buttons for an earlier file.
+    var alertRevealPath: String? = nil
 
     private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
     private(set) var savedTmuxExecutablePath: String?
@@ -1716,10 +1754,10 @@ final class AppState {
     /// already resolved daemon-side, so the app never re-derives the pair.
     ///
     /// False until capabilities have been fetched, which is the conservative
-    /// reading and the same one `transcriptComposerEnabled` takes: a pane that
-    /// registers no stream file renders exactly what it renders today, while a
-    /// provisional row that appeared and then vanished on the first capability
-    /// fetch would be worse than one that appeared a moment late.
+    /// reading: a pane that registers no stream file renders exactly what it
+    /// renders today, while a provisional row that appeared and then vanished on
+    /// the first capability fetch would be worse than one that appeared a
+    /// moment late.
     var transcriptStreamingEnabled: Bool {
         daemonCapabilities?.transcriptStreamingEnabled ?? false
     }
@@ -1775,6 +1813,17 @@ final class AppState {
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
+    /// How `setGCCollectorEnabled` persists one opt-in GC collector's switch —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
+        { [daemonClient] collector, enabled in
+            let mapping = collector.mapping
+            try await daemonClient.setGCCollectorEnabled(method: mapping.rpcMethod, params: mapping.params(enabled))
+        }
+    /// How `fetchConfig` reads the daemon's resolved `Config` — injectable so
+    /// the config loaders are testable without a real daemon.
+    @ObservationIgnored lazy var configFetcher: @MainActor () async throws -> Config =
+        { [daemonClient] in try await daemonClient.getConfig() }
     /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
@@ -1825,12 +1874,14 @@ final class AppState {
         { [daemonClient] terminalID in
             try await daemonClient.terminalCompletions(terminalID: terminalID)
         }
-    /// How `setTranscriptComposerEnabled` persists the composer gate —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// How a remote transcript pane runs `remote.transcriptSync` — injectable
+    /// so the pane can be driven in a test with no daemon.
     @ObservationIgnored
-    lazy var transcriptComposerFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
+    lazy var remoteTranscriptSyncer:
+        @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult =
+        { [daemonClient] selection in
+            try await daemonClient.remoteTranscriptSync(
+                provider: selection.provider, sessionID: selection.sessionID)
         }
     /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
     /// for the same reason as `controlModeSetter`.
@@ -1849,6 +1900,18 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptStreamingEnabled(enabled: enabled)
         }
+    /// How `setProfileBalancingEnabled` persists the profile-balancing soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profileBalancingFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setProfileBalancing(enabled: enabled) }
+    /// How `setProfilePoolOptOut` persists a profile's pool opt-out —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] profileID, optOut in try await daemonClient.setProfilePoolOptOut(id: profileID, optOut: optOut) }
+    /// How `setPRPollScheduleEnabled` persists the schedule-based PR polling
+    /// gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
@@ -1868,6 +1931,9 @@ final class AppState {
     /// asked to call something first.
     var queuedPromptTarget: QueuedPromptTarget? {
         didSet {
+            if let closed = oldValue, closed !== queuedPromptTarget {
+                composerTargetsByWorktreeID = composerTargetsByWorktreeID.filter { $0.value !== closed }
+            }
             if queuedPromptTarget == nil { advanceQueuedPromptBacklog() }
         }
     }
@@ -1879,6 +1945,13 @@ final class AppState {
     /// the operator can be left typing into a modal bound to the *previous*
     /// target. They queue instead.
     @ObservationIgnored var queuedPromptBacklog: [QueuedPromptTarget] = []
+    /// Composers on screen or queued, keyed by their daemon worktree ID once
+    /// `worktree.create` has returned it. `git worktree add` runs after that
+    /// return, so its failure arrives later as a
+    /// `.worktreeArchived(creationFailed: true)` delta, and this is how the
+    /// delta finds the composer whose draft would otherwise go with the row.
+    /// An entry leaves when its composer closes and on any archive of its row.
+    @ObservationIgnored var composerTargetsByWorktreeID: [UUID: QueuedPromptTarget] = [:]
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -1924,6 +1997,19 @@ final class AppState {
                 checkoutPRHead: request.checkoutPRHead
             )
         }
+    /// Where a first message that never reached its worktree is written —
+    /// `UnsentPromptFile` under `~/tbd/repos/<repoID>/unsent-prompts/`.
+    /// Returns the path written. Injectable so tests never write under the
+    /// process-global `TBD_HOME`, and can make the write fail.
+    @ObservationIgnored lazy var unsentPromptWriter:
+        @MainActor (_ repoID: UUID, _ worktreeName: String, _ text: String) throws -> String =
+            { repoID, worktreeName, text in
+                try UnsentPromptFile.write(
+                    text: text,
+                    worktreeName: worktreeName,
+                    directory: TBDConstants.unsentPromptsDir(repoID: repoID),
+                    date: Date())
+            }
     /// How `submitQueuedPrompt` parks the composed text — injectable for the
     /// same reason as `worktreeCreator`.
     /// A `nil` text unparks — the daemon clears the column and disarms any
@@ -2010,6 +2096,11 @@ final class AppState {
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
     /// redundant RPC fan-out as `loadTabStates` runs per worktree.
     @ObservationIgnored private var hasAttemptedPanelImport = false
+    /// How `refreshRepos()` fetches the repo list — injectable for the same
+    /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
+    /// prunes no remembered sidebar group.
+    @ObservationIgnored lazy var reposFetcher: @MainActor () async throws -> [Repo] =
+        { [daemonClient] in try await daemonClient.listRepos() }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -2118,7 +2209,6 @@ final class AppState {
     /// Storm indicator for observability and tests.
     @ObservationIgnored private(set) var skippedPollCycles = 0
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
-    let notificationSoundPlayer = NotificationSoundPlayer()
     let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
@@ -2126,6 +2216,8 @@ final class AppState {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+    /// Named in the remote-transcript spec; left unprefixed to match it.
+    static let remoteTranscriptOpenKey = "remoteTranscriptOpen"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     /// Emits a debounced event when the network path changes or the machine
@@ -2160,6 +2252,8 @@ final class AppState {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
+        remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
+        expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
@@ -2683,7 +2777,7 @@ final class AppState {
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
                 await self?.loadSupervisionConfig()
-                await self?.loadHangStackRetentionConfig()
+                await self?.loadGCConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
                 // refresh capabilities too — a toggle from ANOTHER client
@@ -2740,6 +2834,14 @@ final class AppState {
             handleRemoteSessionAttentionDelta(d)
         case .remoteSessionReconnectRequested(let d):
             reconnectRemoteSession(RemoteSessionSelection(provider: d.provider, sessionID: d.sessionID))
+        case .terminalLimitHit(let d):
+            limitHits[d.terminalID] = TerminalLimitHit(
+                profileID: d.profileID,
+                resetsAt: d.resetsAt,
+                limitType: d.limitType,
+                suggestedProfileID: d.suggestedProfileID,
+                receivedAt: Date()
+            )
         default:
             break
         }
@@ -2842,7 +2944,9 @@ final class AppState {
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
         // Look the row up before it gets removed so we can name it in the alert.
         let worktree = findWorktree(id: delta.worktreeID)
-        let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
+        let failureMessage = creationFailureAlert(
+            worktree, delta: delta,
+            composer: composerTargetsByWorktreeID.removeValue(forKey: delta.worktreeID))
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
@@ -2860,9 +2964,54 @@ final class AppState {
         // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
         // pre-session hook — arrives with creationFailed == false and must stay
         // silent, even though the row is `.creating` at this moment.
+        //
+        // Nil when the open composer will raise the alert itself — replacing
+        // an alert while it is on screen is not reliable on macOS, so there is
+        // only ever one.
         if let message = failureMessage {
-            showAlert(message, isError: true)
+            showAlert(message.text, isError: true, revealPath: message.revealPath)
         }
+    }
+
+    /// The alert for a creation-failure archive, and the composer side of it.
+    ///
+    /// Names the file the daemon saved the row's parked first message to, if
+    /// it saved one. Tells this row's composer the creation failed: an open
+    /// one saves its draft, closes and raises the alert itself — so this
+    /// returns nil for it — while a queued one, never on screen and so
+    /// holding no draft, is dropped from the queue and this alert stands. A
+    /// deliberate archive (`creationFailed == false`) returns nil and leaves
+    /// the composer alone.
+    ///
+    /// "Open" is exact because of what the map holds: a composer leaves it
+    /// when it closes (`queuedPromptTarget`'s observer) and when it submits
+    /// (`submitQueuedPrompt`), so an entry that is also the presented target
+    /// is a live, unsubmitted sheet whose `onChange(of: hasFailed)` will run.
+    /// A daemon-saved (or daemon-lost) message is the one exception: that
+    /// alert is the only place its fate is named, so it stands regardless.
+    private func creationFailureAlert(
+        _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
+    ) -> (text: String, revealPath: String?)? {
+        guard delta.creationFailed else { return nil }
+        let named = Self.creationFailureMessage(worktree, creationFailed: true)
+        guard let failure = named
+            ?? ((composer != nil || delta.unsentPromptPath != nil || delta.unsentPromptLost)
+                ? "Worktree creation failed." : nil)
+        else { return nil }
+        if let composer {
+            composer.failAfterCreate(reason: failure)
+            queuedPromptBacklog.removeAll { $0 === composer }
+            if queuedPromptTarget === composer, delta.unsentPromptPath == nil,
+               !delta.unsentPromptLost { return nil }
+        }
+        if delta.unsentPromptLost {
+            // "If one was queued": the daemon sets the flag when it could not
+            // even read the row, so a message is possible, not certain.
+            return ("\(failure) Its first message, if one was queued, could not be saved.", nil)
+        }
+        guard let path = delta.unsentPromptPath else { return (failure, nil) }
+        let shown = (path as NSString).abbreviatingWithTildeInPath
+        return ("\(failure) Its first message was saved to \(shown).", path)
     }
 
     /// Returns a failure alert message when the daemon reported that this
@@ -2965,6 +3114,11 @@ final class AppState {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
+        // Clear any limit hit when the terminal transitions to working
+        // (design 2026-09-05 §7.1)
+        if delta.activityState == .working {
+            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
+        }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
             // Claude and shell activity deltas remain raw last-arrival state;
             // provenance ordering is part of the Codex presentation fix only.
@@ -3047,6 +3201,8 @@ final class AppState {
             return
         }
         terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
+        // Clear any limit hit when the profile changes (design 2026-09-05 §7.1)
+        if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
@@ -3211,8 +3367,8 @@ final class AppState {
             unreadByWorktree[notification.worktreeID] = incoming
         }
 
-        // Fire sound + macOS notification
-        notificationSoundPlayer.playIfEnabled(for: notification.type)
+        // Post the macOS notification. Its sound rides on the notification,
+        // so Focus and Do Not Disturb silence both together.
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
@@ -3357,7 +3513,7 @@ final class AppState {
             await loadModelProfiles()
             await loadHibernationConfig()
             await loadSupervisionConfig()
-            await loadHangStackRetentionConfig()
+            await loadGCConfig()
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
@@ -3525,10 +3681,11 @@ final class AppState {
     /// Refresh the repo list. Only updates if data changed.
     func refreshRepos() async {
         do {
-            let fetchedRepos = try await daemonClient.listRepos()
+            let fetchedRepos = try await reposFetcher()
             if fetchedRepos != repos {
                 repos = fetchedRepos
             }
+            pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)

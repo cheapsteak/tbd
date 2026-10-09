@@ -13,11 +13,6 @@ extension RPCRouter {
     /// config directory, spawn environment, working directory and pid, and the
     /// app does not link the daemon library.
     ///
-    /// Gated on `transcript_composer_enabled`, and the refusal is an ERROR rather
-    /// than an empty inventory. An empty list is a real answer — a session with
-    /// no commands — and a caller must not read "the feature is off" as "this
-    /// session knows nothing".
-    ///
     /// **The probe's environment is the session's, assembled the way the spawn
     /// path assembles it** — `ClaudeSpawnCommandBuilder.build` plus the
     /// free-form overrides its callers layer underneath it. The daemon's own
@@ -39,14 +34,6 @@ extension RPCRouter {
     /// key keeps it, because that is the environment its session runs in.
     func handleTerminalCompletions(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCompletionsParams.self, from: paramsData)
-
-        let config = try await db.config.get()
-        guard config.transcriptComposerEnabled else {
-            return RPCResponse(error:
-                "terminal.completions is unavailable: the transcript composer is disabled "
-                + "(config.transcript_composer_enabled is off). Enable it in Settings → "
-                + "General → Claude, or with the config.setTranscriptComposerEnabled RPC.")
-        }
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
@@ -94,6 +81,7 @@ extension RPCRouter {
             panePID = Int32(raw)
         }
 
+        let config = try await db.config.get()
         var environment = ProcessInfo.processInfo.environment
         environment.merge(
             EnvOverrideResolver.merge(

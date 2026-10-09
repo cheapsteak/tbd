@@ -80,8 +80,8 @@ private struct PRBindingRPCHarness {
 
     /// A remote lane's row in the same repo. It exists — so a binding's foreign
     /// key holds and the injected repo resolver still answers for it — but it
-    /// has no directory on this machine, which is the state in which the forge
-    /// cannot be determined.
+    /// has no directory on this machine, so its forge is asked in its repo's
+    /// checkout.
     func addRemoteWorktree() async throws -> UUID {
         let suffix = UUID().uuidString
         return try await db.worktrees.createRemote(
@@ -226,27 +226,60 @@ struct PRBindingRPCTests {
     }
 
     /// The forge shape comes from a second lookup, independent of the repo
-    /// resolver: the worktree's own directory is where `glab` reads its
-    /// configuration from, and a worktree with no local row — a remote lane, or
-    /// one deleted between the two awaits — has no directory here to ask in.
+    /// resolver: it is asked in the directory the row's poll runs in, which is
+    /// where `glab` reads its configuration from. A worktree with no row — one
+    /// deleted between the two awaits — has no directory here to ask in.
     /// Nothing has then answered "GitLab" or "not GitLab", and either shape is
     /// a guess.
     ///
     /// `/pull/<n>` is the damaging guess, which is why the resolver here names
-    /// the host as GitLab while the worktree is remote: composing GitHub's
-    /// shape then persists a binding whose URL 404s and whose label reads "PR".
-    /// So the call defers, exactly as it does when the repo cannot be named —
-    /// and the repo *is* nameable here, so the deferral can only come from the
-    /// forge lookup.
+    /// the host as GitLab: composing GitHub's shape then persists a binding
+    /// whose URL 404s and whose label reads "PR". So the call defers, exactly
+    /// as it does when the repo cannot be named — and the repo *is* nameable
+    /// here (the injected resolver answers for any id), so the deferral can
+    /// only come from the forge lookup.
     @Test("pr.attach by number defers when the worktree's forge cannot be determined")
     func attachByNumberUndeterminedForge() async throws {
         let harness = try await PRBindingRPCHarness(
             repo: ("acme", "acme-prod", "git.acme.example"),
             gitLabHosts: ["git.acme.example"])
-        let remote = try await harness.addRemoteWorktree()
-        let attach = try await harness.attach(number: 412, worktreeID: remote)
+        let attach = try await harness.attach(number: 412, worktreeID: UUID())
         #expect(attach.outcome == "deferredUnknownRepo")
         #expect(attach.binding == nil)
+    }
+
+    /// A remote lane has no directory on this machine, so its forge is asked
+    /// in its repo's checkout (`RPCRouter.bindingRepoPath`) — owner, name and
+    /// host are repo facts. Before that, every lookup for a lane answered
+    /// "undetermined" and a lane could hold no binding at all.
+    @Test("pr.attach by number on a remote lane asks the forge in its repo's checkout")
+    func attachByNumberOnRemoteLaneResolvesForge() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
+        let remote = try await harness.addRemoteWorktree()
+        let attach = try await harness.attach(number: 412, worktreeID: remote)
+        #expect(attach.outcome == "bound")
+        #expect(attach.binding?.url
+                == "https://git.acme.example/acme/acme-prod/-/merge_requests/412")
+    }
+
+    /// `.provider` skips the coordinator's repo validation, because a provider
+    /// names a PR by URL and it may live in another repository. It is reachable
+    /// only from a provider snapshot: a socket client sending it would
+    /// otherwise bypass the wrong-repo guard.
+    @Test("pr.attach with wire source 'provider' is treated as manual and still validates the repo")
+    func attachWireProviderSourceIsManual() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+        let foreign = try await harness.attach(
+            url: "https://github.com/acme/acme-web/pull/88", source: "provider")
+        #expect(foreign.outcome == "rejectedWrongRepo")
+        #expect(try await harness.bindings().bindings.isEmpty)
+
+        let own = try await harness.attach(
+            url: "https://github.com/acme/acme-prod/pull/412", source: "provider")
+        #expect(own.outcome == "bound")
+        #expect(own.binding?.source == .manual)
     }
 
     /// github.com short-circuits inside the resolver before any subprocess, so
@@ -297,15 +330,51 @@ struct PRBindingRPCTests {
     /// and an unrecoverable one when it creates one: an attach would bind this
     /// repo's #412 in place of the #412 the caller named on some other host,
     /// silently and with no error.
-    @Test("pr.attach does not fall through from an unparseable url to the number")
+    ///
+    /// Attach reads a whole URL exactly, so this one parses as the pull request
+    /// it names — on its own host — and the coordinator refuses it as another
+    /// host's rather than binding this repo's #412.
+    @Test("pr.attach does not fall through from a foreign url to the number")
     func attachDoesNotFallThroughToNumber() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
 
+        let attach = try await harness.attach(
+            url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+        #expect(attach.outcome == "rejectedWrongRepo")
+        #expect(attach.detail == "git.acme-corp.example/acme/acme-prod")
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    @Test("pr.attach of an unparseable url with a number is still an error")
+    func attachUnparseableURLIsAnError() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         await #expect(throws: (any Error).self) {
-            try await harness.attach(
-                url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+            try await harness.attach(url: "not a pr url at all", number: 412)
         }
         #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    /// The scanner is locked to github.com, so before attach read whole URLs
+    /// exactly an Enterprise URL was "unresolvable": a detached Enterprise PR a
+    /// provider had named could never be brought back.
+    @Test("pr.attach of an Enterprise URL binds on its checkout and revives a detached provider PR")
+    func attachEnterpriseURL() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "ghe.acme.example"))
+        let own = try await harness.attach(url: "https://ghe.acme.example/acme/acme-prod/pull/7")
+        #expect(own.outcome == "bound")
+        #expect(own.binding?.host == "ghe.acme.example")
+
+        // A provider-named PR in another repository, detached by the user.
+        let foreignURL = "https://ghe.acme.example/acme/acme-web/pull/88"
+        let foreign = try #require(PRBindingExtractor.parsePRURL(exactly: foreignURL))
+        _ = await harness.router.prBindingCoordinator.bind(
+            worktreeID: harness.worktreeID, parsed: foreign, source: .provider)
+        #expect(try await harness.detach(url: foreignURL))
+        #expect(try await harness.bindings().bindings.map(\.number) == [7])
+
+        let revived = try await harness.attach(url: foreignURL)
+        #expect(revived.outcome == "bound")
+        #expect(try await harness.bindings().bindings.map(\.number).sorted() == [7, 88])
     }
 
     @Test("pr.attach reports a wrong-repo rejection instead of binding")

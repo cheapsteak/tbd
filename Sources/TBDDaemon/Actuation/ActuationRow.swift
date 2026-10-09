@@ -194,10 +194,11 @@ enum ActuationOutcome: Sendable, Equatable {
 ///
 /// This is the guard on the one place this design knowingly proceeds on
 /// information that may be wrong. A message composed against `staleDaemon`
-/// modes can mis-paste — the markers printed by a child that never asked for
-/// them, or absorbed by one that did — and that is accepted, because refusing
-/// would make every supervision send fail closed exactly when the app is
-/// napping or wedged, which is when supervision most needs to send. What makes
+/// modes can mis-paste — markers printed by a child that has turned
+/// bracketing off since an "on" was frozen, or by an agent session that a
+/// stale "off" was not trusted for and so got wrapped — and that is accepted,
+/// because refusing would make every supervision send fail closed exactly when
+/// the app is napping or wedged, which is when supervision most needs to send. What makes
 /// it honest rather than merely optimistic is that the guess is recorded: a row
 /// reading `dispatched, modeSource: staleDaemon` tells whoever reads the record
 /// afterwards that the composition was a guess, and the age says how old.
@@ -348,5 +349,25 @@ struct ActuationRow: Codable, Sendable, Equatable {
     /// reader learns both ways a composition can be uninformed: the store
     /// stopped watching, or it never saw the child start.
     var modesObserved: Bool?
+    /// The bracketed-paste flag exactly as the answering store reported it,
+    /// before any rule weighed how far to trust it.
+    ///
+    /// Rides with `modeSource` and is absent whenever that is `unavailable`.
+    /// Recorded beside `bracketedPaste` because the two can disagree on
+    /// purpose — a `staleDaemon` "off" is not obeyed for an agent session — and
+    /// a reader diagnosing a lost Enter needs both the reading and what was
+    /// made of it, not one inferred from the other.
+    var modeBracketedPaste: Bool?
+    /// Whether the composition chose to wrap the body in a bracketed paste —
+    /// `HolderSendComposition.bracketedPaste(for:unobservedShouldWrap:)`'s
+    /// answer for this dispatch.
+    ///
+    /// Set on holder **text** sends wherever `modeSource` is, including an
+    /// `unavailable` one, where it reads `false`: the decision is made with or
+    /// without an answer. A named-key send composes no paste and leaves it
+    /// absent. An empty body is never wrapped whatever this says, so a `true`
+    /// beside `--text "" --submit` records the rule's answer, not markers on
+    /// the wire.
+    var bracketedPaste: Bool?
     var error: String?
 }

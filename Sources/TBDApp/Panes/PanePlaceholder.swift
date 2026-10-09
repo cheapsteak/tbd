@@ -494,9 +494,10 @@ struct PanePlaceholder: View {
                     // click-catching layer over it. A transparent plain Button
                     // (not .onTapGesture, which blocks .contextMenu on macOS)
                     // — applied BEFORE the TranscriptOverlayView overlay below
-                    // so that overlay stays on top in hit-testing. Plain
-                    // left-clicks reach it: TerminalPanelView's click monitor
-                    // only consumes Cmd+clicks that resolve a file path.
+                    // so that overlay stays on top in hit-testing. Every
+                    // left-click reaches it: the terminal underneath takes
+                    // clicks only through its own mouse overrides, which
+                    // AppKit hit-testing never reaches past this layer.
                     if TerminalPanePresentation.showsWakeOverlay(
                         for: terminal, switching: switching) {
                         Button {

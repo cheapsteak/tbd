@@ -255,27 +255,6 @@ extension AppState {
         }
     }
 
-    /// Mirror the daemon's hang-stack reclaimer gate into
-    /// `HangStackWriter`'s write-time cap
-    /// (`docs/specs/2026-08-29-hang-stack-reclaimer-design.md`). Called on
-    /// launch and whenever a config-change delta arrives — the same two call
-    /// sites as `loadSupervisionConfig()`.
-    ///
-    /// One flag governs both halves of the policy, so the app has no toggle of
-    /// its own to keep in sync and nothing published here. A failed fetch
-    /// leaves the cap at whatever it was, which on launch is OFF: the
-    /// keep-biased direction, and the same answer the unset column gives.
-    ///
-    /// The value mirrored is `HangStackWriter.retentionArmed(for:)`, which
-    /// reads `gcHangStacksEnabled` **on top of** `gcEnabled` exactly as the
-    /// daemon's own phase does: the master switch has to master both halves of
-    /// one policy, or turning GC off in Settings would stop the sweep while the
-    /// app kept deleting.
-    func loadHangStackRetentionConfig() async {
-        guard let config = await fetchConfig() else { return }
-        HangStackWriter.shared.setRetentionEnabled(HangStackWriter.retentionArmed(for: config))
-    }
-
     /// Persist supervision's fleet-wide authority switch (design 2026-07-26
     /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
     /// Shipped OFF (braked); for now inert, since the rest of the supervision
@@ -336,7 +315,7 @@ extension AppState {
     /// Fetch the current global Config (used by the scratch-instructions editor to show the effective text).
     func fetchConfig() async -> Config? {
         do {
-            return try await daemonClient.getConfig()
+            return try await configFetcher()
         } catch {
             logger.error("Failed to fetch config: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -445,32 +424,6 @@ extension AppState {
             // A refusal (e.g. a watch mode is active) leaves the daemon's value
             // unchanged; re-fetch so the toggle snaps back to it.
             await refreshDaemonCapabilities()
-        }
-    }
-
-    /// Help text for the composer toggle. A stored constant rather than a
-    /// literal in the view so it is assertable, and so it says exactly what the
-    /// switch turns on — the field, its completion menu, and its attachments.
-    static let transcriptComposerHelp = """
-        Adds a message box under the live transcript, so you can reply to a \
-        Claude session without switching to its terminal. It completes slash \
-        commands, skills and subagents from the session's own Claude Code, and \
-        accepts pasted or dropped images. Claude sessions on local worktrees \
-        only. Off by default (soaking).
-        """
-
-    /// Persist the transcript-composer gate, then re-fetch capabilities so the
-    /// Settings toggle reflects the daemon's persisted state. Takes effect on
-    /// the next transcript pane render — no restart in either direction.
-    func setTranscriptComposerEnabled(_ enabled: Bool) async {
-        do {
-            try await transcriptComposerFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set transcript composer: \(error, privacy: .public)")
-            showAlert(
-                "Failed to set the transcript composer: \(error.localizedDescription)",
-                isError: true)
         }
     }
 
@@ -778,9 +731,9 @@ extension AppState {
 
     /// Open (or focus) a Claude *login session* pinned to `profileID` so the
     /// user can complete `/login` there — the daemon labels the terminal as a
-    /// login session, auto-types `/login` once Claude is up, and pushes a
-    /// `modelProfilesChanged` delta when the profile's isolated config dir
-    /// gains an account, flipping the Settings badge live.
+    /// login session and pushes a `modelProfilesChanged` delta when the
+    /// profile's isolated config dir gains an account, flipping the Settings
+    /// badge live.
     ///
     /// Duplicate-safe: if a live login session for this profile already
     /// exists, it is focused instead of spawning another; while a spawn RPC
@@ -982,6 +935,65 @@ extension AppState {
         } catch {
             logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
             showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Account Load Balancing
+
+    /// Persist the profile-balancing soak flag and refresh daemon capabilities.
+    /// Applies to the next spawn-time resolution.
+    func setProfileBalancingEnabled(_ enabled: Bool) async {
+        do {
+            try await profileBalancingFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set profile balancing: \(error, privacy: .public)")
+            showAlert("Failed to set profile balancing: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - PR polling schedule
+
+    /// Persist the schedule-based PR polling gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// swaps its PR driver at once; no restart.
+    func setPRPollScheduleEnabled(_ enabled: Bool) async {
+        do {
+            try await prPollScheduleFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set PR poll schedule: \(error, privacy: .public)")
+            showAlert("Failed to set PR polling: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a profile's pool opt-out, then reload profiles.
+    func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
+        do {
+            try await profilePoolOptOutSetter(id, optOut)
+            await loadModelProfiles()
+        } catch {
+            logger.error("Failed to set profile pool opt-out: \(error, privacy: .public)")
+            showAlert("Failed to set profile pool opt-out: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Count live Claude sessions running under a given profile.
+    /// Prefers the daemon's `entry.liveSessions` when non-nil, else computes from
+    /// `appState.terminals` (Claude kind, unparked, matching profileID).
+    func liveSessionCount(forProfile profileID: UUID) -> Int {
+        // If any profile has a daemon-supplied count, use it (prefer the daemon)
+        if let entry = modelProfiles.first(where: { $0.profile.id == profileID }),
+           let liveCount = entry.liveSessions {
+            return liveCount
+        }
+        // Otherwise count from local terminal state
+        return terminals.values.reduce(0) { acc, terminalList in
+            acc + terminalList.filter { terminal in
+                terminal.profileID == profileID
+                    && !terminal.isParked
+                    && terminal.kind == .claude
+            }.count
         }
     }
 }

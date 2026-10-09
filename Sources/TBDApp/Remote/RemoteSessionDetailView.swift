@@ -96,9 +96,11 @@ enum RemoteSessionSendPayload {
 /// Laid out like a local session: the terminal fills the pane, and the
 /// session's name and its Reconnect / Stop actions live in the window
 /// toolbar (`ContentView`). The only chrome here is a compact warning strip,
-/// rendered only while a warning actually applies, and — only while no live
-/// attached terminal is showing — a send footer (see
-/// `RemoteSessionDetailGates.showsSendFooter`).
+/// rendered only while a warning actually applies, and — only while neither a
+/// live attached terminal nor the transcript's enabled composer is showing — a
+/// send footer (see `RemoteSessionDetailGates.showsSendFooter`). When the transcript is
+/// available and open, the session's conversation sits beside the terminal in
+/// a horizontal split (`RemoteTranscriptPaneView`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
 /// this view hosts `RemoteAttachPager`, which keeps recently-viewed
@@ -198,12 +200,10 @@ struct RemoteSessionDetailView: View {
         }
     }
 
-    /// Whether `selection`'s attach terminal currently has a live PTY
-    /// mounted in `RemoteAttachPager` — the only state that distinguishes
-    /// "render the pager slot" from "render the detached/reattach prompt"
-    /// for the CURRENTLY viewed session (a session that's eligible and
-    /// selected but not in this set is, by construction, explicitly
-    /// detached — see `RemoteAttachLifecycle`).
+    /// Whether this selection has an admitted connection in the pager. A
+    /// browsed session can be eligible and selected without having requested
+    /// one, so "not in this set" means either never attached or detached —
+    /// `detachInfo` tells the two apart.
     private var isAttached: Bool {
         appState.attachedRemoteSelections.contains(selection)
     }
@@ -276,8 +276,24 @@ struct RemoteSessionDetailView: View {
 
     // MARK: - Content
 
-    @ViewBuilder
+    /// A horizontal split: the terminal side on the left, and — when the
+    /// provider declares `transcript.read` and the shared
+    /// `remoteTranscriptOpen` preference says open — the transcript on the
+    /// right. The split is always the container, even with one child, so
+    /// opening or closing the transcript only adds or removes the second
+    /// child and never restructures the left one: `RemoteAttachPager` stays
+    /// mounted either way (see `terminalArea` and `RemoteDetailSplit`).
     private var contentArea: some View {
+        RemoteDetailSplit(showsTrailing: appState.remoteSessionShowsTranscriptPane(selection)) {
+            terminalArea
+        } trailing: {
+            RemoteTranscriptLivePane(selection: selection)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var terminalArea: some View {
         ZStack {
             // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
             // nested inside a check scoped to the CURRENT selection's
@@ -377,11 +393,9 @@ struct RemoteSessionDetailView: View {
         .padding()
     }
 
-    /// Shown in place of the pager slot once `selection` has detached
-    /// (`AppState.explicitlyDetachedRemoteSessions`) — auto-attach means
-    /// there is no longer a "not yet attached, click to start" state for an
-    /// eligible session (selecting it already started that), only "live" vs
-    /// "detached, here's why, click to try again."
+    /// First-time browsing offers Attach; a connection that ended offers
+    /// Reattach and its existing exit information. Neither prompt makes a
+    /// claim about the remote process's current liveness.
     private var detachedPrompt: some View {
         VStack(spacing: 12) {
             Image(systemName: isUnexpectedDetach
@@ -389,11 +403,14 @@ struct RemoteSessionDetailView: View {
                   : "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-            Text(isUnexpectedDetach ? "Attach ended unexpectedly" : "Detached")
+            Text(isUnexpectedDetach ? "Attach ended unexpectedly" : detachInfo == nil ? "Not attached" : "Detached")
                 .font(.headline)
-            // Read from the provider's reported state, never from this local
-            // viewer's exit code — see `detachedFateLine`.
-            Text(RemoteSessionStatePresentation.detachedFateLine(terminalState: session?.payload.state))
+            // First-time browsing explains how to attach. After a connection
+            // ended, the fate line is read from the provider's reported state,
+            // never from this local viewer's exit code — see `detachedFateLine`.
+            Text(detachInfo == nil
+                 ? "Attach to open an interactive terminal for this session."
+                 : RemoteSessionStatePresentation.detachedFateLine(terminalState: session?.payload.state))
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if let exitCode = detachInfo?.exitCode {
@@ -401,7 +418,7 @@ struct RemoteSessionDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Button("Reattach") { appState.reattachRemoteSession(selection) }
+            Button(detachInfo == nil ? "Attach" : "Reattach") { appState.reattachRemoteSession(selection) }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
         }
@@ -422,7 +439,11 @@ struct RemoteSessionDetailView: View {
         RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: isGone,
             snapshotFresh: providerStatus?.hasStaleSnapshot != true,
-            hasLiveAttachedPane: showsAttachSlot)
+            hasLiveAttachedPane: showsAttachSlot,
+            transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
+                capabilities: capabilities,
+                transcriptOpen: appState.remoteTranscriptOpen,
+                composerState: appState.remoteComposerState(for: selection)))
     }
 
     private var sendFooter: some View {

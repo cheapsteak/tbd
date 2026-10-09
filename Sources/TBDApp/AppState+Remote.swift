@@ -45,6 +45,7 @@ extension AppState {
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
             remoteSessions = sessions.sessions
+            pruneExpandedSidebarGroups(providerNames: Set(providers.providers.map(\.config.name)))
             if let selectedRemoteProvider,
                !providers.providers.contains(where: { $0.config.name == selectedRemoteProvider }) {
                 self.selectedRemoteProvider = nil
@@ -267,7 +268,7 @@ extension AppState {
     /// requesting it, and the request is what this whole design is for:
     /// destroying a session should not destroy the conversation. The receipt is
     /// also what a later Revive-as-reseed reads. When the provider does not
-    /// declare `retain` no receipt is possible, and the confirmation says so in
+    /// declare `transcript.retain` no receipt is possible, and the confirmation says so in
     /// as many words — that is the branch a user most needs to see.
     ///
     /// The confirmation itself is `RemoteDeleteConfirmation.decide`, which is
@@ -280,7 +281,7 @@ extension AppState {
         }
         let capabilities = remoteProviders.first { $0.config.name == provider }?
             .describe?.capabilities ?? []
-        let willRetain = capabilities.contains("retain")
+        let willRetain = capabilities.contains(RemoteCapability.transcriptRetain)
         let decision = RemoteDeleteConfirmation.decide(
             state: session?.payload.state ?? .unknown,
             workspaceDirty: session?.payload.reportsDirtyWorkspace ?? false,

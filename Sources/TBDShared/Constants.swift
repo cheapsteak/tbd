@@ -29,6 +29,15 @@ public enum TBDConstants {
         tmuxExecutablePathFile(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// File naming the ref the daemon's update check compares against:
+    /// `~/tbd/updates/check-ref`. Written by `scripts/update.sh` while the
+    /// update source is `release`, absent otherwise. Honors `TBD_HOME`.
+    public static func updateCheckRefFile(environment: [String: String]) -> URL {
+        configDir(environment: environment)
+            .appendingPathComponent("updates")
+            .appendingPathComponent("check-ref")
+    }
+
     /// Unix socket path resolved from the given environment dictionary.
     /// Honors `TBD_SOCKET_PATH` independently of `TBD_HOME` — darwin caps
     /// `sun_path` at ~104 bytes, so a deep `TBD_HOME` can overflow even though
@@ -184,6 +193,26 @@ public enum TBDConstants {
     }
     public static func notesPath(repoID: UUID) -> String {
         notesPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Name of the per-repo directory holding first messages that never
+    /// reached a worktree. Shared by the app and the daemon, which write into
+    /// it, and `OrphanGC`, which reclaims what ages out of it.
+    public static let unsentPromptsDirName = "unsent-prompts"
+
+    /// Directory holding a repo's unsent first messages:
+    /// `~/tbd/repos/<repoID>/unsent-prompts/`. One file is written here (by
+    /// the daemon or the app, see `UnsentPromptFile`) when a worktree creation
+    /// fails with a first message composed for it; `OrphanGC` reclaims files
+    /// older than 30 days.
+    /// Honors TBD_HOME.
+    public static func unsentPromptsDir(repoID: UUID, environment: [String: String]) -> URL {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(unsentPromptsDirName, isDirectory: true)
+    }
+    public static func unsentPromptsDir(repoID: UUID) -> URL {
+        unsentPromptsDir(repoID: repoID, environment: ProcessInfo.processInfo.environment)
     }
 
     /// Path to a repo's Claude settings overlay fragment file:
@@ -357,6 +386,47 @@ public enum TBDConstants {
         retainedTranscriptPath(
             provider: provider, key: key, environment: ProcessInfo.processInfo.environment)
     }
+
+    /// Root of the remote-session transcript caches: `~/tbd/remote-transcripts`.
+    /// Honors TBD_HOME.
+    ///
+    /// A TBD-owned root outside the Claude projects store on purpose:
+    /// `ClaudeSessionScanner` searches under project roots, so remote
+    /// conversations kept here are never listed as local sessions.
+    public static func remoteTranscriptsDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("remote-transcripts")
+    }
+    public static var remoteTranscriptsDir: URL {
+        remoteTranscriptsDir(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// One remote session's transcript cache directory:
+    /// `~/tbd/remote-transcripts/<provider>/<sessionID>/`. Honors TBD_HOME.
+    ///
+    /// Both components are escaped exactly as `retainedTranscriptPath` escapes
+    /// its own — a session id is opaque by contract, so the mapping must be
+    /// injective and must never let a separator, `.` or `..` traverse. It holds
+    /// `remoteTranscriptFileName` and `remoteTranscriptStateFileName`.
+    public static func remoteTranscriptDir(
+        provider: String, sessionID: String, environment: [String: String]
+    ) -> URL {
+        let root = remoteTranscriptsDir(environment: environment).path
+        return URL(
+            fileURLWithPath: "\(root)/\(filenameEscaped(provider))/\(filenameEscaped(sessionID))",
+            isDirectory: true)
+    }
+    public static func remoteTranscriptDir(provider: String, sessionID: String) -> URL {
+        remoteTranscriptDir(
+            provider: provider, sessionID: sessionID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The conversation, as Claude Code transcript JSONL, inside
+    /// `remoteTranscriptDir`.
+    public static let remoteTranscriptFileName = "transcript.jsonl"
+    /// `{cursor, length, generation}` for the conversation beside it, inside
+    /// `remoteTranscriptDir`.
+    public static let remoteTranscriptStateFileName = "state.json"
 
     /// RFC 3986's unreserved set less `.`, so no encoded component can be `.`
     /// or `..`. See `retainedTranscriptPath` for why each exclusion is

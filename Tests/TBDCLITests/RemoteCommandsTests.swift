@@ -215,9 +215,68 @@ struct RemoteCommandsTests {
     // MARK: - The missing-capability refusal
 
     @Test func missingCapabilityRefusalNamesTheCapabilityAndProvider() {
-        let text = remoteMissingCapability("recall", provider: "agentbox")
-        #expect(text.contains("recall"))
-        #expect(text.contains("agentbox"))
+        let text = remoteMissingCapability(RemoteCapability.transcriptRecall, provider: "agentbox")
+        #expect(text == "Error: provider 'agentbox' has not declared the 'transcript.recall' capability")
+    }
+
+    private func fleet(declaring capabilities: [String]) -> RemoteFleetSnapshot {
+        RemoteFleetSnapshot(
+            providers: [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "agentbox", exec: "/bin/agentbox"),
+                describe: ProviderDescribe(name: "agentbox", capabilities: capabilities),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)],
+            sessions: [], worktrees: [])
+    }
+
+    /// Each transcript command's own capability-refusal function — the exact
+    /// closure its `run()` calls, not `RemoteFleetSnapshot.missingCapability`
+    /// on its own — so a command that regressed to a bare
+    /// `contains("retain")`-style check would fail a test against it.
+    private func standaloneTranscriptChecks() -> [(capability: String, check: (RemoteFleetSnapshot) -> String?)] {
+        [
+            (RemoteCapability.transcriptRetain, { RemoteRetain.missingCapability(fleet: $0, provider: "agentbox") }),
+            (RemoteCapability.transcriptImport, { RemoteImport.missingCapability(fleet: $0, provider: "agentbox") }),
+            (RemoteCapability.transcriptRecall, { RemoteRecall.missingCapability(fleet: $0, provider: "agentbox") }),
+            (RemoteCapability.transcriptRead, { RemoteTranscript.missingCapability(fleet: $0, provider: "agentbox") }),
+        ]
+    }
+
+    /// Each namespaced capability admits its own command and nothing else —
+    /// including `delete --retain` and `create`'s file-bearing sources, which
+    /// share `transcript.retain` / `transcript.import` with the standalone
+    /// commands above.
+    @Test func namespacedCapabilitiesAdmitTheirCommands() {
+        let all = standaloneTranscriptChecks()
+        for (capability, check) in all {
+            let snapshot = fleet(declaring: [capability])
+            #expect(check(snapshot) == nil)
+            for (other, otherCheck) in all where other != capability {
+                #expect(otherCheck(snapshot) != nil)
+            }
+        }
+        #expect(RemoteDelete.refusal(
+            fleet: fleet(declaring: ["delete", RemoteCapability.transcriptRetain]),
+            provider: "agentbox", retain: true) == nil)
+        #expect(RemoteCreate.missingCapability(
+            fleet: fleet(declaring: ["seed", RemoteCapability.transcriptImport]),
+            provider: "agentbox", hasSeedSource: true, needsImport: true) == nil)
+    }
+
+    /// The hard cutover, checked through each command's own function: a
+    /// provider still declaring the bare pre-namespace spellings is refused
+    /// `retain`, `delete --retain`, `import`, `recall`, `transcript`, and
+    /// `create`'s file-bearing sources, and the refusal names the namespaced
+    /// string to declare.
+    @Test func barePreNamespaceCapabilitiesAdmitNothing() {
+        let bare = fleet(declaring: ["delete", "transcript", "retain", "import", "recall", "seed"])
+        for (capability, check) in standaloneTranscriptChecks() {
+            #expect(check(bare) == remoteMissingCapability(capability, provider: "agentbox"))
+        }
+        #expect(RemoteDelete.refusal(fleet: bare, provider: "agentbox", retain: true)
+            == remoteMissingCapability(RemoteCapability.transcriptRetain, provider: "agentbox"))
+        #expect(RemoteCreate.missingCapability(
+            fleet: bare, provider: "agentbox", hasSeedSource: true, needsImport: true)
+            == remoteMissingCapability(RemoteCapability.transcriptImport, provider: "agentbox"))
     }
 
     // MARK: - delete: the caller-side policy

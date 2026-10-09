@@ -13,6 +13,9 @@ enum FakeProviderOutcome: Sendable {
     /// create-retry path (RPCRouterRemoteTests), which needs the FIRST
     /// invocation to time out and the SECOND to succeed with the SAME stdin.
     case timeout
+    /// Throws this error for this call — anything a real invoke can throw
+    /// besides a timeout, such as a spawn failure.
+    case thrown(any Error & Sendable)
 }
 
 /// Scriptable fake provider: each verb invocation pops the next canned
@@ -73,7 +76,9 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         case .result(let result):
             return result
         case .timeout:
-            throw ProviderRunError.timeout(verb: verb.first ?? "?")
+            throw ProviderRunError.timeout(verb: ProviderRunner.verbName(verb))
+        case .thrown(let error):
+            throw error
         }
     }
 

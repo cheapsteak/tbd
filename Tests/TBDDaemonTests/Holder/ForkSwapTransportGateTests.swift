@@ -131,6 +131,9 @@ struct ForkSwapTransportGateTests {
         // holder arm parks through the coordinator, and a coordinator with no
         // registry refuses for a reason that is not the one under test.
         await router.hibernationCoordinator.setHolderRegistry(router.holderRegistry)
+        // A live holder, so the no-reader rail is what these rows reach;
+        // the ended-session path has tests of its own.
+        await router.hibernationCoordinator.setHolderProcessIsLive { _ in true }
         let probe = RecaptureProbe()
         router.sessionRecaptureFactory = { db, tmux in
             probe.scheduler(db: db, tmux: tmux)

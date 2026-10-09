@@ -1029,3 +1029,22 @@ def test_the_compose_step_fails_on_a_placeholder_it_does_not_know(
     assert proc.returncode != 0
     assert "__MERGE_BASE_SHA__" in proc.stderr
     assert not github_output.read_text(encoding="utf-8").strip()
+
+
+def test_the_conventions_lens_checks_product_fit() -> None:
+    # A script whose correctness rested on one project's database naming rule
+    # passed review: it lived in user-land behind a required `--prefix`, its
+    # description listed the naming rule as an Assumption, and the reviewer
+    # grepped the diff instead of reading it. Each of those escape routes must
+    # stay closed in the prompt.
+    prompt = _prompt_template()
+    _, _, fit = prompt.partition("Product fit.")
+    assert fit, "the prompt no longer contains a `Product fit.` rule"
+    fit = fit.split("\n\n", 1)[0]
+    assert "would a TBD user in an unrelated org" in fit
+    assert "Medium severity" in fit
+    assert "a required parameter" in fit
+    assert "is still that scheme" in fit
+    assert "Assumptions" in fit and "not a mitigation" in fit
+    assert "per-repo `archive` hook" in fit
+    assert "in full rather than grepping" in fit

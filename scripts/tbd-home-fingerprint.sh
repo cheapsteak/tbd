@@ -70,12 +70,12 @@ volatile_names=(
   .DS_Store
 )
 
-prune_args=()
+prune_args=()  # non-empty: one entry per volatile_dirs entry, a constant list
 for d in "${volatile_dirs[@]}"; do
   prune_args+=(-path "$real_home/$d/*" -prune -o)
 done
 
-name_args=()
+name_args=()  # non-empty: one entry per volatile_names entry, a constant list
 for n in "${volatile_names[@]}"; do
   name_args+=(! -name "$n")
 done

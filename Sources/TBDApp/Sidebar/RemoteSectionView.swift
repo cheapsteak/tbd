@@ -27,6 +27,9 @@ struct RemoteSectionView: View {
     /// see `SidebarHeaderMetrics.childRowLeadingInset`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    /// See `AppState.sidebarWorkflowGroupsKey`.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
 
     var body: some View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
@@ -50,12 +53,15 @@ struct RemoteSectionView: View {
             chevronBeforeProjectName: chevronBeforeProjectName), bottom: 0, trailing: 0)
     }
 
+    /// Ungrouped (the default), the provider's sessions list inline under
+    /// its header; grouped, they file under Remote and Exited disclosures.
     @ViewBuilder
     private func providerSessionGroups(_ provider: String) -> some View {
-        let groups = appState.sidebarRemoteGroups(provider: provider)
+        let layout = appState.sidebarProviderLayout(provider: provider, grouped: workflowGroups)
         let remoteID = SidebarGroupID(owner: .provider(provider), kind: .remote)
         let exitedID = SidebarGroupID(owner: .provider(provider), kind: .exited)
-        if !groups.isEmpty {
+        sessionRows(layout.inlineSessions, depth: 0)
+        if let groups = layout.remoteGroups {
             SidebarGroupHeader(id: remoteID, title: "Remote", summary: groups.summary)
                 .listRowInsets(childInsets)
             if appState.expandedSidebarGroups.contains(remoteID) {

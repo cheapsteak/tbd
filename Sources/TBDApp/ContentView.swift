@@ -291,8 +291,20 @@ struct ContentView: View {
                 if let selection = appState.selectedRemoteSession {
                     let showsReconnect = appState.attachedRemoteSelections.contains(selection)
                     let showsStop = appState.remoteSessionShowsStop(selection)
-                    if showsReconnect || showsStop {
+                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                    if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
+                            if showsTranscriptToggle {
+                                // One preference for every remote session
+                                // (`remoteTranscriptOpen`), not per session.
+                                Button {
+                                    appState.toggleRemoteTranscriptOpen()
+                                } label: {
+                                    Image(systemName: appState.remoteTranscriptOpen
+                                          ? "text.bubble.fill" : "text.bubble")
+                                }
+                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                            }
                             if showsReconnect {
                                 // Restarts the local `attach` child in place —
                                 // the way out of a pane whose transport died
@@ -426,6 +438,18 @@ struct ContentView: View {
                 set: { if !$0 { appState.alertMessage = nil } }
             )
         ) {
+            // Read once: every button below closes the alert, which clears
+            // the path, so each action must use this captured copy.
+            if let path = appState.alertRevealPath {
+                Button("Copy Path") {
+                    appState.pasteboardWriter(path)
+                    appState.alertMessage = nil
+                }
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                    appState.alertMessage = nil
+                }
+            }
             Button("OK") { appState.alertMessage = nil }
         } message: {
             Text(appState.alertMessage ?? "")
@@ -1116,12 +1140,9 @@ struct PRButtonLabel: View {
     /// outputs are `\\`, `\-` and `\|`), so a literal `"nil"` reason no longer
     /// reads as an absent one either.
     ///
-    /// `nonisolated` because it is a pure string transform and the other
-    /// once-materialized menu in the app — the status bar's `+N` overflow —
-    /// keys itself the same way from nonisolated
-    /// `PRBindingPresentation.menuRowsID`. `PRButtonLabel`'s `View` conformance
-    /// infers whole-type `@MainActor` isolation, which would otherwise put this
-    /// out of reach there and invite a second, subtly different copy.
+    /// `nonisolated` because it is a pure string transform with no actor of
+    /// its own; `PRButtonLabel`'s `View` conformance would otherwise infer
+    /// whole-type `@MainActor` isolation onto it.
     nonisolated static func escapedIDField(_ value: String?) -> String {
         guard let value else { return #"\0"# }
         return value
@@ -1286,7 +1307,7 @@ private struct FilePanelDivider: View {
         Color.clear
             .frame(width: 8)
             .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
-            .cursor(.resizeLeftRight)
+            .pointerStyle(.columnResize)
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in

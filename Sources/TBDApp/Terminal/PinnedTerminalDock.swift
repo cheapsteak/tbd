@@ -14,7 +14,7 @@ struct PinnedTerminalDock: View {
 
         GeometryReader { geometry in
             let totalHeight = geometry.size.height
-            let dividerThickness: CGFloat = 4
+            let dividerThickness = SplitDividerMetrics.lineThickness
             let totalDividerSpace = dividerThickness * CGFloat(max(count - 1, 0))
             let available = max(totalHeight - totalDividerSpace, 0)
 
@@ -33,6 +33,7 @@ struct PinnedTerminalDock: View {
                             availableSpace: available
                         )
                         .frame(height: dividerThickness)
+                        .zIndex(1)
                     }
                 }
             }
@@ -57,9 +58,7 @@ private struct DockCellDivider: View {
     var body: some View {
         Rectangle()
             .fill(Color.gray.opacity(0.3))
-            .contentShape(Rectangle())
-            .cursor(.resizeUpDown)
-            .overlay(alignment: .top) {
+            .overlay {
                 if dragOffset != 0 {
                     Rectangle()
                         .fill(Color.accentColor.opacity(0.6))
@@ -68,33 +67,41 @@ private struct DockCellDivider: View {
                         .allowsHitTesting(false)
                 }
             }
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        if dragStartRatios.isEmpty {
-                            dragStartRatios = ratios
-                        }
-                        guard availableSpace > 0 else { return }
-                        let minRatio: CGFloat = 0.1
-                        let maxDown = (dragStartRatios[index + 1] - minRatio) * availableSpace
-                        let maxUp = -(dragStartRatios[index] - minRatio) * availableSpace
-                        dragOffset = max(maxUp, min(maxDown, value.translation.height))
-                    }
-                    .onEnded { _ in
-                        guard availableSpace > 0 else {
-                            dragOffset = 0
-                            dragStartRatios = []
-                            return
-                        }
-                        let delta = dragOffset / availableSpace
-                        var newRatios = dragStartRatios
-                        newRatios[index] = dragStartRatios[index] + delta
-                        newRatios[index + 1] = dragStartRatios[index + 1] - delta
-                        ratios = newRatios
-                        dragOffset = 0
-                        dragStartRatios = []
-                    }
-            )
+            .overlay {
+                Color.clear
+                    .frame(height: SplitDividerMetrics.grabThickness)
+                    .contentShape(Rectangle())
+                    .pointerStyle(.rowResize)
+                    .gesture(dragGesture)
+            }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragStartRatios.isEmpty {
+                    dragStartRatios = ratios
+                }
+                guard availableSpace > 0 else { return }
+                let minRatio: CGFloat = 0.1
+                let maxDown = (dragStartRatios[index + 1] - minRatio) * availableSpace
+                let maxUp = -(dragStartRatios[index] - minRatio) * availableSpace
+                dragOffset = max(maxUp, min(maxDown, value.translation.height))
+            }
+            .onEnded { _ in
+                guard availableSpace > 0 else {
+                    dragOffset = 0
+                    dragStartRatios = []
+                    return
+                }
+                let delta = dragOffset / availableSpace
+                var newRatios = dragStartRatios
+                newRatios[index] = dragStartRatios[index] + delta
+                newRatios[index + 1] = dragStartRatios[index + 1] - delta
+                ratios = newRatios
+                dragOffset = 0
+                dragStartRatios = []
+            }
     }
 }
 
@@ -133,7 +140,7 @@ private struct PinnedTerminalCell: View {
                         .onTapGesture {
                             appState.navigateToActiveWorktree(terminal.worktreeID, terminalID: terminal.id)
                         }
-                        .cursor(.pointingHand)
+                        .pointerStyle(.link)
                         .help("Go to \(worktree.displayName)")
                 }
                 Spacer()

@@ -44,6 +44,8 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var sidebarWorkflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
@@ -76,9 +78,10 @@ struct GeneralSettingsTab: View {
                 Toggle("Enable macOS notifications", isOn: $enableNotifications)
                     .help("Show system notifications when background tasks complete")
                 Toggle("Enable notification sounds", isOn: $enableSounds)
-                    .help("Play a sound when background tasks complete")
+                    .disabled(!enableNotifications)
+                    .help("Play a sound with each macOS notification. The sound follows Focus and Do Not Disturb, like the notification itself.")
 
-                if enableSounds {
+                if enableNotifications && enableSounds {
                     HStack {
                         Picker("Sound", selection: Binding(
                             get: { customPath.isEmpty ? soundName : "__custom__" },
@@ -163,11 +166,16 @@ struct GeneralSettingsTab: View {
                 ))
                 .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree. Each worktree can override this from its PR toolbar menu.")
 
+                prPollScheduleToggle
+
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
 
                 Toggle("Put the project chevron before the name", isOn: $chevronBeforeProjectName)
                     .help("Off: each project's expand/collapse chevron trails its name, appearing on hover alongside the row's +, so its position shifts with the length of each name. On: the chevron leads the name in the same column on every row, always visible, and the sidebar's titles and rows shift right to clear that column.")
+
+                Toggle("Group hibernated, remote and exited worktrees", isOn: $sidebarWorkflowGroups)
+                    .help("Off: every worktree and remote session stays in its usual place in the sidebar. On: remote and exited work files under a collapsible Remote group, and wholly parked worktrees under a Hibernated group, in each project and in Scratch. Groups you expand stay expanded across restarts.")
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
@@ -177,12 +185,18 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
                 ))
                 .help(Self.autoCreateNotesHelp)
+            }
 
+            Section("Cleanup") {
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
                     set: { newValue in Task { await appState.setGCEnabled(newValue) } }
                 ))
                 .help("Reaps Claude agent worktrees whose run has ended, snapshot-first. Restore from History → Reclaimed.")
+
+                ForEach(GCCollector.allCases, id: \.self) { collector in
+                    gcCollectorToggle(collector)
+                }
             }
 
             Section("Claude") {
@@ -203,7 +217,6 @@ struct GeneralSettingsTab: View {
                 .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
-                transcriptComposerToggle
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
                 Picker("Usage reset times", selection: $usageResetTimeStyle) {
@@ -366,24 +379,6 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Message-composer opt-in, shown beside the live-transcript toggle because
-    /// it is the transcript pane it appears in. Reads the persisted flag from
-    /// `daemon.capabilities` and writes via `config.setTranscriptComposerEnabled`.
-    /// Off by default (soaking). No `Supported` companion: unlike the pty-holder
-    /// gate there is no second runtime condition — a daemon that reports the
-    /// capability can serve every part of the feature.
-    @ViewBuilder
-    private var transcriptComposerToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Message composer in the transcript pane", isOn: Binding(
-            get: { capabilities?.transcriptComposerEnabled ?? false },
-            set: { newValue in
-                Task { await appState.setTranscriptComposerEnabled(newValue) }
-            }
-        ))
-        .help(AppState.transcriptComposerHelp)
-    }
-
     /// Ask for a first message when creating a worktree. Reads the persisted
     /// flag from `daemon.capabilities` and writes via `config.setQueuedPrompt`.
     /// Off by default (soaking).
@@ -443,6 +438,47 @@ struct GeneralSettingsTab: View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    /// One opt-in orphan-GC collector. Reads the daemon `Config` mirror and
+    /// writes the same RPC as its `tbd gc` subcommand. Disabled while the
+    /// master switch is off, since the daemon reads each one on top of it.
+    @ViewBuilder
+    private func gcCollectorToggle(_ collector: GCCollector) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle(collector.label, isOn: Binding(
+                get: { appState.gcCollectorEnabled(collector) },
+                set: { newValue in Task { await appState.setGCCollectorEnabled(collector, newValue) } }
+            ))
+            .help(collector.help)
+            Text(Self.gcCollectorCaption(collector, cleanupEnabled: appState.gcEnabled))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(!appState.gcEnabled)
+    }
+
+    static func gcCollectorCaption(_ collector: GCCollector, cleanupEnabled: Bool) -> String {
+        cleanupEnabled
+            ? collector.caption
+            : "\(collector.caption) Requires automatic cleanup to be on."
+    }
+
+    /// Schedule-based PR polling. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
+    /// which the daemon applies at once. Off by default (soaking).
+    @ViewBuilder
+    private var prPollScheduleToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Poll PRs on a schedule", isOn: Binding(
+            get: { capabilities?.prPollScheduleEnabled ?? Config.prPollScheduleDefault },
+            set: { newValue in Task { await appState.setPRPollScheduleEnabled(newValue) } }
+        ))
+        .help(Self.prPollScheduleHelp)
+    }
+
+    static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
+        + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
+        + "while TBD is in front, and every 5 minutes otherwise."
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.
@@ -754,7 +790,7 @@ struct GeneralSettingsTab: View {
 
     private func pickCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -767,7 +803,7 @@ struct GeneralSettingsTab: View {
 
     private func pickErrorCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+        panel.allowedContentTypes = NotificationSoundPlayer.notificationCenterSoundExtensions.sorted()
             .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
