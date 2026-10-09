@@ -213,7 +213,7 @@ struct ProfileCommandsTests {
     @Test func subcommandsRegistered() {
         let names = ProfileCommand.configuration.subcommands.map { String(describing: $0) }
         #expect(names == ["ProfileList", "ProfileSetDefault", "ProfileLogin",
-                          "ProfileBalancing", "ProfilePool"])
+                          "ProfileBalancing", "ProfilePool", "ProfileRename"])
     }
 
     @Test func setDefaultParsesClearFlag() throws {
@@ -237,5 +237,17 @@ struct ProfileCommandsTests {
     @Test func listParsesJSONFlag() throws {
         let cmd = try ProfileList.parse(["--json"])
         #expect(cmd.json)
+    }
+
+    @Test func renameParsesProfileAndNewName() throws {
+        let cmd = try ProfileRename.parse(["acme", "acme-prod"])
+        #expect(cmd.name == "acme")
+        #expect(cmd.newName == "acme-prod")
+    }
+
+    @Test func renameRequiresANewName() {
+        #expect(throws: Error.self) {
+            _ = try ProfileRename.parse(["acme"])
+        }
     }
 }

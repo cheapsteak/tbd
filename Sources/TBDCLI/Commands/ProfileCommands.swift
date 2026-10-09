@@ -17,6 +17,7 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileLogin.self,
             ProfileBalancing.self,
             ProfilePool.self,
+            ProfileRename.self,
         ]
     )
 }
@@ -583,5 +584,35 @@ struct ProfilePool: AsyncParsableCommand {
             method: RPCMethod.modelProfileSetPoolOptOut,
             params: ModelProfileSetPoolOptOutParams(id: entry.profile.id, optOut: optOut))
         print("Profile '\(entry.profile.name)' is now \(optOut ? "excluded" : "included") in the balancing pool.")
+    }
+}
+
+// MARK: - profile rename
+
+struct ProfileRename: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Rename a profile",
+        discussion: """
+            Only the display name changes. The profile keeps its id, so the \
+            global default, repo overrides, pool membership and the sessions \
+            already running on it all still point at it.
+            """
+    )
+    @Argument(help: "Profile name or UUID") var name: String
+    @Argument(help: "New name") var newName: String
+    mutating func run() async throws {
+        let client = SocketClient()
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self
+        )
+        let entry = try resolveProfile(named: name, in: list.profiles)
+        // The daemon trims the name and refuses an empty or taken one.
+        try client.callVoid(
+            method: RPCMethod.modelProfileRename,
+            params: ModelProfileRenameParams(id: entry.profile.id, name: newName))
+        let renamed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("Renamed profile '\(entry.profile.name)' to '\(renamed)'.")
     }
 }
