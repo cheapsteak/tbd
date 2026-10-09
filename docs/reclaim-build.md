@@ -76,7 +76,7 @@ Worktrees created before this change may have an untracked `.sourcekit-lsp/confi
 A local debug build writes about 900 MB of `.dSYM` bundles into each worktree's `.build/<triple>/debug`: 646 MB for `TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM`, about 100 MB each for `TBDApp` and `TBDDaemon`, and less for the other products. Nothing local reads them, so three scripts delete them, all through `scripts/dsym-prune-lib.sh`:
 
 - **`scripts/restart.sh`** – after a successful build, before the bundle is assembled. A failed build exits first and prunes nothing.
-- **`scripts/test.sh`** – from its EXIT trap, so on a green run, a red one, and a killed one alike. The run's exit status is never changed by the prune.
+- **`scripts/test.sh`** – from its EXIT trap, so on a green run, a red one, and one ended by SIGTERM alike. The run's exit status is never changed by the prune.
 - **`scripts/reclaim-build.sh`** – the `dsym` tier above, for worktrees built some other way, such as a bare `scripts/swift-safe build`.
 
 Why deleting them is safe:
@@ -89,6 +89,7 @@ Opt-outs:
 
 - **`TBD_KEEP_DSYM=1`** – keeps the bundles in all three scripts, for a session that wants to debug from a self-contained `.dSYM`, or move a binary away from its `.o` files.
 - **`CI`** – when set, none of the three prunes. Runners are ephemeral, so there is no disk to win back.
+- **A running build** – while a SwiftPM build, compile, link or `dsymutil` step whose command line names the worktree is still running, the prune leaves the bundles alone and says so: deleting a bundle `dsymutil` is still writing fails that link. The next script run or reclaim sweep picks them up.
 
 ## Install / uninstall
 ```sh

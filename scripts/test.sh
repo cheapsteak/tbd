@@ -957,10 +957,10 @@ tmux_tmpdir="$scratch_home/tmux"
 # THE .dSYM PRUNE RIDES ALONG, AND IT MUST NEVER DECIDE THE EXIT STATUS. Linking
 # the test bundle writes a 646 MB `TBDPackageTests.dSYM` (plus one per product)
 # that nothing local reads — see scripts/dsym-prune-lib.sh — so the trap drops
-# them on every exit, red, green or killed. bash keeps the status `exit` was
+# them on every exit, red, green or TERMed. bash keeps the status `exit` was
 # given when an EXIT trap returns normally, but a failing command under `set -e`
 # inside the trap would replace it; hence the `|| true`. Skipped under CI and
-# with TBD_KEEP_DSYM=1.
+# with TBD_KEEP_DSYM=1, and held off while another build here is running.
 cleanup() {
   sweep_tmux_servers "$scratch_home"
   sweep_holders "$scratch_home"

@@ -221,11 +221,12 @@ if [ "$skip_build" = false ]; then
     # shipped, so this only has to stop.
     [ "$build_status" -eq 0 ] || exit "$build_status"
 
-    # Drop the debug .dSYM bundles in .build (up to ~900 MB with the test
-    # bundle's, which test.sh's link writes): lldb reads
-    # the same DWARF from the .o files through the binary's debug map, and
-    # nothing ships them. Never fails the restart; skipped under CI and with
-    # TBD_KEEP_DSYM=1. See scripts/dsym-prune-lib.sh.
+    # Drop the debug .dSYM bundles in .build (up to ~900 MB, most of it the
+    # test bundle's, which test.sh's link writes): lldb reads the same DWARF
+    # from the .o files through the binary's debug map, and nothing ships them.
+    # Never fails the restart; skipped under CI, with TBD_KEEP_DSYM=1, and
+    # while another build in this worktree is still running. See
+    # scripts/dsym-prune-lib.sh.
     # shellcheck source=/dev/null
     source "$REPO_ROOT/scripts/dsym-prune-lib.sh"
     prune_debug_dsyms "$REPO_ROOT" || true

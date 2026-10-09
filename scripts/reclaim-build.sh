@@ -400,7 +400,7 @@ main() {
           if [[ "$tier" == "tier1" ]]; then
             if rm -rf "$path/.build/index-build"; then log "reclaimed index-build: $path"; else log "rm failed: $path"; fi
           elif [[ "$tier" == "dsym" ]]; then
-            log "reclaiming dSYMs: $path"; prune_debug_dsyms "$path" >&2
+            log "reclaiming dSYMs: $path"; DSYM_PRUNE_PS_CMD="${RECLAIM_PS_CMD:-}" prune_debug_dsyms "$path" >&2
           else
             if rm -rf "$path/.build"; then log "reclaimed .build: $path"; else log "rm failed: $path"; fi
           fi
