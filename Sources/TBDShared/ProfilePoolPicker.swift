@@ -345,7 +345,7 @@ public enum ProfilePoolPicker {
     /// - `.oauth`: 300 seconds (5 minutes). Signed-in profiles are refreshed ~90s;
     ///   five minutes means several consecutive misses.
     /// - `.oauthToken`: 900 seconds (15 minutes). Token profiles refresh on a
-    ///   five-minute activity floor; without the longer threshold, the reading would
+    ///   five-minute cadence; without the longer threshold, the reading would
     ///   be marked stale the instant it was fetched.
     /// - `.apiKey`, `.bedrock`: 300 seconds (unchanged; these kinds are not pool-eligible
     ///   and this function is documented for reference completeness).
