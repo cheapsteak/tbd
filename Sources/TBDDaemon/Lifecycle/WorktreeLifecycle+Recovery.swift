@@ -33,9 +33,12 @@ extension WorktreeLifecycle {
     ///   resume exactly like the create path. Never blocks startup.
     /// - Checkout exists but no terminals at all → the daemon died after
     ///   `git worktree add` but before any tmux spawn. There is no hook
-    ///   window to resume. TBD created the checkout and reconcile does not
-    ///   adopt trees that have no row, so the row is kept and flipped to
-    ///   `.active` with no terminals (`activateTerminalLessCreate`).
+    ///   window to resume. If `git worktree list` names the row's path, TBD
+    ///   created that checkout and reconcile does not adopt trees that have no
+    ///   row, so the row is kept and flipped to `.active` with no terminals
+    ///   (`activateTerminalLessCreate`). If git does not list the path (a plain
+    ///   directory, a failed listing, a missing repo), the row and its records
+    ///   are deleted and the directory is not touched.
     /// - Checkout + pre-session terminal exist but the repo row is gone →
     ///   the wait can never be resumed (phase 3 needs the repo) and nothing
     ///   else ever resolves a `.creating` row, so skipping would strand it
@@ -117,7 +120,26 @@ extension WorktreeLifecycle {
             }
 
             guard let preSessionTerminal else {
-                await activateTerminalLessCreate(row, reposDir: unsentPromptsReposDir)
+                // A directory at the row's path is not enough: only a path git
+                // lists as a worktree of this repo is a checkout TBD made. Any
+                // other directory (a plain folder, or a listing that failed or
+                // came back without the path) takes the old delete, which
+                // removes the row and its records and never touches the
+                // directory itself.
+                if await gitListsCheckout(row) {
+                    await activateTerminalLessCreate(row, reposDir: unsentPromptsReposDir)
+                } else {
+                    logger.warning("recovery: deleting terminal-less .creating worktree \(worktree.id, privacy: .public) — git does not list \(row.localPath, privacy: .public) as a worktree of its repo, so it is not a checkout TBD can vouch for; the directory is left alone")
+                    do {
+                        try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                        try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                        // Hard delete: closed-terminal history (rows + files) goes too.
+                        try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
+                        await rollBackStrandedCreate(worktree.id, reposDir: unsentPromptsReposDir)
+                    } catch {
+                        logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
                 continue
             }
 
@@ -201,6 +223,19 @@ extension WorktreeLifecycle {
             resumed.append(task)
         }
         return resumed
+    }
+
+    /// Whether `git worktree list` for the row's repo names the row's path.
+    /// False on any doubt: no repo, a repo that is gone, or a listing that
+    /// failed. Activating on a failed listing would vouch for a directory git
+    /// never confirmed.
+    private func gitListsCheckout(_ row: Worktree) async -> Bool {
+        guard let repoID = row.repoID,
+              let repo = (try? await db.repos.get(id: repoID)) ?? nil,
+              let listed = try? await git.worktreeList(repoPath: repo.path) else {
+            return false
+        }
+        return listed.contains { $0.path == row.localPath }
     }
 
     /// Keep a terminal-less `.creating` row whose checkout exists and flip it to

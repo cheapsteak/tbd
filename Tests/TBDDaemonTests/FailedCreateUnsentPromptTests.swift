@@ -39,6 +39,19 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
             path: "/tmp/fcup-wt-\(UUID())", tmuxServer: "srv", status: .creating)
     }
 
+    /// A real git repo with a real linked worktree, for the recovery paths that
+    /// only activate a row whose path `git worktree list` names.
+    private func makeRepoWithCheckout(
+        _ db: TBDDatabase
+    ) async throws -> (repo: Repo, checkout: URL, cleanup: () -> Void) {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "r", defaultBranch: "main")
+        let checkout = tempDir.appendingPathComponent("checkout-\(UUID().uuidString.prefix(8))")
+        try await shell("git worktree add -b tbd/brave-otter '\(checkout.path)'", at: repoDir)
+        return (repo, checkout, { try? FileManager.default.removeItem(at: tempDir) })
+    }
+
     @Test func aParkedPromptIsSavedAndNamedInTheDelta() async throws {
         let (lifecycle, db) = try makeLifecycle()
         let row = try await makeCreatingRow(db)
@@ -119,10 +132,8 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
     /// delivered into whatever terminal the row gets later.
     @Test func activatingATerminalLessRowSavesThenClearsItsParkedPrompt() async throws {
         let (lifecycle, db) = try makeLifecycle()
-        let repo = try await db.repos.create(
-            path: "/tmp/fcup-\(UUID())", displayName: "r", defaultBranch: "main")
-        let checkout = reposDir.appendingPathComponent("checkout-\(UUID())")
-        try fm.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
         let row = try await db.worktrees.create(
             repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
             path: checkout.path, tmuxServer: "srv", status: .creating)
@@ -147,10 +158,8 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
     /// archive stamp, the same outcome as a revive with `skipClaude`.
     @Test func activatingATerminalLessMidReviveRowKeepsItsArchivedSessions() async throws {
         let (lifecycle, db) = try makeLifecycle()
-        let repo = try await db.repos.create(
-            path: "/tmp/fcup-\(UUID())", displayName: "r", defaultBranch: "main")
-        let checkout = reposDir.appendingPathComponent("checkout-\(UUID())")
-        try fm.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
         let row = try await db.worktrees.create(
             repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
             path: checkout.path, tmuxServer: "srv", status: .active)
