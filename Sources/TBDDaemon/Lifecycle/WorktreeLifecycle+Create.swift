@@ -502,7 +502,8 @@ extension WorktreeLifecycle {
                 // The checkout exists from here on. Recorded before any
                 // bookkeeping below can throw, so a failed create hands this
                 // checkout back instead of orphaning it.
-                await createdCheckouts.record(worktreeID: worktreeID, path: result.path)
+                // The fresh-branch leg never checks out a fork's PR head.
+                await createdCheckouts.record(worktreeID: worktreeID, path: result.path, foreignHead: false)
                 resultPath = result.path
                 resultBranch = result.branch
             }
