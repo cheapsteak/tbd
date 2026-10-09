@@ -28,6 +28,21 @@ struct ClockTestSupportTests {
         }
     }
 
+    // The two TestClock tests below are this handshake's own self-tests, so
+    // they stay on `TestClock` (moving them to `EventDrivenTestClock` would
+    // test that clock, which `EventDrivenTestClockSelfTests` already covers).
+    // What they change is the arming guard. `advanceWhenSuspended`'s
+    // `checkSuspension()` probe is a background-QoS `megaYield`: twenty
+    // serially-awaited tasks, i.e. many scheduling hops, not one. Both tests
+    // went red on the saturated fast pass with the same signature, "no task was
+    // suspended on the clock within 45.0 seconds", and no logic assertion
+    // failing. That pass's own green-run latency is p50 65.6 s per test. A
+    // multi-hop bounded wait there takes its budget from `TestDeadlines`
+    // (Tests/CLAUDE.md, "No bounded wait in a fast-pass target carries a
+    // literal deadline"; `pollUntilTrue`'s "size it with
+    // `TestDeadlines.saturatedPass` unless the wait is one scheduling hop").
+    // One 90 s guard per test sits well inside `.clockDriven`'s 240 s limit.
+
     @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async throws {
         let clock = TestClock()
         let subject = DelayedFlag(clock: clock)
@@ -36,31 +51,33 @@ struct ClockTestSupportTests {
         let firedBeforeAdvance = await subject.fired
         #expect(firedBeforeAdvance == false)
 
-        await clock.advanceWhenSuspended(by: .seconds(30))
+        await clock.advanceWhenSuspended(by: .seconds(30), timeout: TestDeadlines.saturatedPass)
         try await task.value
 
         let firedAfterAdvance = await subject.fired
         #expect(firedAfterAdvance)
     }
 
-    /// Advancing past an armed sleeper moves `now` by exactly the advance.
+    /// `advanceWhenSuspended` moves `now` by exactly the requested duration,
+    /// not merely to the armed sleeper's deadline.
     ///
-    /// Runs on `EventDrivenTestClock` rather than `TestClock`: the polled
-    /// `advanceWhenSuspended` handshake (a megaYield probe every 25 ms) starved
-    /// past its 45 s guard on the saturated fast pass, while this test asserts
-    /// only the virtual-time contract. The arming wait parks on a continuation
-    /// signalled by the sleep itself, with a budget sized to the pass's latency.
-    /// `advanceWhenSuspended` itself stays covered by the test above. The name
-    /// is kept so the flake ledger's identity for this test is unchanged.
+    /// The advance (7 s) deliberately overshoots the sleep (5 s): `TestClock`
+    /// steps `now` to each due sleeper's deadline before settling on the
+    /// target, so an advance equal to the sleep could not tell "moved by the
+    /// duration" from "moved to the next deadline". `now` is read before the
+    /// task is joined. If the helper stopped advancing, the sleeper would never
+    /// be released, and joining first would turn this red assertion into an
+    /// unattributed hang at the suite's time limit.
     @Test func advanceWhenSuspendedMovesTheClockForward() async throws {
-        let clock = EventDrivenTestClock()
+        let clock = TestClock()
         let before = clock.now
 
         let task = Task { try await clock.sleep(for: .seconds(5)) }
-        try await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: TestDeadlines.saturatedPass)
-        try await task.value
+        defer { task.cancel() }
+        await clock.advanceWhenSuspended(by: .seconds(7), timeout: TestDeadlines.saturatedPass)
 
-        #expect(before.duration(to: clock.now) == .seconds(5))
+        try #require(before.duration(to: clock.now) == .seconds(7))
+        try await task.value
     }
 
     @Test func testDateSourceReadsWritesAndAdvances() {
