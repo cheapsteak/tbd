@@ -95,13 +95,18 @@ struct RemoteAttachPagerDiagnosisTests {
             }
         }
 
-        func registerProvider() {
+        /// `described: false` registers a provider whose `describe` has not
+        /// succeeded yet, so what it supports is not known.
+        func registerProvider(described: Bool = true) {
             unregisterProvider()
             state.remoteProviders.append(RemoteProviderStatus(
                 config: RemoteAttachPagerDiagnosisTests.providerConfig,
-                describe: ProviderDescribe(
-                    name: RemoteAttachPagerDiagnosisTests.providerName, capabilities: ["attach", "log"]),
-                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil))
+                describe: described
+                    ? ProviderDescribe(
+                        name: RemoteAttachPagerDiagnosisTests.providerName, capabilities: ["attach", "log"])
+                    : nil,
+                health: described ? .ok : .error,
+                errorMessage: nil, remediationLabel: nil, remediationCommand: nil))
         }
 
         func unregisterProvider() {
@@ -236,6 +241,28 @@ struct RemoteAttachPagerDiagnosisTests {
             #expect(h.shownDiagnosis(h.tabs.first) == .providerNotRegistered(provider: Self.providerName))
 
             h.registerProvider()
+            h.update(mounts: [key(Self.s1)])
+
+            #expect(h.tabs.count == 1)
+            #expect(h.isLiveTerminal(h.tabs.first, for: key(Self.s1)))
+            #expect(h.coordinator.diagnosed.isEmpty)
+        }
+    }
+
+    /// The third way a diagnosis heals, and the one where the first answer was
+    /// never a refusal: a provider that has not been described yet is "not
+    /// known", not "declined attach", and the tab it gets is replaced by the
+    /// live terminal when `describe` lands, without reopening the session.
+    @Test("a tab for a provider that has not been described yet becomes a terminal once it is")
+    func unknownCapabilitiesHealWhenDescribeLands() {
+        withHarness { h in
+            h.registerProvider(described: false)
+            h.update(mounts: [key(Self.s1)])
+
+            #expect(h.shownDiagnosis(h.tabs.first) == .capabilitiesUnknown(provider: Self.providerName))
+            #expect(h.builtTerminals.isEmpty)
+
+            h.registerProvider(described: true)
             h.update(mounts: [key(Self.s1)])
 
             #expect(h.tabs.count == 1)

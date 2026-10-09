@@ -32,6 +32,12 @@ enum RemoteAttachPreflight {
         case sessionBelongsToAnotherProvider(requested: String, actual: String, sessionID: String)
         /// The provider does not declare the `attach` capability.
         case attachUnsupported(provider: String)
+        /// The provider's `describe` has not succeeded, so what it supports is
+        /// not known. Distinct from `attachUnsupported`, which is a positive
+        /// statement that the provider declined attach: here nothing has been
+        /// declared yet, because the provider has not been heard from (not yet
+        /// read, or briefly unreachable).
+        case capabilitiesUnknown(provider: String)
         /// The registry entry's executable isn't there — the missing
         /// local-transport-dependency case.
         case executableMissing(provider: String, command: String)
@@ -51,6 +57,7 @@ enum RemoteAttachPreflight {
             case .providerNotRegistered: return "Provider not registered"
             case .sessionBelongsToAnotherProvider: return "Session belongs to another provider"
             case .attachUnsupported: return "Attach not supported"
+            case .capabilitiesUnknown: return "Provider capabilities not known yet"
             case .executableMissing: return "Attach command not found"
             case .executableNotRunnable: return "Attach command not executable"
             }
@@ -75,6 +82,11 @@ enum RemoteAttachPreflight {
                 return "\"\(provider)\" does not declare the attach capability, so TBD never "
                     + "invokes its attach verb. Use the log view, or send input, if those are "
                     + "declared."
+            case .capabilitiesUnknown(let provider):
+                return "TBD has not been able to read \"\(provider)\"'s capabilities yet (its "
+                    + "describe has not succeeded), so it cannot tell whether attach is "
+                    + "supported and will not guess. This clears once the provider answers; if "
+                    + "it does not, check the provider's status."
             case .executableMissing(let provider, let command):
                 return "\"\(provider)\" is registered to run \(command), which does not exist on "
                     + "this machine. Install the provider (or its transport helper), or correct "
@@ -145,7 +157,14 @@ enum RemoteAttachPreflight {
         // that would turn an ordinary mirror lag into a spurious refusal to
         // attach through the provider the user actually asked for.
 
-        guard provider.describe?.capabilities.contains("attach") == true else {
+        // No `describe` is not a `describe` that omits attach: until the
+        // provider has answered, nothing is known about what it supports, and
+        // saying "does not declare attach" would be a false statement about a
+        // provider that has declared nothing.
+        guard let describe = provider.describe else {
+            return .capabilitiesUnknown(provider: provider.config.name)
+        }
+        guard describe.capabilities.contains("attach") else {
             return .attachUnsupported(provider: provider.config.name)
         }
 

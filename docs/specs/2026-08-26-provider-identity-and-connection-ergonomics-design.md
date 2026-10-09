@@ -204,6 +204,11 @@ Diagnoses, each with a title and an actionable sentence naming the provider:
 - `sessionBelongsToAnotherProvider` — this session id exists, under a
   different registry entry. Names both.
 - `attachUnsupported` — the provider does not declare the `attach` capability.
+- `capabilitiesUnknown` — the provider's `describe` has not succeeded, so what
+  it supports is not known. Kept apart from `attachUnsupported`, which is a
+  positive statement that attach was declined; here the provider has declared
+  nothing yet, and the pane re-checks on every render, so it clears when the
+  provider answers.
 - `executableMissing` / `executableNotRunnable` — the registry entry's `exec`
   is absent or not executable. This is the missing-local-transport-dependency
   case, and it is the one that previously produced a blank pane.

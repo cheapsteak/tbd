@@ -118,6 +118,29 @@ struct RemoteAttachPreflightTests {
         #expect(diagnosis.detail.contains("log view"))
     }
 
+    @Test("a provider whose capabilities are not known yet is not reported as declining attach")
+    func distinguishesUnknownCapabilitiesFromAnUndeclaredAttach() {
+        // `describe` has not succeeded (not yet read, or briefly unreachable):
+        // nothing has been declared, so "does not declare attach" would be a
+        // false statement about the provider.
+        let undescribed = RemoteProviderStatus(
+            config: RemoteProviderConfig(name: "agentbox", exec: "/opt/agentbox/bin/agentbox"),
+            describe: nil,
+            health: .error, errorMessage: "describe failed", remediationLabel: nil, remediationCommand: nil)
+
+        let diagnosis = resolve(
+            provider: "agentbox",
+            providers: [undescribed],
+            sessions: [session(provider: "agentbox", id: "s1")])
+
+        #expect(diagnosis == .capabilitiesUnknown(provider: "agentbox"))
+        #expect(diagnosis != .attachUnsupported(provider: "agentbox"))
+        #expect(diagnosis.readyConfig == nil, "unknown is not permission to attach")
+        #expect(diagnosis.title == "Provider capabilities not known yet")
+        #expect(diagnosis.detail.contains("agentbox"))
+        #expect(diagnosis.detail.contains("does not declare") == false)
+    }
+
     // MARK: - Local transport dependency
 
     @Test("a missing local executable is an actionable diagnosis, not a blank pane")
