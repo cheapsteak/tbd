@@ -155,6 +155,11 @@ struct HangStackWriterRetentionTests: ~Copyable {
         #expect(try names().count == HangStackRetention.maxFiles)
     }
 
+    @Test("a default Config arms the write-time cap: the shipped default is on")
+    func defaultConfigArmsTheCap() {
+        #expect(HangStackWriter.retentionArmed(for: Config()))
+    }
+
     @Test("resolution is the conjunction, in every combination")
     func retentionArmedIsTheConjunction() {
         #expect(!HangStackWriter.retentionArmed(
