@@ -72,15 +72,18 @@ enum ViewerScreenProducer {
     ///   `lastByteAt`, so a session that has been silent since before its
     ///   viewer arrived reports the age of the store itself rather than zero.
     /// - Parameter now: the same monotonic clock `lastByteAt` was read from.
-    /// - Returns: nil when the terminal could not be reached at all, which the
-    ///   caller reports as `.noTerminal` rather than as silence.
+    ///
+    /// Total: a live `TerminalView` always has a terminal to lock, so there is
+    /// no "could not read it" outcome here. Whether this store exists at all is
+    /// the caller's question, and the caller answers it with `.noTerminal`
+    /// before asking.
     static func answer(
         for request: SidecarScreenRequest,
         terminalView: TerminalView,
         lastByteAt: ContinuousClock.Instant?,
         attachedAt: ContinuousClock.Instant,
         now: ContinuousClock.Instant
-    ) -> Answer? {
+    ) -> Answer {
         let observed = terminalView.withTerminal { terminal -> ViewerObservation in
             let projected = TerminalScreenProjection.project(terminal, maxLines: request.lines)
             guard request.wantStyledCapture else {
@@ -91,7 +94,6 @@ enum ViewerScreenProducer {
                 styled: TerminalCellWalk.styledHistory(
                     of: terminal, maxScrollbackLines: request.styledScrollbackLines))
         }
-        guard let observed else { return nil }
         let projected = observed.projected
 
         let payload = ViewerScreenPayload(

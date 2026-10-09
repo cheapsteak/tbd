@@ -57,12 +57,12 @@ struct ViewerScreenProducerTests {
     @Test("the payload's lines, viewport, cursor and modes are the shared projection's")
     func payloadMatchesTheSharedProjection() throws {
         try withView(feeding: "\u{1b}[?2004h\u{1b}[?1hfirst\r\nsecond\r\n\u{1b}[2;4H") { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: Self.start, attachedAt: Self.start, now: Self.start))
-            let projected = try #require(
-                view.withTerminal { TerminalScreenProjection.project($0, maxLines: 50) })
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: Self.start, attachedAt: Self.start, now: Self.start)
+            let projected = view.withTerminal {
+                TerminalScreenProjection.project($0, maxLines: 50)
+            }
 
             #expect(answer.payload.lines == projected.lines)
             #expect(answer.payload.viewportStart == projected.viewportStart)
@@ -84,16 +84,14 @@ struct ViewerScreenProducerTests {
     func requestedDepthBoundsTheLines() throws {
         let body = (1...80).map { "line \($0)" }.joined(separator: "\r\n")
         try withView(feeding: body) { view in
-            let shallow = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(lines: 5), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let shallow = ViewerScreenProducer.answer(
+                for: request(lines: 5), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(shallow.payload.lines.count <= 5)
 
-            let deep = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(lines: 500), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let deep = ViewerScreenProducer.answer(
+                for: request(lines: 500), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(deep.payload.lines.count > shallow.payload.lines.count,
                     "a deeper request must actually reach further back")
         }
@@ -104,10 +102,9 @@ struct ViewerScreenProducerTests {
     @Test("a zero-line request carries no lines but still carries the modes")
     func zeroLineRequestCarriesModesOnly() throws {
         try withView(feeding: "\u{1b}[?2004hvisible text") { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(lines: 0), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let answer = ViewerScreenProducer.answer(
+                for: request(lines: 0), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.payload.lines.isEmpty)
             #expect(answer.payload.modes.bracketedPaste)
@@ -123,11 +120,10 @@ struct ViewerScreenProducerTests {
     func ageComesFromTheLastByteStamp() throws {
         try withView(feeding: "hello") { view in
             let fedAt = Self.start
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: fedAt, attachedAt: fedAt.advanced(by: .seconds(-30)),
-                    now: fedAt.advanced(by: .milliseconds(1_250))))
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: fedAt, attachedAt: fedAt.advanced(by: .seconds(-30)),
+                now: fedAt.advanced(by: .milliseconds(1_250)))
 
             #expect(answer.payload.ageMilliseconds == 1_250)
         }
@@ -141,11 +137,10 @@ struct ViewerScreenProducerTests {
     func neverFedStoreAgesFromTheAttach() throws {
         try withView { view in
             let attachedAt = Self.start
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: nil, attachedAt: attachedAt,
-                    now: attachedAt.advanced(by: .milliseconds(700))))
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: nil, attachedAt: attachedAt,
+                now: attachedAt.advanced(by: .milliseconds(700)))
 
             #expect(answer.payload.ageMilliseconds == 700,
                     "with no byte ever consumed the age is the store's own, not zero")
@@ -158,11 +153,10 @@ struct ViewerScreenProducerTests {
     func backwardsClockClampsAtZero() throws {
         try withView { view in
             let fedAt = Self.start
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: fedAt, attachedAt: fedAt,
-                    now: fedAt.advanced(by: .milliseconds(-500))))
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: fedAt, attachedAt: fedAt,
+                now: fedAt.advanced(by: .milliseconds(-500)))
 
             #expect(answer.payload.ageMilliseconds == 0)
         }
@@ -180,10 +174,9 @@ struct ViewerScreenProducerTests {
         // The child hides its cursor. The payload still reports it visible,
         // because this store cannot see the difference — and says so.
         try withView(feeding: "\u{1b}[?25lhidden") { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.payload.cursorVisible == ViewerScreenProducer.cursorVisibleDefault)
             #expect(!answer.payload.cursorVisibleObserved,
@@ -199,10 +192,9 @@ struct ViewerScreenProducerTests {
     @Test("the payload carries no provenance beyond the cursor flag")
     func payloadCarriesNoDaemonProvenance() throws {
         try withView(feeding: "text") { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let answer = ViewerScreenProducer.answer(
+                for: request(), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let encoded = try JSONEncoder().encode(answer.payload)
             let object = try JSONSerialization.jsonObject(with: encoded)
             let fields = try #require(object as? [String: Any])
@@ -218,16 +210,14 @@ struct ViewerScreenProducerTests {
     @Test("the styled capture is produced only when it is asked for")
     func styledCaptureOnlyWhenAsked() throws {
         try withView(feeding: "\u{1b}[31mred line\u{1b}[0m") { view in
-            let without = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(styled: false), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let without = ViewerScreenProducer.answer(
+                for: request(styled: false), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(without.styledCapture == nil)
 
-            let with = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(styled: true), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let with = ViewerScreenProducer.answer(
+                for: request(styled: true), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let capture = try #require(with.styledCapture)
             #expect(capture.contains("red line"))
             #expect(capture.contains("\u{1b}["), "the colours are the point of a styled capture")
@@ -241,10 +231,9 @@ struct ViewerScreenProducerTests {
     @Test("a styled capture ends with an SGR reset and joins with newlines")
     func styledCaptureMatchesTheHistoryShape() throws {
         try withView(feeding: "first\r\nsecond") { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(styled: true), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let answer = ViewerScreenProducer.answer(
+                for: request(styled: true), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let capture = try #require(answer.styledCapture)
 
             #expect(capture.hasSuffix("\u{1b}[0m\n"),
@@ -259,10 +248,9 @@ struct ViewerScreenProducerTests {
     @Test("an empty screen's styled capture is empty rather than a bare reset")
     func emptyScreenGivesAnEmptyCapture() throws {
         try withView { view in
-            let answer = try #require(
-                ViewerScreenProducer.answer(
-                    for: request(styled: true), terminalView: view,
-                    lastByteAt: nil, attachedAt: Self.start, now: Self.start))
+            let answer = ViewerScreenProducer.answer(
+                for: request(styled: true), terminalView: view,
+                lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.styledCapture == "",
                     "the history store records an empty capture as an entry with no capture")

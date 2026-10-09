@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TBDShared
 
 @MainActor
 final class TerminalFocusTarget {

@@ -1531,19 +1531,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             guard reading.hasView, let terminalView, let attachedAt = holderAttachedAt else {
                 return .unavailable(.noTerminal)
             }
-            guard
-                let answer = ViewerScreenProducer.answer(
-                    for: request,
-                    terminalView: terminalView,
-                    lastByteAt: reading.lastByteAt,
-                    attachedAt: attachedAt,
-                    now: ContinuousClock.now)
-            else {
-                // `withTerminal` answered nil, which means the view had no
-                // terminal to lock. Distinct from `.noTerminal` above only in
-                // where it was noticed; the daemon reads both the same way.
-                return .unavailable(.noTerminal)
-            }
+            let answer = ViewerScreenProducer.answer(
+                for: request,
+                terminalView: terminalView,
+                lastByteAt: reading.lastByteAt,
+                attachedAt: attachedAt,
+                now: ContinuousClock.now)
             return .answered(answer.payload, styledCapture: answer.styledCapture)
         }
 
