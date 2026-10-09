@@ -59,6 +59,24 @@ struct RemoteVerbTests {
         #expect(RemoteVerb.transcriptRead(sessionID: "--since")
             == ["transcript", "read", "--since"])
     }
+
+    // MARK: - transcript.tail
+
+    @Test func transcriptTailCapabilityMatchesTheContract() {
+        #expect(RemoteCapability.transcriptTail == "transcript.tail")
+    }
+
+    @Test func transcriptReadTailAsksForTheEnd() {
+        let argv = RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12)
+        #expect(argv == ["transcript", "read", "s-1", "--tail", "12"])
+        #expect(!argv.contains("--since"))
+    }
+
+    @Test func transcriptReadBeforePassesTheCursorVerbatimAndNeverSince() {
+        let argv = RemoteVerb.transcriptReadBefore(sessionID: "s-1", before: "opaque/b 1", count: 12)
+        #expect(argv == ["transcript", "read", "s-1", "--before", "opaque/b 1", "--tail", "12"])
+        #expect(!argv.contains("--since"))
+    }
 }
 
 /// Wire shapes for the two RPCs the remote transcript pane and composer use.

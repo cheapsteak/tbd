@@ -561,8 +561,12 @@ public actor RemoteProviderManager {
         let sightedSince = requestStartedAt ?? now
         let sightings = suppressingDeleted(
             sessions, provider: provider, sightedSince: sightedSince, now: now)
+        // The mirror stores each payload without its transcript hint — see
+        // `RemoteSessionPayload.withoutTranscriptHint`. Everything else below
+        // keeps the full sightings.
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sightings, complete: complete, now: now)
+            provider: provider, sessions: sightings.map(\.withoutTranscriptHint),
+            complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
@@ -648,8 +652,10 @@ public actor RemoteProviderManager {
         else { return }
         let outcome: SnapshotOutcome
         do {
+            // Hint stripped for the mirror only — see
+            // `RemoteSessionPayload.withoutTranscriptHint`.
             outcome = try await db.remoteSessions.upsertOne(
-                provider: provider, session: session, now: arrivedAt)
+                provider: provider, session: session.withoutTranscriptHint, now: arrivedAt)
         } catch {
             remoteLogger.error(
                 "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"

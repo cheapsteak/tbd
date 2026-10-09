@@ -945,6 +945,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
+                return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1115,6 +1117,7 @@ public final class RPCRouter: Sendable {
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
+        result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
         return try RPCResponse(result: result)
     }
 

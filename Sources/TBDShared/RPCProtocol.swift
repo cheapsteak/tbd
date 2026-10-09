@@ -331,6 +331,13 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
+    /// The live remote transcript sync gate
+    /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
+    /// the daemon reads it fresh at every decision — and turning it off drops
+    /// background sync's queue. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetRemoteTranscriptLiveSyncEnabled =
+        "config.setRemoteTranscriptLiveSyncEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -3669,6 +3676,15 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
+/// tail-first loading, earlier-history loading and hint-driven background
+/// sync of remote session transcripts (default OFF during soak). Design:
+/// `docs/specs/2026-09-25-remote-session-transcript-design.md` § Gating.
+public struct ConfigSetRemoteLiveSyncEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
@@ -4067,6 +4083,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             usageCeilingPercent: profileBalancingUsageCeilingPercent,
             maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
     }
+    /// Whether live remote transcript sync is on
+    /// (`remote_transcript_live_sync_enabled`). Default OFF while it soaks.
+    /// Resolved through `Config.remoteTranscriptLiveSyncEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4201,6 +4224,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Int.self, forKey: .profileBalancingUsageCeilingPercent)
         profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+        // New field for the live remote transcript sync gate. A daemon that
+        // does not send it knows nothing about the feature, so fall through to
+        // the shipped default.
+        remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
+            ?? Config.remoteTranscriptLiveSyncEnabledDefault
     }
 }
 

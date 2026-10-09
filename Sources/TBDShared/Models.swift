@@ -1728,6 +1728,15 @@ public struct Config: Codable, Sendable, Equatable {
     /// Balancing's maximum reading age, in seconds, as stored: nil when never
     /// set. Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingMaxReadingAgeSeconds: Int?
+    /// Live remote transcript sync: tail-first loading, earlier-history
+    /// loading and hint-driven background sync. Read fresh at every decision.
+    ///
+    /// **Resolved, not stored**: the backing column carries no SQL default and
+    /// stays NULL until somebody touches the toggle, so this property is
+    /// `remote_transcript_live_sync_enabled ?? Config.remoteTranscriptLiveSyncEnabledDefault`.
+    /// Declared with a default value rather than threaded through the
+    /// memberwise initializer, which sits at the type-checker's budget.
+    public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1846,6 +1855,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
+    /// The shipped default for `remoteTranscriptLiveSyncEnabled`, and the
+    /// single place it lives. Ships off; graduation is a change to this
+    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// left alone.
+    public static let remoteTranscriptLiveSyncEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -2073,6 +2087,11 @@ public struct Config: Codable, Sendable, Equatable {
             Int.self, forKey: .profileBalancingUsageCeilingPercent)
         profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+        // Same tri-state: absent means the sender knew nothing about the flag,
+        // the NULL column's situation — follow the shipped default.
+        remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
+            ?? Config.remoteTranscriptLiveSyncEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

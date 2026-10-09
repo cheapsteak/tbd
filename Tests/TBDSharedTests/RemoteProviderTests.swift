@@ -524,3 +524,61 @@ struct RemoteProviderTests {
         #expect(RemoteCreateParams(provider: "acme", paramsJSON: "{}").parentWorktreeID == nil)
     }
 }
+
+/// The optional `transcript` hint on a Session object
+/// (`docs/remote-provider-contract.md` § Transcript hint): decoded when well
+/// formed, read as absent otherwise, and never allowed to cost the session.
+@Suite("RemoteSessionPayload transcript hint")
+struct RemoteSessionPayloadTranscriptHintTests {
+
+    @Test func aHintDecodes() throws {
+        let json = #"{"id":"s","state":"running","transcript":{"id":"conv-1","size":1048576}}"#
+        let p = try JSONDecoder().decode(RemoteSessionPayload.self, from: Data(json.utf8))
+        #expect(p.transcript == RemoteTranscriptHint(id: "conv-1", size: 1_048_576))
+    }
+
+    @Test func anAbsentHintIsNil() throws {
+        let json = #"{"id":"s","state":"running"}"#
+        let p = try JSONDecoder().decode(RemoteSessionPayload.self, from: Data(json.utf8))
+        #expect(p.id == "s")
+        #expect(p.transcript == nil)
+    }
+
+    @Test(arguments: [
+        #""transcript":"conv-1""#, #""transcript":{"id":"conv-1"}"#,
+        #""transcript":{"size":3}"#, #""transcript":{"id":7,"size":3}"#,
+    ])
+    func aMalformedHintReadsAsAbsentAndKeepsTheSession(_ field: String) throws {
+        let json = #"{"id":"s","state":"running",\#(field)}"#
+        let p = try JSONDecoder().decode(RemoteSessionPayload.self, from: Data(json.utf8))
+        #expect(p.id == "s")
+        #expect(p.state == .running)
+        #expect(p.transcript == nil)
+    }
+
+    @Test func withoutTranscriptHintDropsOnlyTheHint() {
+        let p = RemoteSessionPayload(id: "s", title: "t", state: .running, agentState: .working,
+                                     meta: ["repo": "acme"], archived: false,
+                                     transcript: RemoteTranscriptHint(id: "c", size: 1))
+        let stripped = p.withoutTranscriptHint
+        #expect(stripped.transcript == nil)
+        #expect(stripped == RemoteSessionPayload(id: "s", title: "t", state: .running, agentState: .working,
+                                                 meta: ["repo": "acme"], archived: false))
+    }
+
+    /// A stripped payload encodes with no `transcript` key at all, which is
+    /// what keeps a mirrored row's payload string stable as the hint moves.
+    @Test func aStrippedPayloadEncodesNoTranscriptKey() throws {
+        let p = RemoteSessionPayload(id: "s", state: .running,
+                                     transcript: RemoteTranscriptHint(id: "c", size: 1))
+        let full = try #require(String(bytes: try JSONEncoder().encode(p), encoding: .utf8))
+        let stripped = try #require(
+            String(bytes: try JSONEncoder().encode(p.withoutTranscriptHint), encoding: .utf8))
+        #expect(full.contains("\"transcript\""))
+        #expect(!stripped.contains("\"transcript\""))
+    }
+
+    @Test func cursorExpiredCodeMatchesTheContract() {
+        #expect(ProviderErrorObject.cursorExpiredCode == "cursor_expired")
+    }
+}
