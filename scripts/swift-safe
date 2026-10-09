@@ -35,11 +35,40 @@ caller that passes its own ``-module-cache-path`` is left alone, and ``CI`` is
 left alone too — runners are ephemeral, so a shared cache saves nothing there.
 
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
-output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
-``command`` into the lock file after acquiring, and a waiter reads it back to
-say who it is queued behind; a heartbeat then repeats the wait's elapsed time
-so a human can tell a queued build from a hung one and an automated caller's
-stall watchdog sees liveness.
+output sees nothing from this wrapper.  Every line this wrapper writes is
+prefixed ``swift-safe:``, which is what lets a caller that buffers compiler
+output — ``scripts/restart-build-lib.sh`` does — separate these lines back out
+and show them live.  That claim is load-bearing rather than decorative, so it
+holds for the refusals too: the unsupported-subcommand usage line carries the
+prefix, and the argument validators' messages get it from ``_entry``, the single
+point every ``SystemExit`` funnels through.  A line without it is a line a
+watching human never sees until the build is over.
+
+The holder writes ``pid``/``cwd``/``command`` into the lock file after
+acquiring, and a waiter reads it back to say who it is queued behind; a
+heartbeat then repeats the wait's elapsed time so a human can tell a queued
+build from a hung one and an automated caller's stall watchdog sees liveness.
+
+When the recorded identity cannot explain the wait — an empty record, or a pid
+that is no longer running — the waiter asks the process table who still has
+the lock file open and names those processes instead.  The flock rides on an
+open file description rather than on the process that recorded itself, so a
+killed build can leave an orphan holding an inherited descriptor while the
+file still names the dead pid: reporting only the record then says "not
+running", which reads as a harmless stale file, about a lock that will never
+be released.  Openers are a superset of the holder (waiters have the file open
+too), so the line says the holder is among them and never names one as the
+holder.
+
+That probe has THREE outcomes and the line says which one happened, because
+"nobody else has it open" and "I could not ask" are opposite conclusions that
+would otherwise print the same words.  Conflating them is how the original
+misleading line gets reproduced: a probe that cannot complete — plausibly on
+exactly the wedged, CPU-pegged machine where it matters, since that is also
+where ``lsof`` and ``ps`` are slowest — would otherwise fall back to "the
+current holder is unidentified", which is the wording the incident blames.
+``scripts/restart-build-lib.sh`` keeps the same distinction on its own process
+walk, for the same reason.
 
 A wait also ends when whoever requested the build goes away.  Killing a shell
 or an agent session signals only that process, so a wrapper queued behind the
@@ -107,6 +136,12 @@ import sys
 import time
 
 
+# What every stderr line this wrapper writes about itself begins with.  Not
+# cosmetic: `scripts/restart-build-lib.sh` separates these lines from buffered
+# compiler output by this exact prefix and streams only them, so a line that
+# omits it is a line a watching human never sees while the build runs.
+REPORT_PREFIX = "swift-safe: "
+
 DEFAULT_JOBS = 2
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 # Agent harnesses kill a session that emits nothing for 600s, and a queued
@@ -117,6 +152,25 @@ DEFAULT_HEARTBEAT_SECONDS = 60.0
 # Fields the holder records; anything else in the file is ignored.
 HOLDER_FIELDS = ("pid", "cwd", "command")
 MAX_REPORTED_COMMAND_CHARACTERS = 120
+# Bounds on the fallback probe that asks the process table who still has the
+# lock file open, for when the recorded identity cannot explain the wait.  The
+# probe runs inside the wait loop, so it may cost a little and must never cost
+# the wait: it is abandoned after this long and reports at most this many.
+#
+# The budget covers the WHOLE probe — finding the openers with `lsof` and
+# naming them with `ps`, both legs — and not one leg each.  A per-leg timeout
+# is not a bound anybody can act on: two legs bounded separately are their
+# sum, so a per-heartbeat cost stated as five seconds would really have been
+# fifteen, and a number written down here is trusted precisely because nobody
+# re-derives it.
+LOCK_OPENER_PROBE_TIMEOUT_SECONDS = 5.0
+# ...of which the naming leg is guaranteed this much however slow the first
+# leg was, so a slow `lsof` cannot starve it into always timing out and
+# leaving every opener it found called "unknown" — a probe that names pids
+# without commands answers half the question.  `lsof` is capped at the
+# remainder, which is what keeps the guarantee inside the total.
+LOCK_OPENER_NAME_MINIMUM_SECONDS = 1.0
+MAX_REPORTED_LOCK_OPENERS = 4
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 # Where the shared precompiled-module cache lives, under the user's real home.
 SHARED_MODULE_CACHE_SUBPATH = "Library/Caches/tbd/swift-module-cache"
@@ -464,7 +518,14 @@ def _lock_path() -> Path:
 
 
 def _report(message: str) -> None:
-    """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone."""
+    """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone.
+
+    Every stderr line this wrapper writes goes through here, so that the
+    `swift-safe:` prefix the module docstring promises has one place it can be
+    checked.  The prefix is written at the call sites rather than added here —
+    it keeps each message greppable as it reads — and `REPORT_PREFIX` is what
+    the paths that cannot spell it themselves use (see `_entry`).
+    """
     print(message, file=sys.stderr, flush=True)
 
 
@@ -582,7 +643,194 @@ def _ancestor_pids(
     return tuple(chain)
 
 
-def _holder_description(lock_path: Path) -> str:
+def _process_command_names(
+    pids: tuple[int, ...],
+    *,
+    timeout: float = LOCK_OPENER_PROBE_TIMEOUT_SECONDS,
+) -> dict[int, str]:
+    """pid -> executable basename, from one `ps`; unknown pids are omitted.
+
+    Best effort, like every other probe here: a `ps` that is missing, slow or
+    refused leaves the caller naming pids alone, which is still the actionable
+    half.  macOS prints the full path under `comm=` and Linux the basename, so
+    the result is reduced to a basename either way.
+
+    `timeout` is a slice of a budget the caller owns, not a bound of this
+    function's own: `_lock_file_openers` hands over what is left of
+    `LOCK_OPENER_PROBE_TIMEOUT_SECONDS` after its own leg.  The default is the
+    whole of that, for a caller that is not sharing.
+    """
+    if not pids:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "pid=,comm=", "-p", ",".join(str(pid) for pid in pids)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    names: dict[int, str] = {}
+    for line in completed.stdout.splitlines():
+        pid_text, _, command = line.strip().partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        command = command.strip()
+        if command:
+            names[pid] = Path(command).name
+    return names
+
+
+def _lock_file_openers(lock_path: Path) -> tuple[tuple[int, str], ...] | None:
+    """(pid, name) for every *other* process that has the lock file open.
+
+    The recorded identity answers "who took the slot", and it is the answer
+    whenever it is usable.  This answers the question that is left when it is
+    not, and it is the more truthful of the two: the flock rides on an open
+    file description, so it outlives the process that recorded itself.  A
+    build whose manifest hung and was killed left an orphan holding an
+    inherited descriptor, the file still naming the long-dead pid that opened
+    it — and every waiter was told the recorded pid "is not running", which
+    reads as a harmless stale file while the lock was genuinely, permanently
+    held.  A diagnostic that points the wrong way is worse than none.
+
+    `lsof` reports openers, not lock ownership: darwin leaves its lock column
+    blank for an flock, so there is nothing to filter on.  Openers are a
+    superset of the holder — every waiter has the file open too — so callers
+    must say "the holder is among these" and never name one of them as the
+    holder.  Being a superset is what makes it useful anyway: an orphan with
+    an inherited descriptor appears in it, and the command names separate a
+    queued wrapper from a compiler at a glance.
+
+    Three return values, and keeping them apart is the point.  `None` means the
+    probe could not answer — no `lsof`, a timeout, or an `lsof` that ran and
+    failed — and the caller must report that it could not look.  `()` means it
+    ran and found nobody else, which is the honest "unidentified holder"
+    fallback.  A non-empty tuple is the answer.  Collapsing the first two into `()`, which is
+    what this did before, reproduces the exact misleading line the probe was
+    added to remove — and does it on the wedged machine where `lsof` and `ps`
+    are slowest, which is where the line is read.  None of the three fails the
+    wait: this runs inside a wait loop and may never end one.
+
+    The naming leg is a separate matter and stays best-effort: a `ps` that fails
+    leaves the openers named "unknown", which is half an answer rather than no
+    answer, so it is reported as a find and not as a failure.
+
+    Both legs share one budget, `LOCK_OPENER_PROBE_TIMEOUT_SECONDS`, and that
+    is the whole cost of the probe per heartbeat.  `lsof` is capped at the
+    budget less the naming leg's guaranteed floor, so the leg that turns pids
+    into command names always gets a usable slice no matter how slow `lsof`
+    was — and the two together can never exceed the stated bound.
+    """
+    deadline = time.monotonic() + LOCK_OPENER_PROBE_TIMEOUT_SECONDS
+    try:
+        completed = subprocess.run(
+            ["lsof", "-t", "-w", "--", str(lock_path)],
+            capture_output=True,
+            text=True,
+            timeout=(
+                LOCK_OPENER_PROBE_TIMEOUT_SECONDS - LOCK_OPENER_NAME_MINIMUM_SECONDS
+            ),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # `subprocess.TimeoutExpired` is a `SubprocessError`, so this is the
+        # timeout path too — and the one that most needs telling apart from an
+        # empty result, since a probe that runs out of time is a probe on a busy
+        # machine.
+        return None
+    # An `lsof` that ran but could not answer is also "could not look", and its
+    # EXIT STATUS cannot say which happened: measured on darwin, `lsof -t -w`
+    # exits 1 both for a file nobody has open and for a status error such as a
+    # missing path or a refused directory.  What separates them is stderr, which
+    # is empty on the honest nothing and carries a "status error" line plus a
+    # usage dump on a failure (`-w` suppresses warnings, not these).  So the
+    # discriminator is stderr and not the code — reading the code alone would
+    # turn every ordinary "nobody else has it open" into "I could not ask",
+    # which is the same confusion in the opposite direction.
+    if completed.returncode != 0 and completed.stderr.strip():
+        try:
+            lock_path.stat()
+        except FileNotFoundError:
+            # Except when the path is simply gone: nobody can have a file that
+            # does not exist open, so that is an ANSWER and not a failure to
+            # answer.  Settled by `stat` rather than by reading `lsof`'s
+            # complaint, which is prose and not an interface.  A refusal or any
+            # other stat error is the real "could not look" and falls through.
+            return ()
+        except OSError:
+            return None
+        return None
+    # Our own waiter holds the file open too; naming it would describe the
+    # process doing the asking as a candidate for the thing blocking it.
+    own = os.getpid()
+    pids: list[int] = []
+    for field in completed.stdout.split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        if pid > 0 and pid != own and pid not in pids:
+            pids.append(pid)
+    names = _process_command_names(
+        tuple(pids),
+        # Whatever is left of the budget, floored so the leg is never handed
+        # a slice too small to answer in.  `lsof`'s own cap is the budget
+        # less this floor, so the floor can only be reached — never exceeded.
+        timeout=max(LOCK_OPENER_NAME_MINIMUM_SECONDS, deadline - time.monotonic()),
+    )
+    return tuple((pid, names.get(pid, "unknown")) for pid in pids)
+
+
+def _unidentified_holder(
+    preamble: str, fallback: str, lock_path: Path, openers
+) -> str:
+    """Finish a description whose recorded identity explains nothing.
+
+    `fallback` is the whole line to use when the process table can see no
+    more than the record could — it is a separate string rather than a suffix
+    because one caller has nothing to add to its own preamble.
+
+    Reached only from a contended wait, so the lock IS held by someone: the
+    one thing that must never be implied here is that it is not.
+
+    Each of `_lock_file_openers`' three outcomes gets its own line.  The one
+    that is easy to lose is the middle one: a probe that could not run says so,
+    rather than borrowing the words for a probe that ran and found nobody.  The
+    words it would otherwise borrow are the ones the incident turned on.
+
+    `openers` is resolved here rather than defaulted into the signature, so
+    that the name is looked up when it is called: a default argument would
+    bind the function object at definition and leave a test's substitution
+    silently ignored.
+    """
+    visible = (openers or _lock_file_openers)(lock_path)
+    if visible is None:
+        return (
+            f"{preamble}, and the process table could not be asked which "
+            f"processes have the lock file open within "
+            f"{LOCK_OPENER_PROBE_TIMEOUT_SECONDS:g}s; the lock is still held, so "
+            f"inspect it by hand: lsof {lock_path}"
+        )
+    if not visible:
+        return fallback
+    listed = ", ".join(
+        f"pid {pid} ({name})" for pid, name in visible[:MAX_REPORTED_LOCK_OPENERS]
+    )
+    remainder = len(visible) - MAX_REPORTED_LOCK_OPENERS
+    if remainder > 0:
+        listed += f", and {remainder} more"
+    return (
+        f"{preamble}, but the lock is still held — the holder is among the "
+        f"processes that have the lock file open: {listed}"
+    )
+
+
+def _holder_description(lock_path: Path, *, openers=None) -> str:
     """Describe the lock holder without ever claiming one we cannot see."""
     fields = _holder_fields(lock_path)
     try:
@@ -592,12 +840,20 @@ def _holder_description(lock_path: Path) -> str:
     # `os.kill(0, 0)` inspects this process's own group and would report a
     # holder that is really us, so a non-positive pid counts as unrecorded.
     if pid <= 0:
-        return "holder has not recorded its identity yet"
+        unrecorded = "holder has not recorded its identity yet"
+        return _unidentified_holder(unrecorded, unrecorded, lock_path, openers)
     if not _process_is_alive(pid):
-        return (
-            f"the lock file names pid {pid}, which is not running; "
-            "the current holder is unidentified"
+        stale = f"the lock file names pid {pid}, which is not running"
+        return _unidentified_holder(
+            stale,
+            f"{stale}; the current holder is unidentified",
+            lock_path,
+            openers,
         )
+    # A recorded pid that is alive is taken at its word, and no `lsof` runs.
+    # It is wrong only under pid reuse, which costs one misleading name; the
+    # probe would cost a subprocess on every heartbeat of every contended
+    # build to catch it.  The case that misled in the field is the one above.
 
     parts = [f"pid {pid}"]
     # The directory basename identifies the worktree; the full path is noise.
@@ -712,9 +968,9 @@ def main(arguments: list[str]) -> int:
 
     if not arguments or arguments[0] not in SUPPORTED_SUBCOMMANDS:
         supported = "|".join(sorted(SUPPORTED_SUBCOMMANDS))
-        print(
-            f"usage: scripts/swift-safe <{supported}> [swift arguments...]",
-            file=sys.stderr,
+        _report(
+            f"swift-safe: usage: scripts/swift-safe <{supported}> "
+            "[swift arguments...]"
         )
         return 64
 
@@ -722,7 +978,7 @@ def main(arguments: list[str]) -> int:
     bounded = _bounded_arguments(subcommand, swift_arguments)
     swift = os.environ.get("TBD_SWIFT_BIN") or shutil.which("swift")
     if not swift:
-        print("swift-safe: swift executable not found", file=sys.stderr)
+        _report("swift-safe: swift executable not found")
         return 69
 
     path = _lock_path()
@@ -774,26 +1030,23 @@ def main(arguments: list[str]) -> int:
                 yield_after_seconds=yield_after,
             )
         except Yielded:
-            print(
+            _report(
                 f"swift-safe: still queued for {path} after {yield_after:g}s; "
                 "yielding the local build slot so this run can be verified "
-                "elsewhere",
-                file=sys.stderr,
+                "elsewhere"
             )
             return 76
         except Abandoned:
-            print(
+            _report(
                 "swift-safe: the process that requested this build exited while "
                 f"it was queued for {path}; abandoning the wait without starting "
-                "a build",
-                file=sys.stderr,
+                "a build"
             )
             return 75
         except TimeoutError:
-            print(
+            _report(
                 f"swift-safe: timed out after {timeout:g}s waiting for {path} "
-                f"({_holder_description(path)})",
-                file=sys.stderr,
+                f"({_holder_description(path)})"
             )
             return 75
 
@@ -811,7 +1064,7 @@ def main(arguments: list[str]) -> int:
         try:
             os.execv(swift, [swift, *bounded])
         except OSError as error:
-            print(f"swift-safe: could not exec {swift}: {error}", file=sys.stderr)
+            _report(f"swift-safe: could not exec {swift}: {error}")
             return 71
 
 
@@ -824,13 +1077,18 @@ def _entry(arguments: list[str]) -> int:
     exit 1, so it is printed here instead and the 1 named like any other status.
     A `SystemExit` carrying anything but a message is re-raised untouched; none
     is raised today, and guessing a status for one would be inventing a number.
+
+    The prefix is added HERE and not in each validator, because the validators
+    are where it would be forgotten: they raise from wherever they are called,
+    there are a dozen of them, and one more is a plausible future edit.  This is
+    the one place every one of them funnels through.
     """
     try:
         status = main(arguments)
     except SystemExit as refusal:
         if not isinstance(refusal.code, str):
             raise
-        _report(refusal.code)
+        _report(f"{REPORT_PREFIX}{refusal.code}")
         return _reported_status(1)
     return _reported_status(status)
 
