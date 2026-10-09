@@ -567,6 +567,16 @@ test_a_replay_that_conflicts_is_a_retryable_abort_and_pushes_nothing() {
   main_moves "$d" .github/workflows/test.yml "on: push"; main_moves "$d" Tests/TBDSharedTests/HolderLockTests.swift "x"
   github_gate "$d"; publish "$d" "$mutant" > /dev/null
   assert_eq "mutation: an unmarked abort is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  # main cannot be read: a publishing failure, not news about the test.
+  d="$(world)"; routes "$d"
+  git -C "$d/origin.git" update-ref -d refs/heads/main
+  assert_eq "a failed fetch of main exits 2" "2" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_eq "recorded aborted, marked publish_raced" "aborted true" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  mutant="$(mutant_of 's/^  RACED_DIE=1$/  true/' "$PR_SH")"
+  d="$(world)"; routes "$d"; git -C "$d/origin.git" update-ref -d refs/heads/main
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: unmarked, a transient fetch failure is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
 }
 
 test_a_workflow_refusal_of_a_clean_candidate_is_retried_then_aborted() {
@@ -587,13 +597,25 @@ test_a_workflow_refusal_of_a_clean_candidate_is_retried_then_aborted() {
   assert_eq "mutation: without the retry it is the push-refused lock-out" "push-refused" "$(recorded "$d" | jq -r .outcome)"
   # main moved between the check and the push: the retry's replay goes through.
   d="$(world)"; routes "$d"
-  main_moves "$d" README.md "moved after the check"
+  main_moves "$d" .github/workflows/test.yml "on: push"
   github_gate "$d" once
   assert_eq "a refusal the retry clears: exit 0" "0" "$(publish "$d")"
+  assert_eq "pushed twice" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
   assert_eq "the replay is on the branch" "$(git -C "$d/origin.git" rev-parse refs/heads/main)" \
     "$(git -C "$d/origin.git" rev-parse "$(remote_head "$d")~1")"
   assert_eq "and has the status" "$(remote_head "$d")" "$(status_sha "$d")"
   assert_eq "recorded pr-opened" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
+  # main's workflow files did not move: the retry pushes the candidate as it is,
+  # and nothing claims a replay.
+  d="$(world)"; routes "$d"
+  github_gate "$d" once
+  assert_eq "a refusal with main's workflows unmoved: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/checking main again"$/checking main again"; workflows_moved() { true; }/' "$PR_SH")"
+  d="$(world)"; routes "$d"; github_gate "$d" once
+  publish "$d" "$mutant" > /dev/null
+  assert_contains "mutation: replaying regardless claims a workflow change that never happened" "$(status_desc "$d")" "replayed"
 }
 
 test_a_candidate_touching_workflows_is_never_replayed() {
@@ -605,7 +627,7 @@ test_a_candidate_touching_workflows_is_never_replayed() {
   assert_eq "pushed once, as it is" "1" "$(wc -l < "$d/pushes" | tr -d ' ')"
   assert_contains "the issue is told it needs a workflow change" "$(logged "$d")" "appears to need a workflow change"
   assert_eq "recorded push-refused" "push-refused null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
-  mutant="$(mutant_of 's/^  \[\[ -n "\$touched" \]\] \&\& touches_workflows=1$/  true/' "$PR_SH")"
+  mutant="$(mutant_of 's/^  \[\[ "\$wrc" -eq 1 \]\] \&\& touches_workflows=1$/  true/' "$PR_SH")"
   d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
   main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
   publish "$d" "$mutant" > /dev/null
@@ -625,10 +647,26 @@ test_a_rerun_reuses_the_open_pr_on_its_replay() {
   assert_eq "the status goes on the replay again" "$pushed" "$(status_sha "$d")"
   assert_contains "with the note" "$(status_desc "$d")" "replayed onto main"
   assert_eq "and records the open PR" "pr-opened 77" "$(recorded "$d" | jq -r '"\(.outcome) \(.pr)"')"
-  mutant="$(mutant_of 's/^  PUSHED="\$sha"$/  return 1/' "$PR_SH")"
+  mutant="$(mutant_of 's/^  local sha="\$1" tip onto$/  return 1/' "$PR_SH")"
   : > "$d/log"
   publish "$d" "$mutant" > /dev/null
   assert_eq "mutation: an unrecognised replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  # A human amends the replay, keeping its message: not the bot's replay any more.
+  git -C "$d/session" fetch -q "$d/origin.git" "refs/heads/flakefix/issue-10" 2>/dev/null
+  git -C "$d/session" checkout -q FETCH_HEAD 2>/dev/null
+  echo "a human's change" > "$d/session/Tests/TBDSharedTests/HolderLockTests.swift"
+  git -C "$d/session" commit -q -a --amend --no-edit
+  git -C "$d/session" push -q -f "$d/origin.git" "HEAD:refs/heads/flakefix/issue-10" 2>/dev/null
+  pushed="$(remote_head "$d")"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$pushed\"}]"
+  : > "$d/log"
+  publish "$d" > /dev/null
+  assert_eq "an amended replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  assert_lacks "and gets no status" "$(logged "$d")" "statuses/"
+  mutant="$(mutant_of 's/if replay_onto "\$onto" \&\& \[\[ "\$PUSHED" == "\$sha" \]\]; then/if replay_onto "$onto"; then PUSHED="$sha"/' "$PR_SH")"
+  : > "$d/log"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: trusting the message alone stamps the amended head" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
 }
 
 test_a_stale_branch_is_replaced_deliberately() {

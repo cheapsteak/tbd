@@ -82,21 +82,34 @@ WORKFLOW_REFUSAL='refusing to allow .* to create or update workflow|to create or
 # without one the picker sees no attempt and re-picks the test on the same
 # evidence, and a PR closed later has no attempt to tie its close to. So die
 # records `pr-opened` when a PR exists and `aborted` otherwise, once (a failed
-# record does not record again), then exits 2 so the run goes red.
-ISSUE="" PR="" POST_PUSH="" RECORDING="" REUSED=""
+# record does not record again), then exits 2 so the run goes red. A failure
+# in the replay's own steps (RACED_DIE) says nothing about the test, so its
+# abort is marked publish_raced.
+ISSUE="" PR="" POST_PUSH="" RECORDING="" REUSED="" RACED_DIE="" NEW_BASE=""
 die() {
   echo "flake-pr: $*" >&2
   if [[ -n "$ISSUE" && -z "$RECORDING" ]]; then
     RECORDING=1
     if [[ -n "$PR" ]]; then
-      record pr-opened --pr "$PR"
+      record_opened
     elif [[ -n "$POST_PUSH" ]]; then
       record aborted --reason "The candidate was pushed to $BRANCH_PREFIX$ISSUE, then publishing failed: $*"
+    elif [[ -n "$RACED_DIE" ]]; then
+      record aborted --publish-raced --reason "Publishing failed before any push, while checking main or replaying onto it: $*"
     else
       record aborted --reason "Publishing failed before any push: $*"
     fi
   fi
   exit 2
+}
+
+# record_opened: the pr-opened entry, noting a replay when there was one.
+record_opened() {
+  if [[ -n "$NEW_BASE" ]]; then
+    record pr-opened --pr "$PR" --reason "Stress-checked on ${base:0:12}; replayed onto main ${NEW_BASE:0:12} as ${PUSHED:0:12} because main's workflow files changed during the run."
+  else
+    record pr-opened --pr "$PR"
+  fi
 }
 py() { python3 "$SCRIPT_DIR/flake-pr.py" "$@"; }
 
@@ -125,8 +138,10 @@ record() {
 
 # fetch_main: the remote's `main` as it is now, into MAIN_NOW.
 fetch_main() {
+  RACED_DIE=1
   git_auth fetch -q "$remote" refs/heads/main || die "cannot fetch main"
   MAIN_NOW="$(git rev-parse FETCH_HEAD)" || die "cannot read the fetched main"
+  RACED_DIE=""
 }
 
 # workflows_moved: whether `main` now holds other .github/workflows/ files than
@@ -144,14 +159,19 @@ workflows_moved() {
 # tip and NEW_BASE to ONTO; returns 1, with git's reason in REPLAY_ERROR, when
 # a commit does not apply.
 replay_onto() {
-  local onto="$1" wt c rc=0 out
+  local onto="$1" wt c rc=0 out list cn ce cd
+  RACED_DIE=1
+  list="$(git rev-list --reverse "$base..$head")" || die "cannot list the candidate's commits"
+  [[ -n "$list" && "$(wc -l <<< "$list" | tr -d ' ')" == "$commits_n" ]] \
+    || die "the candidate's commit list does not match its count ($commits_n)"
   wt="$(mktemp -d "${TMPDIR:-/tmp}/flake-pr-replay.XXXXXX")" || die "cannot create a replay directory"
   git worktree add -q --detach "$wt" "$onto" 2>/dev/null || die "cannot check out $onto to replay onto"
-  out="$(mktemp "${TMPDIR:-/tmp}/flake-pr-replay-out.XXXXXX")"
+  out="$(mktemp "${TMPDIR:-/tmp}/flake-pr-replay-out.XXXXXX")" || die "cannot create a replay log"
+  RACED_DIE=""
   REPLAY_ERROR=""
-  for c in $(git rev-list --reverse "$base..$head"); do
-    if ! GIT_COMMITTER_NAME="$(git log -1 --format=%cn "$c")" GIT_COMMITTER_EMAIL="$(git log -1 --format=%ce "$c")" \
-        GIT_COMMITTER_DATE="$(git log -1 --format=%cI "$c")" \
+  for c in $list; do
+    IFS=$'\t' read -r cn ce cd < <(git log -1 --format='%cn%x09%ce%x09%cI' "$c")
+    if ! GIT_COMMITTER_NAME="$cn" GIT_COMMITTER_EMAIL="$ce" GIT_COMMITTER_DATE="$cd" \
         git -C "$wt" cherry-pick -x --allow-empty --keep-redundant-commits "$c" > "$out" 2>&1; then
       REPLAY_ERROR="$(git log -1 --format='%h %s' "$c"): $(head -"$PUSH_ERROR_LINES" "$out")"
       rc=1
@@ -166,17 +186,24 @@ replay_onto() {
   return "$rc"
 }
 
-# is_replay_of_head SHA: whether SHA, an open PR's head, is this candidate
-# replayed by an earlier run of this publish: its tip names head as the commit
-# it was cherry-picked from. Sets PUSHED and NEW_BASE when it is.
+# is_replay_of_head SHA: whether SHA, an open PR's head, is exactly this
+# candidate as an earlier run of this publish replayed it. The tip naming head
+# as its origin finds the base it was replayed onto; the replay is then redone
+# there, and only the identical commit counts (a replay keeps each commit's
+# author, committer and dates, so it is reproducible), so a head anyone
+# amended is someone else's. Sets PUSHED and NEW_BASE when it is.
 is_replay_of_head() {
-  local sha="$1" tip
+  local sha="$1" tip onto
   git_auth fetch -q "$remote" "refs/heads/$branch" 2>/dev/null || return 1
   tip="$(git rev-parse FETCH_HEAD)" || return 1
   [[ "$tip" == "$sha" ]] || return 1
   git log -1 --format=%B "$sha" | grep -qxF "(cherry picked from commit $head)" || return 1
-  NEW_BASE="$(git rev-parse "$sha~$commits_n")" || return 1
-  PUSHED="$sha"
+  onto="$(git rev-parse -q --verify "$sha~$commits_n^{commit}")" || return 1
+  if replay_onto "$onto" && [[ "$PUSHED" == "$sha" ]]; then
+    return 0
+  fi
+  PUSHED="$head" NEW_BASE=""
+  return 1
 }
 
 # raced REASON: the candidate was lost to `main` moving; record it so the
@@ -262,10 +289,12 @@ cmd_open() {
   # What is pushed, given the status, and promoted: the candidate itself, or
   # its replay onto a newer `main` (PUSHED, on NEW_BASE).
   PUSHED="$head" NEW_BASE="" MAIN_NOW="" REPLAY_ERROR=""
-  local touched touches_workflows="" commits_n
-  touched="$(git log --format= --name-only --no-renames "$base..$head" -- "$WORKFLOWS_DIR")" \
-    || die "cannot list the candidate's workflow changes"
-  [[ -n "$touched" ]] && touches_workflows=1
+  # Whether the candidate's tree differs from its base under .github/workflows/:
+  # what GitHub judges is the tree pushed, not how the commits got there.
+  local touches_workflows="" commits_n wrc=0
+  git diff --quiet "$base" "$head" -- "$WORKFLOWS_DIR" || wrc=$?
+  [[ "$wrc" -le 1 ]] || die "cannot compare the candidate's workflow files with $base"
+  [[ "$wrc" -eq 1 ]] && touches_workflows=1
   commits_n="$(git rev-list --count "$base..$head")" || die "cannot count the candidate's commits"
 
   # An open PR on the branch: a re-run of this publish, or not ours to touch.
@@ -306,21 +335,25 @@ cmd_open() {
     fi
     push_branch || rc=$?
     # A workflow refusal of a candidate that touches no workflow file: `main`
-    # moved again between the fetch and the push. Replay onto it and push
-    # once more; a second refusal is recorded `aborted` and goes red.
+    # moved again between the fetch and the push. Replay onto it, when its
+    # workflow files moved, and push once more; a second refusal is recorded
+    # `aborted` and goes red.
     if [[ "$rc" -ne 0 && -z "$touches_workflows" ]] && grep -qiE "$WORKFLOW_REFUSAL" "$err"; then
-      echo "flake-pr: GitHub refused the push as a workflow change though the candidate touches no workflow file; replaying onto main again"
+      echo "flake-pr: GitHub refused the push as a workflow change though the candidate touches no workflow file; checking main again"
       fetch_main
-      if ! replay_onto "$MAIN_NOW"; then
-        raced "GitHub refused the push as a workflow change though the candidate touches no workflow file, so main had moved; the replay onto ${MAIN_NOW:0:12} did not apply, and nothing was pushed. $REPLAY_ERROR"
-        return 0
+      if workflows_moved; then
+        if ! replay_onto "$MAIN_NOW"; then
+          raced "GitHub refused the push as a workflow change though the candidate touches no workflow file, so main had moved; the replay onto ${MAIN_NOW:0:12} did not apply, and nothing was pushed. $REPLAY_ERROR"
+          return 0
+        fi
+        echo "flake-pr: replayed the candidate onto ${MAIN_NOW:0:12} as $PUSHED"
       fi
       rc=0
       push_branch || rc=$?
       if [[ "$rc" -ne 0 ]] && grep -qiE "$WORKFLOW_REFUSAL" "$err"; then
         local why; why="$(head -"$PUSH_ERROR_LINES" "$err")"
         echo "flake-pr: GitHub refused the replayed push as a workflow change too: $why" >&2
-        raced "GitHub refused the push as a workflow change twice, though the candidate touches no workflow file and was replayed onto main (${MAIN_NOW:0:12}) before the second push; nothing was pushed. GitHub said: $why"
+        raced "GitHub refused the push as a workflow change twice, though the candidate touches no workflow file and main (${MAIN_NOW:0:12}) was checked again before the second push; nothing was pushed. GitHub said: $why"
         return 1
       fi
     fi
@@ -345,10 +378,12 @@ cmd_open() {
       return 1
     fi
     POST_PUSH=1
-
+  fi
+  # NEW_BASE is final here, on either path.
+  [[ -n "$NEW_BASE" ]] && replayed=(--replayed "$base" "$NEW_BASE")
+  if [[ -z "$PR" ]]; then
     local commits bodyf url test
     commits="$(git log --format='%h %s' "${NEW_BASE:-$base}..$PUSHED")"
-    [[ -n "$NEW_BASE" ]] && replayed=(--replayed "$base" "$NEW_BASE")
     bodyf="$(mktemp "${TMPDIR:-/tmp}/flake-pr-body.XXXXXX")"
     py body --pick-dir "$PICK" --attempt-dir "$ATTEMPT" --repo "$REPO" --commits <(printf '%s\n' "$commits") \
       ${replayed[@]+"${replayed[@]}"} --out "$bodyf" || die "cannot render the PR body"
@@ -367,7 +402,6 @@ cmd_open() {
   # The verdict was measured on the candidate; the status goes on what was
   # pushed, which promote then requires to be the PR's head (§7).
   local line state description run_url
-  [[ -n "$NEW_BASE" ]] && replayed=(--replayed "$base" "$NEW_BASE")
   line="$(py status --attempt-dir "$ATTEMPT" ${replayed[@]+"${replayed[@]}"})" || die "cannot compute the status"
   state="${line%%$'\t'*}"; description="${line#*$'\t'}"
   run_url="$(cat "$ATTEMPT/run_url" 2>/dev/null)"
@@ -386,11 +420,7 @@ cmd_open() {
     py weak-label --repo "$REPO" --pr "$PR" || die "cannot label PR #$PR"
   fi
   RECORDING=1
-  if [[ -n "$NEW_BASE" ]]; then
-    record pr-opened --pr "$PR" --reason "Stress-checked on ${base:0:12}; replayed onto main ${NEW_BASE:0:12} as ${PUSHED:0:12} because main's workflow files changed during the run."
-  else
-    record pr-opened --pr "$PR"
-  fi
+  record_opened
 }
 
 # promote: mark the draft ready once its own CI passed on the head the verifier
