@@ -394,8 +394,8 @@ extension AppState {
         Each new session runs on its own terminal rather than inside a tmux \
         window. Sessions already running stay on tmux; the change takes effect \
         as they end and respawn. Attached sessions keep running uninterrupted \
-        across daemon restarts. Less scrollback is kept than tmux retains. Off \
-        by default (soaking).
+        across daemon restarts. Less scrollback is kept than tmux retains. On \
+        by default; turn it off to put new sessions back in tmux windows.
         """
 
     /// Why the pty-holder toggle is inert on this daemon. Shown only when

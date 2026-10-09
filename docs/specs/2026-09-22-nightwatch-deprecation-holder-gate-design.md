@@ -43,8 +43,8 @@ by construction; nothing in `DeskSessionManager` changes.
 A watch mode (`nightwatchMode` other than `.off`) and the pty-holder transport
 are never both on. "On" for the holder means the flag's **effective** value,
 `config.ptyHolderEnabled` resolved through `Config.ptyHolderDefault`, so the
-rule reaches installs that never touched the toggle when Phase 3 graduates the
-default.
+rule reaches installs that never touched the toggle — which, with the default
+graduated, is the ordinary case rather than the edge one.
 
 ### The refusal text
 

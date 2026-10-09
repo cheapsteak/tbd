@@ -123,7 +123,8 @@ struct PtyHolderSettingsTests {
                 "what the operator gains")
         #expect(help.contains("Less scrollback is kept than tmux retains."),
                 "what the operator gives up")
-        #expect(help.contains("Off by default (soaking)."))
+        #expect(help.contains("On by default; turn it off to put new sessions back in tmux windows."),
+                "which way the switch sits before the operator touches it")
     }
 
     /// The disabled-state caption. It exists because the spawn gate asks two

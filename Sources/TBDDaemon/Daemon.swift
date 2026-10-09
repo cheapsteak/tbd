@@ -1435,9 +1435,9 @@ public final class Daemon: Sendable {
         // listeners serve, both because `terminal.output` needs the readers and
         // because the liveness debt starts accruing the moment the daemon is up.
         //
-        // With `pty_holder_enabled` off there are no such rows and this is a
-        // single query — it cannot delay the socket bind for anyone who has not
-        // opted in.
+        // On an install with no holder-backed session rows — one that opted
+        // the transport off — this is a single query and cannot delay the
+        // socket bind at all.
         //
         // **The ordering was reconsidered and stands, because the phase is now
         // bounded.** Adopting first costs everyone the phase's duration, and

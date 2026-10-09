@@ -9,7 +9,8 @@ import Foundation
 ///
 /// "Holder on" is always the EFFECTIVE `Config.ptyHolderEnabled` — the column
 /// resolved through `Config.ptyHolderDefault` — so the rule reaches installs
-/// that never touched the toggle when the default graduates.
+/// that never touched the toggle, which the graduated default makes the
+/// ordinary case.
 ///
 /// Spec: docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md
 public enum NightwatchHolderGate {

@@ -13,9 +13,9 @@ import Testing
 /// off" (0). If someone adds a `DEFAULT` clause to that migration,
 /// `ptyHolderIsNullBeforeAnyGesture` and
 /// `rowWrittenBeforeTheMigrationStillReadsNull` go red — that is their only job.
-/// The distinction earns its keep here because the holder transport owns a pty
-/// and a child process that outlive the daemon: somebody who turned it off did
-/// so deliberately and must stay opted out through graduation.
+/// The distinction is what made graduation a one-line change to
+/// `Config.ptyHolderDefault`: NULL rows picked the new default up, and the
+/// explicit `0` of somebody who turned the transport off deliberately did not.
 ///
 /// `transport` is a second model changing in the same commit, and it has its own
 /// trap: `Terminal` has a hand-written `init(from:)`, so a defaulted property
@@ -89,10 +89,12 @@ struct PtyHolderFlagTests {
     // MARK: - Resolution: the three states are distinguishable
 
     /// NULL follows `Config.ptyHolderDefault` wherever it goes; an explicit
-    /// `false` does not. That property is what makes graduation a one-line
-    /// constant change with no forcing `UPDATE` migration. Exercised against
-    /// BOTH possible default values, so it fails if the resolution is ever
-    /// wired as `?? false`.
+    /// `false` does not. That property is what made graduation a one-line
+    /// constant change with no forcing `UPDATE` migration, and it is what keeps
+    /// an opt-out alive across the next one. Exercised against BOTH possible
+    /// default values, so it fails if the resolution is ever wired as
+    /// `?? false` — or as `?? true`, now that `true` is the shipped value and a
+    /// hardcoded one would look correct.
     @Test func explicitFalseSurvivesADefaultFlipWhileNullFollowsIt() async throws {
         let db = try TBDDatabase(inMemory: true)
 
@@ -112,8 +114,9 @@ struct PtyHolderFlagTests {
             "an explicit opt-out must be honored forever, whatever the shipped default becomes")
     }
 
-    /// Mirrored for an explicit `true`: an operator who opted into the soak
-    /// stays opted in even if the shipped default never moves.
+    /// Mirrored for an explicit `true`: an operator who opted in before the
+    /// default moved stays opted in, and would stay opted in if the default
+    /// ever moved back.
     @Test func explicitTrueSticks() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPtyHolderEnabled(true)
@@ -138,14 +141,31 @@ struct PtyHolderFlagTests {
 
     // MARK: - The shipped default, and the wire
 
-    /// The shipped default today: OFF. A holder owns a pty and a child process
-    /// that outlive the daemon, and until the holder reconcilers land nothing
-    /// reclaims one orphaned by a daemon crash — so the transport soaks behind
-    /// its own switch. Graduation edits this constant and nothing else.
-    @Test func shippedDefaultIsOff() async throws {
-        #expect(Config.ptyHolderDefault == false)
+    /// The shipped default: ON. The holder transport is graduated, so an
+    /// install that never touched the toggle spawns new sessions onto a holder.
+    /// This is the constant the graduation moved, and the pair of assertions
+    /// checks both the constant and what a never-chosen row resolves to —
+    /// a resolution wired as `?? false` would pass the first and fail the
+    /// second.
+    @Test func shippedDefaultIsOn() async throws {
+        #expect(Config.ptyHolderDefault == true)
         let db = try TBDDatabase(inMemory: true)
+        #expect(try await db.config.get().ptyHolderEnabled == true)
+    }
+
+    /// The opt-out graduation had to preserve, read through the production
+    /// resolution path rather than an injected default: an install that chose
+    /// `false` keeps resolving `false` while the shipped constant says `true`.
+    /// The second assertion is what keeps the first meaningful — it fails if
+    /// the two values ever agree again, which is the state in which this test
+    /// would pass without discriminating anything.
+    @Test func anExplicitOptOutDiffersFromTheShippedDefault() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(false)
         #expect(try await db.config.get().ptyHolderEnabled == false)
+        #expect(
+            Config.ptyHolderDefault == true,
+            "this test discriminates only while the shipped default is the opposite choice")
     }
 
     @Test func setPtyHolderEnabledRoundtrips() async throws {

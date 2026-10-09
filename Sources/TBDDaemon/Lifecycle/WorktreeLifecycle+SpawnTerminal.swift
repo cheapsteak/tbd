@@ -19,7 +19,7 @@ enum TerminalSpawnTransport: Sendable {
 
     /// **The transport gate, for every path that creates a session row.**
     ///
-    /// Off is today's behavior, exactly; on puts the new session on a holder.
+    /// Off puts the new session in a tmux window; on puts it on a holder.
     /// The decision is made at spawn time and the row keeps it for life:
     /// flipping the flag must never migrate a running session, because the
     /// transport is a property of a live pty that already exists, not of a

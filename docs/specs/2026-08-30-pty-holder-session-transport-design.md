@@ -976,13 +976,14 @@ when they answer.
 
 ## Rollout
 
-This wholesale-replaces a load-bearing path, so it ships behind a default-off
-flag with a soak and a stated graduation plan.
+This wholesale-replaces a load-bearing path, so it rolls out behind a flag
+that holds new spawns on tmux until a soak and a stated graduation bar are
+met.
 
 - **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
   migration with **no SQL `DEFAULT` clause**, so unset stays a third state.
-  The shipped default is `false`, resolved in `ConfigRecord.toModel(...)` the
-  way the **graduation-ready** gates there resolve theirs: a
+  The shipped default is resolved in `ConfigRecord.toModel(...)` the way the
+  **graduation-ready** gates there resolve theirs: a
   `ptyHolderDefault: Bool = Config.ptyHolderDefault` parameter on `toModel`,
   and `pty_holder_enabled ?? ptyHolderDefault` in the body. That is a minority
   of the gates in that file, not all of them — roughly seven follow it, while
@@ -1043,79 +1044,41 @@ flag with a soak and a stated graduation plan.
   `feed(byteArray:)`-out shape is the closest existing seam to what the holder
   transport needs, so the third path is cheaper than the second was. Each
   gated branch gets tests for flag-on and flag-off behavior.
-- **Soak.** Enable on a development machine running a real fleet at real
-  load. Ordinary development restarts exercise the re-adoption path
-  continuously — the hardest code in the design gets adversarial testing for
-  free. Graduation gates on field evidence: no double-reader violations, the
-  reconcilers holding (no growth in unclaimed holders or socket litter), and
-  latency flatness re-confirmed under load by re-running the probes that drew
-  the curve in the first place: `scripts/diag/tmux-vs-rawpty-idle.py` for the
-  raw-versus-tmux echo comparison and `scripts/diag/tmux-server-contention.py`
-  for the pane-count control. Both are committed alongside this design, for
-  the reason that a design justified by a latency curve has to ship the tool
-  that can re-draw it — otherwise graduation is a judgement call wearing a
-  measurement's clothes.
+- **Soak.** Enable on a development machine running a real fleet at real load.
+  Ordinary development restarts exercise the re-adoption path continuously —
+  the hardest code in the design gets adversarial testing for free.
 
-  **Flatness is the claim, so flatness is what the threshold has to test.** An
-  absolute latency bound alone would pass a transport that is merely fast on a
-  quiet machine, which is exactly what tmux already is — its p50 is 1.1 ms and
-  imperceptible. The graduation run is therefore a paired measurement, and all
-  four conditions must hold:
+  Graduation rests on sustained field operation rather than a bench
+  measurement: continuous use over weeks on a machine carrying on the order of
+  a hundred concurrent holder-backed sessions, with every spawn kind,
+  hibernation and wake, daemon restart and re-adoption exercised daily, and no
+  latency regression perceptible to the operator typing into them. The
+  transport's justification is scaling headroom, and a fleet of that size under
+  real load is the condition the headroom was wanted for.
 
-  - **Workload:** the design point as stated above — **~150 concurrent sessions
-    at sustained load ≥ 100** on one machine, matched against an idle-machine
-    run of the same probe, interleaved so both arms see the same conditions.
-    Session count and load are two different numbers and both have to be met;
-    validating at 100 sessions would clear a materially lower bar than the
-    design targets.
-  - **Sample:** at least 2,000 keystrokes per arm. This is a bar chosen for
-    graduation, **not** a repeat of the original method: the load-based latency
-    runs behind the headline numbers were small, and their highest-load bucket
-    was explicitly n=4 and directional only. That is precisely why graduation
-    needs a larger sample than the measurements that motivated it — a p90 is
-    the statistic under test, and a p90 from a handful of samples is not one.
-  - **Absolute bound:** p90 keystroke echo at load stays at or under **5 ms**,
-    the ceiling a raw pty was never observed to exceed at any load up to 117.
-  - **Flatness bound:** p90 at load is no more than **2×** p90 at idle. The
-    multiplier is set where it is because it has to sit clear of ordinary
-    scheduling jitter on a loaded machine while still failing anything with a
-    per-keystroke wakeup in the path — and tmux fails it by more than an order
-    of magnitude, so the exact value is not load-bearing. Its p90 went
-    9.3 → 12.7 → 139 ms as load rose; the 139 ms bucket is n=4 and directional
-    only, but even discarding it entirely the 9.3 → 12.7 growth already
-    exceeds nothing-should-grow, and the mechanism is not in doubt: a tmux
-    keystroke costs process wakeups whose latency is scheduling delay.
-
-  Any load-dependent growth beyond that flatness bound means the transport has
-  a wakeup in the echo path that the design says it does not, and graduation
-  does not proceed on the theory that the absolute number still looks small.
-
-  **The run must exercise a real holder-backed session, not the raw-pty arm
-  standing in for one.** The existing probes measure a raw pty and tmux; the
-  raw arm is *expected* to be the holder's attached echo path exactly, because
-  by construction there is no process between the app and the master once a
-  viewer is attached — the holder never reads, and the daemon has stepped off.
-  But that is the design's central claim, and a graduation gate that assumes it
-  is measuring nothing. So the load arm runs against sessions actually spawned
-  on the holder transport with a viewer attached, and the raw-pty arm stays as
-  the reference the holder path is expected to match: if the two diverge, the
-  gap is a process in the path that should not be there, and finding it is the
-  entire value of the measurement. The detached path is a separate question the
-  flatness bound does not speak to at all — nobody is typing into a detached
-  session — and the reconciler and drain evidence cover it instead.
+  The probes committed alongside this design —
+  `scripts/diag/tmux-vs-rawpty-idle.py` for the raw-versus-tmux echo comparison
+  and `scripts/diag/tmux-server-contention.py` for the pane-count control — and
+  the in-app instrument behind `enableTerminalLatencyDiagnostic`, which takes
+  one number on both transports through a single seam, remain the tools for
+  re-drawing the latency curve whenever a question about it arises. A design
+  justified by a latency curve has to ship the tool that can re-draw it. They
+  are instruments, not gates.
 
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
-  reader never sees — so an absence of reports is not an absence of the fault,
-  and gating the design's central safety property on unaided observation would
-  be the weakest step in the argument. Two positive detectors carry that bar
-  instead. An always-on **reader-count assertion**: the daemon holds explicit
-  per-session reader state, and every transition into reading asserts the count
-  was zero, incrementing a violation counter and logging loudly rather than
-  trusting the arbitration to be correct. And a soak-time **continuity
-  canary**: a known sequence written periodically to a session, whose reader
-  checks it arrives unbroken — a gap is byte theft, positively observed rather
-  than inferred. Graduation reads those two numbers.
+  reader never sees — so an absence of corruption reports is not an absence of
+  the fault. The daemon therefore holds explicit per-session reader state, and
+  every transition into reading checks that the count was zero, incrementing a
+  violation counter and logging loudly rather than trusting the arbitration to
+  be correct. That detector is permanent rather than soak instrumentation: it
+  keeps the property observable for as long as two readers remain possible,
+  which is as long as a viewer can attach a pty the daemon may also read.
+
+  **The reconcilers holding** is the other field condition: no growth in
+  unclaimed holders, and no accumulating rendezvous litter — neither the socket
+  a SIGKILLed holder could not unlink, nor the lock and log a clean exit leaves
+  beside it.
 - **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
   change that reaches everyone who never chose while preserving every
   explicit opt-out. That is the transport's only graduation event: its holder

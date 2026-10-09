@@ -377,11 +377,11 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the pty-holder transport gate — the default-off soak switch for
-    /// spawning sessions onto a holder process rather than into a tmux window.
-    /// This is how the soak is turned on: the flag is the feature's only opt-in,
-    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
-    /// the sole way to enable it behind a database the project's own rules say
+    /// Persist the pty-holder transport gate — the switch that decides whether
+    /// a session is spawned onto a holder process or into a tmux window. The
+    /// flag is the feature's only switch in either direction, and leaving it
+    /// reachable only by hand-editing `~/tbd/state.db` would put the sole way
+    /// to move off the default behind a database the project's own rules say
     /// not to go into.
     ///
     /// **It applies to sessions created after the call, and to no others.** A

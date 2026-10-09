@@ -82,11 +82,11 @@ struct PtyHolderSettingsRPCTests {
 
     // MARK: - daemon.capabilities
 
-    @Test("capabilities reports the pty-holder flag OFF by default")
-    func capabilitiesDefaultsOff() async throws {
+    @Test("capabilities reports the pty-holder flag ON by default")
+    func capabilitiesDefaultsOn() async throws {
         let (router, _) = try makeRouterAndDB()
         #expect(try await capabilities(router).ptyHolderEnabled == Config.ptyHolderDefault)
-        #expect(Config.ptyHolderDefault == false, "the shipped default is still OFF during the soak")
+        #expect(Config.ptyHolderDefault == true, "the transport has graduated: the shipped default is ON")
     }
 
     /// The round trip the toggle actually performs: set, read back, set back,

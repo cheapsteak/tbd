@@ -28,12 +28,11 @@ gate from the subsystem they belong to:
   arm. A finished, resumable holder row is parked, preserving its session id,
   exactly as a finished tmux row is. Formerly `holder_row_reconcile_enabled`.
 
-The transport itself stays behind `pty_holder_enabled`, default off. That flag
-gates spawning, not servicing: it decides which transport a new session gets,
-and every leg above runs whenever a row of its transport exists. It is also
-the transport's soak gate, and flipping its default is the single graduation
-event the transport spec's Rollout section names; no holder leg has a
-graduation of its own.
+The transport itself sits behind `pty_holder_enabled`. That flag gates
+spawning, not servicing: it decides which transport a new session gets, and
+every leg above runs whenever a row of its transport exists. Flipping its
+shipped default is the single graduation event the transport spec's Rollout
+section names; no holder leg has a graduation of its own.
 
 ## The decision, and who made it
 
