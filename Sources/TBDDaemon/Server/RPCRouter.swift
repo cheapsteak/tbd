@@ -255,6 +255,10 @@ public final class RPCRouter: Sendable {
     /// `remoteManager`, so it is `nil` exactly when that is — and the handler
     /// is refused by `remoteGate()` before it would need one.
     let remoteTranscriptSync: RemoteTranscriptSync?
+    /// The latest transcript hint each remote session reported, read by
+    /// `remoteTranscriptSync`'s tail-or-forward decision. Always built, and
+    /// empty after every daemon start until the first sightings.
+    let remoteTranscriptHints: RemoteTranscriptHints
     /// Daemon-lifetime incremental transcript baselines used only to enrich
     /// terminal-list responses for Codex presentation state.
     let codexActivityTracker = CodexTranscriptActivityTracker()
@@ -561,12 +565,27 @@ public final class RPCRouter: Sendable {
         // `remoteTranscriptEnvironment` resolves the cache root through
         // `TBDConstants`, so `TBD_HOME` decides where caches live and a test
         // can point it at a temp home without touching the process env.
+        let hints = RemoteTranscriptHints()
+        self.remoteTranscriptHints = hints
         self.remoteTranscriptSync = remoteManager.map { manager in
-            RemoteTranscriptSync(environment: remoteTranscriptEnvironment) { provider, verb in
-                try await manager.invoke(
-                    providerName: provider, verb: verb, stdin: nil,
-                    timeout: RPCRouter.transcriptReadTimeout)
-            }
+            RemoteTranscriptSync(
+                environment: remoteTranscriptEnvironment,
+                policy: { [db] provider, sessionID in
+                    // Read at every decision, never cached (§ Gating), so a
+                    // toggle takes effect on the next sync.
+                    let enabled = (try? await db.config.get().remoteTranscriptLiveSyncEnabled)
+                        ?? Config.remoteTranscriptLiveSyncEnabledDefault
+                    let capabilities = await manager.declaredCapabilities(provider: provider)
+                    return RemoteTranscriptSyncPolicy(
+                        liveSyncEnabled: enabled,
+                        tailDeclared: capabilities.contains(RemoteCapability.transcriptTail),
+                        hint: await hints.latest(provider: provider, sessionID: sessionID))
+                },
+                invoke: { provider, verb in
+                    try await manager.invoke(
+                        providerName: provider, verb: verb, stdin: nil,
+                        timeout: RPCRouter.transcriptReadTimeout)
+                })
         }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {

@@ -68,9 +68,12 @@ struct RemoteTranscriptSyncTests: ~Copyable {
     }
 
     private func makeSync(
-        _ provider: ScriptedProvider, pageCap: Int = RemoteTranscriptSync.defaultPageCap
+        _ provider: ScriptedProvider, pageCap: Int = RemoteTranscriptSync.defaultPageCap,
+        policy: RemoteTranscriptSyncPolicy = .forwardOnly
     ) -> RemoteTranscriptSync {
-        RemoteTranscriptSync(environment: environment, pageCap: pageCap) { _, verb in
+        RemoteTranscriptSync(
+            environment: environment, pageCap: pageCap, policy: { _, _ in policy }
+        ) { _, verb in
             try await provider.call(verb)
         }
     }
@@ -81,6 +84,14 @@ struct RemoteTranscriptSyncTests: ~Copyable {
 
     private func read(since cursor: String? = nil) -> [String] {
         RemoteVerb.transcriptRead(sessionID: "s-1", since: cursor)
+    }
+
+    private func tail() -> [String] {
+        RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12)
+    }
+
+    private func readBefore(_ cursor: String) -> [String] {
+        RemoteVerb.transcriptReadBefore(sessionID: "s-1", before: cursor, count: 12)
     }
 
     // MARK: - Cursor round trip and reset
@@ -456,5 +467,495 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         #expect(FileManager.default.fileExists(atPath: directory.path) == false,
                 "a queued follow-up recreated the discarded cache")
         #expect(await sync.activeLaneCount == 0)
+    }
+
+    // MARK: - Tail or forward
+
+    private static let liveTail = RemoteTranscriptSyncPolicy(liveSyncEnabled: true, tailDeclared: true, hint: nil)
+
+    private static func policy(
+        enabled: Bool = true, tail: Bool = true, hint: RemoteTranscriptHint?
+    ) -> RemoteTranscriptSyncPolicy {
+        RemoteTranscriptSyncPolicy(liveSyncEnabled: enabled, tailDeclared: tail, hint: hint)
+    }
+
+    private func cache(_ sync: RemoteTranscriptSync) -> RemoteTranscriptCache {
+        sync.cache(provider: "agentbox", sessionID: "s-1")
+    }
+
+    /// A cache built by a forward read (cursor `c-1`), optionally with a
+    /// recorded hint, written through the cache's own API.
+    @discardableResult
+    private func seedForward(
+        _ sync: RemoteTranscriptSync, hint: RemoteTranscriptHint? = nil
+    ) throws -> RemoteTranscriptCacheState {
+        let store = cache(sync)
+        var state = try store.load()
+        state = try store.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", from: state)
+        if let hint { state = try store.commitHint(hint, to: state) }
+        return state
+    }
+
+    /// A cache built by a tail reset: cursor `c-1`, history above it at `b-1`.
+    @discardableResult
+    private func seedTail(_ sync: RemoteTranscriptSync) throws -> RemoteTranscriptCacheState {
+        let store = cache(sync)
+        var state = try store.load()
+        state = try store.reset(to: Data("{\"n\":5}\n".utf8), cursor: "c-1", before: "b-1", from: state)
+        return state
+    }
+
+    private func stored(_ sync: RemoteTranscriptSync) throws -> RemoteTranscriptCacheState {
+        try #require(cache(sync).peekState())
+    }
+
+    @Test func theThresholdsArePinned() {
+        #expect(RemoteTranscriptSync.tailRecordCount == 12)
+        #expect(RemoteTranscriptSync.tailResetGrowthThreshold == 524_288)
+    }
+
+    @Test func flagOnTailsAnEmptyCache() async throws {
+        let hint = RemoteTranscriptHint(id: "c1", size: 100)
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":11}\n{\"n\":12}\n", #"{"cursor":"c-1","before":"b-1"}"#),
+        ])
+        let sync = makeSync(provider, policy: Self.policy(hint: hint))
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+
+        #expect(await provider.calls == [tail()])
+        #expect(try fileText(result) == "{\"n\":11}\n{\"n\":12}\n")
+        let state = try stored(sync)
+        #expect(state.before == "b-1")
+        #expect(state.cursor == "c-1")
+        #expect(state.hint == hint)
+        #expect(result.caughtUp)
+        #expect(result.hasEarlier)
+        #expect(result.head == 0)
+    }
+
+    @Test func flagOnTailsWhenTheHintIDChanges() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"new\":1}\n", #"{"cursor":"n-1","before":"nb-1"}"#),
+        ])
+        let sync = makeSync(provider, policy: Self.policy(hint: RemoteTranscriptHint(id: "c2", size: 10)))
+        let seeded = try seedForward(sync, hint: RemoteTranscriptHint(id: "c1", size: 100))
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [tail()])
+        #expect(result.generation == seeded.generation + 1)
+        #expect(try fileText(result) == "{\"new\":1}\n")
+    }
+
+    @Test func flagOnTailsWhenSizeGrowsPastTheThreshold() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":9}\n", #"{"cursor":"c-9","before":"b-8"}"#),
+        ])
+        let sync = makeSync(provider, policy: Self.policy(hint: RemoteTranscriptHint(id: "c1", size: 100 + 524_289)))
+        try seedForward(sync, hint: RemoteTranscriptHint(id: "c1", size: 100))
+
+        _ = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [tail()])
+    }
+
+    @Test func flagOnReadsForwardAtTheThreshold() async throws {
+        let current = RemoteTranscriptHint(id: "c1", size: 100 + 524_288)
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.policy(hint: current))
+        try seedForward(sync, hint: RemoteTranscriptHint(id: "c1", size: 100))
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(since: "c-1")])
+        #expect(result.caughtUp)
+        #expect(try stored(sync).hint == current)
+    }
+
+    @Test func flagOnReadsForwardWithNoHint() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        try seedForward(sync, hint: RemoteTranscriptHint(id: "c1", size: 100))
+
+        _ = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(since: "c-1")])
+    }
+
+    /// A cache written before hints existed has nothing to compare with: it
+    /// reads forward even when the current hint is far past any threshold, and
+    /// records the hint for next time.
+    @Test func aCacheWithNoRecordedHintReadsForward() async throws {
+        let current = RemoteTranscriptHint(id: "c9", size: 999_999_999)
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.policy(hint: current))
+        try seedForward(sync)
+
+        _ = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(since: "c-1")])
+        #expect(try stored(sync).hint == current)
+    }
+
+    @Test func aShrunkSizeForTheSameIDReadsForward() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.policy(hint: RemoteTranscriptHint(id: "c1", size: 100)))
+        try seedForward(sync, hint: RemoteTranscriptHint(id: "c1", size: 900))
+
+        _ = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(since: "c-1")])
+    }
+
+    @Test func withoutTailDeclaredTheFlagOnNeverTails() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":1}\n", #"{"cursor":"c-1"}"#)])
+        let sync = makeSync(
+            provider, policy: Self.policy(tail: false, hint: RemoteTranscriptHint(id: "c1", size: 100)))
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read()])
+        #expect(!result.hasEarlier)
+    }
+
+    @Test func flagOffNeverTailsEvenOnAnEmptyCache() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":1}\n", #"{"cursor":"c-1"}"#)])
+        let sync = makeSync(
+            provider, policy: Self.policy(enabled: false, hint: RemoteTranscriptHint(id: "c1", size: 100)))
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read()])
+        #expect(!result.hasEarlier)
+    }
+
+    /// With the flag off, a cache holding history above it (left from a period
+    /// with the flag on) is refetched in full, so the whole conversation
+    /// returns. The same holds with the flag on for a provider without
+    /// `transcript.tail`, whose `before` can never be followed.
+    @Test(arguments: [
+        RemoteTranscriptSyncPolicy.forwardOnly,
+        RemoteTranscriptSyncPolicy(liveSyncEnabled: true, tailDeclared: false, hint: nil),
+    ])
+    func withoutTailModeACacheHoldingBeforeIsRefetchedInFull(policy: RemoteTranscriptSyncPolicy) async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n{\"n\":5}\n", #"{"cursor":"c-2"}"#),
+        ])
+        let sync = makeSync(provider, policy: policy)
+        let seeded = try seedTail(sync)
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read()])
+        #expect(try stored(sync).before == nil)
+        #expect(result.generation == seeded.generation + 1)
+        #expect(!result.hasEarlier)
+        #expect(try fileText(result) == "{\"n\":1}\n{\"n\":5}\n")
+    }
+
+    /// The other branch of the same gate: in tail mode a cache holding a
+    /// `before` reads forward and keeps it.
+    @Test func inTailModeACacheHoldingBeforeReadsForwardAndKeepsIt() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":6}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        try seedTail(sync)
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read(since: "c-1")])
+        #expect(try stored(sync).before == "b-1")
+        #expect(result.hasEarlier)
+    }
+
+    /// A tail answer with no envelope, or one without a cursor, gives the cache
+    /// nothing to continue forward from. It is discarded and the same sync
+    /// ends in a full forward read.
+    @Test(arguments: ["", #"{"before":"b"}"#, "{not json"])
+    func aTailAnswerWithoutACursorFallsBackToAFullRead(stderr: String) async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"tail\":1}\n", stderr),
+            Self.page("{\"n\":1}\n{\"n\":2}\n", #"{"cursor":"c-2"}"#),
+        ])
+        let sync = makeSync(provider, pageCap: 1, policy: Self.liveTail)
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+
+        #expect(await provider.calls == [tail(), read()])
+        #expect(try fileText(result) == "{\"n\":1}\n{\"n\":2}\n")
+        #expect(try stored(sync).before == nil)
+        #expect(try stored(sync).cursor == "c-2")
+        #expect(result.caughtUp)
+        #expect(!result.hasEarlier)
+    }
+
+    /// `--tail` never sets `more`; one that does is ignored.
+    @Test func aTailResetIsCaughtUpEvenIfMoreIsSet() async throws {
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":1}\n", #"{"cursor":"c","before":"b","more":true}"#),
+        ])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(result.caughtUp)
+        #expect(await provider.calls == [tail()])
+    }
+
+    /// After a daemon restart the hint store is empty: the on-screen sync
+    /// must not overwrite the recorded hint with nothing, or the first
+    /// sighting would read as a change and refetch.
+    @Test func anUnknownHintLeavesTheRecordedHintAlone() async throws {
+        let recorded = RemoteTranscriptHint(id: "c1", size: 100)
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2"}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        try seedForward(sync, hint: recorded)
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(result.caughtUp)
+        #expect(try stored(sync).hint == recorded)
+    }
+
+    @Test func theHintIsRecordedOnlyWhenCaughtUp() async throws {
+        let recorded = RemoteTranscriptHint(id: "c1", size: 100)
+        let provider = ScriptedProvider([Self.page("{\"n\":2}\n", #"{"cursor":"c-2","more":true}"#)])
+        let sync = makeSync(
+            provider, pageCap: 1, policy: Self.policy(hint: RemoteTranscriptHint(id: "c1", size: 200)))
+        try seedForward(sync, hint: recorded)
+
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(!result.caughtUp)
+        #expect(try stored(sync).hint == recorded)
+    }
+
+    /// The flag governs decisions, not bookkeeping.
+    @Test func theHintIsRecordedWithTheFlagOff() async throws {
+        let hint = RemoteTranscriptHint(id: "c1", size: 5)
+        let provider = ScriptedProvider([Self.page("{\"n\":1}\n", #"{"cursor":"c-1"}"#)])
+        let sync = makeSync(provider, policy: Self.policy(enabled: false, tail: false, hint: hint))
+        let result = try await sync.sync(provider: "agentbox", sessionID: "s-1")
+        #expect(await provider.calls == [read()])
+        #expect(result.caughtUp)
+        #expect(try stored(sync).hint == hint)
+    }
+
+    // MARK: - Load earlier
+
+    @Test func loadEarlierPrependsAndBumpsHead() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":3}\n{\"n\":4}\n", #"{"before":"b-0"}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+
+        #expect(await provider.calls == [readBefore("b-1")])
+        #expect(outcome == RemoteTranscriptLoadEarlierOutcome(
+            generation: seeded.generation, head: 1, reachedStart: false, expired: false, discarded: false))
+        let state = try stored(sync)
+        #expect(state.cursor == "c-1")
+        #expect(state.before == "b-0")
+        #expect(try String(contentsOf: cache(sync).transcriptURL, encoding: .utf8)
+            == "{\"n\":3}\n{\"n\":4}\n{\"n\":5}\n")
+    }
+
+    @Test func loadEarlierReachingTheStartClearsBefore() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":4}\n", "")])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        #expect(outcome.reachedStart)
+        #expect(!outcome.expired)
+        #expect(outcome.head == 1)
+        #expect(try stored(sync).before == nil)
+    }
+
+    @Test func loadEarlierOnCursorExpiredClearsBeforeAndReportsExpired() async throws {
+        let provider = ScriptedProvider([
+            ProviderResult(
+                exitCode: 1, stdout: Data(#"{"error":{"code":"cursor_expired","message":"gone"}}"#.utf8),
+                stderr: ""),
+        ])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+        let bytes = try Data(contentsOf: cache(sync).transcriptURL)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        #expect(outcome.reachedStart)
+        #expect(outcome.expired)
+        #expect(outcome.head == seeded.head)
+        #expect(try stored(sync).before == nil)
+        #expect(try Data(contentsOf: cache(sync).transcriptURL) == bytes)
+    }
+
+    @Test func loadEarlierWithAMalformedEnvelopeWritesNothing() async throws {
+        let provider = ScriptedProvider([Self.page("{\"n\":4}\n", #"{"before":7}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+        let bytes = try Data(contentsOf: cache(sync).transcriptURL)
+
+        await #expect(throws: RemoteTranscriptSyncError.providerFailed(
+            message: "malformed transcript read --before envelope")) {
+            try await sync.loadEarlier(provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        }
+        #expect(try stored(sync) == seeded)
+        #expect(try Data(contentsOf: cache(sync).transcriptURL) == bytes)
+    }
+
+    @Test func loadEarlierWithAnyOtherFailureWritesNothing() async throws {
+        let provider = ScriptedProvider([
+            ProviderResult(
+                exitCode: 1, stdout: Data(#"{"error":{"code":"boom","message":"transport dropped"}}"#.utf8),
+                stderr: ""),
+        ])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        await #expect(throws: RemoteTranscriptSyncError.providerFailed(message: "transport dropped")) {
+            try await sync.loadEarlier(provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        }
+        #expect(try stored(sync) == seeded)
+    }
+
+    /// A page that cannot advance — empty with a `before`, or whose `before`
+    /// is the cursor just sent — must not let a scroll-up loop forever on the
+    /// same request: `before` is cleared and the start reported, and a
+    /// non-empty page is still prepended.
+    @Test(arguments: [("", "b-0"), ("{\"n\":0}\n", "b-1")])
+    func loadEarlierThatMakesNoProgressStopsAtTheStart(page: String, nextBefore: String) async throws {
+        let provider = ScriptedProvider([Self.page(page, #"{"before":"\#(nextBefore)"}"#)])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        #expect(outcome.reachedStart)
+        #expect(!outcome.expired)
+        #expect(try stored(sync).before == nil)
+        let text = try String(contentsOf: cache(sync).transcriptURL, encoding: .utf8)
+        #expect(text == page + "{\"n\":5}\n")
+        #expect(outcome.head == (page.isEmpty ? seeded.head : seeded.head + 1))
+    }
+
+    @Test func loadEarlierWithNoBeforeReportsTheStartWithoutACall() async throws {
+        let provider = ScriptedProvider([])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedForward(sync)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        #expect(outcome.reachedStart)
+        #expect(await provider.calls.isEmpty)
+    }
+
+    /// The caller's generation is stale: no provider call, `discarded`, and
+    /// the cache's own generation to resync from.
+    @Test func aLoadEarlierPageIsDiscardedWhenTheGenerationChanged() async throws {
+        let provider = ScriptedProvider([])
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+        let bytes = try Data(contentsOf: cache(sync).transcriptURL)
+
+        let outcome = try await sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation - 1)
+        #expect(outcome.discarded)
+        #expect(outcome.generation == seeded.generation)
+        #expect(await provider.calls.isEmpty)
+        #expect(try Data(contentsOf: cache(sync).transcriptURL) == bytes)
+    }
+
+    /// A load queued on the lane behind a sync that resets the cache sees the
+    /// new generation when its turn comes, and makes no provider call.
+    @Test func aLoadEarlierQueuedBehindAResettingSyncIsDiscarded() async throws {
+        let gate = Gate()
+        let provider = ScriptedProvider([
+            Self.page("{\"r\":1}\n", #"{"cursor":"c","reset":true}"#),
+        ], holdFirst: gate)
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        async let synced = sync.sync(provider: "agentbox", sessionID: "s-1")
+        let started = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await provider.calls.count == 1
+        }
+        async let loaded = sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        let queued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await sync.laneWaiterCount(provider: "agentbox", sessionID: "s-1") == 1
+        }
+        await gate.open()
+
+        let syncResult = try await synced
+        let outcome = try await loaded
+        #expect(started == .satisfied)
+        #expect(queued == .satisfied)
+        #expect(await provider.calls == [read(since: "c-1")])
+        #expect(syncResult.generation == seeded.generation + 1)
+        #expect(outcome.discarded)
+        #expect(outcome.generation == seeded.generation + 1)
+    }
+
+    /// A load and a sync never run at once on one lane: the load waits for
+    /// the sync's provider call, then runs.
+    @Test func loadEarlierAndSyncNeverOverlapOnOneLane() async throws {
+        let gate = Gate()
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":6}\n", #"{"cursor":"c-2"}"#),
+            Self.page("{\"n\":4}\n", #"{"before":"b-0"}"#),
+        ], holdFirst: gate)
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+
+        async let synced = sync.sync(provider: "agentbox", sessionID: "s-1")
+        let started = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await provider.calls.count == 1
+        }
+        async let loaded = sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        let queued = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await sync.laneWaiterCount(provider: "agentbox", sessionID: "s-1") == 1
+        }
+        let callsWhileHeld = await provider.calls.count
+        await gate.open()
+
+        _ = try await synced
+        let outcome = try await loaded
+        #expect(started == .satisfied)
+        #expect(queued == .satisfied)
+        #expect(callsWhileHeld == 1)
+        #expect(await provider.calls == [read(since: "c-1"), readBefore("b-1")])
+        #expect(!outcome.discarded)
+        #expect(try String(contentsOf: cache(sync).transcriptURL, encoding: .utf8)
+            == "{\"n\":4}\n{\"n\":5}\n{\"n\":6}\n")
+    }
+
+    /// A discard that lands while a load's provider call is in flight drops
+    /// the page instead of recreating the directory.
+    @Test func aDiscardDropsAnInFlightLoadEarlier() async throws {
+        let gate = Gate()
+        let provider = ScriptedProvider([
+            Self.page("{\"n\":4}\n", #"{"before":"b-0"}"#),
+        ], holdFirst: gate)
+        let sync = makeSync(provider, policy: Self.liveTail)
+        let seeded = try seedTail(sync)
+        let directory = cache(sync).directory
+
+        async let loaded = sync.loadEarlier(
+            provider: "agentbox", sessionID: "s-1", requestGeneration: seeded.generation)
+        let started = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await provider.calls.count == 1
+        }
+        await sync.discard(provider: "agentbox", sessionID: "s-1")
+        await gate.open()
+
+        var thrown: RemoteTranscriptSyncError?
+        do { _ = try await loaded } catch let error as RemoteTranscriptSyncError { thrown = error }
+        #expect(started == .satisfied)
+        #expect(thrown == .discarded)
+        #expect(FileManager.default.fileExists(atPath: directory.path) == false,
+                "the in-flight page recreated the discarded cache")
+    }
+
+    // MARK: - Hint store
+
+    /// Unknown until sighted; a sighting without a hint removes the entry
+    /// rather than keeping a stale one; sessions are keyed apart.
+    @Test func theHintStoreRecordsReplacesAndForgets() async {
+        let hints = RemoteTranscriptHints()
+        #expect(await hints.latest(provider: "agentbox", sessionID: "s-1") == nil)
+        await hints.record(provider: "agentbox", sessionID: "s-1", hint: RemoteTranscriptHint(id: "c1", size: 1))
+        await hints.record(provider: "agentbox", sessionID: "s-1", hint: RemoteTranscriptHint(id: "c1", size: 2))
+        await hints.record(provider: "agentbox", sessionID: "s-2", hint: RemoteTranscriptHint(id: "d1", size: 9))
+        #expect(await hints.latest(provider: "agentbox", sessionID: "s-1") == RemoteTranscriptHint(id: "c1", size: 2))
+        await hints.record(provider: "agentbox", sessionID: "s-1", hint: nil)
+        #expect(await hints.latest(provider: "agentbox", sessionID: "s-1") == nil)
+        #expect(await hints.latest(provider: "agentbox", sessionID: "s-2") == RemoteTranscriptHint(id: "d1", size: 9))
     }
 }

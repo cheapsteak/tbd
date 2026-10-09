@@ -1897,12 +1897,37 @@ public struct RemoteTranscriptSyncParams: Codable, Sendable {
 /// - `caughtUp` — false when the sync stopped at its page cap with the
 ///   provider still reporting `more`; the next sync resumes from the stored
 ///   cursor.
+/// - `head` — bumped on every prepend of earlier history under the same
+///   generation. A reader whose `head` differs rereads the file while holding
+///   its top visible row still.
+/// - `hasEarlier` — earlier history can be loaded now: the live-sync flag is
+///   on, the provider declares `transcript.tail`, and the cache holds a
+///   `before`. Always false with the flag off.
+///
+/// An older daemon sends neither `head` nor `hasEarlier`; they decode as `0`
+/// and `false`.
 public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
     public let path: String
     public let generation: Int
     public let caughtUp: Bool
-    public init(path: String, generation: Int, caughtUp: Bool) {
+    public let head: Int
+    public let hasEarlier: Bool
+    public init(path: String, generation: Int, caughtUp: Bool, head: Int = 0, hasEarlier: Bool = false) {
         self.path = path; self.generation = generation; self.caughtUp = caughtUp
+        self.head = head; self.hasEarlier = hasEarlier
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path, generation, caughtUp, head, hasEarlier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        generation = try c.decode(Int.self, forKey: .generation)
+        caughtUp = try c.decode(Bool.self, forKey: .caughtUp)
+        head = try c.decodeIfPresent(Int.self, forKey: .head) ?? 0
+        hasEarlier = try c.decodeIfPresent(Bool.self, forKey: .hasEarlier) ?? false
     }
 }
 

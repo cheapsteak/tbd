@@ -158,4 +158,205 @@ struct RemoteTranscriptCacheTests: ~Copyable {
         #expect(loaded == RemoteTranscriptCacheState(cursor: nil, length: 0, generation: 1))
         #expect(try fileText().isEmpty)
     }
+
+    // MARK: - Live-sync fields
+
+    private func writeRawState(_ json: String) throws {
+        try FileManager.default.createDirectory(at: cache.directory, withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: cache.stateURL)
+    }
+
+    private func encode(_ state: RemoteTranscriptCacheState) throws -> Data {
+        try JSONEncoder().encode(state)
+    }
+
+    /// A `state.json` an older daemon wrote has none of the new keys. It loads
+    /// with them empty, and loading it writes nothing.
+    @Test func anOldStateFileDecodesWithTheNewFieldsEmpty() throws {
+        let json = #"{"cursor":"c","length":0,"generation":2}"#
+        try writeRawState(json)
+        let loaded = try cache.load()
+        #expect(loaded.cursor == "c")
+        #expect(loaded.generation == 2)
+        #expect(loaded.before == nil)
+        #expect(loaded.head == 0)
+        #expect(loaded.hint == nil)
+        #expect(loaded.pendingPrepend == false)
+        #expect(try String(contentsOf: cache.stateURL, encoding: .utf8) == json)
+    }
+
+    @Test func aTailResetRecordsBefore() throws {
+        var state = try cache.load()
+        state = try cache.append(Data("{\"old\":1}\n".utf8), cursor: "c-0", to: state)
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c", before: "b", from: state)
+        #expect(state.before == "b")
+        #expect(state.cursor == "c")
+        #expect(state.generation == 1)
+        #expect(try storedState() == state)
+    }
+
+    @Test func aForwardResetClearsBefore() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", before: "b", from: state)
+        state = try cache.reset(to: Data("{\"n\":1}\n{\"n\":2}\n".utf8), cursor: "c", from: state)
+        #expect(state.before == nil)
+        #expect(try storedState().before == nil)
+    }
+
+    @Test func anUnchangedTailResetKeepsTheGenerationButUpdatesBefore() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", before: "b-1", from: state)
+        let generation = state.generation
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-2", before: "b-2", from: state)
+        #expect(state.generation == generation)
+        #expect(state.before == "b-2")
+        #expect(state.cursor == "c-2")
+        #expect(try storedState() == state)
+    }
+
+    /// A reset that changes the file clears the recorded hint: it described
+    /// the conversation the cache no longer holds the same way.
+    @Test func aChangingResetClearsTheHint() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", from: state)
+        state = try cache.commitHint(RemoteTranscriptHint(id: "c1", size: 10), to: state)
+        state = try cache.reset(to: Data("{\"n\":2}\n".utf8), cursor: "c-2", from: state)
+        #expect(state.hint == nil)
+    }
+
+    @Test func prependPutsThePageFirstAndBumpsHead() throws {
+        var state = try cache.load()
+        state = try cache.append(Data("{\"n\":3}\n".utf8), cursor: "c-3", to: state)
+        let generation = state.generation
+        state = try cache.prepend(Data("{\"n\":1}\n{\"n\":2}".utf8), before: "b-0", to: state)
+        #expect(try fileText() == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
+        let size = try #require(
+            try FileManager.default.attributesOfItem(atPath: cache.transcriptURL.path)[.size] as? NSNumber)
+        #expect(state.length == size.intValue)
+        #expect(state.head == 1)
+        #expect(state.before == "b-0")
+        #expect(state.generation == generation)
+        #expect(state.pendingPrepend == false)
+        #expect(state.cursor == "c-3")
+        #expect(try storedState() == state)
+        // The round trip: a later load reads it back unchanged.
+        #expect(try cache.load() == state)
+        let names = try FileManager.default.contentsOfDirectory(atPath: cache.directory.path)
+        #expect(!names.contains { $0.hasSuffix(".tmp") })
+    }
+
+    @Test func prependToTheStartClearsBefore() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":2}\n".utf8), cursor: "c-2", before: "b-1", from: state)
+        state = try cache.prepend(Data("{\"n\":1}\n".utf8), before: nil, to: state)
+        #expect(state.before == nil)
+        #expect(try fileText() == "{\"n\":1}\n{\"n\":2}\n")
+    }
+
+    /// A crash between a prepend's rename and its last state write: the file
+    /// is longer than `length`, and truncating it would cut the prepended file
+    /// in the wrong place. The marker makes `load()` start over instead.
+    @Test func aPendingPrependFoundOnLoadResetsTheCache() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":3}\n".utf8), cursor: "c-3", before: "b-2", from: state)
+        var marked = state
+        marked.pendingPrepend = true
+        try encode(marked).write(to: cache.stateURL)
+        try Data("{\"n\":2}\n{\"n\":3}\n".utf8).write(to: cache.transcriptURL)
+
+        let loaded = try cache.load()
+        #expect(try fileText().isEmpty)
+        #expect(loaded.length == 0)
+        #expect(loaded.cursor == nil)
+        #expect(loaded.before == nil)
+        #expect(loaded.hint == nil)
+        #expect(loaded.generation == state.generation + 1)
+        #expect(loaded.pendingPrepend == false)
+        #expect(try storedState() == loaded)
+    }
+
+    /// The crash before the rename leaves the file as it was, with the marker
+    /// set. The same reset: one tail refetch is the documented cost.
+    @Test func aPendingPrependWithTheFileUntouchedAlsoResets() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":3}\n".utf8), cursor: "c-3", before: "b-2", from: state)
+        var marked = state
+        marked.pendingPrepend = true
+        try encode(marked).write(to: cache.stateURL)
+
+        let loaded = try cache.load()
+        #expect(try fileText().isEmpty)
+        #expect(loaded.cursor == nil)
+        #expect(loaded.before == nil)
+        #expect(loaded.generation == state.generation + 1)
+        #expect(loaded.pendingPrepend == false)
+    }
+
+    @Test func aStrandedPrependTempFileIsSwept() throws {
+        var state = try cache.load()
+        state = try cache.append(Data("{\"n\":1}\n".utf8), cursor: "c-1", to: state)
+        let stranded = cache.directory.appendingPathComponent(".transcript.jsonl.\(UUID().uuidString).tmp")
+        try Data("stranded".utf8).write(to: stranded)
+        _ = try cache.load()
+        #expect(FileManager.default.fileExists(atPath: stranded.path) == false)
+    }
+
+    @Test func commitHintWritesOnlyTheHint() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", before: "b-1", from: state)
+        let bytes = try Data(contentsOf: cache.transcriptURL)
+        let hint = RemoteTranscriptHint(id: "c1", size: 100)
+        let next = try cache.commitHint(hint, to: state)
+        var expected = state
+        expected.hint = hint
+        #expect(next == expected)
+        #expect(try storedState() == expected)
+        #expect(try Data(contentsOf: cache.transcriptURL) == bytes)
+    }
+
+    @Test func clearBeforeWritesOnlyBefore() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":1}\n".utf8), cursor: "c-1", before: "b-1", from: state)
+        state = try cache.commitHint(RemoteTranscriptHint(id: "c1", size: 100), to: state)
+        let bytes = try Data(contentsOf: cache.transcriptURL)
+        let next = try cache.clearBefore(in: state)
+        var expected = state
+        expected.before = nil
+        #expect(next == expected)
+        #expect(try storedState() == expected)
+        #expect(try Data(contentsOf: cache.transcriptURL) == bytes)
+    }
+
+    /// `peekState` is for readers outside the lane: it never repairs, so an
+    /// uncommitted tail stays on disk for the lane's own `load()` to cut.
+    @Test func peekStateNeverRepairs() throws {
+        var state = try cache.load()
+        state = try cache.append(Data("{\"a\":1}\n".utf8), cursor: "c-1", to: state)
+        let handle = try FileHandle(forWritingTo: cache.transcriptURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"uncommitted\":1}\n".utf8))
+        try handle.close()
+
+        #expect(cache.peekState() == state)
+        #expect(try fileText() == "{\"a\":1}\n{\"uncommitted\":1}\n")
+    }
+
+    @Test func peekStateOfAMissingCacheIsNilAndCreatesNothing() {
+        #expect(cache.peekState() == nil)
+        #expect(FileManager.default.fileExists(atPath: cache.directory.path) == false)
+    }
+
+    @Test func appendKeepsBeforeHeadAndHint() throws {
+        var state = try cache.load()
+        state = try cache.reset(to: Data("{\"n\":2}\n".utf8), cursor: "c-2", before: "b-1", from: state)
+        state = try cache.prepend(Data("{\"n\":1}\n".utf8), before: "b-0", to: state)
+        let hint = RemoteTranscriptHint(id: "c1", size: 100)
+        state = try cache.commitHint(hint, to: state)
+        state = try cache.append(Data("{\"n\":3}\n".utf8), cursor: "c-3", to: state)
+        #expect(state.before == "b-0")
+        #expect(state.head == 1)
+        #expect(state.hint == hint)
+        #expect(state.cursor == "c-3")
+        #expect(try fileText() == "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n")
+    }
 }

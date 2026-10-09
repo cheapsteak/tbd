@@ -252,6 +252,83 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(await sync(r).error == "provider 'agentbox' timed out running 'transcript read'")
     }
 
+    // MARK: - remote.transcriptSync under the live-sync flag
+
+    /// With the flag on and `transcript.tail` declared, an empty cache is
+    /// tail-reset and the result says earlier history exists. Turned off, the
+    /// next sync never passes `--tail`, refetches the cache holding `before` in
+    /// full, and reports no earlier history.
+    @Test func syncResultCarriesHeadAndHasEarlier() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead, RemoteCapability.transcriptTail]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":2}\n".utf8), stderr: #"{"cursor":"c","before":"b"}"#),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n{\"n\":2}\n".utf8), stderr: #"{"cursor":"c-2"}"#),
+        ])
+        let r = router(await manager(invoker))
+
+        let first = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        #expect(first.head == 0)
+        #expect(first.hasEarlier)
+
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(false)
+        let second = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        #expect(!second.hasEarlier)
+        #expect(second.generation == first.generation + 1)
+        #expect(invoker.callsSnapshot() == [
+            ["describe"],
+            RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12),
+            RemoteVerb.transcriptRead(sessionID: "s-1"),
+        ])
+    }
+
+    /// The flag never touched (NULL) follows the shipped default, off: a
+    /// provider declaring `transcript.tail` still gets a plain forward read.
+    @Test func syncWithTheFlagUnsetNeverTails() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead, RemoteCapability.transcriptTail]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":1}\n".utf8), stderr: #"{"cursor":"c-1"}"#),
+        ])
+        let r = router(await manager(invoker))
+
+        let result = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        #expect(!result.hasEarlier)
+        #expect(invoker.callsSnapshot() == [["describe"], ["transcript", "read", "s-1"]])
+    }
+
+    /// The router's policy reads the hint store: a recorded hint is committed
+    /// at the caught-up sync, and a new conversation id in the store makes the
+    /// next sync a tail reset.
+    @Test func theSyncPolicyReadsTheHintStore() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring([RemoteCapability.transcriptRead, RemoteCapability.transcriptTail]),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":2}\n".utf8), stderr: #"{"cursor":"c-1","before":"b"}"#),
+            ProviderResult(exitCode: 0, stdout: Data("{\"n\":3}\n".utf8), stderr: #"{"cursor":"c-2"}"#),
+            ProviderResult(exitCode: 0, stdout: Data("{\"x\":1}\n".utf8), stderr: #"{"cursor":"x-1"}"#),
+        ])
+        let r = router(await manager(invoker))
+        await r.remoteTranscriptHints.record(
+            provider: "agentbox", sessionID: "s-1", hint: RemoteTranscriptHint(id: "c1", size: 100))
+
+        _ = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        _ = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+        await r.remoteTranscriptHints.record(
+            provider: "agentbox", sessionID: "s-1", hint: RemoteTranscriptHint(id: "c2", size: 10))
+        let third = try await sync(r).decodeResult(RemoteTranscriptSyncResult.self)
+
+        #expect(!third.hasEarlier)
+        #expect(invoker.callsSnapshot() == [
+            ["describe"],
+            RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12),
+            RemoteVerb.transcriptRead(sessionID: "s-1", since: "c-1"),
+            RemoteVerb.transcriptReadTail(sessionID: "s-1", count: 12),
+        ])
+    }
+
     // MARK: - remote.sendMessage refusals
 
     @Test func sendIsRefusedWithoutSendSubmit() async throws {

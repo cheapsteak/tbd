@@ -111,6 +111,25 @@ struct RemoteTranscriptSyncWireTests {
         #expect(result.caughtUp == false)
     }
 
+    /// An older daemon sends neither field.
+    @Test func syncResultDecodesWithoutHeadOrHasEarlier() throws {
+        let json = #"{"path":"/tmp/x/transcript.jsonl","generation":3,"caughtUp":true}"#
+        let result = try JSONDecoder().decode(
+            RemoteTranscriptSyncResult.self, from: Data(json.utf8))
+        #expect(result.head == 0)
+        #expect(result.hasEarlier == false)
+    }
+
+    @Test func syncResultRoundTripsHeadAndHasEarlier() throws {
+        let result = RemoteTranscriptSyncResult(
+            path: "/tmp/x/transcript.jsonl", generation: 3, caughtUp: true, head: 4, hasEarlier: true)
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptSyncResult.self, from: JSONEncoder().encode(result))
+        #expect(decoded == result)
+        #expect(decoded.head == 4)
+        #expect(decoded.hasEarlier)
+    }
+
     @Test func sendMessageParamsRoundTrip() throws {
         let params = RemoteSendMessageParams(
             provider: "acme", sessionID: "s-1", text: "line one\nline two")
