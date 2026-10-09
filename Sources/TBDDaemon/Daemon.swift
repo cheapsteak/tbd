@@ -849,7 +849,8 @@ public final class Daemon: Sendable {
         // One reservation ledger for the whole daemon: the lifecycle and the
         // router hold copies of this resolver, and a balanced pick is only
         // atomic across spawns that share the same ledger. The stale-account
-        // latch is shared the same way, so it holds to once across spawns.
+        // and fallback latches are shared the same way, so each holds to once
+        // across spawns.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
@@ -857,6 +858,8 @@ public final class Daemon: Sendable {
             candidateSource: profilePoolCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs)),
+            fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
         let pendingQuestions = PendingQuestionStore()

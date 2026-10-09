@@ -63,12 +63,13 @@ enum ProfilePoolCandidates {
         entries: [ModelProfileWithUsage],
         balancingOn: Bool,
         defaultProfileID: UUID?,
-        now: Date
+        now: Date,
+        policy: ProfilePoolPolicy = .standard
     ) -> Set<UUID> {
         guard balancingOn else { return [] }
         let candidates = fromApp(
             entries: entries, liveCounts: { _ in 0 }, defaultProfileID: defaultProfileID)
-        let verdicts = ProfilePoolPicker.pick(candidates: candidates, now: now).verdicts
+        let verdicts = ProfilePoolPicker.pick(candidates: candidates, now: now, policy: policy).verdicts
         return Set(verdicts.compactMap { id, verdict in
             showsStaleBadge(balancingOn: balancingOn, verdict: verdict) ? id : nil
         })

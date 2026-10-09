@@ -1722,6 +1722,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
+    /// Balancing's usage ceiling, in percent, as stored: nil when never set.
+    /// Act on `profileBalancingPolicy`, which resolves it.
+    public var profileBalancingUsageCeilingPercent: Int?
+    /// Balancing's maximum reading age, in seconds, as stored: nil when never
+    /// set. Act on `profileBalancingPolicy`, which resolves it.
+    public var profileBalancingMaxReadingAgeSeconds: Int?
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -2061,6 +2067,12 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        // Absent means never set, the NULL column's situation; the policy
+        // resolves it.
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
@@ -2074,6 +2086,14 @@ public struct Config: Codable, Sendable, Equatable {
 }
 
 public extension Config {
+    /// The thresholds profile balancing applies, with unset or out-of-range
+    /// stored values resolved to the shipped ones.
+    var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
+    }
+
     /// Whether transcript streaming is actually on: the conjunction of the two
     /// flags, and the only form any caller should act on.
     ///

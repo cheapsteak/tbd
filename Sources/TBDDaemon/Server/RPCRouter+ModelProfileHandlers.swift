@@ -104,7 +104,9 @@ extension RPCRouter {
             gcEnabled: config.gcEnabled,
             autoCreateNotesEnabled: config.autoCreateNotesEnabled,
             globalRemoteCreateDefaults: config.remoteCreateDefaults,
-            profileBalancingEnabled: config.profileBalancingEnabled
+            profileBalancingEnabled: config.profileBalancingEnabled,
+            profileBalancingUsageCeilingPercent: config.profileBalancingUsageCeilingPercent,
+            profileBalancingMaxReadingAgeSeconds: config.profileBalancingMaxReadingAgeSeconds
         ))
     }
 
