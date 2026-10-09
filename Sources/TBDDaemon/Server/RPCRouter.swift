@@ -972,6 +972,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptPromptAnswerEnabled:
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
+                return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1152,6 +1154,7 @@ public final class RPCRouter: Sendable {
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
+        result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
         return try RPCResponse(result: result)
     }
 
