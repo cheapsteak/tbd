@@ -43,13 +43,21 @@ struct ClockTestSupportTests {
         #expect(firedAfterAdvance)
     }
 
-    @Test func advanceWhenSuspendedMovesTheClockForward() async {
-        let clock = TestClock()
+    /// Advancing past an armed sleeper moves `now` by exactly the advance.
+    ///
+    /// Runs on `EventDrivenTestClock` rather than `TestClock`: the polled
+    /// `advanceWhenSuspended` handshake (a megaYield probe every 25 ms) starved
+    /// past its 45 s guard on the saturated fast pass, while this test asserts
+    /// only the virtual-time contract. The arming wait parks on a continuation
+    /// signalled by the sleep itself, with a budget sized to the pass's latency.
+    /// `advanceWhenSuspended` itself stays covered by the test above.
+    @Test func advanceMovesTheClockForward() async throws {
+        let clock = EventDrivenTestClock()
         let before = clock.now
 
         let task = Task { try await clock.sleep(for: .seconds(5)) }
-        await clock.advanceWhenSuspended(by: .seconds(5))
-        _ = try? await task.value
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: TestDeadlines.saturatedPass)
+        try await task.value
 
         #expect(before.duration(to: clock.now) == .seconds(5))
     }
