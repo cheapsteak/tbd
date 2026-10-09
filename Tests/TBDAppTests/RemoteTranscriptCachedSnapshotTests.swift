@@ -68,6 +68,39 @@ struct RemoteTranscriptCachedSnapshotTests {
         #expect(transcript.path.hasPrefix(home.path), "the path must follow TBD_HOME")
     }
 
+    @Test("a cache file seeds state.json's head, and hasEarlier from its before cursor")
+    func seedsHeadAndHasEarlier() throws {
+        defer { cleanUp() }
+        _ = try writeCache(try fixtureText(), generation: 2)
+        let stateURL = directory.appendingPathComponent(TBDConstants.remoteTranscriptStateFileName)
+
+        try #"{"generation":2,"length":0,"head":3}"#.write(to: stateURL, atomically: true, encoding: .utf8)
+        let noBefore = try #require(
+            RemoteTranscriptSyncSnapshot.cached(for: Self.selection, environment: environment))
+        #expect(noBefore.generation == 2)
+        #expect(noBefore.head == 3)
+        #expect(noBefore.hasEarlier == false, "no before cursor: nothing above the cache")
+        #expect(noBefore.earlier == .idle)
+
+        try #"{"generation":2,"length":0,"head":3,"before":"b-1"}"#
+            .write(to: stateURL, atomically: true, encoding: .utf8)
+        let withBefore = try #require(
+            RemoteTranscriptSyncSnapshot.cached(for: Self.selection, environment: environment))
+        #expect(withBefore.head == 3)
+        #expect(withBefore.hasEarlier)
+    }
+
+    @Test("a state.json from before head existed seeds head 0")
+    func olderStateSeedsHeadZero() throws {
+        defer { cleanUp() }
+        _ = try writeCache(try fixtureText(), generation: 4)
+        let seed = try #require(
+            RemoteTranscriptSyncSnapshot.cached(for: Self.selection, environment: environment))
+        #expect(seed.generation == 4)
+        #expect(seed.head == 0)
+        #expect(seed.hasEarlier == false)
+    }
+
     @Test("a missing or unreadable state.json seeds generation 0; the first sync's generation decides")
     func unreadableStateSeedsZero() throws {
         defer { cleanUp() }

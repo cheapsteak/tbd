@@ -5,6 +5,30 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "remoteTranscript")
 
+/// Where loading earlier history stands for one pane
+/// (docs/specs/2026-09-25-remote-session-transcript-design.md, "Loading
+/// earlier history").
+enum RemoteTranscriptEarlierState: Equatable {
+    /// Nothing in flight, and the start has not been reached.
+    case idle
+    /// One `remote.transcriptLoadEarlier` call is in flight.
+    case loading
+    /// The last call failed; the next scroll into the top zone, or the
+    /// header's button, retries.
+    case failed(String)
+    /// The cache holds the conversation's beginning.
+    case reachedStart
+    /// The provider answered `cursor_expired`: the history above the cache can
+    /// no longer be fetched.
+    case expired
+
+    /// Whether this state ends the history for the current generation, so a
+    /// sync that read the cache before the load cannot revive `hasEarlier`.
+    var endsHistory: Bool {
+        self == .reachedStart || self == .expired
+    }
+}
+
 /// What the last completed `remote.transcriptSync` told the pane, plus a token
 /// that moves on every completed sync so an append that changed none of the
 /// other three is still read (`RemoteTranscriptPaneView.refreshToken`).
@@ -16,6 +40,16 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
     /// The last sync's failure, cleared by the next success. Shown by the pane
     /// so a daemon that refuses the sync is not mistaken for one still loading.
     var error: String?
+    /// The cache's prepend counter. A change under the same generation means
+    /// earlier history landed at the front of the file: the pane re-reads it
+    /// whole while holding its top visible row still.
+    var head = 0
+    /// Whether the cache has history above its first record that
+    /// `remote.transcriptLoadEarlier` can fetch. Always false with
+    /// `remote_transcript_live_sync_enabled` off, so the pane then never loads
+    /// earlier history and shows no header.
+    var hasEarlier = false
+    var earlier: RemoteTranscriptEarlierState = .idle
 }
 
 /// Drives `remote.transcriptSync` for one remote session while its transcript
@@ -44,6 +78,24 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
 /// - **Seed** – `initialSnapshot` (what the daemon already cached, see
 ///   `RemoteTranscriptSyncSnapshot.cached(for:)`) is the snapshot before any
 ///   sync publishes, so the pane renders the cache at once.
+/// - **Earlier history** – `loadEarlier(trigger:)` calls
+///   `remote.transcriptLoadEarlier` when the last answer reported
+///   `hasEarlier`, one call at a time. The pane reports the table's near-top
+///   transitions through `noteNearTop(_:)`; entering the zone loads, and so
+///   does a sync published while the table is still near the top with
+///   nothing in flight and nothing failed — that is how a page too short to
+///   leave the zone, or a `hasEarlier` that arrives with the table already at
+///   the top, keeps loading. A failed call is not retried by a sync: it waits
+///   for the next entry into the zone or the header's button.
+/// - **Head and generation** – `head` never moves backwards within a
+///   generation (a sync that read the cache before a prepend can return after
+///   it), and a sync cannot revive `hasEarlier` once a load reached the start.
+///   A newer generation replaces `head` and `hasEarlier` and resets the
+///   earlier-history state; an older one is ignored for those fields — except
+///   that the first daemon answer is authoritative over a seed read from disk.
+///   A load whose result names a generation other than the one it started
+///   under fetched nothing (a sync reset the cache first) and is treated as
+///   that reset.
 /// - **Immediate triggers** – `syncNow()` (after a successful composer send)
 ///   and `noteAgentState(_:)` (whenever the session's `agent_state` or
 ///   `agent_state_at` moves) run a sync without waiting for the tick, and the
@@ -57,6 +109,14 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
 @Observable
 final class RemoteTranscriptSyncDriver {
     typealias Syncer = @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult
+    typealias LoadEarlier = @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptLoadEarlierResult
+
+    /// What asked for a page of earlier history. Either one may retry a failed
+    /// call; the pane only reports `.nearTop` on an entry into the zone.
+    enum LoadEarlierTrigger: String {
+        case nearTop
+        case button
+    }
 
     nonisolated static let defaultInterval: Duration = .seconds(3)
 
@@ -68,6 +128,7 @@ final class RemoteTranscriptSyncDriver {
     @ObservationIgnored private(set) var completedSyncs = 0
 
     private let sync: Syncer
+    private let loadEarlierCall: LoadEarlier?
     private let interval: Duration
     private let clock: any Clock<Duration>
 
@@ -88,6 +149,18 @@ final class RemoteTranscriptSyncDriver {
     /// was published, so an older result never replaces a newer one.
     @ObservationIgnored private var lastStartedSync = 0
     @ObservationIgnored private var lastPublishedSync = 0
+    /// Set by `stop()`: a retired driver starts no load of earlier history.
+    @ObservationIgnored private var retired = false
+    /// Whether any daemon answer has been published. Until one has, the
+    /// generation is a seed read from disk and the first answer replaces it
+    /// whichever way it moved.
+    @ObservationIgnored private var hasDaemonAnswer = false
+    /// One load of earlier history in flight at a time. Separate from
+    /// `snapshot.earlier`, which a generation change resets to `.idle` while
+    /// the load is still out.
+    @ObservationIgnored private var loadInFlight = false
+    /// The table's last near-top report.
+    @ObservationIgnored private var nearTop = false
 
     /// `agent_state` together with `agent_state_at`: a session that goes
     /// working → idle → working between two reads still moves the timestamp.
@@ -99,12 +172,14 @@ final class RemoteTranscriptSyncDriver {
     init(
         selection: RemoteSessionSelection,
         sync: @escaping Syncer,
+        loadEarlier: LoadEarlier? = nil,
         initialSnapshot: RemoteTranscriptSyncSnapshot? = nil,
         interval: Duration = RemoteTranscriptSyncDriver.defaultInterval,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.selection = selection
         self.sync = sync
+        self.loadEarlierCall = loadEarlier
         self.snapshot = initialSnapshot ?? RemoteTranscriptSyncSnapshot()
         self.interval = interval
         self.clock = clock
@@ -147,7 +222,115 @@ final class RemoteTranscriptSyncDriver {
     /// sync in flight publishes nothing.
     func stop() {
         epoch &+= 1
+        retired = true
+        loadInFlight = false
         setActive(false)
+    }
+
+    // MARK: - Earlier history
+
+    /// The table reported whether it is scrolled near its top. Entering the
+    /// zone loads a page of earlier history (when there is one); leaving it
+    /// only records.
+    func noteNearTop(_ near: Bool) {
+        let entering = near && !nearTop
+        nearTop = near
+        if entering {
+            loadEarlier(trigger: .nearTop)
+        }
+    }
+
+    /// Fetch one page of earlier history, unless there is none, one is
+    /// already in flight, or the driver is retired. Nothing here sleeps.
+    func loadEarlier(trigger: LoadEarlierTrigger) {
+        guard !retired, let loadEarlierCall, snapshot.hasEarlier, !loadInFlight else { return }
+        loadInFlight = true
+        snapshot.earlier = .loading
+        let epoch = self.epoch
+        let startGeneration = snapshot.generation
+        let selection = self.selection
+        logger.debug("""
+        load earlier (\(trigger.rawValue, privacy: .public)) for \(selection.provider, privacy: .public)/\
+        \(selection.sessionID, privacy: .public)
+        """)
+        Task { [weak self] in
+            do {
+                let result = try await loadEarlierCall(selection)
+                self?.finishLoad(result, epoch: epoch, startGeneration: startGeneration)
+            } catch {
+                self?.failLoad(error, epoch: epoch)
+            }
+        }
+    }
+
+    private func finishLoad(
+        _ result: RemoteTranscriptLoadEarlierResult, epoch: Int, startGeneration: Int
+    ) {
+        guard epoch == self.epoch else { return }
+        loadInFlight = false
+        hasDaemonAnswer = true
+        var next = snapshot
+        if result.generation != startGeneration || result.generation != next.generation {
+            // A sync replaced the cache before the load ran, so the load
+            // fetched nothing. Adopt the reset if no sync has published it
+            // yet; `hasEarlier` waits for that sync to say.
+            if result.generation > next.generation {
+                next.generation = result.generation
+                next.head = result.head
+                next.hasEarlier = false
+                next.refreshToken &+= 1
+            }
+            next.earlier = .idle
+        } else {
+            next.head = max(next.head, result.head)
+            next.hasEarlier = !result.reachedStart
+            next.earlier = result.expired ? .expired : result.reachedStart ? .reachedStart : .idle
+            next.refreshToken &+= 1
+        }
+        snapshot = next
+    }
+
+    private func failLoad(_ error: any Error, epoch: Int) {
+        guard epoch == self.epoch else { return }
+        loadInFlight = false
+        // Not `.loading` any more: a newer generation reset it while the call
+        // was out, and this failure belongs to history that is gone.
+        guard snapshot.earlier == .loading else { return }
+        // A cancelled call says nothing about the daemon.
+        if error is CancellationError {
+            snapshot.earlier = .idle
+            return
+        }
+        logger.debug("""
+        load earlier failed for \(self.selection.provider, privacy: .public)/\
+        \(self.selection.sessionID, privacy: .public): \(error, privacy: .public)
+        """)
+        snapshot.earlier = .failed(ComposerSendCoordinator.bannerMessage(for: error))
+    }
+
+    /// Folds a sync's answer about the generation, `head` and `hasEarlier`
+    /// into `snapshot` (see the type doc's "Head and generation").
+    private static func merge(
+        _ result: RemoteTranscriptSyncResult, into snapshot: inout RemoteTranscriptSyncSnapshot,
+        authoritative: Bool
+    ) {
+        if result.generation > snapshot.generation
+            || (authoritative && result.generation != snapshot.generation) {
+            snapshot.generation = result.generation
+            snapshot.head = result.head
+            snapshot.hasEarlier = result.hasEarlier
+            snapshot.earlier = .idle
+        } else if result.generation == snapshot.generation {
+            let stale = result.head < snapshot.head
+            snapshot.head = max(snapshot.head, result.head)
+            if snapshot.earlier.endsHistory {
+                snapshot.hasEarlier = false
+            } else if !stale {
+                snapshot.hasEarlier = result.hasEarlier
+            }
+        }
+        // An older generation: this sync read the cache before a reset that a
+        // load result already published. Nothing in it is current.
     }
 
     // MARK: - Loop
@@ -193,11 +376,21 @@ final class RemoteTranscriptSyncDriver {
             let result = try await sync(selection)
             guard epoch == self.epoch, ordinal > lastPublishedSync else { return false }
             lastPublishedSync = ordinal
-            snapshot = RemoteTranscriptSyncSnapshot(
-                path: result.path, generation: result.generation,
-                caughtUp: result.caughtUp, refreshToken: snapshot.refreshToken &+ 1,
-                error: nil)
+            var next = snapshot
+            next.path = result.path
+            next.caughtUp = result.caughtUp
+            next.refreshToken &+= 1
+            next.error = nil
+            Self.merge(result, into: &next, authoritative: !hasDaemonAnswer)
+            hasDaemonAnswer = true
+            snapshot = next
             completedSyncs += 1
+            // Still near the top with more above and nothing in flight or
+            // failed: keep loading (a page too short to leave the zone, or a
+            // `hasEarlier` that arrived with the table already at the top).
+            if nearTop, snapshot.earlier == .idle {
+                loadEarlier(trigger: .nearTop)
+            }
             return !result.caughtUp
         } catch {
             // A cancelled call says nothing about the daemon; the next sync
