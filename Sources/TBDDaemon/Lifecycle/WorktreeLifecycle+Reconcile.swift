@@ -371,7 +371,8 @@ extension WorktreeLifecycle {
                     // before the disposal releases the reader it is read from.
                     if terminal.transport == .holder {
                         await Self.recordHolderClosedTerminal(
-                            terminal, registry: holderRegistry, history: db.terminalHistory)
+                            terminal, registry: holderRegistry,
+                            resolver: holderScreenResolver, history: db.terminalHistory)
                         if let failure = await disposeHolder(for: terminal) {
                             logger.warning(
                                 "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")

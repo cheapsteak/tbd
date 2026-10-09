@@ -88,15 +88,15 @@ struct HolderScreenResolver: Sendable {
         subsystem: "com.tbd.daemon", category: "holderScreenResolver")
 
     /// Who the census says is reading a session's pty right now.
-    private let ptyReader: @Sendable (UUID) async -> PtyReaderRole?
+    let ptyReader: @Sendable (UUID) async -> PtyReaderRole?
     /// The daemon's own store for a session, or nil when it publishes none.
     private let daemonStore: @Sendable (UUID) async -> HolderDaemonStore?
     /// The pull, or nil in a daemon with no sidecar wiring — the tmux-only
     /// configuration, which then resolves straight from the reader as before.
-    private let pull: HolderScreenPull?
+    let pull: HolderScreenPull?
     /// The daemon's retained scrollback depth, which caps what a viewer is
     /// asked for so the contract does not vary by who is looking.
-    private let retainedScrollbackLines: Int
+    let retainedScrollbackLines: Int
 
     init(
         ptyReader: @escaping @Sendable (UUID) async -> PtyReaderRole?,

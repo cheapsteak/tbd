@@ -136,7 +136,8 @@ extension WorktreeLifecycle {
             // reader it is captured from.
             if terminal.transport == .holder {
                 await Self.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
                 if let failure = await disposeHolder(for: terminal) {
                     archiveLogger.warning(
                         "archive left a holder running: \(failure, privacy: .public)")

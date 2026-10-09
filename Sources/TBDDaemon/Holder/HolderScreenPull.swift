@@ -40,6 +40,10 @@ import os
 /// seconds either, and those are exactly the moments supervision most wants to
 /// act — so the read must not be the thing that blocks it.
 ///
+/// It is the default rather than the rule: a caller whose wait is spent
+/// somewhere costlier can tighten it per request, and the disposal path does,
+/// because its wait sits inside a window the user is watching close.
+///
 /// ## Overlapping pulls are independent
 ///
 /// Two pulls for one session each get their own `requestID`, their own
@@ -93,6 +97,10 @@ actor HolderScreenPull {
         /// send has not yet returned one. A reply cannot arrive before the
         /// frame is on the wire, so nil means "necessarily this connection".
         var epoch: UInt64?
+        /// What this request's caller is willing to wait — its own, not the
+        /// puller's, because two callers on this one path spend their wait in
+        /// different places (`HolderInputTiming`).
+        let bound: Duration
         var boundTask: Task<Void, Never>?
         let continuation: CheckedContinuation<Answer, Never>
     }
@@ -175,6 +183,12 @@ actor HolderScreenPull {
     ///   the session.
     /// - Parameter wantStyledCapture: whether the reply should also carry the
     ///   SGR-intact capture Closed Terminals history records.
+    /// - Parameter bound: how long *this* caller waits, defaulting to the
+    ///   puller's own. An override rather than a second puller because there
+    ///   is one reply sink and one pending map; what differs between callers is
+    ///   the wait, not the protocol. The disposal path takes a tighter one
+    ///   (`HolderInputTiming.closedTerminalPullBound`) because its wait is
+    ///   spent inside a window closing.
     ///
     /// **The request is registered before it is sent**, which is the one place
     /// this departs from the courier's order and it is a correctness point
@@ -185,7 +199,8 @@ actor HolderScreenPull {
     /// impossible, and costs a pending entry that the send's own failure path
     /// resolves.
     func pull(
-        terminalID: UUID, lines: Int, retainedScrollbackLines: Int, wantStyledCapture: Bool
+        terminalID: UUID, lines: Int, retainedScrollbackLines: Int, wantStyledCapture: Bool,
+        bound: Duration? = nil
     ) async -> Answer {
         let requestID = UUID()
         let request = SidecarScreenRequest(
@@ -206,7 +221,8 @@ actor HolderScreenPull {
         }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Answer, Never>) in
             pending[requestID] = Pending(
-                terminalID: terminalID, epoch: nil, boundTask: nil, continuation: continuation)
+                terminalID: terminalID, epoch: nil, bound: bound ?? self.bound,
+                boundTask: nil, continuation: continuation)
             // Inherits this actor's isolation, so the send, the epoch stamp and
             // the bound all land on the same executor `record` does and no two
             // of them can resolve one waiter.
@@ -269,7 +285,9 @@ actor HolderScreenPull {
             return
         }
         pending[requestID]?.epoch = epoch
-        let boundTask = Task { [clock, bound] in
+        // This request's own bound, which the caller may have tightened.
+        let bound = pending[requestID]?.bound ?? self.bound
+        let boundTask = Task { [clock] in
             // Non-throwing on cancellation: `try?` swallows the
             // `CancellationError`, and the guard then stops a cancelled bound
             // from expiring a request that was answered.
@@ -351,7 +369,7 @@ actor HolderScreenPull {
         Self.logger.info("""
             no viewer answered the screen request for session \
             \(entry.terminalID.uuidString, privacy: .public) within \
-            \(String(describing: self.bound), privacy: .public); answering from the daemon's own \
+            \(String(describing: entry.bound), privacy: .public); answering from the daemon's own \
             emulator instead
             """)
         entry.continuation.resume(returning: .timedOut)

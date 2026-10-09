@@ -100,4 +100,24 @@ public enum HolderInputTiming {
     /// `HolderInputTimingTests` pins that relationship so a later tuning pass
     /// cannot quietly put a multi-second wait in front of every send.
     public static let screenPullBound: Duration = .milliseconds(500)
+
+    /// How long a holder-backed terminal's disposal waits for the viewer that
+    /// holds its pty to hand back the session's final screen, before writing
+    /// the Closed Terminals entry without one.
+    ///
+    /// **Shorter than the read bound, not equal to it**, because the two waits
+    /// are spent in different places. `screenPullBound` sits in front of an
+    /// RPC answer nobody is watching render; this one sits inside a close — a
+    /// gesture the user made and is watching complete, where the panel being
+    /// asked is itself being torn down. A quarter of a second is still many
+    /// main-actor turns for an awake app, and the only app that can spend the
+    /// whole of it is one that was not going to answer at all.
+    ///
+    /// **Expiring costs a capture and nothing else.** The entry is written
+    /// either way, carrying the row's Claude session id, which is all a revive
+    /// needs; what is lost is the screen text, and the alternative to losing it
+    /// is presenting the daemon's attach-time screen as a session's final one.
+    /// So the wait is bounded against the close rather than against the value
+    /// of the answer.
+    public static let closedTerminalPullBound: Duration = .milliseconds(250)
 }
