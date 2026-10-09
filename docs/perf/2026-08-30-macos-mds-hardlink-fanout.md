@@ -165,8 +165,12 @@ a link count equal to the checkout count.
 **Stop pinning hardlink; let the tool choose, or pin clone explicitly on APFS.**
 For `uv`, remove the `UV_LINK_MODE=hardlink` export, or set
 `UV_LINK_MODE=clone`. Existing environments keep their old link counts until
-rebuilt, so converting them requires a reinstall (`uv sync --reinstall`, or
-deleting and re-provisioning the environment).
+something rewrites them, so the setting alone changes nothing on a machine that
+already has them. Convert them in place with the script under "Converting
+existing environments" below — no network, no lockfile, and safe against
+checkouts with live sessions. Reinstalling (`uv sync --reinstall`, or deleting
+and re-provisioning) also works and is the right choice if you wanted a fresh
+resolve anyway, but it is an alternative, not a requirement.
 
 Two things to fix alongside it, or the change will be undone by its own guardrails:
 
@@ -205,46 +209,28 @@ Three approaches, because the differences matter more than they look:
   sees either the old inode or the new one and never a missing path. Safe to
   run against checkouts with live sessions.
 
-The third, in full:
+That third approach is implemented in
+[`scripts/reclone-hardlinked-deps.py`](../../scripts/reclone-hardlinked-deps.py)
+in this repository:
 
-```python
-"""Convert hardlinked files to APFS clones in place. Content is byte-identical
-and blocks stay shared, so this costs no real disk -- it only breaks the link
-count that macOS `mds` fans out across."""
-import ctypes, ctypes.util, os, sys
-
-libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-libc.clonefile.restype = ctypes.c_int
-
-def convert(root):
-    done = failed = 0
-    for dirpath, _dirs, files in os.walk(root):
-        for name in files:
-            p = os.path.join(dirpath, name)
-            try:
-                st = os.lstat(p)
-                if not os.path.isfile(p) or os.path.islink(p) or st.st_nlink <= 1:
-                    continue
-                tmp = os.path.join(dirpath, f".__cl{os.getpid()}_{name}")
-                try:
-                    if libc.clonefile(p.encode(), tmp.encode(), 0) != 0:
-                        raise OSError(ctypes.get_errno(), p)
-                    os.chmod(tmp, st.st_mode & 0o7777)
-                    os.utime(tmp, (st.st_atime, st.st_mtime))
-                    os.replace(tmp, p)          # atomic; p is never absent
-                    done += 1
-                except Exception:
-                    try: os.unlink(tmp)
-                    except OSError: pass
-                    failed += 1
-            except OSError:
-                failed += 1
-    return done, failed
-
-if __name__ == "__main__":
-    print("cloned=%d failed=%d" % convert(sys.argv[1]))
+```sh
+scripts/reclone-hardlinked-deps.py --dry-run          # every TBD worktree
+scripts/reclone-hardlinked-deps.py                    # convert them
+scripts/reclone-hardlinked-deps.py PATH [PATH ...]    # specific worktrees
+scripts/reclone-hardlinked-deps.py --base DIR         # another worktree root
 ```
+
+It defaults to `$TBD_HOME/worktrees/<repo>/<worktree>`, but takes explicit paths
+or `--base`, so it is useful outside TBD too. Beyond the bare `clonefile` loop it
+carries the parts this investigation showed were necessary rather than
+decorative: it declines to start when an installer is already running — a
+preflight, not a lock, so still run it when the fleet is idle — reports every
+tree including clean ones so a long scan cannot be mistaken for a hang, runs
+unbuffered for the same reason, treats a path that does not exist as an error
+instead of "nothing to do", verifies afterwards that no hardlinks remain and
+that each converted virtualenv's interpreter still starts, and reports an empty
+scan as a failure — because "found nothing" and "everything is already
+converted" must not be indistinguishable.
 
 Two things to check before running it against a live checkout:
 
