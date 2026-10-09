@@ -121,6 +121,31 @@ struct NightwatchHolderBootReconcileTests {
         #expect(broadcasts.count(matching: isNotificationReceived) == 0)
     }
 
+    /// The same unsupported daemon, but holding one adopted holder session.
+    /// `canSpawn` false is not "holder-free" — the registry is built without
+    /// its binary so adoption survives an upgrade that moved it — so the
+    /// hazard is live and the mode is turned off with the usual notification.
+    @Test func aLiveHolderSessionOnAnUnsupportedDaemonStillTurnsTheModeOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(false)
+        try await db.config.setNightwatchMode(.nightwatch)
+        let wt = try await makeWorktree(db)
+        _ = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 9101, childPID: 0)
+        #expect(try await db.terminals.hasLiveHolderSession() == true,
+                "the fixture never armed the hazard")
+        let applied = AppliedModes()
+
+        let (result, broadcasts) = try await run(db, applied, holderSupported: false)
+
+        #expect(result == nil)
+        #expect(try await db.config.get().nightwatchMode == .off)
+        #expect(await applied.modes.isEmpty)
+        #expect(try await db.notifications.unread(worktreeID: wt.id).count == 1)
+        #expect(broadcasts.count(matching: isModelProfilesChanged) == 1)
+    }
+
     @Test func deskScratchWorktreeIsPreferredForTheNotification() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPtyHolderEnabled(true)

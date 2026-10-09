@@ -920,19 +920,23 @@ extension AppState {
 
     // MARK: - Nightwatch Mode
 
-    /// Whether the pty-holder transport blocks the watch modes, as the
-    /// controls read it: the daemon's effective flag **and** its ability to
-    /// start a holder at all. Both terms, because a daemon that cannot find
-    /// the `TBDHolder` helper spawns no holder-backed session and so has no
-    /// hazard — greying the modes out there would take Nightwatch away from an
-    /// install that can still run it. Unfetched capabilities read as not
-    /// blocking, so the controls are never disabled on a claim the daemon has
-    /// not made.
+    /// Whether the pty-holder transport blocks the watch modes, as the controls
+    /// read it — the same three terms the daemon's own refusal asks, so the
+    /// control and the RPC cannot disagree: the effective flag, this daemon's
+    /// ability to start a holder, and whether one is already alive.
+    ///
+    /// Unfetched capabilities read as not blocking, so the controls are never
+    /// disabled on a claim the daemon has not made. That direction is
+    /// deliberate and it is the app's only divergence from the daemon: the
+    /// daemon refuses authoritatively, so the worst case is a click that comes
+    /// back with the refusal text, where the opposite default would grey out a
+    /// mode the daemon would have accepted.
     var holderBlocksWatchModes: Bool {
         guard let capabilities = daemonCapabilities else { return false }
         return NightwatchHolderGate.watchModesBlocked(
             holderEnabled: capabilities.ptyHolderEnabled,
-            holderSupported: capabilities.ptyHolderSupported)
+            holderSupported: capabilities.ptyHolderSupported,
+            holderSessionsLive: capabilities.ptyHolderSessionsLive)
     }
 
     /// Help text for the Settings "Nightwatch / Daywatch" toggle. A stored

@@ -1121,6 +1121,11 @@ public final class RPCRouter: Sendable {
         result.modelProxySupported = proxy.supported
         result.modelProxyPort = proxy.port
         result.modelProxyVersion = proxy.version
+        // Assigned rather than passed, for the same budget reason. The
+        // watch-mode controls need all three holder terms to reach the verdict
+        // the daemon's own refusal will, and this is the one neither the flag
+        // nor `ptyHolderSupported` implies.
+        result.ptyHolderSessionsLive = try await db.terminals.hasLiveHolderSession()
         // Assigned rather than passed, for the same budget reason as the
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled

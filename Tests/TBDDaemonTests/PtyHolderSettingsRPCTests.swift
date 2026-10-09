@@ -174,6 +174,46 @@ struct PtyHolderSettingsRPCTests {
             Config.ptyHolderDefault == true,
             "an absent field would otherwise be indistinguishable from the default")
         #expect(result.ptyHolderSupported == false)
+        #expect(result.ptyHolderSessionsLive == false,
+                "a daemon that never sent the field is holding nothing to report")
+    }
+
+    /// The live-sessions term crosses the wire, so the app's watch-mode
+    /// controls reach the verdict the daemon's refusal will. Round-tripped
+    /// rather than defaulted: the field is assigned after construction, which
+    /// compiles fine with no decode line and then reads false for every daemon
+    /// that is holding sessions.
+    @Test("capabilities carries the live-holder-sessions term")
+    func capabilitiesRoundTripsTheLiveHolderTerm() throws {
+        var payload = DaemonCapabilitiesResult(controlModeEnabled: false)
+        payload.ptyHolderSessionsLive = true
+        let decoded = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: JSONEncoder().encode(payload))
+        #expect(decoded.ptyHolderSessionsLive == true)
+    }
+
+    /// And the daemon computes it from its own rows rather than from the flag:
+    /// one live holder-transport row with the flag explicitly OFF still reports
+    /// the term true.
+    @Test("capabilities reports a live holder session independently of the flag")
+    func capabilitiesReportsLiveHolderSessionsFromTheRows() async throws {
+        let (router, db) = try makeRouterAndDB()
+        try await db.config.setPtyHolderEnabled(false)
+        #expect(try await capabilities(router).ptyHolderSessionsLive == false)
+
+        let repo = try await db.repos.create(
+            path: "/tmp/tbd-ph-repo-\(UUID().uuidString)",
+            displayName: "R", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/tbd-ph-wt-\(UUID().uuidString)", tmuxServer: "tbd-ph")
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 9101, childPID: 0)
+
+        #expect(try await capabilities(router).ptyHolderSessionsLive == true)
+        #expect(try await capabilities(router).ptyHolderEnabled == false,
+                "the two terms are independent")
     }
 
     /// …and a daemon that does send them is believed, in both directions, so

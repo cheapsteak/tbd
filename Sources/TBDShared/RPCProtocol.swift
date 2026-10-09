@@ -4009,6 +4009,18 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Turning the transport off stays available, because the effective flag is
     /// what `NightwatchHolderGate` reads whether a holder can start or not.
     public let ptyHolderSupported: Bool
+    /// Whether any session on the pty-holder transport is still alive on this
+    /// daemon. The third term of `NightwatchHolderGate.watchModesBlocked`, sent
+    /// so the app's watch-mode controls reach the same verdict the daemon's
+    /// refusal will: a daemon whose `TBDHolder` helper went missing reports
+    /// `ptyHolderSupported == false` and may still be holding several adopted
+    /// sessions.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives. Absent on the wire
+    /// reads false, like `ptyHolderSupported`: a daemon that never sent it is
+    /// one that has no holder path to report.
+    public var ptyHolderSessionsLive: Bool = false
     /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
     /// while it soaks. Read at spawn time, so the Settings toggle reads it back
     /// from here rather than from a local guess — and a session already running
@@ -4177,6 +4189,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .ptyHolderEnabled) ?? false
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
+        ptyHolderSessionsLive = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderSessionsLive) ?? false
         // New fields for the model proxy. A daemon that does not send
         // `modelProxyEnabled` runs no proxy at all, so fall through to the
         // shipped defaults rather than assuming the route is live. `supported`,

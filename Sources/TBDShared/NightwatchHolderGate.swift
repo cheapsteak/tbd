@@ -8,19 +8,29 @@ import Foundation
 /// per tick, so the combination is made unreachable rather than tolerated.
 ///
 /// **The hazard, not the flag, is what gets refused.** A watch mode is blocked
-/// when a holder-backed session can actually come into existence: the EFFECTIVE
-/// `Config.ptyHolderEnabled` — the column resolved through
-/// `Config.ptyHolderDefault`, so the rule reaches installs that never touched
-/// the toggle, which the graduated default makes the ordinary case — *and* this
-/// daemon's ability to start a holder at all (`HolderRegistry.canSpawn`, the
-/// `TBDHolder` helper beside the daemon binary). Without the helper every spawn
-/// falls back to tmux, so no holder session can exist and there is nothing to
-/// refuse; a gate that fired there would take Nightwatch away from an install
-/// that can still run it, and name as the remedy a transport change that would
-/// have no effect.
+/// when a holder-backed session can be spawned, **or** when one is already
+/// alive. Those are two different questions and a gate that asks only one of
+/// them is wrong in one direction or the other:
 ///
-/// `watchModesBlocked` composes the two terms once, and both deciders read it,
-/// so no surface can accidentally ask only half the question.
+/// - *Can one be spawned* is the EFFECTIVE `Config.ptyHolderEnabled` — the
+///   column resolved through `Config.ptyHolderDefault`, so the rule reaches
+///   installs that never touched the toggle, which the graduated default makes
+///   the ordinary case — **and** this daemon's ability to start a holder at all
+///   (`HolderRegistry.canSpawn`, the `TBDHolder` helper beside the daemon
+///   binary). With the flag on and no helper every spawn falls back to tmux, so
+///   blocking on the flag alone would take Nightwatch away from an install that
+///   can still run it, naming as the remedy a transport change with no effect.
+/// - *Is one already alive* has to be asked separately, because `canSpawn`
+///   false does not mean holder-free. A registry with a missing binary is still
+///   built on purpose — adoption reaches an already-running holder through its
+///   socket, and must keep working across an upgrade that moved the binary
+///   (`WorktreeLifecycle+SpawnTerminal`, `decide`). So an upgrade that mislaid
+///   the helper while holders were running leaves live holder-backed sessions
+///   on a daemon that cannot spawn another, and that is exactly the state the
+///   desk's liveness check leaks a Claude session per tick in.
+///
+/// `watchModesBlocked` composes all three terms once, and every decider reads
+/// it, so no surface can accidentally ask part of the question.
 ///
 /// Spec: docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md
 public enum NightwatchHolderGate {
@@ -47,11 +57,18 @@ public enum NightwatchHolderGate {
         supervision, and do not run with the pty-holder transport.
         """
 
-    /// Whether the pty-holder hazard is live on this daemon: the flag is on
-    /// *and* a holder can actually be started. Composed once here; the two
-    /// deciders below take the answer rather than the parts.
-    public static func watchModesBlocked(holderEnabled: Bool, holderSupported: Bool) -> Bool {
-        holderEnabled && holderSupported
+    /// Whether the pty-holder hazard is live on this daemon: a holder-backed
+    /// session can be spawned (the flag is on *and* a holder can be started),
+    /// or one is already alive. Composed once here; every decider takes the
+    /// answer rather than the parts.
+    ///
+    /// `holderSessionsLive` is the term that cannot be derived from the other
+    /// two — see this type's doc for why `canSpawn` false does not mean
+    /// holder-free.
+    public static func watchModesBlocked(
+        holderEnabled: Bool, holderSupported: Bool, holderSessionsLive: Bool
+    ) -> Bool {
+        (holderEnabled && holderSupported) || holderSessionsLive
     }
 
     /// `.off` is never refused. `whileBlocked` is `watchModesBlocked(...)`,
@@ -78,9 +95,13 @@ public enum NightwatchHolderGate {
     /// effective flag reads on through the shipped default. The refusals mean
     /// the pair can never be deliberately re-entered, and the reconcile's own
     /// write means a later boot reads `.off`.
-    public static func bootMustTurnModeOff(_ config: Config, holderSupported: Bool) -> Bool {
+    public static func bootMustTurnModeOff(
+        _ config: Config, holderSupported: Bool, holderSessionsLive: Bool
+    ) -> Bool {
         config.nightwatchMode != .off
             && watchModesBlocked(
-                holderEnabled: config.ptyHolderEnabled, holderSupported: holderSupported)
+                holderEnabled: config.ptyHolderEnabled,
+                holderSupported: holderSupported,
+                holderSessionsLive: holderSessionsLive)
     }
 }

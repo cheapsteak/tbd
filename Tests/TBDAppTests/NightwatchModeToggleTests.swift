@@ -100,6 +100,21 @@ struct NightwatchModePresentationTests {
         state.daemonCapabilities = DaemonCapabilitiesResult(
             controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
         #expect(!state.holderBlocksWatchModes)
+
+        // The third term, which neither of the other two implies: a daemon
+        // that cannot spawn a holder but is holding one it adopted.
+        var holding = DaemonCapabilitiesResult(
+            controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: false)
+        holding.ptyHolderSessionsLive = true
+        state.daemonCapabilities = holding
+        #expect(state.holderBlocksWatchModes,
+                "an adopted holder session is the hazard, helper or no helper")
+        for mode in [NightwatchMode.daywatch, .nightwatch] {
+            #expect(!NightwatchModePresentation.isEnabled(
+                mode, holderBlocking: state.holderBlocksWatchModes))
+        }
+        #expect(NightwatchModePresentation.isEnabled(
+            .off, holderBlocking: state.holderBlocksWatchModes))
     }
 
     /// Version skew: a newer app against a daemon that predates the flag.

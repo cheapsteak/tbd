@@ -17,9 +17,13 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "nightwatch")
 /// and is otherwise a no-op. It is the one write to the watch mode not behind a
 /// user gesture, because at boot none is available.
 ///
-/// `holderSupported` is the second half of the hazard and is not optional
-/// here: a daemon that cannot start a holder spawns no holder-backed session,
-/// so it must leave a persisted watch mode running rather than take it away.
+/// `holderSupported` is one term of the hazard and is not optional here: a
+/// daemon that cannot start a holder spawns no holder-backed session, so it
+/// must leave a persisted watch mode running rather than take it away. The
+/// other term — whether a holder session is already alive — this step reads
+/// from the database itself, because `canSpawn` false does not mean
+/// holder-free: a helper that went missing while holders were running leaves
+/// live holder rows on a daemon that cannot spawn another.
 ///
 /// The mode write and the `.modelProfilesChanged` broadcast that reflects it
 /// are the durable part of this reconcile and always happen together. The
@@ -40,7 +44,9 @@ enum NightwatchHolderBootReconcile {
     ) async throws -> NightwatchMode? {
         let config = try await db.config.get()
         guard NightwatchHolderGate.bootMustTurnModeOff(
-            config, holderSupported: holderSupported) else {
+            config,
+            holderSupported: holderSupported,
+            holderSessionsLive: try await db.terminals.hasLiveHolderSession()) else {
             await applyMode(config.nightwatchMode)
             return config.nightwatchMode
         }

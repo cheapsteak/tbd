@@ -1054,6 +1054,27 @@ met.
   under real load is the condition the headroom was wanted for, so that is the
   condition graduation is read from.
 
+  **Why a standing field condition rather than a paired probe run with numeric
+  thresholds.** A thresholded run — a p90 ceiling and a flatness multiplier
+  measured against an interleaved idle arm — is the shape this bar could take
+  instead, and it is rejected on the maintainer's call, for three reasons that
+  are properties of the question rather than of any one run. A probe run is a
+  measurement of a moment, and what the transport had to show is that it holds
+  up; the paired run can be green on a tree whose re-adoption path is broken,
+  because nothing in it restarts a daemon. The numbers such a bar would be set
+  against are weaker than the bar: the load-dependent growth that motivated the
+  design came from buckets whose highest was explicitly n=4 and directional
+  only, so a p90 re-derived at that sample size is not the statistic it looks
+  like. And the raw-pty arm those probes measure is *expected* to be the
+  holder's attached echo path, which is the design's own central claim — so a
+  gate built on it asks the measurement to assume what it is there to check.
+  What discriminates instead is whether a fleet of the design's size runs on
+  the transport every day without the operator noticing, which is also the only
+  condition that covers hibernation, wake, restart and re-adoption. The probes
+  stay in the tree as instruments for re-drawing the curve, below; a question
+  about latency is answered by running them, not by a number frozen into this
+  bullet.
+
   The evidence it was read from, and what kind each piece is. **Measured**, from
   a development machine's live database: 56 session rows on the holder transport
   against 9 still on tmux, with a further 34 rows predating the transport column

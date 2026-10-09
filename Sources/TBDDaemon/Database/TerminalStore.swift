@@ -832,6 +832,30 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Whether any session on the pty-holder transport is still alive.
+    ///
+    /// The second term of `NightwatchHolderGate.watchModesBlocked`, and the one
+    /// the flag and the registry cannot answer between them: a daemon whose
+    /// `TBDHolder` helper went missing cannot spawn a holder but may well have
+    /// adopted several, so "no holder can be started" is not "no holder is
+    /// running".
+    ///
+    /// Same shape as `hasLiveRoutedSession` above, for the same reasons.
+    /// Filtered in SQL on the one unambiguous column — every install that never
+    /// ran a holder answers with an empty set — and judged in Swift by
+    /// `Terminal.isExitStamped`, so liveness cannot drift from the spelling
+    /// every other reader uses. A parked holder row counts as alive: it is woken
+    /// by a gesture and wakes back onto a holder.
+    public func hasLiveHolderSession() async throws -> Bool {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("transport") == TerminalTransport.holder.rawValue)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+                .contains { !$0.isExitStamped }
+        }
+    }
+
     /// Get a terminal by ID.
     public func get(id: UUID) async throws -> Terminal? {
         try await writer.read { db in

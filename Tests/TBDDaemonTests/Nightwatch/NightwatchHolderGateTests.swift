@@ -25,14 +25,32 @@ struct NightwatchHolderGateTests {
     /// that would change nothing.
     @Test func theHazardNeedsTheHelperAsWellAsTheFlag() {
         #expect(NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: true, holderSupported: true))
+            holderEnabled: true, holderSupported: true, holderSessionsLive: false))
         #expect(!NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: true, holderSupported: false),
-                "no helper means no holder session, so no hazard to refuse")
+            holderEnabled: true, holderSupported: false, holderSessionsLive: false),
+                "no helper and no live holder means nothing to refuse")
         #expect(!NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: false, holderSupported: true))
+            holderEnabled: false, holderSupported: true, holderSessionsLive: false))
         #expect(!NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: false, holderSupported: false))
+            holderEnabled: false, holderSupported: false, holderSessionsLive: false))
+    }
+
+    /// **A live holder session blocks on its own.** `canSpawn == false` is not
+    /// "holder-free": the registry is still built when the `TBDHolder` binary
+    /// is missing, because adoption reaches an already-running holder through
+    /// its socket, so an upgrade that mislaid the helper while holders were
+    /// running leaves live holder rows on a daemon that cannot spawn another.
+    /// That is the state the desk's liveness check leaks a session per tick in,
+    /// so it must block however the other two terms read.
+    @Test func aLiveHolderSessionBlocksEvenWhenNothingCanSpawnOne() {
+        #expect(NightwatchHolderGate.watchModesBlocked(
+            holderEnabled: true, holderSupported: false, holderSessionsLive: true),
+                "a helper that went missing does not retire the holders it adopted")
+        #expect(NightwatchHolderGate.watchModesBlocked(
+            holderEnabled: false, holderSupported: false, holderSessionsLive: true),
+                "an explicit opt-out does not retire sessions already on a holder")
+        #expect(NightwatchHolderGate.watchModesBlocked(
+            holderEnabled: false, holderSupported: true, holderSessionsLive: true))
     }
 
     /// The never-touched install on a daemon with no helper: the effective flag
@@ -46,13 +64,20 @@ struct NightwatchHolderGateTests {
             .toModel(ptyHolderDefault: true)
         #expect(config.ptyHolderEnabled, "the fixture must exercise the graduated default")
         let blocked = NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: config.ptyHolderEnabled, holderSupported: false)
+            holderEnabled: config.ptyHolderEnabled,
+            holderSupported: false, holderSessionsLive: false)
         #expect(!NightwatchHolderGate.refusesMode(mode, whileBlocked: blocked))
 
         var withMode = config
         withMode.nightwatchMode = mode
-        #expect(!NightwatchHolderGate.bootMustTurnModeOff(withMode, holderSupported: false),
+        #expect(!NightwatchHolderGate.bootMustTurnModeOff(
+            withMode, holderSupported: false, holderSessionsLive: false),
                 "boot must leave a watch mode running on a daemon that cannot start a holder")
+
+        // ...but a live holder row on that same daemon blocks it again.
+        #expect(mode == .off || NightwatchHolderGate.bootMustTurnModeOff(
+            withMode, holderSupported: false, holderSessionsLive: true),
+                "an adopted holder session is the hazard, helper or no helper")
     }
 
     @Test(arguments: NightwatchMode.allCases)
@@ -72,23 +97,37 @@ struct NightwatchHolderGateTests {
         var nullColumn = ConfigRecord(id: "unstored", pty_holder_enabled: nil)
             .toModel(ptyHolderDefault: true)
         nullColumn.nightwatchMode = .nightwatch
-        #expect(NightwatchHolderGate.bootMustTurnModeOff(nullColumn, holderSupported: true))
+        #expect(NightwatchHolderGate.bootMustTurnModeOff(
+            nullColumn, holderSupported: true, holderSessionsLive: false))
 
         var explicitOff = ConfigRecord(id: "unstored", pty_holder_enabled: false)
             .toModel(ptyHolderDefault: true)
         explicitOff.nightwatchMode = .nightwatch
-        #expect(!NightwatchHolderGate.bootMustTurnModeOff(explicitOff, holderSupported: true))
+        #expect(!NightwatchHolderGate.bootMustTurnModeOff(
+            explicitOff, holderSupported: true, holderSessionsLive: false))
     }
 
     @Test func bootReconcileIsANoOpUnlessBothAreOn() {
         var config = ConfigRecord(id: "unstored", pty_holder_enabled: true).toModel()
         config.nightwatchMode = .off
-        #expect(!NightwatchHolderGate.bootMustTurnModeOff(config, holderSupported: true))
+        #expect(!NightwatchHolderGate.bootMustTurnModeOff(
+            config, holderSupported: true, holderSessionsLive: false))
         config.ptyHolderEnabled = false
         config.nightwatchMode = .daywatch
-        #expect(!NightwatchHolderGate.bootMustTurnModeOff(config, holderSupported: true))
+        #expect(!NightwatchHolderGate.bootMustTurnModeOff(
+            config, holderSupported: true, holderSessionsLive: false))
         config.ptyHolderEnabled = true
-        #expect(NightwatchHolderGate.bootMustTurnModeOff(config, holderSupported: true))
+        #expect(NightwatchHolderGate.bootMustTurnModeOff(
+            config, holderSupported: true, holderSessionsLive: false))
+    }
+
+    /// `.off` is never turned off again, whatever the hazard reads — the
+    /// reconcile has nothing to do for a mode that is already off.
+    @Test func modeOffIsNeverReconciled() {
+        var config = ConfigRecord(id: "unstored", pty_holder_enabled: true).toModel()
+        config.nightwatchMode = .off
+        #expect(!NightwatchHolderGate.bootMustTurnModeOff(
+            config, holderSupported: true, holderSessionsLive: true))
     }
 
     @Test func copyNamesTheFlagTheReplacementAndTheFirstStep() {
