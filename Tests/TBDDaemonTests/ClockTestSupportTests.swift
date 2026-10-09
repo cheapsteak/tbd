@@ -41,7 +41,8 @@ struct ClockTestSupportTests {
     // (Tests/CLAUDE.md, "No bounded wait in a fast-pass target carries a
     // literal deadline"; `pollUntilTrue`'s "size it with
     // `TestDeadlines.saturatedPass` unless the wait is one scheduling hop").
-    // One 90 s guard per test sits well inside `.clockDriven`'s 240 s limit.
+    // The first test pays at most two 90 s guards (arming, then the fire) and
+    // the second one, both inside `.clockDriven`'s 240 s limit.
 
     @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async throws {
         let clock = TestClock()
@@ -52,10 +53,17 @@ struct ClockTestSupportTests {
         #expect(firedBeforeAdvance == false)
 
         await clock.advanceWhenSuspended(by: .seconds(30), timeout: TestDeadlines.saturatedPass)
-        try await task.value
 
-        let firedAfterAdvance = await subject.fired
-        #expect(firedAfterAdvance)
+        // Observe the effect under a bound rather than joining first. A missed
+        // arming has already recorded its diagnostic and still advanced an
+        // empty clock, so a sleep that registers late is scheduled past the new
+        // `now` and never fires: an unbounded join would sit there until the
+        // suite's time limit. Cancelling releases that sleeper, and a healthy
+        // run has already fired by the time the cancel lands.
+        let fired = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { await subject.fired }
+        task.cancel()
+        _ = try? await task.value
+        #expect(fired == .satisfied, "the sleeping subsystem never fired after the advance")
     }
 
     /// `advanceWhenSuspended` moves `now` by exactly the requested duration,
@@ -64,20 +72,24 @@ struct ClockTestSupportTests {
     /// The advance (7 s) deliberately overshoots the sleep (5 s): `TestClock`
     /// steps `now` to each due sleeper's deadline before settling on the
     /// target, so an advance equal to the sleep could not tell "moved by the
-    /// duration" from "moved to the next deadline". `now` is read before the
-    /// task is joined. If the helper stopped advancing, the sleeper would never
-    /// be released, and joining first would turn this red assertion into an
-    /// unattributed hang at the suite's time limit.
-    @Test func advanceWhenSuspendedMovesTheClockForward() async throws {
+    /// duration" from "moved to the next deadline".
+    ///
+    /// The sleeper is cancelled rather than joined. That it is *released* is
+    /// the test above's claim. Here, joining would hang to the suite's time
+    /// limit whenever the sleeper was never released: when the helper stops
+    /// advancing, or when a missed arming advances an empty clock before a
+    /// late sleep registers. Cancellation ends the sleep on every path.
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {
         let clock = TestClock()
         let before = clock.now
 
         let task = Task { try await clock.sleep(for: .seconds(5)) }
-        defer { task.cancel() }
         await clock.advanceWhenSuspended(by: .seconds(7), timeout: TestDeadlines.saturatedPass)
+        let moved = before.duration(to: clock.now)
+        task.cancel()
+        _ = try? await task.value
 
-        try #require(before.duration(to: clock.now) == .seconds(7))
-        try await task.value
+        #expect(moved == .seconds(7))
     }
 
     @Test func testDateSourceReadsWritesAndAdvances() {
