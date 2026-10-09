@@ -85,8 +85,11 @@ struct RemoteTranscriptSyncSnapshot: Equatable {
 ///   does a sync published while the table is still near the top with
 ///   nothing in flight and nothing failed — that is how a page too short to
 ///   leave the zone, or a `hasEarlier` that arrives with the table already at
-///   the top, keeps loading. A failed call is not retried by a sync: it waits
-///   for the next entry into the zone or the header's button.
+///   the top, keeps loading. A successful load that leaves the table near the
+///   top with more above starts the next one straight away, so paging runs
+///   until the rows leave the zone or the start is reached. A failed call is
+///   not retried by a sync or chained: it waits for the next entry into the
+///   zone or the header's button.
 /// - **Head and generation** – `head` never moves backwards within a
 ///   generation (a sync that read the cache before a prepend can return after
 ///   it), and a sync cannot revive `hasEarlier` once a load reached the start.
@@ -111,8 +114,9 @@ final class RemoteTranscriptSyncDriver {
     typealias Syncer = @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult
     typealias LoadEarlier = @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptLoadEarlierResult
 
-    /// What asked for a page of earlier history. Either one may retry a failed
-    /// call; the pane only reports `.nearTop` on an entry into the zone.
+    /// What asked for a page of earlier history. `.nearTop` is the table
+    /// entering the zone, or a sync or completed load finding it still there;
+    /// only an entry into the zone or the button retries a failed call.
     enum LoadEarlierTrigger: String {
         case nearTop
         case button
@@ -288,6 +292,17 @@ final class RemoteTranscriptSyncDriver {
             next.refreshToken &+= 1
         }
         snapshot = next
+        // Still near the top with more above: fetch the next page now. The
+        // table reports only transitions, and a page that adds few rows (or
+        // folds entirely into an activity group already on screen) leaves it
+        // inside the zone, so no entry edge would ever come; waiting for a
+        // sync to notice stalls paging on the sync cadence, and stops it while
+        // the app is inactive. A page that does push the rows out of the zone
+        // makes the table report `false`, which ends the chain after at most
+        // the one load already started.
+        if nearTop, snapshot.earlier == .idle {
+            loadEarlier(trigger: .nearTop)
+        }
     }
 
     private func failLoad(_ error: any Error, epoch: Int) {

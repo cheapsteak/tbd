@@ -643,6 +643,8 @@ extension RemoteTranscriptSyncDriverTests {
         #expect(loads.values == [1], "a second call while one is in flight")
         #expect(driver.snapshot.earlier == .loading)
 
+        // Out of the zone, so the success below does not chain a second load.
+        driver.noteNearTop(false)
         gate.releaseOne()
         #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
         #expect(loads.values == [1])
@@ -744,7 +746,9 @@ extension RemoteTranscriptSyncDriverTests {
         #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 2)
         #expect(await Self.until(driver) { $0.earlier == .failed("nope") } == .satisfied)
 
-        // The header's button retries too.
+        // The header's button retries too. Scrolled away first, so the success
+        // that follows does not chain another load.
+        driver.noteNearTop(false)
         driver.loadEarlier(trigger: .button)
         #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 3)
         #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
@@ -843,7 +847,7 @@ extension RemoteTranscriptSyncDriverTests {
         let loads = FireRecorder<Int>()
         let driver = Self.makeLoadingDriver(
             clock: clock, seed: Self.seed(hasEarlier: false), syncs: syncs, loads: loads
-        ) { _ in Self.page(head: 1) }
+        ) { _ in Self.page(head: 1, reachedStart: true) }
         defer { driver.stop() }
 
         // The table is already at the top before anything says there is more.
@@ -855,6 +859,74 @@ extension RemoteTranscriptSyncDriverTests {
         _ = await syncs.next(timeout: TestDeadlines.saturatedPass)
         #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1,
                 "hasEarlier arriving with the table at the top must start a load")
+    }
+
+    @Test("a successful load that leaves the table near the top chains to the next until the start")
+    func successNearTopChainsUntilReachedStart() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        // Each page lands without moving the table out of the zone (a page of
+        // tool activity folding into the top group); the third reaches the
+        // start. No sync runs: the driver is never made active, so only the
+        // completions themselves can start the next load.
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { n in
+            Self.page(head: n, reachedStart: n == 3)
+        }
+        defer { driver.stop() }
+
+        driver.noteNearTop(true)
+        #expect(await Self.until(driver) { $0.earlier == .reachedStart } == .satisfied,
+                "paging stalled near the top after load(s) \(loads.values)")
+        #expect(loads.values == [1, 2, 3])
+        #expect(driver.snapshot.head == 3)
+        #expect(driver.snapshot.hasEarlier == false)
+    }
+
+    @Test("a successful load after the table left the zone does not chain")
+    func successAwayFromTopDoesNotChain() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        let gate = RemoteTranscriptSyncGate()
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { _ in
+            await gate.wait()
+            return Self.page(head: 1)
+        }
+        defer {
+            driver.stop()
+            gate.open()
+        }
+
+        driver.noteNearTop(true)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1)
+        // The prepend pushed the reader's rows down out of the zone.
+        driver.noteNearTop(false)
+        gate.releaseOne()
+        #expect(await Self.until(driver) { $0.head == 1 } == .satisfied)
+        await settle()
+        #expect(loads.values == [1])
+        #expect(driver.snapshot.earlier == .idle)
+
+        // Scrolling back up into the zone is the next entry, and it loads.
+        driver.noteNearTop(true)
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 2)
+    }
+
+    @Test("a failed load near the top does not chain")
+    func failureNearTopDoesNotChain() async {
+        let clock = EventDrivenTestClock()
+        let loads = FireRecorder<Int>()
+        // Load 1 succeeds and chains; load 2 fails, and nothing follows it.
+        let driver = Self.makeLoadingDriver(clock: clock, loads: loads) { n in
+            if n >= 2 { throw Refused() }
+            return Self.page(head: n)
+        }
+        defer { driver.stop() }
+
+        driver.noteNearTop(true)
+        #expect(await Self.until(driver) { $0.earlier == .failed("nope") } == .satisfied)
+        await settle()
+        #expect(loads.values == [1, 2], "a failure was retried without a new scroll into the zone")
+        #expect(driver.snapshot.head == 1)
     }
 
     @Test("a load result after stop publishes nothing")

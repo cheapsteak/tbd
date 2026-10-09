@@ -215,7 +215,7 @@ While the pane is visible and the app is active, the app calls `remote.transcrip
 
 ### Loading earlier history
 
-When the table scrolls to within about five rows of its top and the last sync reported `hasEarlier`, the pane calls `remote.transcriptLoadEarlier`. One call is in flight per pane at a time, and a failed call waits for the next scroll, or the header's button, to retry.
+When the table scrolls to within about five rows of its top and the last sync reported `hasEarlier`, the pane calls `remote.transcriptLoadEarlier`. One call is in flight per pane at a time. A successful call that leaves the table within that zone, with more history above, is followed by the next one at once, because a page of tool activity can add few rows or none — it folds into the activity group already at the top — and the table would otherwise sit in the zone with no further scroll to report. A failed call is never followed that way: it waits for the next scroll, or the header's button, to retry.
 
 A slim header shows where the history stands. It is an overlay pinned to the top of the table, not a row in it, so showing or hiding it never shifts the rows and the table's row model is unchanged. It is visible while the table is scrolled near its top, while a call is in flight, and after a failure, in one of four states:
 
