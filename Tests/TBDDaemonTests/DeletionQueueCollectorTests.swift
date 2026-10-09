@@ -230,9 +230,13 @@ struct DeletionQueueCollectorTests {
         // A worktree restored or moved into the archived path keeps an older
         // creation date, so the "recreated" heuristic passes it. A modified
         // tracked file must still stop the reap.
-        let tracked = try #require(
-            try FileManager.default.contentsOfDirectory(atPath: f.worktree)
-                .first { !$0.hasPrefix(".") })
+        // The fixture repo has no tracked file of its own, so commit one
+        // here (the shell helper supplies the author identity).
+        let tracked = "tracked.txt"
+        try "committed\n".write(
+            toFile: f.worktree + "/" + tracked, atomically: true, encoding: .utf8)
+        let wtURL = URL(fileURLWithPath: f.worktree)
+        try await shell("git add \(tracked) && git commit -m 'add tracked file'", at: wtURL)
         try "edited\n".write(
             toFile: f.worktree + "/" + tracked, atomically: true, encoding: .utf8)
         let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
