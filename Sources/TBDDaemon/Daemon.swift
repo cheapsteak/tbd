@@ -404,10 +404,11 @@ public final class Daemon: Sendable {
         }
         // Resolve worktree rows stranded in `.creating` by a daemon restart
         // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
-        // orphaned rows are deleted/flipped first — reconcile only sees
-        // `.active` rows and would otherwise trip the UNIQUE path constraint
-        // re-adopting a stranded checkout. Resumed waits run detached and
-        // never block startup.
+        // stranded rows are deleted, activated or resumed first: reconcile
+        // treats a checkout that has no `.active` row as unmanaged (it reports
+        // it, and never adopts it), so a terminal-less checkout TBD itself
+        // created has to be activated here to stay tracked. Resumed waits run
+        // detached and never block startup.
         await lifecycle.recoverCreatingWorktrees()
         do {
             let repos = try await database.repos.list()

@@ -217,7 +217,12 @@ extension WorktreeLifecycle {
     /// Reconciles the database state with actual git worktrees on disk.
     ///
     /// - Worktrees in db but missing from git: marked as archived
-    /// - Worktrees in git but missing from db: added with default names
+    /// - Worktrees in git under one of TBD's pool prefixes but with no row: left
+    ///   alone and reported in the log. TBD does not take ownership of a tree it
+    ///   did not create, because its lifecycle can delete the directory (archive)
+    ///   or reap it; `tbd worktree adopt <path>` is how a user opts a tree in.
+    ///   The foreign-worktree sweep (`scripts/sweep-foreign-worktrees.sh`)
+    ///   covers these trees.
     ///
     /// This sweep is a daemon-internal actuation rail in its own right: boot
     /// (and `cleanup`) invoke it, and it kills windows, parks sessions and kills
@@ -317,17 +322,17 @@ extension WorktreeLifecycle {
         let gitPaths = Set(gitWorktrees.map(\.path))
         // Include `.creating` rows so a worktree whose pre-session phase-3
         // wait is still in flight (status flips to .active only when the hook
-        // finishes) isn't "unknown" to the re-adopt pass below — re-adopting
-        // its path would violate the UNIQUE path constraint and abort this
-        // repo's reconcile.
+        // finishes) isn't "unknown" to the unmanaged-tree report below — it is
+        // a tree TBD is creating, not a stranger, and reporting it as one
+        // would point the user at `tbd worktree adopt` for a path that already
+        // has a row.
         //
         // This one set deliberately fetches through the location-neutral
         // `list(...)` and then states its two exclusions here, in the open,
         // rather than borrowing `LocalWorktree.init?`. What it must contain is
         // "every path a live creating row already claims", and a path missing
-        // from it is not a harmless omission: the re-adopt pass would treat
-        // that path as unknown, create a second row on it, and abort this
-        // repo's whole reconcile on the UNIQUE path constraint.
+        // from it is not a harmless omission: the report below would call a
+        // tree TBD is in the middle of creating an unmanaged one.
         // `LocalWorktree.init?` is a predicate about a worktree TBD may act on
         // right now, which is a different question — and any later tightening
         // of it (say, requiring the directory to exist, which a creating row's
@@ -405,7 +410,22 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Add unknown worktrees (skip the main repo worktree).
+        // Report unmanaged worktrees (skip the main repo worktree).
+        //
+        // A git worktree under a pool prefix with no row is NOT adopted. It may
+        // be a tree a user or another tool made with a plain `git worktree add`,
+        // and a row would hand it to TBD's lifecycle: archive deletes the
+        // directory and GC can reap it, taking uncommitted work with it, on the
+        // strength of nothing but its location. Ownership is opt-in via
+        // `tbd worktree adopt <path>`. Trees TBD creates itself always get a
+        // row first (`createWorktree`, and recovery activates a stranded
+        // `.creating` row), so nothing TBD made reaches this loop.
+        //
+        // The report is one `.info` line per tree per pass. Reconcile is not on
+        // a timer: it runs at daemon start, on `tbd cleanup` and when a repo is
+        // added, so a persistent unmanaged tree costs a line per such event,
+        // not a stream. That is why this carries no once-per-path state.
+        //
         // LEGACY-WORKTREE-LOCATION: remove after 2026-06-01
         // Reads worktrees from <repo>/.tbd/worktrees/ for backward compatibility with
         // worktrees created before the canonical-location switch. New worktrees are
@@ -416,11 +436,12 @@ extension WorktreeLifecycle {
         let layout = WorktreeLayout()
         let acceptablePrefixes = layout.legacyAndCanonicalPrefixes(for: repo)
             .map { $0.hasSuffix("/") ? $0 : $0 + "/" }
-        // Paths the user explicitly forgot (`tbd worktree forget`) must NOT be
-        // re-adopted, even though they still sit under a TBD-managed prefix
-        // and remain registered with git. Loaded once per reconcile pass.
-        // Tombstones are cleared by the adopt/create flows when the user
-        // deliberately re-adds a path.
+        // Paths the user explicitly forgot (`tbd worktree forget`) are skipped
+        // silently: they still sit under a TBD-managed prefix and remain
+        // registered with git, and the user has already answered the question
+        // the report asks. Loaded once per reconcile pass. Tombstones are
+        // cleared by the adopt/create flows when the user deliberately re-adds
+        // a path.
         let forgottenPaths = try await db.forgottenWorktrees.allPaths()
         for gitWt in gitWorktrees where !dbPaths.contains(gitWt.path) {
             guard acceptablePrefixes.contains(where: { gitWt.path.hasPrefix($0) }) else { continue }
@@ -429,15 +450,7 @@ extension WorktreeLifecycle {
                 continue
             }
 
-            let name = (gitWt.path as NSString).lastPathComponent
-            let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
-            _ = try await db.worktrees.create(
-                repoID: repoID,
-                name: name,
-                branch: gitWt.branch,
-                path: gitWt.path,
-                tmuxServer: tmuxServer
-            )
+            logger.info("reconcile: git worktree \(gitWt.path, privacy: .public) is under a TBD worktree directory but has no TBD row, so TBD is not managing it and will not archive or delete it. Run `tbd worktree adopt \(gitWt.path, privacy: .public)` to track it.")
         }
 
         let allLiveWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)

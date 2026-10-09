@@ -33,16 +33,18 @@ extension WorktreeLifecycle {
     ///   resume exactly like the create path. Never blocks startup.
     /// - Checkout exists but no terminals at all → the daemon died after
     ///   `git worktree add` but before any tmux spawn. There is no hook
-    ///   window to resume and no terminals to keep; delete the row and let
-    ///   reconcile re-adopt the on-disk checkout as a fresh worktree.
+    ///   window to resume. TBD created the checkout and reconcile does not
+    ///   adopt trees that have no row, so the row is kept and flipped to
+    ///   `.active` with no terminals (`activateTerminalLessCreate`).
     /// - Checkout + pre-session terminal exist but the repo row is gone →
     ///   the wait can never be resumed (phase 3 needs the repo) and nothing
     ///   else ever resolves a `.creating` row, so skipping would strand it
     ///   forever. Delete the row and its terminal/tab records.
     ///
-    /// Every delete here goes through `rollBackFailedCreate`, so a first
-    /// message the app parked in the row is saved to `unsent-prompts/` rather
-    /// than deleted with it; `unsentPromptsReposDir` is that save's test seam.
+    /// Every delete here goes through `rollBackFailedCreate`, and the
+    /// terminal-less activation saves the same way, so a first message the app
+    /// parked in the row is saved to `unsent-prompts/` rather than deleted or
+    /// left behind; `unsentPromptsReposDir` is that save's test seam.
     ///
     /// Returns the detached phase-3 resume tasks (for tests); the daemon
     /// ignores them.
@@ -115,16 +117,7 @@ extension WorktreeLifecycle {
             }
 
             guard let preSessionTerminal else {
-                logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout exists but no terminals; reconcile will re-adopt it")
-                do {
-                    try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
-                    try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
-                    // Hard delete: closed-terminal history (rows + files) goes too.
-                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
-                    await rollBackStrandedCreate(worktree.id, reposDir: unsentPromptsReposDir)
-                } catch {
-                    logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
+                await activateTerminalLessCreate(row, reposDir: unsentPromptsReposDir)
                 continue
             }
 
@@ -208,6 +201,44 @@ extension WorktreeLifecycle {
             resumed.append(task)
         }
         return resumed
+    }
+
+    /// Keep a terminal-less `.creating` row whose checkout exists and flip it to
+    /// `.active`: the same shape `adoptWorktree` produces, a row with no
+    /// terminals that the user can open from the app.
+    ///
+    /// TBD made this checkout itself, so the row is the only thing that owns it.
+    /// Reconcile does not adopt a git worktree that has no row, so deleting the
+    /// row would orphan a tree TBD created.
+    ///
+    /// - A first message parked in the row is saved to `unsent-prompts/` exactly
+    ///   as a failed create saves it, then cleared from the column. It was
+    ///   meant for a create whose terminals never spawned, so it must not wait
+    ///   in the row for some later terminal to take it. The column is cleared
+    ///   even when the save failed, as a failed create deletes it either way;
+    ///   the loss is logged.
+    /// - A row still carrying `archivedClaudeSessions` was mid-revive. No
+    ///   terminal exists to restore them into, so they are kept: the row goes
+    ///   through `revive(clearSessions: false)`, which also clears
+    ///   `archivedAt`, the same outcome as a revive with `skipClaude`.
+    private func activateTerminalLessCreate(_ row: Worktree, reposDir: URL?) async {
+        let saved = saveParkedFirstMessage(of: row, reposDir: reposDir)
+        if saved.lost {
+            logger.error("recovery: the parked first message of \(row.id, privacy: .public) could not be saved and is being cleared")
+        }
+        do {
+            if row.pendingPrompt != nil {
+                _ = try await db.worktrees.setPendingPrompt(worktreeID: row.id, text: nil, submit: false)
+            }
+            if row.archivedClaudeSessions?.isEmpty == false {
+                try await db.worktrees.revive(id: row.id, clearSessions: false)
+            } else {
+                try await db.worktrees.updateStatus(id: row.id, status: .active)
+            }
+            logger.info("recovery: activated terminal-less .creating worktree \(row.id, privacy: .public) — its checkout exists and TBD created it, so the row is kept")
+        } catch {
+            logger.warning("recovery: failed to activate terminal-less worktree \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Delete a stranded `.creating` row the way a failed create is rolled
