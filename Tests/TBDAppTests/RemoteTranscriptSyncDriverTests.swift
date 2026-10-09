@@ -723,6 +723,10 @@ extension RemoteTranscriptSyncDriverTests {
         defer { driver.stop() }
 
         driver.noteNearTop(true)
+        // Consume load 1 here: `next()` hands out the oldest unreturned value,
+        // so leaving it buffered would make the retry assertions below read
+        // 1 and 2 instead of 2 and 3.
+        #expect(await loads.next(timeout: TestDeadlines.saturatedPass) == 1)
         #expect(await Self.until(driver) { $0.earlier == .failed("nope") } == .satisfied)
 
         // A sync while still near the top is not a retry.
