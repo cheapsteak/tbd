@@ -377,6 +377,24 @@ actor HolderRegistry {
     /// this registry exists to prevent, whether or not it is ever published.
     private(set) var attachRoundTripsStarted = 0
 
+    /// The daemon's explicit per-session reader state, and the always-on
+    /// double-reader detector built on it.
+    ///
+    /// **It is deliberately one ledger rather than a counter per path.** This
+    /// type's reader state was previously spread across three facts that have
+    /// to be read together to answer "who is on this pty" — a slot that holds
+    /// a reader which may be suspended, a pending attach, and a viewer claim —
+    /// and the counters beside it (`liveDrainLoops`, `peakLiveDrainLoops`)
+    /// count drain loops rather than readers, so they cannot see a viewer at
+    /// all. The census is the single place that says, per session, who is
+    /// reading: `.daemon`, `.viewer(attach:)`, or nobody.
+    ///
+    /// Every transition into reading goes through `beganReading`, which asserts
+    /// the session's count was zero and reports a violation rather than
+    /// trusting the arbitration above to be correct. See `HolderReaderCensus`
+    /// for why a violation logs instead of trapping.
+    private var readerCensus = HolderReaderCensus()
+
     private let busyRetryBudget: Duration
     private let adoptAllBudget: Duration
     private let clock: any Clock<Duration>
@@ -529,6 +547,84 @@ actor HolderRegistry {
     /// state rather than a fourth status.
     func recordStatusForTesting(_ status: HolderChildStatus?, for terminalID: UUID) {
         statuses[terminalID] = status
+    }
+
+    // MARK: - The reader-count assertion
+
+    /// Who the daemon's explicit reader state says is on a session's pty right
+    /// now — the daemon, a named viewer's attach, or nobody.
+    ///
+    /// **The one honest answer to that question in this type.** `reader(for:)`
+    /// answers for a suspended reader as well as a draining one, and
+    /// `viewerAttachment(for:)` answers "a viewer *may* hold this pty",
+    /// deliberately conflating an acknowledged attach with one that timed out.
+    /// Neither is "who is reading", and a caller that needs that was previously
+    /// obliged to compose it out of both plus `isDraining`.
+    func ptyReader(for terminalID: UUID) -> PtyReaderRole? {
+        readerCensus.reader(of: terminalID)
+    }
+
+    /// How many transitions into reading have found this session's pty already
+    /// being read — the double-reader violation count, monotonic for the
+    /// daemon's life.
+    ///
+    /// Zero is the only acceptable value. It is what the transport's graduation
+    /// reads, and it is asserted on directly rather than through log output,
+    /// because a detector whose only interface is a log line is a detector no
+    /// test can pin.
+    var readerCensusViolations: Int { readerCensus.violations }
+
+    /// The most recent violation, for a caller that wants to name the two
+    /// readers rather than merely count them.
+    var lastReaderCensusViolation: HolderReaderCensus.Violation? {
+        readerCensus.lastViolation
+    }
+
+    /// The census line as it is logged. Test-facing, and the thing a soak
+    /// reader greps for.
+    var readerCensusSummary: String { readerCensus.summary }
+
+    /// How often the census summary is logged.
+    ///
+    /// Hourly, matching `OrphanGC`'s cadence, and sized against the question it
+    /// answers rather than against any event: "did the soak see any
+    /// violations?" is asked weeks later, of the log archive, so what matters
+    /// is that a persisted line exists in every window a reader might look at —
+    /// not that it is fresh. One `.notice` per hour per daemon is a rounding
+    /// error in that archive, and `.notice` is the lowest level macOS persists
+    /// to disk by default, which is what makes the record durable at all.
+    static let readerCensusReportInterval: Duration = .seconds(3600)
+
+    /// Logs the census summary once.
+    ///
+    /// `.notice` rather than `.info` deliberately: only `.notice` and above are
+    /// persisted by default, and a summary that lives in an in-memory ring
+    /// buffer cannot answer a question asked weeks after the soak.
+    func logReaderCensusSummary() {
+        // A local first: `Logger`'s interpolation is an escaping autoclosure,
+        // and reading an actor-isolated property through one needs an explicit
+        // `self` capture that would outlive this turn.
+        let line = readerCensus.summary
+        Self.logger.notice("\(line, privacy: .public)")
+    }
+
+    /// Logs the census summary now and then on a tick, until cancelled.
+    ///
+    /// The durable half of the detector. The per-violation `.error` line says
+    /// what went wrong; this says that something was watching and what it has
+    /// seen in total — which is the half an absence of errors cannot supply.
+    ///
+    /// Sleeps on the registry's injected clock, so a test can drive a whole
+    /// reporting schedule without waiting on a wall clock.
+    func reportReaderCensusPeriodically(
+        every interval: Duration = HolderRegistry.readerCensusReportInterval
+    ) async {
+        logReaderCensusSummary()
+        while !Task.isCancelled {
+            try? await clock.sleep(for: interval)
+            guard !Task.isCancelled else { break }
+            logReaderCensusSummary()
+        }
     }
 
     // MARK: - Sizing
@@ -1596,6 +1692,18 @@ actor HolderRegistry {
             clearPendingAttach(terminalID: terminalID, generation: generation)
             throw error
         }
+        // The daemon is off this pty from here, and only from here: a
+        // `suspendDraining` that returns has provably seen its drain thread
+        // leave the descriptor, while one that throws leaves the daemon reading
+        // — `.drainDidNotQuiesce` means the thread is still in there, and
+        // `.cannotDuplicate` resumes before it throws. So the departure is
+        // recorded on the success path alone, and the catch above deliberately
+        // records nothing.
+        //
+        // Recorded before the vend below, so the vend's own assertion is
+        // answered by the ledger rather than by this call's knowledge of its
+        // own ordering — which is the entire point of having a ledger.
+        readerCensus.stoppedReading(.daemon, session: terminalID)
         // The one suspension a test can steer. In production this is a nil
         // check; see `attachBarrier`.
         await attachBarrier?()
@@ -1623,6 +1731,14 @@ actor HolderRegistry {
             clearPendingAttach(terminalID: terminalID, generation: generation)
             throw Error.superseded(terminalID: terminalID)
         }
+        // The viewer's transition into reading, and the one the daemon cannot
+        // observe from the outside: from the moment this descriptor leaves the
+        // process the app may be reading it, and nothing on this side will ever
+        // be told. If the daemon were still counted here — a vend that skipped
+        // the quiesce, an arbitration step that resumed behind this call's back
+        // — this is where it is seen.
+        readerCensus.beganReading(
+            .viewer(attach: generation), session: terminalID, at: "attach-vend")
         Self.logger.info(
             """
             vended the pty for session \(terminalID.uuidString, privacy: .public) to a viewer as \
@@ -1763,6 +1879,12 @@ actor HolderRegistry {
                 clearPendingAttach(terminalID: terminalID, generation: generation)
                 return
             }
+            // The descriptor never left this process, which is the whole of
+            // what this arm knows and the only evidence that takes a viewer off
+            // the census without its cooperation. Recorded before the resume,
+            // so the resume asserts against the ledger and a resume that had
+            // somehow been licensed without this evidence would be caught.
+            readerCensus.stoppedReading(.viewer(attach: generation), session: terminalID)
             do {
                 // The claim is HELD ACROSS THE RESUME and cleared only after it
                 // has landed — the mirror image of `beginAttach` holding it
@@ -1780,6 +1902,8 @@ actor HolderRegistry {
                 // exist in which the maps say nobody is attaching while a
                 // suspend or a resume is still in flight.
                 try await resumeAfterCancellation(reader)
+                readerCensus.beganReading(
+                    .daemon, session: terminalID, at: "resume-after-failed-vend")
                 clearPendingAttach(terminalID: terminalID, generation: generation)
                 Self.logger.info(
                     """
@@ -1954,6 +2078,15 @@ actor HolderRegistry {
         guard viewerAttachments[terminalID] == generation else {
             throw Error.handbackSuperseded(terminalID: terminalID, generation: generation)
         }
+        // The viewer leaves the census here, on its caller's evidence and
+        // nothing weaker: `acceptHandback` arrives only after the viewer closed
+        // its descriptor (the ordering the app owns and this process cannot
+        // check), and `seizeFromDeadApp` only after an app-liveness verdict
+        // that the process holding it is gone. Both mean the same thing to the
+        // ledger — nothing outside this process is on the pty — and recording
+        // it before the resume is what makes the resume's assertion meaningful
+        // rather than self-certifying.
+        readerCensus.stoppedReading(.viewer(attach: generation), session: terminalID)
 
         let reader: HolderReader
         do {
@@ -1964,6 +2097,8 @@ actor HolderRegistry {
                 // a restart of its thread.
                 if let preamble { await suspended.ingest(preamble: preamble) }
                 try await suspended.resumeDraining()
+                readerCensus.beganReading(
+                    .daemon, session: terminalID, at: "handback-resume")
                 reader = suspended
             case nil:
                 // Defensive; see the header. A claim with no reader under it
@@ -2437,6 +2572,20 @@ actor HolderRegistry {
     /// still on the pty — is a state a concurrent `adopt` can see and wait for,
     /// rather than an absence it would read as "nobody is on this master".
     func release(terminalID: UUID) async {
+        // A viewer holding this pty is a reader leaving it, because the session
+        // itself is going away: the holder is told to forget its child, the job
+        // is killed, and the viewer's `dup` refers to a terminal with nothing
+        // on the other end. Recorded BEFORE the claim is dropped — once the
+        // claim is gone there is nothing left to name the generation with.
+        if let generation = viewerAttachments[terminalID] {
+            readerCensus.stoppedReading(.viewer(attach: generation), session: terminalID)
+        }
+        // Whatever this release could not account for goes with the session. A
+        // hygiene sweep, not an arbitration step: both readers above are
+        // recorded as leaving by the steps that stop them, so this should find
+        // nothing — it is here so a long-lived daemon's ledger cannot grow an
+        // entry per session it has ever torn down.
+        defer { readerCensus.forget(session: terminalID) }
         // A viewer's claim does not outlive the session it was made against.
         // Every caller here is tearing the session down or handing it back, and
         // a claim left behind would refuse every later adoption of a terminal
@@ -2456,7 +2605,7 @@ actor HolderRegistry {
             await task.value
             clearIfStillReleasing(task, for: terminalID)
         case .adopted(let reader):
-            let task = Task<Void, Never> { await self.stopPublished(reader) }
+            let task = Task<Void, Never> { await self.stopPublished(reader, for: terminalID) }
             slots[terminalID] = .releasing(task)
             await task.value
             clearIfStillReleasing(task, for: terminalID)
@@ -2489,16 +2638,26 @@ actor HolderRegistry {
         drainLoopsStarted += 1
         liveDrainLoops += 1
         peakLiveDrainLoops = max(peakLiveDrainLoops, liveDrainLoops)
+        // The daemon's transition into reading. An adoption that was never
+        // published is deliberately not counted here, for the same reason
+        // `drainLoopsStarted` does not count one: its loop was stopped again
+        // before the call that started it returned, and it never became a
+        // reader this registry was on the hook for.
+        readerCensus.beganReading(.daemon, session: terminalID, at: "publish")
     }
 
     /// Stops a reader this registry published, and drops it from the live count
     /// **before** anything awaiting the release resumes — which is what lets an
     /// adoption queued behind a release publish without ever overlapping the
     /// reader it waited for.
-    private func stopPublished(_ reader: HolderReader) async {
+    private func stopPublished(_ reader: HolderReader, for terminalID: UUID) async {
         await releaseBarrier?()
         await reader.stop()
         liveDrainLoops -= 1
+        // After the stop, never before: until it returns the drain thread may
+        // still be inside a read, and the census says who is reading rather
+        // than who intends to.
+        readerCensus.stoppedReading(.daemon, session: terminalID)
     }
 
     /// Stops whatever an in-flight adoption managed to obtain.
