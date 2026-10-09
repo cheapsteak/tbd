@@ -377,6 +377,16 @@ class IssueView:
     unreadable: bool = False
 
 
+def _parse(parser, body: str, login: str | None, kind: str | None, where: str):
+    """`parser`'s answer for one comment. A comment in a schema this code does
+    not read stops the whole command, named: unlike a corrupt comment, which
+    is skipped and listed, it would otherwise read as no history at all."""
+    try:
+        return parser(body, login, kind)
+    except fl.UnsupportedSchema as error:
+        raise fl.UnsupportedSchema(f"{where}: {error}") from None
+
+
 def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
     issues: dict[int, IssueView] = {}
     for item in raw:
@@ -390,8 +400,8 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
         )
         for comment in sorted(item.get("comments", []), key=lambda c: c["id"]):
             body, login, kind = comment.get("body") or "", comment.get("login"), comment.get("type")
-            is_ledger = body.startswith(fl.SENTINEL)
-            is_attempts = body.startswith(fl.ATTEMPTS_SENTINEL)
+            is_ledger = body.startswith(fl.SENTINEL_PREFIX)
+            is_attempts = body.startswith(fl.ATTEMPTS_SENTINEL_PREFIX)
             if not (is_ledger or is_attempts):
                 continue
             if not fl.trusted_author(login, kind):
@@ -399,7 +409,7 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
                 notes.forged.append(f"#{view.number} comment {comment['id']}: a {what} sentinel by `{login}` ({kind}), ignored")
                 continue
             if is_ledger:
-                state = fl.parse_comment(body, login, kind)
+                state = _parse(fl.parse_comment, body, login, kind, f"#{view.number} comment {comment['id']}")
                 if state is None:
                     notes.unreadable.append(f"#{view.number} comment {comment['id']}: the bot's own ledger comment does not parse; the issue is left untouched")
                     view.unreadable = True
@@ -409,7 +419,7 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
                     continue
                 view.ledger, view.ledger_comment_id, view.ledger_body = state, int(comment["id"]), body
             else:
-                attempts = fl.parse_attempts(body, login, kind)
+                attempts = _parse(fl.parse_attempts, body, login, kind, f"#{view.number} comment {comment['id']}")
                 if attempts is None:
                     notes.unreadable.append(f"#{view.number} comment {comment['id']}: the bot's own attempt comment does not parse; the issue is left untouched")
                     view.unreadable = True
@@ -424,7 +434,8 @@ class Watchlist:
     """The one watchlist issue (spec §4.4), as `fetch` read it. `slots` are its
     bot comments that parsed, oldest first, each with the tests it holds. A
     bot comment that does not parse is skipped: it is no slot, so it is never
-    written, and stays as it is for a human to read."""
+    written, and stays as it is for a human to read. One in a schema version
+    this code does not read is not skipped: reading it stops the run."""
 
     number: int | None = None
     slots: list[tuple[int, list[str], str]] = field(default_factory=list)  # (comment id, tests, body)
@@ -482,12 +493,12 @@ def load_watchlist(raw: list[dict], notes: Notes) -> Watchlist:
     watch = Watchlist(number=int(chosen["number"]), add_label=fl.WATCHLIST_LABEL not in chosen.get("labels", [fl.WATCHLIST_LABEL]))
     for comment in sorted(chosen.get("comments", []), key=lambda c: c["id"]):
         body, login, kind = comment.get("body") or "", comment.get("login"), comment.get("type")
-        if not body.startswith(fl.WATCHLIST_SENTINEL):
+        if not body.startswith(fl.WATCHLIST_SENTINEL_PREFIX):
             continue
         if not fl.trusted_author(login, kind):
             notes.forged.append(f"#{watch.number} comment {comment['id']}: a watchlist sentinel by `{login}` ({kind}), ignored")
             continue
-        states = fl.parse_watchlist(body, login, kind)
+        states = _parse(fl.parse_watchlist, body, login, kind, f"#{watch.number} comment {comment['id']}")
         if states is None:
             notes.unreadable.append(
                 f"#{watch.number} comment {comment['id']}: the bot's own watchlist comment does not parse; it is skipped "
@@ -1258,14 +1269,14 @@ def _fetch_watchlist(repo: str) -> list[dict]:
             "comments": [],
         }
         if fl.trusted_author(item["login"], item["type"]):
-            item["comments"] = _sentinel_comments(repo, item["number"], (fl.WATCHLIST_SENTINEL,))
+            item["comments"] = _sentinel_comments(repo, item["number"], (fl.WATCHLIST_SENTINEL_PREFIX,))
         found.append(item)
     return sorted(found, key=lambda i: i["number"])
 
 
 def _fetch_issue(repo: str, raw: dict) -> dict:
     number = int(raw["number"])
-    comments = _sentinel_comments(repo, number, (fl.SENTINEL, fl.ATTEMPTS_SENTINEL))
+    comments = _sentinel_comments(repo, number, (fl.SENTINEL_PREFIX, fl.ATTEMPTS_SENTINEL_PREFIX))
     state = (raw.get("state") or "").upper()
     # Read for open issues too: one that was closed by a fix and reopened keeps
     # that fix on record, which is what lets a run that died between the reopen
@@ -1637,7 +1648,9 @@ def report_red_run(repo: str, run_id: int, issue: int, now: datetime, job_token:
     url = f"https://github.com/{repo}/actions/runs/{run_id}"
     body = (
         f"The flake ledger's `ledger` job failed: {url}. It wrote nothing after the failure, "
-        "and the next green run converges. Later consecutive red runs post nothing here."
+        "and the next green run converges – unless the run's summary says it stopped on a comment's schema "
+        "version, which no run converges past until the code reads that version. "
+        "Later consecutive red runs post nothing here."
     )
     if job_token:
         body += (
@@ -1777,6 +1790,14 @@ def main(argv: list[str]) -> int:
             print(report_red_run(args.repo, args.run_id, args.issue, _now(args.now), args.job_token, args.run_attempt))
     except (GhError, AnalysisError) as error:
         print(f"flake-ledger: {error}", file=sys.stderr)
+        return 2
+    except fl.UnsupportedSchema as error:
+        # Before any write: `run` reads every comment before it plans one.
+        print(f"flake-ledger: {error}", file=sys.stderr)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a") as handle:
+                handle.write(f"The flake ledger stopped without writing: {error}\n")
         return 2
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         # An answer or file in a shape this script does not expect (bad JSON

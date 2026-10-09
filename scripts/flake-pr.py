@@ -22,6 +22,11 @@ run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
         appends the entry to the issue's attempt comment, or creates it. A
         re-run of the same `fix` run replaces its own entry instead of adding
         a second. Only a comment the bot wrote is ever edited.
+    check-attempts --repo R --issue N
+        reads the issue's attempt comment as `record` will, writing nothing:
+        exit 3 when a bot attempt comment does not parse or is in a schema
+        this code does not read, so `open` refuses before it pushes or posts;
+        exit 2 when the comments cannot be read at all.
     comment --repo R --issue N --body F
         posts one issue comment.
     promote-resolve --repo R --sha S
@@ -47,6 +52,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, fields
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -322,26 +328,42 @@ def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
     return asdict(record)
 
 
-def record(repo: str, issue: int, new: dict) -> None:
-    known = {f.name for f in fields(fl.Attempt)}
-    if set(new) - known or new.get("outcome") not in fl.ATTEMPT_OUTCOMES:
-        raise Malformed(f"not an attempt entry: {sorted(set(new) - known)} {new.get('outcome')!r}")
+def attempt_comment(repo: str, issue: int) -> tuple[int, list[fl.Attempt]] | None:
+    """The bot's attempt comment on ISSUE and its entries, or None when it has
+    none yet. Raises Malformed, having written nothing, when the bot's comment
+    does not parse or is in a schema this code does not read: a fresh comment
+    beside it, or an edit over it, would lose or misread its history."""
     comments = ledger.gh_lines("api", "--paginate", f"repos/{repo}/issues/{issue}/comments?per_page=100", "--jq", ".[]")
     mine = None
     for c in sorted(comments, key=lambda c: c["id"]):
         text = c.get("body") or ""
         user = c.get("user") or {}
-        if not text.startswith(fl.ATTEMPTS_SENTINEL):
+        if not text.startswith(fl.ATTEMPTS_SENTINEL_PREFIX):
             continue
         if not fl.trusted_author(user.get("login"), user.get("type")):
             print(f"flake-pr: ignoring an attempt sentinel by {user.get('login')!r} on #{issue}", file=sys.stderr)
             continue
-        attempts = fl.parse_attempts(text, user.get("login"), user.get("type"))
+        try:
+            attempts = fl.parse_attempts(text, user.get("login"), user.get("type"))
+        except fl.UnsupportedSchema as error:
+            # Not corrupt: a format this code does not read. A fresh comment
+            # beside it, or an edit over it, would misread the history.
+            raise Malformed(f"#{issue} comment {c['id']}: {error}") from None
         if attempts is None:
             # Fail closed: overwriting an unreadable record would lose history.
             raise Malformed(f"#{issue}: the bot's own attempt comment {c['id']} does not parse")
-        mine = (int(c["id"]), attempts)
-        break
+        # The oldest is the one written; every later bot comment is still
+        # read, so one in another schema stops publish as it stops the ledger.
+        if mine is None:
+            mine = (int(c["id"]), attempts)
+    return mine
+
+
+def record(repo: str, issue: int, new: dict) -> None:
+    known = {f.name for f in fields(fl.Attempt)}
+    if set(new) - known or new.get("outcome") not in fl.ATTEMPT_OUTCOMES:
+        raise Malformed(f"not an attempt entry: {sorted(set(new) - known)} {new.get('outcome')!r}")
+    mine = attempt_comment(repo, issue)
     attempt = fl.Attempt(**new)
     if mine is None:
         ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{issue}/comments",
@@ -582,6 +604,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--entry", type=Path, required=True)
+    p = sub.add_parser("check-attempts")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--issue", type=int, required=True)
     p = sub.add_parser("label")
     p.add_argument("--repo", required=True)
     p.add_argument("--pr", type=int, required=True)
@@ -622,6 +647,18 @@ def main(argv: list[str]) -> int:
                                               args.session_failed, args.publish_raced)) + "\n")
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
+        elif args.command == "check-attempts":
+            try:
+                attempt_comment(args.repo, args.issue)
+            except Malformed as error:
+                # 3, not 2: the record itself is unreadable, which a retry
+                # cannot change; a failed read stays 2.
+                print(f"flake-pr: {error}", file=sys.stderr)
+                summary = os.environ.get("GITHUB_STEP_SUMMARY")
+                if summary:
+                    with open(summary, "a") as handle:
+                        handle.write(f"Publishing refused, nothing pushed or written: {error}\n")
+                return 3
         elif args.command == "promote-facts":
             facts = promote_facts(args.repo, args.branch, args.sha, args.trigger, args.conclusion, args.event,
                                   args.run_id, args.run_created_at)

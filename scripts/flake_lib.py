@@ -20,6 +20,9 @@ in one place:
   sentinel AND its author is the bot's App account, `BOT_LOGIN` with user type
   `Bot`. GitHub reserves the `[bot]` suffix for Apps, so nobody else can author
   a comment under that login; anyone can type the sentinel.
+- **Schema versions** (spec §4.4). A bot comment that declares a version this
+  code does not read (`READABLE_SCHEMAS`) raises `UnsupportedSchema`: it is a
+  newer or retired format, not a corrupt comment, and is never read as empty.
 
 Stdlib only, Python 3.12 (ubuntu-latest's `python3`).
 
@@ -271,12 +274,25 @@ def retry_records(path: Path) -> list[dict]:
 
 # --- the ledger's state ------------------------------------------------------------
 
+# The schema version every writer stamps, twice: in the sentinel (`v1`) and as
+# the JSON block's `schema` key. One version covers all three comment kinds.
 SCHEMA = 1
-SENTINEL = "<!-- flake-ledger v1 -->"
+# The versions this code reads. A trusted comment declaring any other version
+# – a later writer's, or one this code no longer reads – is not corrupt, and
+# is never read as if it were: its reader raises `UnsupportedSchema` and the
+# whole command stops (spec §4.4, §8). An older version stays listed here for
+# as long as the readers can read it.
+READABLE_SCHEMAS = frozenset({1})
+# A sentinel is its prefix, the version, and ` -->`. Readers match the prefix,
+# so a comment under another version's sentinel is still found and judged.
+SENTINEL_PREFIX = "<!-- flake-ledger v"
+ATTEMPTS_SENTINEL_PREFIX = "<!-- flakefix-attempts v"
+WATCHLIST_SENTINEL_PREFIX = "<!-- flake-watchlist v"
+SENTINEL = f"{SENTINEL_PREFIX}{SCHEMA} -->"
 STATE_BEGIN, STATE_END = "<!-- flake-ledger-state", "flake-ledger-state -->"
-ATTEMPTS_SENTINEL = "<!-- flakefix-attempts v1 -->"
+ATTEMPTS_SENTINEL = f"{ATTEMPTS_SENTINEL_PREFIX}{SCHEMA} -->"
 ATTEMPTS_BEGIN, ATTEMPTS_END = "<!-- flakefix-attempts-state", "flakefix-attempts-state -->"
-WATCHLIST_SENTINEL = "<!-- flake-watchlist v1 -->"
+WATCHLIST_SENTINEL = f"{WATCHLIST_SENTINEL_PREFIX}{SCHEMA} -->"
 WATCHLIST_BEGIN, WATCHLIST_END = "<!-- flake-watchlist-state", "flake-watchlist-state -->"
 
 # GitHub refuses a comment body over 65,536 characters; keep headroom.
@@ -445,6 +461,67 @@ def _parse_json_block(body: str, begin: str, end: str) -> dict | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+class UnsupportedSchema(Exception):
+    """A trusted bot comment declares a schema version this code does not read
+    (`READABLE_SCHEMAS`). Not corruption: a newer writer's comment, or an older
+    one after a rollback, read as unparsable would be skipped and its history
+    restarted, so every reader stops instead (spec §4.4, §8)."""
+
+
+_DECLARED_VERSION = re.compile(r"(\d{1,9}) -->")
+
+
+def _is_version(value) -> bool:
+    # `True == 1` in Python: a boolean is not a version.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _declared(body: str, prefix: str, payload: dict | None) -> list:
+    """What the sentinel and the block declare, as written: an int for a
+    well-formed version, else the raw spelling, which no reader reads."""
+    found = []
+    if body.startswith(prefix):
+        rest = body[len(prefix):].split("\n", 1)[0].rstrip()
+        match = _DECLARED_VERSION.fullmatch(rest)
+        found.append(int(match.group(1)) if match else rest[:40])
+    if payload and "schema" in payload:
+        found.append(payload["schema"])
+    return found
+
+
+def declared_versions(body: str, prefix: str, begin: str, end: str) -> list:
+    """The schema versions a comment declares: its sentinel's, then its JSON
+    block's `schema`, each when it is there. A corrupt comment's block may
+    declare none."""
+    return _declared(body, prefix, _parse_json_block(body, begin, end))
+
+
+def _versioned_payload(body: str, prefix: str, begin: str, end: str, what: str) -> dict | None:
+    """A bot comment's JSON block, parsed once: None when the comment is
+    corrupt (no block, or a block that declares no version). Raises
+    `UnsupportedSchema` when the sentinel or the block declares a version
+    outside `READABLE_SCHEMAS`, so a block returned is one this code reads."""
+    payload = _parse_json_block(body, begin, end)
+    unreadable = [v for v in _declared(body, prefix, payload) if not (_is_version(v) and v in READABLE_SCHEMAS)]
+    if unreadable:
+        versions = [v for v in unreadable if _is_version(v)]
+        if len(versions) == len(unreadable):
+            version = max(versions)
+            age = "newer than" if version > max(READABLE_SCHEMAS) else "not one of"
+        else:
+            # A spelling this code does not know – `v2.0`, `"2"` – is a format
+            # it cannot read, not a corrupt comment to skip.
+            version = json.dumps(next(v for v in unreadable if not _is_version(v)))
+            age = "not a version spelled as"
+        raise UnsupportedSchema(
+            f"the bot's {what} comment declares schema version {version}, {age} the versions this code reads "
+            f"({', '.join(str(v) for v in sorted(READABLE_SCHEMAS))}); stopping rather than reading it as empty"
+        )
+    # Every declared version is readable here, so a block declaring one is
+    # a block this code reads; one declaring none is corrupt.
+    return payload if payload and "schema" in payload else None
 
 
 def code_span(text: str) -> str:
@@ -627,11 +704,13 @@ def render_comment(state: State, repo: str) -> str:
 def parse_comment(body: str, login: str | None, user_type: str | None) -> State | None:
     """The state in a ledger comment, or None. A comment is state only when its
     author is the bot (`trusted_author`), it starts with the sentinel, and its
-    JSON block parses with this schema: a forged comment is never state."""
-    if not trusted_author(login, user_type) or not body.startswith(SENTINEL):
+    JSON block parses with a readable schema: a forged comment is never state.
+    A bot comment declaring a version this code does not read raises
+    `UnsupportedSchema` instead of reading as None."""
+    if not trusted_author(login, user_type) or not body.startswith(SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, STATE_BEGIN, STATE_END)
-    if not payload or payload.get("schema") != SCHEMA:
+    payload = _versioned_payload(body, SENTINEL_PREFIX, STATE_BEGIN, STATE_END, "ledger")
+    if not payload:
         return None
     return _state_from_payload(payload)
 
@@ -692,11 +771,12 @@ def render_watchlist(states: list[State], repo: str) -> str:
 
 def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list[State] | None:
     """The states in one watchlist comment, or None: only a comment the bot
-    wrote (`trusted_author`), under the sentinel, whose block parses."""
-    if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL):
+    wrote (`trusted_author`), under the sentinel, whose block parses. Raises
+    `UnsupportedSchema` as `parse_comment` does."""
+    if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, WATCHLIST_BEGIN, WATCHLIST_END)
-    if not payload or payload.get("schema") != SCHEMA or not isinstance(payload.get("tests"), list):
+    payload = _versioned_payload(body, WATCHLIST_SENTINEL_PREFIX, WATCHLIST_BEGIN, WATCHLIST_END, "watchlist")
+    if not payload or not isinstance(payload.get("tests"), list):
         return None
     states = [_state_from_payload(t) for t in payload["tests"]]
     if any(s is None for s in states):
@@ -762,11 +842,12 @@ def render_attempts(attempts: list[Attempt], repo: str) -> str:
 
 
 def parse_attempts(body: str, login: str | None, user_type: str | None) -> list[Attempt] | None:
-    """The attempts in an attempt comment, or None unless the bot wrote it."""
-    if not trusted_author(login, user_type) or not body.startswith(ATTEMPTS_SENTINEL):
+    """The attempts in an attempt comment, or None unless the bot wrote it.
+    Raises `UnsupportedSchema` as `parse_comment` does."""
+    if not trusted_author(login, user_type) or not body.startswith(ATTEMPTS_SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, ATTEMPTS_BEGIN, ATTEMPTS_END)
-    if not payload or payload.get("schema") != SCHEMA:
+    payload = _versioned_payload(body, ATTEMPTS_SENTINEL_PREFIX, ATTEMPTS_BEGIN, ATTEMPTS_END, "attempt")
+    if not payload:
         return None
     known = {f.name for f in fields(Attempt)}
     try:

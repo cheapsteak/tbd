@@ -448,7 +448,7 @@ def main(argv: list[str]) -> int:
     except ledger.GhError as error:
         print(f"flake-pick: {error}", file=sys.stderr)
         return 2
-    except Refused as error:
+    except (Refused, fl.UnsupportedSchema) as error:
         print(f"flake-pick: refused: {error}", file=sys.stderr)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
