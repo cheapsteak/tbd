@@ -571,7 +571,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM SNAP_SUM BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -641,7 +641,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -686,7 +686,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -725,7 +725,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -754,7 +754,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -772,7 +772,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -819,7 +819,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY VS_SUM VT_SUM TRY1_VERIFY_SUM SNAP_SUM TRY1_HEAD BASE SCOPE BASELINE_F BASELINE_V BASELINE_MD QUARANTINED PLAN "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -899,7 +899,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -944,7 +944,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY TEST_ID "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi
@@ -1071,7 +1071,7 @@ jobs:
           keep=" GITHUB_OUTPUT GITHUB_STEP_SUMMARY "
           if [ "${1-}" != --clean-env ]; then
             restore="$CLEAN_ENV"; IFS=$' \t\n'; [ -n "$restore" ] || { echo "::error::the recorded environment is missing"; exit 1; }
-            e=(); for k in $keep; do e+=("$k=${!k-}"); done
+            e=(); for k in $keep; do e+=("$k=${!k-}"); done  # non-empty: keep names GITHUB_OUTPUT
             while IFS= read -r -d '' kv; do case "$keep" in *" ${kv%%=*} "*) ;; *) e+=("$kv") ;; esac; done < <(printf '%s' "$restore" | /usr/bin/base64 -d)
             exec /usr/bin/env -i "${e[@]}" /bin/bash --noprofile --norc -p -eo pipefail "$0" --clean-env
           fi

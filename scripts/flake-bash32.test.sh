@@ -96,8 +96,12 @@ def extract(workflow, out):
             jobs[job]["os"] = m.group(1)
         elif job and (m := re.match(r"^      - name:\s*(.*)$", line)):
             step = m.group(1)
-        elif job and (m := re.match(r"^(\s+)run:\s*(.*)$", line)):
-            indent, rest = len(m.group(1)), m.group(2)
+        elif job and re.match(r"^      - (?!run:)", line):
+            step = "(unnamed)"
+        elif job and (m := re.match(r"^(\s+)(- )?run:\s*(.*)$", line)):
+            indent, rest = len(m.group(1)) + len(m.group(2) or ""), m.group(3)
+            if m.group(2):
+                step = "(unnamed)"
             if rest in ("|", "|-", "|+", ">", ">-"):
                 body, i = [], i + 1
                 while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
@@ -266,21 +270,29 @@ NEWER = [
 
 def empty_arrays(p, s, sc, raw):
     """Bash before 4.4 reads "${a[@]}" or ${a[*]} of an EMPTY array as unbound
-    under `set -u`, and the script dies. Flagged: an array the script sets to
-    `()` after it turns on nounset, expanded without the `${a[@]+"${a[@]}"}`
-    or `${a[*]:-}` guard. A site that cannot be reached empty says so with a
-    trailing `# non-empty: <why>` comment, and so does an array's `=()` line
-    for an array that is never empty where it is expanded."""
-    nounset = re.search(r"^\s*set\s+-[A-Za-z]*u|^\s*set\s+-o\s+nounset", sc.code, re.M)
-    if not nounset:
+    under `set -u`, and the script dies; so are its slices and substitutions.
+    In a script that turns nounset on anywhere (a function defined above the
+    `set -u` line still runs after it), flagged: an array that can be empty –
+    set to `()`, declared `-a` without a value, or filled by `read -a` –
+    expanded without the `${a[@]+"${a[@]}"}` or `${a[*]:-}` guard. A site
+    that cannot be reached empty says so with a trailing `# non-empty: <why>`
+    comment, and so does the declaring line of an array that is never empty
+    where it is expanded."""
+    if not re.search(r"^\s*set\s+-[A-Za-z]*u|^\s*set\s+-o\s+nounset", sc.code, re.M):
         return []
-    empty = {m.group(1) for m in re.finditer(r"(?<![\w$])([A-Za-z_]\w*)=\(\)", sc.code)
-             if m.start() > nounset.start() and "# non-empty:" not in raw[s.count("\n", 0, m.start())]}
+    empty = set()
+    for rx in (r"(?<![\w$])([A-Za-z_]\w*)=\(\)",
+               r"\b(?:local|declare|typeset)\s+-[A-Za-z]*a[A-Za-z]*((?:\s+[A-Za-z_]\w*(?![\w=]))+)",
+               r"\bread\b[^;|&\n]*?\s-[A-Za-z]*a\s+([A-Za-z_]\w*)"):
+        for m in re.finditer(rx, sc.code):
+            if "# non-empty:" in raw[s.count("\n", 0, m.start())]:
+                continue
+            empty.update(m.group(1).split())
     found = []
     for no, text in enumerate(sc.quoted.split("\n"), 1):
         if "# non-empty:" in raw[no - 1]:
             continue
-        for m in re.finditer(r"\$\{([A-Za-z_]\w*)\[[@*]\]\}", text):
+        for m in re.finditer(r"\$\{([A-Za-z_]\w*)\[[@*]\](?:\}|:[^-+]|/)", text):
             guarded = text[max(0, m.start() - 2):m.start()] in ('+"', "+'") or text[max(0, m.start() - 1):m.start()] == "+"
             if m.group(1) in empty and not guarded:
                 found.append(f"{p}:{no}: ${{{m.group(1)}[@]}} of an array that can be empty, under set -u: "
@@ -337,7 +349,8 @@ import sys
 src, dst, old, new = sys.argv[1:]
 open(dst, "w").write(open(src).read().replace(old, new, 1))
 PY
-  cmp -s "$c" "$WORKFLOW" && { echo "FAIL - mutation [$1] did not change the workflow" >&2; FAIL=1; }
+  # A file, not FAIL=1: callers run this in a command substitution.
+  cmp -s "$c" "$WORKFLOW" && { echo "FAIL - mutation [$1] did not change the workflow"; echo "$1" >> "$SCRATCH/unchanged"; } >&2
   printf '%s' "$c"
 }
 # check NAME FUNC OLD NEW: FUNC passes on the workflow and fails on the mutant.
@@ -453,6 +466,13 @@ echo "${a[@]}"
 SH
   out="$(python3 "$LINT" check "$f")"
   assert_contains "flagged" "$out" "can be empty"
+  cat > "$SCRATCH/empty2.sh" <<'SH'
+set -u
+f() { local -a b; read -r -a b <<< ""; echo "${b[@]:1}"; }
+g() { local c=(); echo "${c[*]/x/y}"; }
+SH
+  assert_eq "a read -a or local -a array, sliced or substituted, is flagged too" "2" \
+    "$(python3 "$LINT" check "$SCRATCH/empty2.sh" | grep -c 'can be empty')"
   "$BASH32" "$f" > /dev/null 2>&1
   assert_eq "and bash 3.2 does die of it" "1" "$?"
   cat > "$f" <<'SH'
@@ -489,6 +509,11 @@ macos_scripts_listed() {
   done <<< "$named"
   return "$missing"
 }
+test_a_step_with_run_as_its_first_key_is_read() {
+  check "a step whose first key is run: is linted too" lint_clean '      - name: Install tmux' \
+    $'      - run: |\n          declare -A seen=()\n      - name: Install tmux'
+}
+
 test_every_script_a_macos_step_runs_is_checked() {
   check "every scripts/*.sh a macOS step names is in MACOS_SCRIPTS" macos_scripts_listed \
     '        run: bash scripts/repair-spm-workspace.sh' '        run: bash scripts/repair-spm-workspace.sh && bash scripts/ci/new-step.sh'
@@ -571,5 +596,6 @@ for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
   echo "== $t"
   "$t"
 done
+if [[ -s "$SCRATCH/unchanged" ]]; then echo "FAIL - a mutation did not change the workflow"; FAIL=1; fi
 if [[ $FAIL -eq 0 ]]; then echo "ALL PASS"; else echo "FAILURES"; fi
 exit $FAIL

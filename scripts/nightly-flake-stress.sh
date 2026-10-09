@@ -352,7 +352,8 @@ check_pass_table() {
 filter_args_of() {
   local -a parts
   read -r -a parts <<< "$1"
-  printf '%s\n' "${parts[@]}"
+  # Guarded: an empty filter leaves no parts, which bash 3.2 calls unbound.
+  printf '%s\n' ${parts[@]+"${parts[@]}"}
 }
 
 # The extra `swift test` args for iteration $2 of target $1, one per line.
@@ -618,7 +619,7 @@ run_target() {
   echo "    $description"
 
   local failures=0 pass_counts=() signatures=() i verdict log load_before t0 line deadline
-  local -a args
+  local -a args  # non-empty: set to (--no-fingerprint ...) before every use
   for ((i = 1; i <= iterations; i++)); do
     log="${LOG_DIR:-$work_dir}/$name-$i.log"
     # Built as an array, never from an unquoted `$filter`: see filter_args_of.
