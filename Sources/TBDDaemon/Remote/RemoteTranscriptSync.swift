@@ -133,7 +133,7 @@ actor RemoteTranscriptSync {
     /// change takes effect on the next sync.
     typealias Policy = @Sendable (_ provider: String, _ sessionID: String) async -> RemoteTranscriptSyncPolicy
 
-    /// Conversation records TBD asks for, for a tail reset and for each page
+    /// Message records TBD asks for, for a tail reset and for each page
     /// of earlier history alike. TBD's request parameter, not a contract
     /// constant: about a screenful of rows in the pane.
     static let tailRecordCount = 12

@@ -18,7 +18,7 @@ The pieces that exist for remote sessions do not add up to either feature:
 - Send messages to a remote session from a composer in that transcript, with the same delivery guarantees the local composer has.
 - Keep what is fetched, so reopening a transcript, relaunching the app, or restarting the daemon fetches only what is new. Some providers' transports are slow per call and cap output per call, so a full refetch of a long transcript takes many round trips.
 - Keep remote sessions' transcripts up to date without the user opening them, so a pane opens over a current cache.
-- Never load a transcript eagerly in full. A session new to the cache, or far behind it, loads only its last 12 conversation records; earlier history loads only when the user scrolls up to it.
+- Never load a transcript eagerly in full. A session new to the cache, or far behind it, loads only its last 12 message records; earlier history loads only when the user scrolls up to it.
 
 ## Non-goals
 
@@ -74,14 +74,22 @@ Paste mechanics stay with the provider because the provider owns the transport a
 
 ### `transcript read --tail` and `--before`
 
-A new capability, `transcript.tail`, admits two forms of `transcript read` that read a conversation from its end. Both count in **conversation records**: JSONL records whose `type` is `user` or `assistant`. Records between them — tool results and any other type — come along with the conversation records they sit among.
+A new capability, `transcript.tail`, admits two forms of `transcript read` that read a conversation from its end. Both count in **message records**: JSONL records the pane renders as a message. A record is a message record when both of these hold:
 
-- **`transcript read <id> --tail <n>`** returns the end of the current conversation, starting at the record boundary of the n-th-from-last conversation record and including everything after it. It is always a reset. The envelope carries `cursor`, which continues forward on `--since` like any other cursor, and `before`: an opaque cursor for the history above this output, absent when the output already starts at the conversation's beginning. It never sets `more`.
-- **`transcript read <id> --before <cursor> --tail <n>`** returns the n conversation records, with the records among them, that end immediately before `<cursor>`. The envelope carries only `before`, absent once the page reaches the conversation's beginning. A `before` cursor names a position in one specific conversation and stays valid after `/clear`, because it still points into the conversation it came from. A provider that can no longer serve it fails with the error code `cursor_expired`.
+- it does not carry `"isSidechain": true`, and
+- it is one of:
+  - a `type: "assistant"` record whose `message.content` is a non-empty string, or an array holding at least one `text` block with non-empty `text`;
+  - a `type: "user"` record whose `message.content` is a non-empty string, or an array holding at least one `text` block with non-empty `text` — an array of only `tool_result` blocks does not count — unless that text (the string, or the array's first `text` block) begins with `<system-reminder`, `<local-command-`, `<environment_details`, `<task-notification`, `<tool_result`, `[SYSTEM NOTIFICATION`, or `Base directory for this skill:`, which mark injected context rather than a message;
+  - a `type: "attachment"` record whose `attachment.type` is `queued_command`, which is how Claude Code records a prompt typed while the agent was mid-turn.
 
-In both forms a provider MAY return fewer than n conversation records to stay within its own byte budget, but MUST return at least one record when one exists before the requested position, so paging always progresses, even past a multi-megabyte record. `--tail` is not combined with `--since`. A caller MUST NOT use either form without `transcript.tail`.
+Every other record — tool calls, tool results, thinking, injected context, and any other type — comes along with the message records it sits among, and is not counted. The rule follows `TranscriptParser` and `UserMessageClassifier`: the records it admits are the ones that become `.userPrompt`, `.assistantText`, or `.peerMessage` items, which the pane draws as chat bubbles, and the prefixes it excludes are the ones `UserMessageClassifier` routes to a system kind, which the pane folds into an activity group. A slash-command envelope (`<command-name>…`) is a message, because the pane draws it as the user's bubble, and so is a user line marked `isMeta`, because the pane draws it too.
 
-The unit is the conversation record because it is roughly one row in the pane, and a provider can count records without knowing how TBD renders them. The count is TBD's request parameter, not a contract constant: TBD asks for 12, for a tail reset and for each page of earlier history alike.
+- **`transcript read <id> --tail <n>`** returns the end of the current conversation, starting at the record boundary of the n-th-from-last message record and including everything after it, or the whole conversation when it holds fewer than n. It is always a reset. The envelope carries `cursor`, which continues forward on `--since` like any other cursor, and `before`: an opaque cursor for the history above this output, absent when the output already starts at the conversation's beginning. It never sets `more`.
+- **`transcript read <id> --before <cursor> --tail <n>`** returns the n message records, with the records among them, that end immediately before `<cursor>`, or everything from the conversation's beginning when fewer than n remain. The envelope carries only `before`, absent once the page reaches the conversation's beginning. A `before` cursor names a position in one specific conversation and stays valid after `/clear`, because it still points into the conversation it came from. A provider that can no longer serve it fails with the error code `cursor_expired`.
+
+In both forms a provider MAY return fewer than n message records to stay within its own byte budget, but MUST return at least one message record, with the records among them, when one exists before the requested position, even past multi-megabyte records; when none remains before the position, it MUST return every record from the conversation's beginning up to it. Either way paging progresses: every page brings a visible message or reaches the beginning. `--tail` is not combined with `--since`. A caller MUST NOT use either form without `transcript.tail`.
+
+The unit is the message record because it is one message in the pane. Tool calls, tool results, thinking, and injected context fold into a collapsed activity row, so a page counted in them can arrive with no visible message at all; counting only message records makes each page bring about 12 messages. The rule reads only a record's own JSON, so a provider applies it without TBD's renderer, and its edges are not load-bearing: a provider that counts a rare record differently from the pane changes only how many records a page carries, never which positions the cursors name. The count is TBD's request parameter, not a contract constant: TBD asks for 12, for a tail reset and for each page of earlier history alike.
 
 ### The transcript hint
 
@@ -194,7 +202,7 @@ The leg needs no soak flag of its own, unlike the retained-transcripts leg besid
 
 Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read`.
 
-With the flag on, background sync keeps the cache current, so the pane opens over it and the cached first paint described under "Layout" shows it at once. For a session with no cache yet, the first sync is a tail reset, so the pane fills from 12 records rather than streaming the whole history page by page.
+With the flag on, background sync keeps the cache current, so the pane opens over it and the cached first paint described under "Layout" shows it at once. For a session with no cache yet, the first sync is a tail reset, so the pane fills from 12 message records rather than streaming the whole history page by page.
 
 Whether the transcript is open is one preference shared by every remote session, stored in `UserDefaults` under `remoteTranscriptOpen`. Unset reads as open, so the first remote session a user views shows its transcript. Closing it with the toggle stores `false`, and every remote session then opens without it until the toggle stores `true` again.
 
@@ -299,7 +307,8 @@ Each gate is tested on both branches.
 - **Triggering background sync on `agent_state` edges.** Misses records written mid-turn, while the state stays `working`.
 - **Keeping the old cache on a far-behind session and filling the gap.** Leaves holes in the cache and needs gap markers in the pane; a cache that is one contiguous run ending at the newest record needs neither.
 - **Tail resets only for a session with no cache.** A long-idle session would catch up slowly and spend background bandwidth on history nobody is reading.
-- **Twelve user turns, or a byte budget alone, as the tail unit.** One user turn can carry hundreds of tool calls, so its size is unpredictable; a byte budget alone yields a wildly varying number of messages. The conversation record maps to roughly one pane row.
+- **Twelve user turns, or a byte budget alone, as the tail unit.** One user turn can carry hundreds of tool calls, so its size is unpredictable; a byte budget alone yields a wildly varying number of messages. The message record maps to one message in the pane.
+- **Counting every `user` and `assistant` record as the tail unit.** Simpler to state, but in Claude Code's JSONL a tool call is an `assistant` record and its result a `user` record, so a page of 12 can be nothing but tool activity, which the pane folds into one collapsed row. Measured live: three earlier-history pages counted this way added about 400 KB to the cache and no visible message.
 - **Earlier history in segment files (`earlier-0001.jsonl`, …).** `TranscriptSource` reads one file, and the cache stays small enough to prepend into it.
 - **Carrying the hint in the mirrored `remote_session` row.** Would give every reader one place to look, but the mirror rebroadcasts to the app whenever the encoded payload changes, and the hint's `size` changes with every record the agent writes. The app would re-render the session list on every poll and every `events` line for a field it never shows.
 - **The earlier-history header as a row in the table.** Would scroll with the content, but needs a new row type in the table renderer, and inserting or removing that row reflows the table on exactly the prepend-and-anchor path the design already treats as its riskiest. An overlay changes neither the row model nor the layout.
