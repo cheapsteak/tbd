@@ -813,6 +813,20 @@ failed_session_two_ends_red() {
   package_run "$1" "$rt" C1=success C2=success TRY2=true S1=success S1_CONCLUSION=success S2=success S2_CONCLUSION=failure > /dev/null
   [[ "$(cat "$rt/flakefix/outcome")" == candidate && ! -e "$rt/flakefix/abort_kind" ]] && grep -q '^session_failed=true$' "$rt/out"
 }
+# A step before session 1 failed (run 37845177223: the environment record), so
+# session 1 was skipped: aborted on that step, and no session counts as failed.
+skipped_session_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=skipped S1=skipped S1_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    grep -q "before a session's commits were collected" "$rt/flakefix/abort_reason" &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
+test_a_session_that_never_ran_is_not_a_failed_session() {
+  check "a skipped session is no failed session" skipped_session_is_no_failure \
+    'if [ "$S1" != skipped ] && { [ "$S1" != success ]' 'if { [ "$S1" != success ]'
+}
+
 test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
   check "a failed or never-finished session with no commit is aborted, kind session" session_failure_is_aborted \
     'elif [ -n "$failed_session" ]; then' 'elif false; then'
@@ -918,14 +932,16 @@ end_run() {
 }
 
 # record_env FILE RT: run FILE's "Record the verifier's environment" step as
-# the job would before session 1, and print the record it outputs.
+# the job would before session 1, and print the record it outputs. Under
+# /bin/bash, not the first bash on PATH: the macOS runner's is 3.2, which a
+# Homebrew bash 5 ahead of it on a developer's PATH would hide.
 record_env() {
   local wf="$1" rt="$2" t="$2/flakefix"
   step_script "$wf" "Record the verifier" > "$rt/record.sh"
   : > "$rt/record-out"
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="$rt/tmp" T="$t" VS="$rt/flakefix-verifier-scripts" VT="$rt/flakefix-verify" \
     FLAKEFIX_NOTES="$t/flakefix-notes.md" FLAKE_VERIFY_PS="$rt/bin/ps-stub" GIT_CEILING_DIRECTORIES="$SCRATCH" \
-    GITHUB_OUTPUT="$rt/record-out" bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
+    GITHUB_OUTPUT="$rt/record-out" /bin/bash --noprofile --norc -eo pipefail "$rt/record.sh" > /dev/null 2>&1 || return 1
   sed -n 's/^env=//p' "$rt/record-out"
 }
 

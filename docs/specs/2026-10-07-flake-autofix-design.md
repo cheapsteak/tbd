@@ -1471,7 +1471,7 @@ file. The placement battery from `docs/theory-placement.md` agrees:
 Each script follows the repository's harness pattern: the logic that decides
 is a pure function of input files, proven against fixtures with no network, and
 its `*.test.sh` harness runs in the ubuntu `plans-guard` job beside
-`nightly-flake-stress.test.sh`. GitHub access goes through a `gh` stand-in
+`nightly-flake-stress.test.sh`, except the bash 3.2 harness below. GitHub access goes through a `gh` stand-in
 supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 `AUDIT_GH_CMD`.
 
@@ -1621,6 +1621,18 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   them, and check the pass table against the
   `watched-test-pass.sh` invocations parsed from `test.yml`, so a fixture
   `test.yml` with a changed filter or floor makes the check fail.
+- **`flake-bash32.test.sh`** – the one harness outside `plans-guard`: it runs
+  in the macOS `lint` job, because the `fix` job's steps run under macOS's
+  `/bin/bash`, GNU bash 3.2, which Linux does not have, and bash 5 parses and
+  runs constructs 3.2 refuses. Over every macOS `run:` script in the workflow
+  and every shell script those steps run, it checks `bash -n` under 3.2; a
+  `case` inside `$( … )` or a process substitution whose patterns lack the
+  leading `(`, which 3.2 ends at the first pattern's `)` and parses only when
+  it runs, so `-n` cannot see it; and constructs 3.2 lacks (associative
+  arrays, `mapfile`, case conversion, `|&`, `;&`, and the like). It runs the
+  environment record, the preamble that restores it, and the packaging step
+  under 3.2. A step naming a script it does not check fails it, and under
+  `$CI` it fails rather than skips without a bash 3.2.
 
 Every harness must prove it can fail: each case that expects a finding runs
 against a fixture that contains one.

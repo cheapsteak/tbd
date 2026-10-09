@@ -491,13 +491,20 @@ jobs:
           # global or system git config for the verifier's git, since a
           # session can write ~/.gitconfig (the tests' git never reads it,
           # under test.sh's fenced HOME).
-          rec="$({
+          # A function, so no `case` sits inside the command substitution: the
+          # runner's /bin/bash is 3.2, which ends a `$(` at a case pattern's
+          # unpaired `)` and fails the step (scripts/flake-bash32.test.sh).
+          record() {
+            local v
             for v in $(compgen -e); do
-              case "$v" in GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_|GIT_CONFIG_*) ;;
-                *) printf '%s=%s\0' "$v" "${!v}" ;; esac
+              case "$v" in
+                (GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|GITHUB_ENV|GITHUB_PATH|GITHUB_STATE|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|_|GIT_CONFIG_*) ;;
+                (*) printf '%s=%s\0' "$v" "${!v}" ;;
+              esac
             done
             printf '%s\0' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-          } | base64 | tr -d '\n')"
+          }
+          rec="$(record | base64 | tr -d '\n')"
           [ -n "$rec" ]
           echo "env=$rec" >> "$GITHUB_OUTPUT"
 
@@ -993,11 +1000,13 @@ jobs:
           # outage, a crash, the turn limit or the step's timeout – which
           # `continue-on-error` hides. An action that reports no conclusion at
           # all counts as failed: the job then goes red, which is how a change
-          # to the action's outputs would show.
+          # to the action's outputs would show. A skipped session never ran: an
+          # earlier step failed, which already ends the job red and is the
+          # abort reason below, not a session's failure.
           failed_session=""
-          if [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; then
+          if [ "$S1" != skipped ] && { [ "$S1" != success ] || [ "$S1_CONCLUSION" != success ]; }; then
             failed_session="1 (step $S1, Claude Code ${S1_CONCLUSION:-reported nothing})"
-          elif [ "$TRY2" = true ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
+          elif [ "$TRY2" = true ] && [ "$S2" != skipped ] && { [ "$S2" != success ] || [ "$S2_CONCLUSION" != success ]; }; then
             failed_session="2 (step $S2, Claude Code ${S2_CONCLUSION:-reported nothing})"
           fi
           if [ -f "$T/abort_reason" ]; then
