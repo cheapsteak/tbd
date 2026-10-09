@@ -183,6 +183,69 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(originalData == secondData)
     }
 
+    /// The never-launched profile: another Claude Code process created the
+    /// file first, without the onboarding flag, so the first interactive
+    /// spawn would stop at the first-run screens. Before this fix the
+    /// existing file was left as found.
+    @Test("ensureOAuthDir adds hasCompletedOnboarding to an existing .claude.json that lacks it")
+    func ensureOAuthDirAddsMissingOnboardingFlag() async throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+        let dir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let existing: [String: Any] = [
+            "numStartups": 1,
+            "projects": ["/work/acme": ["hasTrustDialogAccepted": true]],
+        ]
+        try JSONSerialization.data(withJSONObject: existing).write(to: claudeJSON)
+
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
+
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: claudeJSON)) as? [String: Any]
+        #expect(json?["hasCompletedOnboarding"] as? Bool == true)
+        #expect(json?["numStartups"] as? Int == 1)
+        let projects = json?["projects"] as? [String: Any]
+        let acme = projects?["/work/acme"] as? [String: Any]
+        #expect(acme?["hasTrustDialogAccepted"] as? Bool == true)
+    }
+
+    @Test("ensureOAuthDir does not rewrite an explicit hasCompletedOnboarding")
+    func ensureOAuthDirKeepsExplicitOnboardingValue() async throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+        let dir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let original = Data(#"{"hasCompletedOnboarding":false,"numStartups":3}"#.utf8)
+        try original.write(to: claudeJSON)
+
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
+
+        #expect(try Data(contentsOf: claudeJSON) == original)
+    }
+
+    @Test("ensureOAuthDir leaves a malformed .claude.json untouched")
+    func ensureOAuthDirLeavesMalformedFile() async throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+        let dir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let original = Data("{ not json".utf8)
+        try original.write(to: claudeJSON)
+
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
+
+        #expect(try Data(contentsOf: claudeJSON) == original)
+    }
+
     // MARK: - resolveConfigDir
 
     @Test("resolveConfigDir returns nil for nil profile")
