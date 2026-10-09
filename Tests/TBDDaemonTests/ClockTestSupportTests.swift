@@ -42,9 +42,11 @@ struct ClockTestSupportTests {
     // literal deadline"; `pollUntilTrue`'s "size it with
     // `TestDeadlines.saturatedPass` unless the wait is one scheduling hop").
     // The first test pays at most two 90 s guards (arming, then the fire) and
-    // the second one, both inside `.clockDriven`'s 240 s limit.
+    // the second one, inside `.clockDriven`'s 240 s limit. `advance` itself
+    // megaYields without a bound, so a pass starved past that still ends at the
+    // suite limit; nothing on `TestClock` can bound it.
 
-    @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async throws {
+    @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async {
         let clock = TestClock()
         let subject = DelayedFlag(clock: clock)
 
@@ -60,10 +62,15 @@ struct ClockTestSupportTests {
         // `now` and never fires: an unbounded join would sit there until the
         // suite's time limit. Cancelling releases that sleeper, and a healthy
         // run has already fired by the time the cancel lands.
-        let fired = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { await subject.fired }
+        let fired = await pollUntilTrue(timeout: TestDeadlines.saturatedPass,
+                                        pollInterval: .milliseconds(25)) { await subject.fired }
         task.cancel()
         _ = try? await task.value
-        #expect(fired == .satisfied, "the sleeping subsystem never fired after the advance")
+        if fired == .timedOut {
+            Issue.record(BoundedWaitTimeout(what: "the sleeping subsystem to fire after the advance",
+                                            observed: "fired == false",
+                                            deadline: TestDeadlines.saturatedPass))
+        }
     }
 
     /// `advanceWhenSuspended` moves `now` by exactly the requested duration,
