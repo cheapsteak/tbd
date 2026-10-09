@@ -166,7 +166,7 @@ struct MarkdownWebViewConfigurationTests {
             let routesToPane = MarkdownWebViewConfiguration.policy(
                 for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url)
             let paneRendersIt = MarkdownPaneLayout.usesFullPaneWebView(
-                showSourceCode: false, selectedFiles: [url.path], useWebView: true)
+                showSourceCode: false, selectedFiles: [url.path])
             #expect(routesToPane == paneRendersIt, "disagreement on .\(ext)")
         }
     }

@@ -12,17 +12,16 @@ import TBDShared
 ///
 /// ## Row hierarchy
 ///
-/// Three rows, in decreasing scope. The webview toggle is the feature switch;
-/// the stylesheet picker is the setting; the path row is where the setting
-/// lives on disk. Making a stylesheet is not a fourth concern — it is a way of
-/// choosing one, so it rides in the picker as a trailing action entry below a
-/// divider rather than as a button competing with it.
+/// Two rows, in decreasing scope. The stylesheet picker is the setting; the
+/// path row is where the setting lives on disk. Making a stylesheet is not a
+/// third concern — it is a way of choosing one, so it rides in the picker as a
+/// trailing action entry below a divider rather than as a button competing
+/// with it.
 ///
 /// File-backed setting, so it carries the affordance CLAUDE.md requires for
-/// one: the tilde-abbreviated backing path and a copy-path button, in the third
-/// row.
+/// one: the tilde-abbreviated backing path and a copy-path button, in the
+/// second row.
 struct MarkdownSettingsSection: View {
-    @AppStorage(MarkdownViewerPreferences.useWebViewKey) private var useWebView: Bool = false
     /// `""` means "no selection" — the bundled default. `MarkdownStylesheet`
     /// already treats blank as unset, so the empty tag needs no special case.
     @AppStorage(MarkdownStylesheet.themeKey) private var themeID: String = ""
@@ -37,9 +36,6 @@ struct MarkdownSettingsSection: View {
 
     var body: some View {
         Section("Markdown") {
-            Toggle("Render markdown files in a webview", isOn: $useWebView)
-                .help("Replaces the native markdown renderer in the file viewer with an HTML/WebView one, which is what makes CSS stylesheets apply. Off by default (soaking).")
-
             stylesheetPicker
 
             if let missing = catalog.missingSelection {
@@ -83,7 +79,7 @@ struct MarkdownSettingsSection: View {
 
             Text("New from Default\u{2026}").tag(MarkdownThemeCatalog.newFromDefaultTag)
         }
-        .help("Stylesheets are the *.css files in the folder below. Applies to the webview renderer only. \u{201C}New from Default\u{201D} copies TBD's bundled sheet into that folder as a new stylesheet, selects it, and reveals it in Finder; the copy is a snapshot and will not pick up later changes to the bundled sheet.")
+        .help("Stylesheets are the *.css files in the folder below. \u{201C}New from Default\u{201D} copies TBD's bundled sheet into that folder as a new stylesheet, selects it, and reveals it in Finder; the copy is a snapshot and will not pick up later changes to the bundled sheet.")
     }
 
     /// Reads through to the stored theme ID — which is never the sentinel — and
