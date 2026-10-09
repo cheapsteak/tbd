@@ -807,7 +807,7 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the pty-holder transport gate (default OFF, soaking). It gates
+    /// Persist the pty-holder transport gate (default ON). It gates
     /// which transport a session is *spawned* onto; a session records its
     /// transport at creation and keeps it for life, so flipping this never
     /// migrates a running session. The column is written on every call, because

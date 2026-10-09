@@ -3992,10 +3992,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `config.get` so the toggle and the daemon can never disagree about which
     /// of them last wrote the column.
     public let updateMode: UpdateMode
-    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set.
-    /// Default OFF while it soaks. Read at spawn time, so the Settings toggle
-    /// reads it back from here rather than from a local guess — and a session
-    /// already running keeps the transport it was created on either way.
+    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set,
+    /// as this daemon resolved it. Default ON. Read at spawn time, so the
+    /// Settings toggle reads it back from here rather than from a local guess
+    /// — and a session already running keeps the transport it was created on
+    /// either way.
     public let ptyHolderEnabled: Bool
     /// Whether this daemon could actually put a new session on a holder — that
     /// is, whether it located the `TBDHolder` helper beside its own binary
@@ -4003,9 +4004,23 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `controlModeSupported` is, so the app never inspects the filesystem.
     ///
     /// With the flag on and this false, every create silently falls back to
-    /// tmux — so Settings disables the toggle and says why rather than offering
-    /// a switch that would change nothing.
+    /// tmux — so Settings says why, and greys the toggle out in the one state
+    /// where neither direction would change anything (already off, no helper).
+    /// Turning the transport off stays available, because the effective flag is
+    /// what `NightwatchHolderGate` reads whether a holder can start or not.
     public let ptyHolderSupported: Bool
+    /// Whether any session on the pty-holder transport is still alive on this
+    /// daemon. The third term of `NightwatchHolderGate.watchModesBlocked`, sent
+    /// so the app's watch-mode controls reach the same verdict the daemon's
+    /// refusal will: a daemon whose `TBDHolder` helper went missing reports
+    /// `ptyHolderSupported == false` and may still be holding several adopted
+    /// sessions.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives. Absent on the wire
+    /// reads false, like `ptyHolderSupported`: a daemon that never sent it is
+    /// one that has no holder path to report.
+    public var ptyHolderSessionsLive: Bool = false
     /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
     /// while it soaks. Read at spawn time, so the Settings toggle reads it back
     /// from here rather than from a local guess — and a session already running
@@ -4083,7 +4098,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 claudeCloudLive: Bool = false,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
-                ptyHolderEnabled: Bool = Config.ptyHolderDefault,
+                ptyHolderEnabled: Bool = false,
                 ptyHolderSupported: Bool = false,
                 modelProxyEnabled: Bool = Config.modelProxyDefault,
                 modelProxySupported: Bool = false,
@@ -4162,16 +4177,20 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // whole decode.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
-        // New fields for the pty-holder transport gate. A daemon that does not
-        // send `ptyHolderEnabled` has no holder path at all, so fall through to
-        // the shipped default rather than assuming the transport is live.
-        // `supported` is a fact about THIS daemon's own installation, so an
-        // absent value is honestly false — which greys the toggle out on an
-        // older daemon instead of offering a switch it would ignore.
+        // New fields for the pty-holder transport gate. Both absences read
+        // false rather than resolving through the shipped default: a daemon
+        // that does not send `ptyHolderEnabled` has no holder path at all, so
+        // it is running no holder-backed session whatever this install's
+        // default says, and calling the transport live there would grey out the
+        // Nightwatch controls that daemon can still honor. This is a different
+        // question from the config column's NULL: there, nobody chose; here,
+        // the sender does not know the field exists.
         ptyHolderEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
+            Bool.self, forKey: .ptyHolderEnabled) ?? false
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
+        ptyHolderSessionsLive = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderSessionsLive) ?? false
         // New fields for the model proxy. A daemon that does not send
         // `modelProxyEnabled` runs no proxy at all, so fall through to the
         // shipped defaults rather than assuming the route is live. `supported`,

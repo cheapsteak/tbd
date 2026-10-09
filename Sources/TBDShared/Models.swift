@@ -1623,9 +1623,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var remotePeerMessagingEnabled: Bool
     /// Whether new sessions spawn onto the per-session pty-holder transport
-    /// instead of tmux. It ships OFF: the holder owns a pty and a child process
-    /// that outlive the daemon, and until the holder reconcilers land nothing
-    /// reclaims one orphaned by a daemon crash.
+    /// instead of tmux. It is ON: the holder owns a pty and a child process
+    /// that outlive the daemon, and the named reconcilers that reclaim one
+    /// orphaned by a daemon crash — the orphan-GC rendezvous leg, the reaper's
+    /// holder leg, and the reconcile pass — are what make that safe.
     ///
     /// The gate covers *spawning* only. A session records its transport at
     /// creation and keeps it for life, so flipping this never migrates a running
@@ -1798,11 +1799,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// left alone.
     public static let remotePeerMessagingDefault = false
     /// The shipped default for `ptyHolderEnabled`, and the single place it
-    /// lives. The holder transport ships off; graduation — after a soak in which
-    /// no holder or child process outlives the session that owns it — is a
-    /// change to this constant, with no forcing `UPDATE` migration and every
-    /// explicit opt-out left alone.
-    public static let ptyHolderDefault = false
+    /// lives. The holder transport is graduated: new sessions spawn onto a
+    /// holder unless somebody has chosen otherwise. Because the column carries
+    /// no SQL default, this constant reaches only rows that never chose — an
+    /// explicit `0` is honored forever, and moving the constant needed no
+    /// forcing `UPDATE` migration.
+    public static let ptyHolderDefault = true
     /// The shipped default for `remoteDeleteEnabled`, and the single place it
     /// lives. Delete ships off; graduation — after a soak in which no delete
     /// destroyed a session its user had not confirmed, and every delete that

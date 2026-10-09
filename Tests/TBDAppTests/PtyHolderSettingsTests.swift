@@ -123,7 +123,8 @@ struct PtyHolderSettingsTests {
                 "what the operator gains")
         #expect(help.contains("Less scrollback is kept than tmux retains."),
                 "what the operator gives up")
-        #expect(help.contains("Off by default (soaking)."))
+        #expect(help.contains("On by default; turn it off to put new sessions back in tmux windows."),
+                "which way the switch sits before the operator touches it")
     }
 
     /// The disabled-state caption. It exists because the spawn gate asks two
@@ -146,6 +147,32 @@ struct PtyHolderSettingsTests {
             #expect(state.daemonCapabilities == nil)
             #expect((state.daemonCapabilities?.ptyHolderEnabled ?? false) == false)
             #expect((state.daemonCapabilities?.ptyHolderSupported ?? false) == false)
+            #expect(!AppState.ptyHolderToggleIsInteractive(
+                supported: state.daemonCapabilities?.ptyHolderSupported ?? false,
+                flagOn: state.daemonCapabilities?.ptyHolderEnabled ?? false))
         }
+    }
+
+    // MARK: - When the toggle is interactive
+
+    /// All four combinations, because the interesting one only exists now that
+    /// the flag ships ON: a daemon with no `TBDHolder` helper still resolves
+    /// the effective flag to `true`, which is what `NightwatchHolderGate`
+    /// reads, so the operator whose watch modes were turned off at boot needs
+    /// the control that turns the transport back off. Greying it out there
+    /// would name a remedy and withhold the means.
+    @Test func theToggleIsInertOnlyWhereNeitherDirectionDoesAnything() {
+        #expect(
+            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: true),
+            "a supported daemon running holders can be turned off")
+        #expect(
+            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: false),
+            "a supported daemon can be turned on")
+        #expect(
+            AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: true),
+            "no helper but the flag reads on: turning it off is the remedy the gate names")
+        #expect(
+            !AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: false),
+            "no helper and already off: neither direction changes anything")
     }
 }

@@ -1218,7 +1218,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pty-holder transport gate (default OFF). Read fresh at spawn
+    /// Persist the pty-holder transport gate (default ON). Read fresh at spawn
     /// time, so no daemon restart is needed — but it applies only to sessions
     /// created after the call: a session records its transport at creation and
     /// keeps it for life. Sending either value is an explicit gesture that

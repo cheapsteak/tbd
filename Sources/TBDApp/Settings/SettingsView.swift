@@ -314,25 +314,28 @@ struct GeneralSettingsTab: View {
 
     /// Pty-holder transport opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Disabled with an explanation when the daemon could not locate the
-    /// `TBDHolder` helper — the same second half the spawn gate asks, without
-    /// which the flag would be honored by falling back to tmux every time.
+    /// Interactive whenever either direction would do something, which
+    /// `AppState.ptyHolderToggleIsInteractive` decides and documents; the
+    /// caption explaining a missing `TBDHolder` helper shows independently of
+    /// that, because it is a fact about the daemon rather than about the
+    /// control.
     @ViewBuilder
     private var ptyHolderToggle: some View {
         let capabilities = appState.daemonCapabilities
         let supported = capabilities?.ptyHolderSupported ?? false
+        let enabled = capabilities?.ptyHolderEnabled ?? false
         Toggle("Run new sessions without tmux", isOn: Binding(
-            get: { capabilities?.ptyHolderEnabled ?? false },
+            get: { enabled },
             set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
         ))
         .help(AppState.ptyHolderHelp)
-        .disabled(!supported)
+        .disabled(!AppState.ptyHolderToggleIsInteractive(supported: supported, flagOn: enabled))
         if !supported {
             Text(AppState.ptyHolderUnsupportedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if supported && !(capabilities?.ptyHolderEnabled ?? false) && appState.nightwatchMode != .off {
+        if supported && !enabled && appState.nightwatchMode != .off {
             Text(nightwatchExperimental
                 ? NightwatchHolderGate.holderRefusal
                 : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
