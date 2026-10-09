@@ -265,7 +265,8 @@ def read_notes(path: Path) -> str:
     """The session's notes, or "" when there are none. A symlink or anything
     but a regular file reads as none: the session wrote the path."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: a FIFO there must not hang the open before it is refused.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return ""
     try:
@@ -312,7 +313,8 @@ def func_decl(name: str) -> re.Pattern:
 
 
 def suite_decl(name: str) -> re.Pattern:
-    return re.compile(rf"\b(?:struct|class|enum|actor|extension)\s+{re.escape(name)}\b")
+    # A nested suite may be declared through its parent: `extension Outer.Inner`.
+    return re.compile(rf"\b(?:struct|class|enum|actor|extension)\s+(?:\w+\.)*{re.escape(name)}\b")
 
 
 def suite_files(listing: str, module: str, suite: str) -> set[str]:
@@ -355,17 +357,17 @@ def target_change(test: str, notes: str, diff: str, base_decls: str = "", head_d
     and HEAD_DECLS are `git grep` listings of the two revisions' type
     declarations under Tests/."""
     none = {"kind": "none", "from": test, "to": None, "reason": None, "stressed": test, "declared": None, "rejected": None}
-    found = {}
+    # The last declaration for the target counts: both tries write one notes
+    # file, and a second try's own declaration follows the first's.
+    last = None
     for line in notes.splitlines():
         if (m := RENAMED_LINE.match(line)) and m.group("old") == test:
-            found[("renamed", m.group("new"), None)] = line.strip()
+            last = (("renamed", m.group("new"), None), line.strip())
         elif (m := RETIRED_LINE.match(line)) and m.group("old") == test:
-            found[("retired", None, m.group("reason")[:REASON_MAX])] = line.strip()
-    if not found:
+            last = (("retired", None, m.group("reason")[:REASON_MAX]), line.strip())
+    if last is None:
         return none
-    if len(found) > 1:
-        return {**none, "declared": " | ".join(found.values()), "rejected": "the notes declare more than one change for the target"}
-    (kind, new, reason), declared = next(iter(found.items()))
+    (kind, new, reason), declared = last
     none["declared"] = declared
     if kind == "renamed" and (not TEST_ID_FORM.fullmatch(new) or new == test):
         return {**none, "rejected": f"`{new}` is not a test ID in the xunit form, or is the target's own"}

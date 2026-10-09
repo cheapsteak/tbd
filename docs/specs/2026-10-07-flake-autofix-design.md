@@ -661,7 +661,9 @@ hidden files. It runs main's verifier copy, checked
 against its fingerprint first, and removes the original, so session 2's
 transcript can never be session 1's left behind. A transcript that cannot be
 kept says why in the job summary and never fails the job; one whose session
-ended in an aborted End step is not kept at all. The `fix` job
+ended in an aborted End step is not kept at all. The upload runs only when
+the Keep step after the last session that ran succeeded, having cleaned the
+directory, so nothing a session left there unexamined is uploaded. The `fix` job
 uploads the directory as the `flakefix-transcripts` artifact. A transcript
 holds repository content and this repository's CI output, and the repository
 is public, so nothing in it is private beyond the credentials redacted. A
@@ -992,12 +994,13 @@ or deleted the test. So the verifier honors a change to the target only when
 both of these hold, checked after the candidate is applied and before the
 stress run:
 
-- **The session declared it.** Its notes hold exactly one line for the target,
+- **The session declared it.** Its notes hold a line for the target,
   `RENAMED: <old test ID> -> <new test ID>` or `RETIRED: <old test ID> —
   <reason>`, the IDs in the xunit form; a bullet and backticks around an ID
-  are allowed. Lines for other tests are ignored; two different declarations
-  for the target are not honored. The notes are read without following a
-  symlink.
+  are allowed. Lines for other tests are ignored. The last line for the
+  target counts: both tries write one notes file, so try 1's declaration is
+  still there when try 2 writes its own. The notes are read without
+  following a symlink and without blocking on anything but a regular file.
 - **The diff bears it out.** Read from `git diff -U0` of the candidate under
   `Tests/`, with each revision's type declarations from `git grep`. The old
   side: the diff takes the old test's function declaration out of a file
@@ -1017,7 +1020,10 @@ What follows:
 
 - **A rename** is stressed under the new ID, with the same scope and the
   adaptive `N` the baseline planned for the old one, and with the retry check
-  keyed to whether the candidate quarantines the new ID. The verdict is
+  keyed to whether the candidate quarantines the new ID. At pass scope the
+  old ID still chooses the pass, the one `N` was sized for; the iterations
+  are judged on the new ID, so a test moved out of that pass is absent and
+  fails. The verdict is
   judged on the new ID exactly as on the old: absent, failing, or retried, it
   fails, and a second try may follow. Clean, the candidate is **not eligible
   for ready** rather than passing: a human must judge whether the renamed test
@@ -1834,10 +1840,12 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   not honored; a retirement whose only removal is a same-named function in
   another suite's file, or a commented-out line, not honored; a move into
   another suite's file, renamed or keeping its name, honored; a rename that
-  only drops a suite extension while the target stays, not honored; two
-  declarations for the target, a declaration for another
-  test, and a new ID not in the xunit form, none honored; and a notes file
-  that is a symlink, or missing, which declares nothing. A `target-change`
+  only drops a suite extension while the target stays, not honored; a
+  second try's declaration after the first's, which counts; a declaration
+  for another test, and a new ID not in the xunit form, neither honored; a
+  rename at pass scope stressed through the old ID's pass; and a notes file
+  that is a symlink, missing, or a FIFO, which declares nothing, the FIFO
+  without blocking. A `target-change`
   that failed and left an empty change file still gets its harness-error
   verdict. The judge with a
   change: a clean rename under its new ID, not eligible for ready, and the
@@ -1888,7 +1896,10 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   body leads with the coverage note and names the new ID, recorded with the
   rename beside its stress verdict; one that retired its target: the same
   label and note, the session's reason defused, no numbers line, and no
-  stress verdict recorded; a rename whose stress failed, still labelled, and
+  stress verdict recorded; a weak-evidence rename, whose status keeps the
+  weak-evidence clause; an entry with no change, which writes neither
+  change field, and an attempt comment holding a key its reader does not
+  know, which still parses; a rename whose stress failed, still labelled, and
   a plain failure, not; and a PR carrying `flakefix-needs-human`, never
   promoted under either trigger with every other condition met. The
   workflow: both sessions on the model the layout step names, never through

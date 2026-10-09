@@ -640,6 +640,7 @@ jobs:
       # copied, redacted, by main's verifier copy checked against its
       # fingerprint; a transcript that cannot be kept never fails the job.
       - name: Keep session 1's transcript
+        id: keep1
         if: always() && (steps.s1.outcome == 'success' || steps.s1.outcome == 'failure') && steps.c1.outcome == 'success'
         continue-on-error: true
         shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
@@ -665,7 +666,9 @@ jobs:
           said="$(bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE" --runner-temp "$RUNNER_TEMP" \
             --out "$RUNNER_TEMP/flakefix-transcripts/session-1.json")" || rc=$?
           echo "Session 1's transcript: $said" >> "$GITHUB_STEP_SUMMARY"
-          exit "$rc"
+          # 1 is "nothing to keep", after the directory was cleaned: the upload
+          # may go on. Anything else leaves the step red, and the upload off.
+          [ "$rc" -le 1 ]
 
       # The stress run may outlive its allotment; the judge, not this step's
       # conclusion, decides, and an incomplete run is judged as truncated.
@@ -733,7 +736,11 @@ jobs:
             echo "cannot tell whether the candidate quarantines $stressed: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
             exit 1
           fi
-          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed" \
+          # At pass scope the ID only chooses the pass, and N was sized for the
+          # old ID's pass: a rename runs that pass, and is judged on its new ID.
+          scope="$(cat "$T/baseline/scope")"; run_as="$stressed"
+          [ "$scope" = pass ] && run_as="$TEST_ID"
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$scope" --test "$run_as" \
             --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
 
       - name: Judge try 1
@@ -949,6 +956,7 @@ jobs:
           rm -rf "$T/verify-1"
 
       - name: Keep session 2's transcript
+        id: keep2
         if: always() && (steps.s2.outcome == 'success' || steps.s2.outcome == 'failure') && steps.c2.outcome == 'success'
         continue-on-error: true
         shell: /bin/bash --noprofile --norc -p -eo pipefail {0}
@@ -974,7 +982,9 @@ jobs:
           said="$(bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE" --runner-temp "$RUNNER_TEMP" \
             --out "$RUNNER_TEMP/flakefix-transcripts/session-2.json")" || rc=$?
           echo "Session 2's transcript: $said" >> "$GITHUB_STEP_SUMMARY"
-          exit "$rc"
+          # 1 is "nothing to keep", after the directory was cleaned: the upload
+          # may go on. Anything else leaves the step red, and the upload off.
+          [ "$rc" -le 1 ]
 
       - name: Stress try 2 (verification tree)
         if: steps.v1.outputs.verdict == 'fail' && steps.v1.outputs.harness != 'true' && steps.c2.outputs.commits != '0'
@@ -1040,7 +1050,11 @@ jobs:
             echo "cannot tell whether the candidate quarantines $stressed: $(cat "$T/verify/quarantined")" > "$T/verify/harness-error"
             exit 1
           fi
-          bash "$VS/scripts/flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed" \
+          # At pass scope the ID only chooses the pass, and N was sized for the
+          # old ID's pass: a rename runs that pass, and is judged on its new ID.
+          scope="$(cat "$T/baseline/scope")"; run_as="$stressed"
+          [ "$scope" = pass ] && run_as="$TEST_ID"
+          bash "$VS/scripts/flake-verify.sh" stress --scope "$scope" --test "$run_as" \
             --iterations "$(jq -r .n "$T/plan.json")" --out-dir "$T/verify"
 
       - name: Judge try 2
@@ -1172,9 +1186,13 @@ jobs:
 
       # §6.1: each session's transcript, as the Keep steps left it, for a human
       # reading why a fix took the shape it did. Repository content only, with
-      # credential-shaped strings redacted; nothing reads it back.
+      # credential-shaped strings redacted; nothing reads it back. Only when
+      # the last session to run was followed by a Keep step that cleaned the
+      # directory: otherwise what that session left there is not uploaded.
       - name: Upload the session transcripts
-        if: always() && steps.pick.outputs.attempted == 'true'
+        if: >-
+          always() && steps.pick.outputs.attempted == 'true' && steps.keep1.outcome == 'success' &&
+          (steps.s2.outcome == 'skipped' || steps.keep2.outcome == 'success')
         uses: actions/upload-artifact@v4
         with:
           name: flakefix-transcripts

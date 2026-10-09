@@ -162,6 +162,8 @@ def _status(verdict: dict) -> tuple[str, str]:
             part = f"target test renamed; no failure observed in {verdict['iterations']} runs under its new ID"
         else:
             part = "target test retired; nothing was stress-run"
+        if change["kind"] == "renamed" and verdict.get("weak"):
+            part += f"; {WEAK_CLAUSE}"
         parts = [part] + (["touches " + ", ".join(verdict["protected"])] if verdict.get("protected") else [])
         return "failure", "not eligible for ready, a human must judge: " + "; ".join(parts)
     if v == "pass":

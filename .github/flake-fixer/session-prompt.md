@@ -88,6 +88,9 @@ section there.
   - `RENAMED: <old test ID> -> <new test ID>`
   - `RETIRED: <old test ID> — <reason>`
 
+  If an earlier try's declaration is already in the notes, add yours after
+  it: the last one counts.
+
   The verifier then stress-runs the new ID (a retired test runs nothing),
   and the PR stays a draft labelled `flakefix-needs-human`, because a human
   must judge whether coverage is preserved. A declaration counts only when

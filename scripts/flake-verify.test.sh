@@ -639,11 +639,15 @@ test_a_rename_that_only_drops_a_suite_extension_is_not_honored() {
     "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> TBDDaemonTests.ClockTestSupportTests/somethingNew()")")"
 }
 
-test_conflicting_or_foreign_declarations_are_not_honored() {
-  local d
+test_the_last_declaration_counts_and_foreign_ones_are_not_honored() {
+  local d mutant
   d="$(change_repo "$CLOCK_SRC" "${CLOCK_SRC/advanceWhenSuspendedMovesTheClockForward/advanceWhenSuspendedFiresTheEventDrivenClock}")"
-  assert_eq "two different declarations for the target" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> $NEWCLOCK
-RETIRED: $CLOCK — gone")")"
+  # Try 1's declaration is still in the notes when try 2 writes its own.
+  assert_eq "a second try's declaration replaces the first's" "renamed $NEWCLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> TBDDaemonTests.ClockTestSupportTests/firstTry()
+RENAMED: $CLOCK -> $NEWCLOCK")")"
+  mutant="$(mutant_of 's/^            last = \(\("renamed", m.group\("new"\), None\), line.strip\(\)\)$/            last = last or (("renamed", m.group("new"), None), line.strip())/' "$VPY")"
+  assert_eq "mutation: the first one wins and the honest rename fails" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> TBDDaemonTests.ClockTestSupportTests/firstTry()
+RENAMED: $CLOCK -> $NEWCLOCK" "$mutant")")"
   assert_eq "a declaration for another test" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: TBDDaemonTests.OtherTests/x() -> $NEWCLOCK")")"
   assert_eq "a new ID not in the xunit form" "none $CLOCK" "$(kind_of "$(change "$d" "RENAMED: $CLOCK -> advanceWhenSuspendedFiresTheEventDrivenClock")")"
 }
@@ -657,6 +661,9 @@ test_a_symlinked_notes_file_declares_nothing() {
   assert_eq "the session wrote the path; a link reads as no notes" "none $CLOCK" "$(kind_of "$out")"
   out="$(cd "$d/r" && bash "$VERIFY" target-change --test "$CLOCK" --base "$(cat "$d/base")" --notes "$d/missing.md")"
   assert_eq "and so does no notes file" "none $CLOCK" "$(kind_of "$out")"
+  mkfifo "$d/fifo.md"
+  out="$(cd "$d/r" && bash "$VERIFY" target-change --test "$CLOCK" --base "$(cat "$d/base")" --notes "$d/fifo.md")"
+  assert_eq "and a FIFO, refused without blocking" "none $CLOCK" "$(kind_of "$out")"
 }
 
 NEWHOLDER='TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()'

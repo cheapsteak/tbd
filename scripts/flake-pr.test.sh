@@ -380,6 +380,24 @@ test_a_retired_target_opens_a_draft_claiming_no_stress_verdict() {
   assert_eq "recorded with no stress verdict" "pr-opened null retired null" "$(recorded "$d" | jq -r '"\(.outcome) \(.verdict) \(.target_change) \(.renamed_to)"')"
 }
 
+test_the_target_change_fields_are_written_only_when_set() {
+  local d out mutant; d="$(world)"; routes "$d"; publish "$d" > /dev/null
+  assert_eq "a plain entry carries neither key, so an older reader still parses it" "false false" \
+    "$(recorded "$d" | jq -r '"\(has("target_change")) \(has("renamed_to"))"')"
+  # And a reader drops a key it does not know rather than refusing the comment.
+  out="$(python3 - "$HERE" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([a], "cheapsteak/tbd").replace('"outcome": "no-diff"', '"outcome": "no-diff", "from_a_later_writer": 1')
+print(len(fl.parse_attempts(body, fl.BOT_LOGIN, "Bot") or []))
+PY
+)"
+  assert_eq "an unknown key is dropped" "1" "$out"
+  d="$(world "$(changed_verdict renamed ineligible | jq -c '.weak = true')")"; routes "$d"; publish "$d" > /dev/null
+  assert_contains "a weak rename says so in its status" "$(logged "$d")" "under its new ID; weak evidence"
+}
+
 test_a_rename_whose_stress_failed_is_still_labelled_and_a_plain_fail_is_not() {
   local d; d="$(world "$(changed_verdict renamed fail)")"; routes "$d"
   publish "$d" > /dev/null
@@ -980,13 +998,18 @@ session_transcripts() {
   done
   block="$(step "$1" fix "Upload the session transcripts")"
   grep -qF 'name: flakefix-transcripts' <<< "$block" && grep -qF 'retention-days: 14' <<< "$block" &&
-    grep -qF 'path: ${{ runner.temp }}/flakefix-transcripts/' <<< "$block" && grep -qF 'if: always()' <<< "$block"
+    grep -qF 'path: ${{ runner.temp }}/flakefix-transcripts/' <<< "$block" &&
+    grep -qF "always() && steps.pick.outputs.attempted == 'true' && steps.keep1.outcome == 'success' &&" <<< "$block" &&
+    grep -qF "(steps.s2.outcome == 'skipped' || steps.keep2.outcome == 'success')" <<< "$block" &&
+    grep -qF 'include-hidden-files: false' <<< "$block"
 }
 test_each_sessions_transcript_is_logged_and_kept() {
   check "both sessions show their full output" session_transcripts 'show_full_output: true' 'show_full_output: false'
   check "each transcript is kept only from the checked copy" session_transcripts \
     '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' '[ "$VS" = "" ]'
   check "and uploaded for 14 days" session_transcripts 'retention-days: 14' 'retention-days: 90'
+  check "and uploaded only after the last session's directory was cleaned" session_transcripts \
+    "(steps.s2.outcome == 'skipped' || steps.keep2.outcome == 'success')" "(steps.s2.outcome == 'skipped' || true)"
   check "only once the session's processes are ended" session_transcripts \
     "steps.s1.outcome == 'failure') && steps.c1.outcome == 'success'" "steps.s1.outcome == 'failure')"
 }
@@ -998,16 +1021,20 @@ target_change_wired() {
     block="$(step "$1" fix "Stress try $i")"
     awk '/flake-verify.sh" target-change --test "\$TEST_ID" --base "\$base" --notes "\$FLAKEFIX_NOTES"/{c=NR}
          /flake-verify.sh" quarantined --test "\$stressed"/{q=NR}
-         /flake-verify.sh" stress .*--test "\$stressed"/{s=NR}
+         /flake-verify.sh" stress .*--test "\$run_as"/{s=NR}
          END{exit !(c && q && s && c < q && q < s)}' <<< "$block" || return 1
     grep -qF 'stressed="$(jq -r '"'"'.stressed // empty'"'"' "$T/verify/target-change.json")"' <<< "$block" || return 1
+    grep -qF 'scope="$(cat "$T/baseline/scope")"; run_as="$stressed"' <<< "$block" || return 1
+    grep -qF '[ "$scope" = pass ] && run_as="$TEST_ID"' <<< "$block" || return 1
     step "$1" fix "Judge try $i" | grep -qF -- '--target-change "$T/verify/target-change.json"' || return 1
   done
 }
 test_a_renamed_target_is_stressed_under_the_id_target_change_names() {
   check "the stress steps stress the ID target-change names" target_change_wired \
-    'flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$stressed"' \
-    'flake-verify.sh" stress --scope "$(cat "$T/baseline/scope")" --test "$TEST_ID"'
+    'flake-verify.sh" stress --scope "$scope" --test "$run_as"' \
+    'flake-verify.sh" stress --scope "$scope" --test "$TEST_ID"'
+  check "except at pass scope, where the old ID chooses the pass N was sized for" target_change_wired \
+    '[ "$scope" = pass ] && run_as="$TEST_ID"' '[ "$scope" = pass ] && run_as="$stressed"'
   check "and the judges read it" target_change_wired \
     '            --target-change "$T/verify/target-change.json" || rc=$?' '            || rc=$?' all
 }

@@ -708,6 +708,8 @@ def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list
 
 ATTEMPT_OUTCOMES = ("aborted", "no-diff", "push-refused", "pr-opened")
 ATTEMPT_NOTES_CHARS = 4000
+# Attempt fields added after the schema shipped, written only when set.
+OPTIONAL_ATTEMPT_FIELDS = ("target_change", "renamed_to")
 
 
 @dataclass(frozen=True)
@@ -752,7 +754,10 @@ def render_attempts(attempts: list[Attempt], repo: str) -> str:
             f"- [{a.started_at}]({run_url(repo, a.run_id, 1)}) on `{a.main_sha[:12]}`: "
             f"{a.outcome}{extra} (episode {a.episode + 1})"
         )
-    payload = {"schema": SCHEMA, "attempts": [asdict(a) for a in attempts]}
+    # The target-change fields are written only when set, so an entry without
+    # one still parses for a reader that predates them.
+    payload = {"schema": SCHEMA, "attempts": [
+        {k: v for k, v in asdict(a).items() if not (k in OPTIONAL_ATTEMPT_FIELDS and v is None)} for a in attempts]}
     return "\n".join(lines) + "\n\n" + _json_block(ATTEMPTS_BEGIN, ATTEMPTS_END, payload)
 
 
@@ -763,9 +768,12 @@ def parse_attempts(body: str, login: str | None, user_type: str | None) -> list[
     payload = _parse_json_block(body, ATTEMPTS_BEGIN, ATTEMPTS_END)
     if not payload or payload.get("schema") != SCHEMA:
         return None
+    known = {f.name for f in fields(Attempt)}
     try:
-        return [Attempt(**a) for a in payload.get("attempts", [])]
-    except TypeError:
+        # Unknown keys are a later writer's additions: dropped, not fatal, so a
+        # reader older than its writer still reads every entry.
+        return [Attempt(**{k: v for k, v in a.items() if k in known}) for a in payload.get("attempts", [])]
+    except (TypeError, AttributeError):
         return None
 
 
