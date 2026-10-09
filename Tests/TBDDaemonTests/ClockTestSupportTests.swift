@@ -28,7 +28,25 @@ struct ClockTestSupportTests {
         }
     }
 
-    @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async throws {
+    // The two TestClock tests below are this handshake's own self-tests, so
+    // they stay on `TestClock` (moving them to `EventDrivenTestClock` would
+    // test that clock, which `EventDrivenTestClockSelfTests` already covers).
+    // What they change is the arming guard. `advanceWhenSuspended`'s
+    // `checkSuspension()` probe is a background-QoS `megaYield`: twenty
+    // serially-awaited tasks, i.e. many scheduling hops, not one. Both tests
+    // went red on the saturated fast pass with the same signature, "no task was
+    // suspended on the clock within 45.0 seconds", and no logic assertion
+    // failing. That pass's own green-run latency is p50 65.6 s per test. A
+    // multi-hop bounded wait there takes its budget from `TestDeadlines`
+    // (Tests/CLAUDE.md, "No bounded wait in a fast-pass target carries a
+    // literal deadline"; `pollUntilTrue`'s "size it with
+    // `TestDeadlines.saturatedPass` unless the wait is one scheduling hop").
+    // The first test pays at most two 90 s guards (arming, then the fire) and
+    // the second one, inside `.clockDriven`'s 240 s limit. `advance` itself
+    // megaYields without a bound, so a pass starved past that still ends at the
+    // suite limit; nothing on `TestClock` can bound it.
+
+    @Test func advanceWhenSuspendedUnblocksASleepingSubsystem() async {
         let clock = TestClock()
         let subject = DelayedFlag(clock: clock)
 
@@ -36,31 +54,49 @@ struct ClockTestSupportTests {
         let firedBeforeAdvance = await subject.fired
         #expect(firedBeforeAdvance == false)
 
-        await clock.advanceWhenSuspended(by: .seconds(30))
-        try await task.value
+        await clock.advanceWhenSuspended(by: .seconds(30), timeout: TestDeadlines.saturatedPass)
 
-        let firedAfterAdvance = await subject.fired
-        #expect(firedAfterAdvance)
+        // Observe the effect under a bound rather than joining first. A missed
+        // arming has already recorded its diagnostic and still advanced an
+        // empty clock, so a sleep that registers late is scheduled past the new
+        // `now` and never fires: an unbounded join would sit there until the
+        // suite's time limit. Cancelling releases that sleeper, and a healthy
+        // run has already fired by the time the cancel lands.
+        let fired = await pollUntilTrue(timeout: TestDeadlines.saturatedPass,
+                                        pollInterval: .milliseconds(25)) { await subject.fired }
+        task.cancel()
+        _ = try? await task.value
+        if fired == .timedOut {
+            Issue.record(BoundedWaitTimeout(what: "the sleeping subsystem to fire after the advance",
+                                            observed: "fired == false",
+                                            deadline: TestDeadlines.saturatedPass))
+        }
     }
 
-    /// Advancing past an armed sleeper moves `now` by exactly the advance.
+    /// `advanceWhenSuspended` moves `now` by exactly the requested duration,
+    /// not merely to the armed sleeper's deadline.
     ///
-    /// Runs on `EventDrivenTestClock` rather than `TestClock`: the polled
-    /// `advanceWhenSuspended` handshake (a megaYield probe every 25 ms) starved
-    /// past its 45 s guard on the saturated fast pass, while this test asserts
-    /// only the virtual-time contract. The arming wait parks on a continuation
-    /// signalled by the sleep itself, with a budget sized to the pass's latency.
-    /// `advanceWhenSuspended` itself stays covered by the test above. The name
-    /// is kept so the flake ledger's identity for this test is unchanged.
-    @Test func advanceWhenSuspendedMovesTheClockForward() async throws {
-        let clock = EventDrivenTestClock()
+    /// The advance (7 s) deliberately overshoots the sleep (5 s): `TestClock`
+    /// steps `now` to each due sleeper's deadline before settling on the
+    /// target, so an advance equal to the sleep could not tell "moved by the
+    /// duration" from "moved to the next deadline".
+    ///
+    /// The sleeper is cancelled rather than joined. That it is *released* is
+    /// the test above's claim. Here, joining would hang to the suite's time
+    /// limit whenever the sleeper was never released: when the helper stops
+    /// advancing, or when a missed arming advances an empty clock before a
+    /// late sleep registers. Cancellation ends the sleep on every path.
+    @Test func advanceWhenSuspendedMovesTheClockForward() async {
+        let clock = TestClock()
         let before = clock.now
 
         let task = Task { try await clock.sleep(for: .seconds(5)) }
-        try await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: TestDeadlines.saturatedPass)
-        try await task.value
+        await clock.advanceWhenSuspended(by: .seconds(7), timeout: TestDeadlines.saturatedPass)
+        let moved = before.duration(to: clock.now)
+        task.cancel()
+        _ = try? await task.value
 
-        #expect(before.duration(to: clock.now) == .seconds(5))
+        #expect(moved == .seconds(7))
     }
 
     @Test func testDateSourceReadsWritesAndAdvances() {

@@ -570,6 +570,24 @@ struct EventDrivenTestClockSelfTests {
         #expect(clock.sleeperCount == 0)
     }
 
+    @Test("requireAdvanceWhenArmed moves now by exactly the advance, past the armed deadline")
+    func requireAdvanceWhenArmedMovesNowByTheAdvance() async throws {
+        let clock = EventDrivenTestClock()
+        let recorder = FireRecorder<String>()
+        let sleeper = Task { [clock] in
+            try? await clock.sleep(for: .seconds(5))
+            recorder.record("woke")
+        }
+
+        // 7 s past a 5 s sleep: `advance` steps `now` to each due deadline
+        // first, so an advance equal to the sleep could not tell "by the
+        // duration" from "to the next deadline".
+        try await clock.requireAdvanceWhenArmed(by: .seconds(7), timeout: TestDeadlines.saturatedPass)
+        #expect(clock.now.offset == .seconds(7))
+        #expect(await recorder.next() == "woke")
+        _ = await sleeper.value
+    }
+
     @Test("advancing short of a deadline moves now without firing")
     func advanceShortOfDeadlineDoesNotFire() async {
         let clock = EventDrivenTestClock()
