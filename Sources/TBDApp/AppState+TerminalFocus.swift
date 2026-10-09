@@ -206,4 +206,58 @@ extension AppState {
             }
         }
     }
+
+    /// Install the app's answer to a daemon screen request, once, for the app's
+    /// life.
+    ///
+    /// While a panel is attached to a holder-backed session its terminal is the
+    /// live store and the daemon's retained emulator is frozen at the attach,
+    /// so a machine read or the input path's mode oracle has to ask the app
+    /// rather than guess. This is where that frame becomes a projection, and
+    /// where the answer the daemon is waiting on is sent.
+    ///
+    /// **The main-actor hop is required, not incidental.** The handler runs on
+    /// the sidecar's receive thread, and everything it needs — the screen
+    /// router, the panel's terminal view — is main-actor-isolated, so the work
+    /// is moved rather than reached for. It is also where the single
+    /// `withTerminal` hold happens, which is what makes the answer one
+    /// observation.
+    ///
+    /// **A reply is sent on every path.** No panel, a dead `AppState`, a panel
+    /// whose terminal is gone: each answers with a named `unavailable` reason,
+    /// which is what turns the daemon's bound into an immediate fallback.
+    /// Silence is the one answer that costs the session the whole bound for no
+    /// reason.
+    ///
+    /// Installed in `init` and never replaced, so it survives every sidecar
+    /// reconnect — `FDSidecarClient` reads the handler per frame rather than
+    /// capturing it per connection.
+    func installScreenRequestHandler() {
+        let sidecar = daemonClient.fdSidecar
+        sidecar.setOnScreenRequest { [weak self] request in
+            Task { @MainActor in
+                let answer: TerminalScreenRouter.Answer
+                if let self {
+                    answer = await self.terminalScreens.answer(request)
+                } else {
+                    answer = .unavailable(.noPanel)
+                }
+                switch answer {
+                case .answered(let payload, let styledCapture):
+                    sidecar.sendScreenReply(
+                        SidecarScreenReply(
+                            requestID: request.requestID,
+                            terminalID: request.terminalID,
+                            screen: payload,
+                            styledCapture: styledCapture))
+                case .unavailable(let reason):
+                    sidecar.sendScreenReply(
+                        SidecarScreenReply(
+                            requestID: request.requestID,
+                            terminalID: request.terminalID,
+                            unavailable: reason))
+                }
+            }
+        }
+    }
 }
