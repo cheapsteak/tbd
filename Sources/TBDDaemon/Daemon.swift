@@ -994,6 +994,22 @@ public final class Daemon: Sendable {
                 })
         }
 
+        // The read direction of the same arrangement: ask the viewer that holds
+        // a session's pty what is on its screen. Built from the sidecar alone —
+        // unlike the courier it needs no fallback writer, because the fallback
+        // for a read is the daemon's own retained emulator and that belongs to
+        // the resolver above it. Gated on the registry for the same reason the
+        // courier is: with no registry there is no holder transport in this
+        // daemon, so there is nothing to pull from. Its reply and
+        // connection-lost sinks are installed at step 9a, before the sidecar
+        // listens, because a connection captures its sinks at adopt time.
+        let holderScreenPull: HolderScreenPull? = holderRegistry.map { _ in
+            HolderScreenPull(
+                sendFrame: { [fdVendingServer] frame in
+                    try await fdVendingServer.sendFrame(frame)
+                })
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1486,6 +1502,19 @@ public final class Daemon: Sendable {
         if let holderInjectionCourier {
             await fdVendingServer.setOnInjectionAck { ack in
                 holderInjectionCourier.acknowledge(ack)
+            }
+        }
+        // A viewer's answer to one screen request, and the end of the
+        // connection that carried it. Both sinks go to the same actor: the
+        // reply resolves a waiting pull, and a connection that ends fails every
+        // pull still outstanding on it rather than leaving them to the bound.
+        // Nil-safe by construction, like the ack sink above.
+        if let holderScreenPull {
+            await fdVendingServer.setOnScreenReply { reply, epoch in
+                holderScreenPull.record(reply, epoch: epoch)
+            }
+            await fdVendingServer.setOnConnectionLost { epoch in
+                holderScreenPull.connectionLost(epoch: epoch)
             }
         }
 

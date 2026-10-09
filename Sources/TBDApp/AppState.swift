@@ -889,6 +889,16 @@ final class AppState {
     /// live, and consulted by the sidecar's injection handler
     /// (`installInjectionHandler`).
     @ObservationIgnored let terminalInjections = TerminalInjectionRouter()
+    /// Where a daemon screen request for a holder-backed session goes: the
+    /// panel whose terminal is that session's live store. Registered by
+    /// `TerminalPanelView.Coordinator` for as long as its holder attach is
+    /// live, and consulted by the sidecar's screen-request handler
+    /// (`installScreenRequestHandler`).
+    ///
+    /// A sibling of `terminalInjections` rather than a second closure on it:
+    /// answering a screen needs no write descriptor, so a panel that runs
+    /// read-only can still serve reads. `TerminalScreenRouter`'s doc argues it.
+    @ObservationIgnored let terminalScreens = TerminalScreenRouter()
     /// The holder handbacks in flight, keyed by terminal ID. A panel that is
     /// replacing another panel for the same holder-backed terminal waits here
     /// for its predecessor's `pane.detach` before attaching, because the
@@ -2263,6 +2273,7 @@ final class AppState {
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
+        installScreenRequestHandler()
         // Give the notification manager a back-reference so banner clicks
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.

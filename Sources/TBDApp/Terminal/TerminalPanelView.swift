@@ -650,6 +650,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// This panel's claim on its session's daemon injections, held for as
         /// long as it owns the pty.
         private var injectionRegistration: TerminalInjectionRouter.Registration?
+        /// This panel's claim on its session's screen requests, held over
+        /// exactly the span its terminal is the live store.
+        private var screenRegistration: TerminalScreenRouter.Registration?
+        /// When this panel took the pty, on the same monotonic clock the view
+        /// holder stamps each feed with.
+        ///
+        /// The floor for a screen answer's age: a session that went quiet
+        /// before its viewer arrived is older than the attach makes it look,
+        /// but once this store exists it can report no age *younger* than
+        /// itself. The daemon emulator's `adoptedAt` plays exactly this part on
+        /// the other side.
+        private var holderAttachedAt: ContinuousClock.Instant?
         /// This panel's claim on its terminal's latency-probe requests, held
         /// only while the default-off terminal latency diagnostic is on.
         private var latencyRegistration: TerminalLatencyDiagnostic.Registration?
@@ -1408,6 +1420,32 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
                 return await self.outgoingQueue.enqueueInjection(bytes)
             }
+            // Claimed in the same place and over the same span as the injection
+            // claim above, and for the mirror-image reason: from the ack until
+            // the detach this panel's terminal is the session's live store, so
+            // it is the only thing that can answer what is on its screen. The
+            // frame's own target is checked against `panelID` here too — a
+            // request carries its own address, and verifying it is what keeps a
+            // panel from projecting a terminal it does not own.
+            holderAttachedAt = ContinuousClock.now
+            screenRegistration = appState.terminalScreens.register(
+                terminalID: panelID
+            ) { [weak self] target, request in
+                guard let self else { return .unavailable(.noPanel) }
+                guard target == self.panelID else {
+                    // `.fault` for the injection path's reason: a mismatch is
+                    // an INVARIANT violation, not an environment fact, and at
+                    // `.error` the two would be one undifferentiated stream.
+                    logger.fault("""
+                        terminal \(self.panelID, privacy: .public) was handed a screen request \
+                        addressed to \(request.terminalID.uuidString, privacy: .public); \
+                        refusing it — a panel's registration and the session it attached to \
+                        have diverged
+                        """)
+                    return .unavailable(.noPanel)
+                }
+                return self.answerScreenRequest(request)
+            }
             // One resize at the view's real size, now that this panel owns the
             // pty — the holder twin of the control-mode path's initial resize,
             // and for the same reason. Nothing has told this session that its
@@ -1472,6 +1510,36 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             ledger.register(terminalID: panelID, task: release)
         }
 
+        /// Project this panel's live terminal for one daemon screen request.
+        ///
+        /// Everything that makes the answer *one observation* is inside
+        /// `ViewerScreenProducer`, which takes a single `withTerminal` hold;
+        /// what belongs here is what only the panel knows — which view, when it
+        /// attached, and when its store last took a byte.
+        ///
+        /// The view holder's reading is taken as a pair, never as two reads: a
+        /// stamp read beside a cleared view would report an age for a store
+        /// that no longer exists. `hasView` false means the holder was cleared
+        /// while this attach was still registered — a torn-down panel whose
+        /// unregister has not run yet — and the honest answer is `.noTerminal`,
+        /// not a projection of a terminal nothing is feeding.
+        @MainActor
+        private func answerScreenRequest(
+            _ request: SidecarScreenRequest
+        ) -> TerminalScreenRouter.Answer {
+            let reading = viewHolder.feedReading
+            guard reading.hasView, let terminalView, let attachedAt = holderAttachedAt else {
+                return .unavailable(.noTerminal)
+            }
+            let answer = ViewerScreenProducer.answer(
+                for: request,
+                terminalView: terminalView,
+                lastByteAt: reading.lastByteAt,
+                attachedAt: attachedAt,
+                now: ContinuousClock.now)
+            return .answered(answer.payload, styledCapture: answer.styledCapture)
+        }
+
         /// Stop the holder reader and release every claim this panel held on
         /// the session. Returns the reader, so a caller that must observe the
         /// descriptor's close can await it; the reader thread does the `close`
@@ -1511,6 +1579,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if let registration = injectionRegistration {
                 injectionRegistration = nil
                 appState?.terminalInjections.unregister(registration)
+            }
+            // Withdrawn here, with the injection claim, because this is where
+            // the pty goes back: past this point the daemon resumes its drain
+            // and its emulator is the live store again, so a screen answered
+            // from here would describe a terminal nobody is feeding.
+            if let registration = screenRegistration {
+                screenRegistration = nil
+                holderAttachedAt = nil
+                appState?.terminalScreens.unregister(registration)
             }
             // Cancelled before the queue drops its outbox and before the
             // descriptor closes: a readiness callback that ran after the close
