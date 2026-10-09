@@ -1043,6 +1043,10 @@ public final class Daemon: Sendable {
         )
         lifecycle.controlMode = controlModeBridge
         lifecycle.holderRegistry = holderRegistry
+        // The history-keeping teardowns go through the resolver so a viewed
+        // tab's Closed Terminals entry carries the screen the person was
+        // looking at rather than the one frozen at their attach.
+        lifecycle.holderScreenResolver = holderScreenResolver
         lifecycle.modelProxySupervisor = modelProxySupervisor
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed

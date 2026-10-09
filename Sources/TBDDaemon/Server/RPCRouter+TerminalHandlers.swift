@@ -864,7 +864,8 @@ extension RPCRouter {
             // reclaims.
             if worktree != nil {
                 await WorktreeLifecycle.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
