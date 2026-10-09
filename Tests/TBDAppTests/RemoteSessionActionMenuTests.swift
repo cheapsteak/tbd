@@ -36,7 +36,6 @@ struct RemoteSessionActionMenuTests {
         #expect(!allKinds.contains(.rename))
         #expect(!allKinds.contains(.stop))
         #expect(!allKinds.contains(.attach))
-        #expect(!allKinds.contains(.viewLog))
         #expect(!allKinds.contains(.sendText))
     }
 
@@ -61,18 +60,43 @@ struct RemoteSessionActionMenuTests {
         #expect(!kinds(items).contains(.attach))
     }
 
-    @Test func logCapabilityAddsViewLogItem() {
+    /// The log view is a fallback the detail pane shows on its own when
+    /// attach is unavailable, never a menu destination: raw log text is not a
+    /// place anyone navigates to on purpose.
+    @Test func logCapabilityAddsNoMenuItem() {
         let items = RemoteSessionActionMenu.items(capabilities: ["log"], gone: false, isPinned: false)
-        #expect(kinds(items) == [.rename, .viewLog, .copySessionID, .pin, nil, .stop])
-    }
-
-    @Test func logCapabilityAbsentOmitsViewLogItem() {
-        let items = RemoteSessionActionMenu.items(capabilities: [], gone: false, isPinned: false)
-        #expect(!kinds(items).contains(.viewLog))
+        #expect(kinds(items) == [.rename, .copySessionID, .pin, nil, .stop])
     }
 
     @Test func sendCapabilityAddsSendTextItem() {
         let items = RemoteSessionActionMenu.items(capabilities: ["send"], gone: false, isPinned: false)
+        #expect(kinds(items) == [.rename, .sendText, .copySessionID, .pin, nil, .stop])
+    }
+
+    /// Send Text… lives only where the pane has a send footer. With a live
+    /// attached terminal, typing goes straight into it, so the item would
+    /// only duplicate it.
+    @Test func sendTextOmittedWhenAttachIsDeclared() {
+        let items = RemoteSessionActionMenu.items(capabilities: ["attach", "send"], gone: false, isPinned: false)
+        #expect(!kinds(items).contains(.sendText))
+        #expect(kinds(items) == [.rename, .attach, .copySessionID, .pin, nil, .stop])
+    }
+
+    /// When selecting the session would not attach — detached, exited, or
+    /// its provider needs authentication — the pane shows a send footer, so
+    /// the item comes back even though `attach` is declared.
+    @Test func sendTextOfferedWhenLiveAttachIsUnavailable() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "send"], gone: false, isPinned: false, liveAttachUnavailable: true)
+        #expect(kinds(items) == [.rename, .attach, .sendText, .copySessionID, .pin, nil, .stop])
+        // Still withheld on a stale snapshot.
+        #expect(!kinds(RemoteSessionActionMenu.items(
+            capabilities: ["attach", "send"], gone: false, snapshotFresh: false,
+            isPinned: false, liveAttachUnavailable: true)).contains(.sendText))
+    }
+
+    @Test func sendTextOfferedAlongsideTheLogFallback() {
+        let items = RemoteSessionActionMenu.items(capabilities: ["log", "send"], gone: false, isPinned: false)
         #expect(kinds(items) == [.rename, .sendText, .copySessionID, .pin, nil, .stop])
     }
 
@@ -123,14 +147,14 @@ struct RemoteSessionActionMenuTests {
 
     @Test func allCapabilitiesProduceTheFullOrderedMenu() {
         let items = RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false)
-        #expect(kinds(items) == [.rename, .attach, .viewLog, .sendText, .copySessionID, .pin, nil, .stop])
+        #expect(kinds(items) == [.rename, .attach, .copySessionID, .pin, nil, .stop])
     }
 
     @Test func staleSnapshotKeepsInspectionAndDropsStateChangingActions() {
         let items = RemoteSessionActionMenu.items(
             capabilities: ["attach", "log", "send"], gone: false,
             snapshotFresh: false, isPinned: false)
-        #expect(kinds(items) == [.attach, .viewLog, .copySessionID, .pin])
+        #expect(kinds(items) == [.attach, .copySessionID, .pin])
         #expect(!kinds(items).contains(.rename))
         #expect(!kinds(items).contains(.sendText))
         #expect(!kinds(items).contains(.stop))
@@ -144,7 +168,7 @@ struct RemoteSessionActionMenuTests {
     /// visibility in the view" regression.
     @Test func itemCountMatchesExactlyTheDeclaredCapabilities() {
         #expect(RemoteSessionActionMenu.items(capabilities: [], gone: false, isPinned: false).count == 5) // rename, copy, pin, divider, stop
-        #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 8)
+        #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 6)
     }
 
     // MARK: - Dismiss: offered for gone OR exited, never for a live running row
@@ -189,7 +213,7 @@ struct RemoteSessionActionMenuTests {
         let items = RemoteSessionActionMenu.items(
             capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: true)
         #expect(kinds(items) == [
-            .rename, .attach, .viewLog, .sendText, .copySessionID, .pin, .dismiss, nil, .stop,
+            .rename, .attach, .copySessionID, .pin, .dismiss, nil, .stop,
         ])
         #expect(items.last == .action(RemoteSessionActionMenu.Action(
             kind: .stop, title: RemoteSessionActionMenu.stopLabel, role: .destructive)))
@@ -282,8 +306,8 @@ struct RemoteSessionActionMenuTests {
     }
 
     /// **Present but disabled**, not omitted — the one deliberate departure
-    /// from this menu's omit-when-absent convention. Attach, View Log and Send
-    /// Text vanish when undeclared; Delete stays and says why, because a user
+    /// from this menu's omit-when-absent convention. Attach and Send Text
+    /// vanish when undeclared; Delete stays and says why, because a user
     /// looking for the way to reclaim a session needs to be told the way exists
     /// and this provider has not built it yet.
     @Test func deletePresentButDisabledWithoutTheCapability() {

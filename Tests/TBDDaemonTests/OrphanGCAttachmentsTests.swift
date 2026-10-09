@@ -105,7 +105,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await insertWorktree(db, id: worktreeID)
         let path = stage(worktreeID, ageDays: 1)
@@ -124,7 +123,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await db.writerForTests.write { conn in
             try WorktreeRecord(from: Worktree(
@@ -147,7 +145,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let stray = TBDConstants.attachmentsDir.appendingPathComponent("notes-i-kept")
         try fm.createDirectory(at: stray, withIntermediateDirectories: true)
         fm.createFile(atPath: stray.appendingPathComponent("x.png").path, contents: Data())
@@ -163,7 +160,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let path = stage(UUID(), ageDays: 3)
 
         let result = await makeGC(db: db, home: home).sweep()
@@ -183,7 +179,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let path = stage(UUID())
 
         try await db.writerForTests.write { conn in
@@ -203,7 +198,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let orphan = UUID()
         let path = stage(orphan)
         let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
@@ -232,7 +226,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let orphan = UUID()
         let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -250,7 +243,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let orphan = UUID()
         let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -269,7 +261,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let orphan = UUID()
         let path = stage(orphan)
 
@@ -291,7 +282,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let strayID = UUID()
         let strayFile = TBDConstants.attachmentsDir.appendingPathComponent(strayID.uuidString)
         try fm.createDirectory(
@@ -317,7 +307,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await insertWorktree(db, id: worktreeID)
         let old = stage(worktreeID, ageDays: 30)
@@ -342,7 +331,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await insertWorktree(db, id: worktreeID)
         let old = stage(worktreeID, ageDays: 30)
@@ -362,7 +350,6 @@ struct OrphanGCAttachmentsTests {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await insertWorktree(db, id: worktreeID)
         let nested = TBDConstants.attachmentsDir(worktreeID: worktreeID)
@@ -378,15 +365,15 @@ struct OrphanGCAttachmentsTests {
         #expect(result.reaped == 0)
     }
 
-    // MARK: - The flag
+    // MARK: - The GC switch
 
-    /// With the flag off the leg does nothing in a real sweep — the whole
-    /// feature is inert, and a sweep that reclaimed for it would be acting on a
-    /// feature nobody turned on.
-    @Test func theFlagOffLeavesEverythingAlone() async throws {
+    /// With `gcEnabled` off the leg does nothing in a real sweep, like every
+    /// other leg under the master switch.
+    @Test func aSweepWithGCDisabledLeavesEverythingAlone() async throws {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
         let path = stage(UUID())
 
         let result = await makeGC(db: db, home: home).sweep()
@@ -395,13 +382,14 @@ struct OrphanGCAttachmentsTests {
         #expect(!result.planned.contains { $0.contains("attachments") })
     }
 
-    /// `dryRun` bypasses the flag, exactly as it bypasses `gcEnabled`: someone
-    /// deciding whether to turn a default-off flag on needs to see what it would
+    /// `dryRun` bypasses `gcEnabled` here exactly as it does everywhere else:
+    /// someone deciding whether to turn GC on needs to see what it would
     /// reclaim first. It plans and touches nothing.
-    @Test func aDryRunPlansWithTheFlagOffAndUnlinksNothing() async throws {
+    @Test func aDryRunPlansWithGCDisabledAndUnlinksNothing() async throws {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(false)
         let orphan = UUID()
         let path = stage(orphan)
 
@@ -425,7 +413,6 @@ struct OrphanGCAttachmentsTests {
         try fm.createDirectory(at: attachmentsBase, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: attachmentsBase) }
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setTranscriptComposerEnabled(true)
         let orphan = UUID()
         let orphanDir = attachmentsBase.appendingPathComponent(orphan.uuidString)
         try fm.createDirectory(at: orphanDir, withIntermediateDirectories: true)

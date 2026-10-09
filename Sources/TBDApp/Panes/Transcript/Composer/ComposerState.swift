@@ -14,15 +14,15 @@ import TBDShared
 /// sitting on a dialog, and telling somebody to answer it in the terminal would
 /// send them to a pane with a shell in it.
 enum ComposerState: Equatable {
-    /// No composer at all: the flag is off, the worktree is remote, or this is
-    /// not a Claude session. Scope is Claude sessions on local worktrees; Codex,
+    /// No composer at all: the worktree is remote, or this is not a Claude
+    /// session. Scope is Claude sessions on local worktrees; Codex,
     /// shell and remote are out, and the archived transcript view never gets one.
     case hidden
     /// Claude is working, idle, or in an informational state. A message sent
     /// mid-turn queues inside Claude Code, as it does when typed.
     case running
     /// The process is gone. Enabled, with a note that sending will resume the
-    /// session and a send button that says so. `exited` distinguishes only the
+    /// session and a send button whose tooltip says so. `exited` distinguishes only the
     /// wording — a session that left on its own from one TBD parked.
     case notRunning(exited: Bool)
     /// A dialog is on screen, or an awaiting-input reason this build does not
@@ -31,18 +31,24 @@ enum ComposerState: Equatable {
     /// because a pasted body plus Enter would commit whichever option is
     /// highlighted.
     case blocked(message: String)
+    /// Shown but disabled, with `message` as a note and nothing to act on.
+    /// Only a remote target reaches it — a session the provider reports as
+    /// exited, which has no wake path (`RemoteComposerState.exited`). The local
+    /// resolver never produces it: a local session that exited is
+    /// `.notRunning`, which sending resumes.
+    case unavailable(message: String)
 
     var isEnabled: Bool {
         switch self {
         case .running, .notRunning: return true
-        case .blocked, .hidden: return false
+        case .blocked, .hidden, .unavailable: return false
         }
     }
 
     static func resolve(
-        terminal: Terminal?, isRemoteWorktree: Bool, composerEnabled: Bool
+        terminal: Terminal?, isRemoteWorktree: Bool
     ) -> ComposerState {
-        guard composerEnabled, !isRemoteWorktree,
+        guard !isRemoteWorktree,
               let terminal, terminal.kind == .claude
         else { return .hidden }
 

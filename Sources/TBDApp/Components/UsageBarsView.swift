@@ -2,8 +2,7 @@ import SwiftUI
 import TBDShared
 
 /// A compact usage meter for a Claude OAuth profile: the 5-hour session
-/// window, the weekly all-models window, and per-model-family weekly windows,
-/// each drawn as a thin bar with a pace-aware colored fill (green/orange/
+/// window and the weekly all-models window, each drawn as a thin bar with a pace-aware colored fill (green/orange/
 /// red — projection of end-of-window usage from the current burn rate,
 /// floored by the API severity so a warning/critical bucket never reads
 /// healthy), a neutral "time marker" tick showing how far through the window
@@ -49,13 +48,6 @@ struct UsageBarsView: View {
                             now: now,
                             timeZone: timeZone)
             }
-            ForEach(Array(ProfileUsagePresentation.scopedBuckets(snapshot).enumerated()), id: \.offset) { _, scoped in
-                UsageBarRow(presentation: ProfileUsagePresentation.bucketPresentation(scoped, style: resetStyle, now: now, timeZone: timeZone),
-                            label: ProfileUsagePresentation.familyAbbreviation(scoped.modelDisplayName) + ":",
-                            windowLabel: ProfileUsagePresentation.familyName(scoped.modelDisplayName) + " weekly",
-                            now: now,
-                            timeZone: timeZone)
-            }
         }
     }
 }
@@ -67,9 +59,9 @@ struct UsageBarsView: View {
 /// column. The four fixed columns keep bars vertically aligned across rows.
 private struct UsageBarRow: View {
     let presentation: ProfileUsagePresentation.BucketPresentation
-    /// Leading label ("5h:" / "wk:" / "F:").
+    /// Leading label ("5h:" / "wk:").
     let label: String
-    /// Spelled-out window name for the `.help` tooltip ("5-hour window" / "Fable weekly").
+    /// Spelled-out window name for the `.help` tooltip ("5-hour window" / "Weekly window").
     let windowLabel: String
     let now: Date
     let timeZone: TimeZone
@@ -189,12 +181,6 @@ private struct UsageBarRow: View {
         ClaudeUsageLimitBucket(kind: kind, percent: percent, severity: severity,
                                resetsAt: resetsIn.map { now.addingTimeInterval($0) })
     }
-    func scopedBucket(_ name: String, _ percent: Double, severity: String? = nil,
-                      resetsIn: TimeInterval? = nil) -> ClaudeUsageLimitBucket {
-        ClaudeUsageLimitBucket(kind: "weekly_scoped", percent: percent, severity: severity,
-                               resetsAt: resetsIn.map { now.addingTimeInterval($0) },
-                               modelDisplayName: name)
-    }
     func snap(_ buckets: [ClaudeUsageLimitBucket]) -> ProfileUsageSnapshot {
         ProfileUsageSnapshot(buckets: buckets, fetchedAt: now,
                              lastAttemptAt: now, status: "ok", statusKind: .ok)
@@ -214,7 +200,6 @@ private struct UsageBarRow: View {
         UsageBarsView(snapshot: snap([
             bucket("session", 55, severity: "normal", resetsIn: 1.75 * 3600),
             bucket("weekly_all", 55, severity: "normal", resetsIn: 2.95 * 24 * 3600),
-            scopedBucket("Fable", 15, severity: "normal", resetsIn: 2.95 * 24 * 3600),
         ]), now: now)
 
         // Near limit.

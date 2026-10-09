@@ -40,10 +40,6 @@ struct CapacityContractTests {
                     kind: "weekly_all", group: "weekly", percent: 17,
                     severity: "normal", resetsAt: nil, isActive: false
                 ),
-                ClaudeUsageLimitBucket(
-                    kind: "weekly_scoped", group: "weekly", percent: 3,
-                    modelDisplayName: "Fable"
-                ),
             ],
             fetchedAt: Self.fetchedAt,
             lastAttemptAt: Self.fetchedAt,
@@ -126,6 +122,23 @@ struct CapacityContractTests {
         #expect(profiles[0]["loginIdentity"] as? String == "operator@example.com")
     }
 
+    @Test func profileListJSON_carriesTheBalancingObject() throws {
+        let on = try composedProfileListJSON(ModelProfileListResult(
+            profiles: [], profileBalancingEnabled: true))
+        let onBalancing = try #require(on["balancing"] as? [String: Any])
+        #expect(onBalancing["enabled"] as? Bool == true)
+        #expect(onBalancing.count == 1)
+
+        let off = try composedProfileListJSON(ModelProfileListResult(
+            profiles: [], profileBalancingEnabled: false))
+        #expect((off["balancing"] as? [String: Any])?["enabled"] as? Bool == false)
+
+        // An older daemon sends no flag; it cannot balance, so `false`.
+        let absent = try composedProfileListJSON(ModelProfileListResult(profiles: []))
+        #expect((absent["balancing"] as? [String: Any])?["enabled"] as? Bool == false)
+        #expect(absent["schemaVersion"] as? Int == 1)
+    }
+
     @Test func profileListJSON_carriesUnknownPayloadFieldsThrough() throws {
         // Fields the capacity contract does not interpret still ship inside the
         // same versioned object — the envelope mirrors nothing by hand, so a
@@ -178,7 +191,7 @@ struct CapacityContractTests {
         #expect(snapshot["lastAttemptAt"] as? String == "2026-07-07T12:34:56Z")
 
         let buckets = try #require(snapshot["buckets"] as? [[String: Any]])
-        #expect(buckets.count == 3)
+        #expect(buckets.count == 2)
 
         let session = try #require(buckets.first { $0["kind"] as? String == "session" })
         #expect(session["group"] as? String == "session")
@@ -194,9 +207,9 @@ struct CapacityContractTests {
         // The API sent null for this window — the key is omitted, not null.
         #expect(weeklyAll["resetsAt"] == nil)
 
-        let scoped = try #require(buckets.first { $0["kind"] as? String == "weekly_scoped" })
-        #expect(scoped["modelDisplayName"] as? String == "Fable")
-        #expect(scoped["percent"] as? Double == 3)
+        // The daemon emits no model-scoped buckets, so the documented
+        // `modelDisplayName` key never appears (docs/capacity-facts.md).
+        #expect(buckets.allSatisfy { $0["modelDisplayName"] == nil })
     }
 
     // MARK: - Absence vs failure

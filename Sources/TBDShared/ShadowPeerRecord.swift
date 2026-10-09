@@ -70,7 +70,8 @@ public struct ShadowPeerRecord: Sendable, Equatable, Codable {
     /// The socket this record's helper owns and answers connects on.
     public let messagingSocketPath: String
     /// `<provider>:<worktree display name>` — the whole identity of a shadow
-    /// peer, since the pane join that disambiguates local peers is unavailable.
+    /// peer, since the terminal join that disambiguates local peers is
+    /// unavailable.
     public let name: String
     /// `"user"`: TBD names a shadow explicitly rather than letting anything
     /// derive one from a working directory.
@@ -224,7 +225,7 @@ public struct ShadowPeerRecord: Sendable, Equatable, Codable {
     }
 
     /// The same record under a new name. Names are the whole identity of a
-    /// shadow peer — the pane join that disambiguates local peers is
+    /// shadow peer — the terminal join that disambiguates local peers is
     /// unavailable — so a worktree renamed on the far side must reach the
     /// record rather than leaving it answering to a name nobody uses.
     public func withName(_ name: String) -> ShadowPeerRecord {

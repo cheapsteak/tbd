@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
-# scripts/sweep-preflight-refs.sh — reclaim inert `preflight/*` refs on origin.
+# scripts/sweep-preflight-refs.sh — reclaim inert `preflight/*` refs on origin,
+# or inert branches under any other namespace named with `--namespace`.
 #
-# THE NAMED RECONCILER FOR INERT REFS. The remote verification valve
+# THE NAMED RECONCILER FOR TWO NAMESPACES, ONE PASS PER NAMESPACE:
+#
+#   - **`preflight/*`** — driven by `.github/workflows/preflight-cleanup.yml`
+#     with the defaults (`--namespace preflight/ --min-age-seconds 3600`). The
+#     rest of this header is about that namespace, which is why it exists.
+#   - **`flakefix/*`** — to be driven by the `ledger` job in `flake-fixer.yml` as
+#     `--namespace flakefix/ --min-age-seconds 86400`, per §11 of
+#     docs/specs/2026-10-07-flake-autofix-design.md. The flake bot pushes
+#     `flakefix/issue-<N>` and opens a PR from it; the repository deletes the
+#     branch when that PR merges, and this pass reclaims the rest — a PR closed
+#     unmerged, or a `publish` job that died between the push and opening the
+#     PR. The same three guards apply unchanged, with a one-day age guard in
+#     place of the hour.
+#
+# One pass covers exactly one namespace, so a `flakefix/` pass cannot touch a
+# `preflight/` ref or the reverse.
+#
+# WHY `preflight/*` EXISTS. The remote verification valve
 # (docs/specs/2026-08-16-remote-verification-valve-design.md) pushes
 # `preflight/<branch>` when a lane needs a CI verdict on a branch that already
 # has an open PR: pushing the PR branch itself would fire
@@ -78,6 +96,11 @@
 #   scripts/sweep-preflight-refs.sh            # print the plan; delete nothing
 #   scripts/sweep-preflight-refs.sh --apply    # delete the refs planned above
 #   scripts/sweep-preflight-refs.sh --apply --branch tbd/foo   # that ref only
+#   scripts/sweep-preflight-refs.sh --namespace flakefix/ --min-age-seconds 86400
+#
+# `--namespace PREFIX` must match `NAMESPACE_PATTERN` and `--min-age-seconds N`
+# must be a positive integer; anything else exits 2 before `gh` is asked
+# anything. `--branch` names the part of a ref after the namespace.
 #
 # Exit status: 0 clean, 1 something was kept or failed that should not have
 # been (a `gh` query failed, an age could not be read, a delete failed), 2 the
@@ -86,6 +109,17 @@
 REMOTE="origin"
 NAMESPACE="preflight/"
 
+# WHAT `--namespace` MAY BE: exactly one of the namespaces this script is the
+# reconciler for, with its trailing slash. This is the guard that keeps the
+# namespace guard meaningful. `preflight_branch_of` matches
+# `refs/heads/$NAMESPACE?*`, so an empty namespace would make every branch on
+# the remote eligible, `main` among them; a namespace with no trailing slash
+# (`flakefix`) would match `flakefix-…` lookalikes; and any other directory of
+# branches — `tbd/`, `release/`, `dependabot/` — holds real work whose only
+# protection would be an open PR. So it is an allowlist rather than a shape: a
+# new bot-owned namespace is added here, deliberately, with its caller.
+NAMESPACE_PATTERN='^(preflight|flakefix)/$'
+
 # THE GRACE PERIOD — THE SECOND LINE, AND THE ONLY ONE THAT COVERS PUSH →
 # DISPATCH. `has_live_run` answers the in-use question directly once a run exists;
 # before one does, this is what spares a ref. Sized against a run rather than
@@ -93,22 +127,31 @@ NAMESPACE="preflight/"
 # its ceiling is ~2700s, so an hour clears a whole one with room to spare. Nothing
 # is lost by being generous — a ref that outlives its usefulness by an hour costs
 # one line in a namespace, and this sweep runs again.
+#
+# `--min-age-seconds` overrides it for a namespace whose push-to-use window is
+# different; the `flakefix/` pass asks for a day.
 MIN_AGE_SECONDS=3600
 
 log() { printf '%s\n' "$*" >&2; }
 
 usage() {
   log "usage: sweep-preflight-refs.sh [--apply | --dry-run] [--branch <name>]"
+  log "                                [--namespace <prefix/>] [--min-age-seconds <n>]"
+  log "  --namespace        branch prefix to sweep, matching $NAMESPACE_PATTERN (default preflight/)"
+  log "  --min-age-seconds  spare a ref whose commit is younger than this (default 3600)"
 }
 
-# preflight_branch_of REF -> the branch this preflight ref shadows, or nothing.
+# preflight_branch_of REF -> the part of REF after `refs/heads/$NAMESPACE`, or
+# nothing. For `preflight/` that is the branch the ref shadows.
 #
 # THE NAMESPACE GUARD, and deliberately the only one. A ref becomes eligible for
 # deletion here and nowhere else, so there is a single place to read when asking
 # "can this sweep reach `main`?" — it cannot, because a ref that does not start
-# with `refs/heads/preflight/` yields an empty branch and is skipped. Defence in
+# with `refs/heads/$NAMESPACE` yields an empty branch and is skipped. Defence in
 # depth would be worse here: a second redundant check makes each copy untestable
 # in isolation, since weakening either one leaves the other still refusing.
+# `NAMESPACE_PATTERN` is not a second copy of this check; it constrains the
+# PREFIX this check is built from, so that it stays a directory of branches.
 preflight_branch_of() {
   case "$1" in
     refs/heads/"$NAMESPACE"?*) printf '%s\n' "${1#refs/heads/"$NAMESPACE"}" ;;
@@ -260,6 +303,43 @@ main() {
         fi
         only_branch="$1"
         ;;
+      # Both values are checked here, as they are parsed, so only a value a
+      # caller supplied is ever judged; the defaults above are constants. That
+      # puts the refusal before `gh` is probed, so a bad value exits 2 the same
+      # way whether or not `gh` is installed. See `NAMESPACE_PATTERN` for why
+      # the namespace's shape is what keeps `main` out of reach.
+      --namespace)
+        shift
+        if [[ $# -eq 0 ]]; then
+          log "--namespace requires a prefix"
+          usage
+          return 2
+        fi
+        if [[ ! "$1" =~ $NAMESPACE_PATTERN ]]; then
+          log "--namespace must match $NAMESPACE_PATTERN, got [$1]"
+          usage
+          return 2
+        fi
+        NAMESPACE="$1"
+        ;;
+      # A positive integer only, of at most nine digits (about 31 years).
+      # Anything else would reach `[[ $age -lt … ]]`, where bash reads a
+      # non-number as a variable name, `0` spares nothing, and a number past
+      # 64 bits wraps — each an age guard that is silently off.
+      --min-age-seconds)
+        shift
+        if [[ $# -eq 0 ]]; then
+          log "--min-age-seconds requires a number"
+          usage
+          return 2
+        fi
+        if [[ ! "$1" =~ ^[1-9][0-9]{0,8}$ ]]; then
+          log "--min-age-seconds must be a positive integer, got [$1]"
+          usage
+          return 2
+        fi
+        MIN_AGE_SECONDS="$1"
+        ;;
       -h|--help) usage; return 0 ;;
       *) log "unknown argument: $1"; usage; return 2 ;;
     esac
@@ -306,7 +386,7 @@ main() {
     # Said only for a named branch, where "there is nothing here" is the answer
     # to a question somebody asked. An empty namespace is not news.
     if [[ -n "$only_branch" ]]; then
-      echo "no preflight ref for $only_branch; nothing to reclaim"
+      echo "no ${NAMESPACE%/} ref for $only_branch; nothing to reclaim"
     fi
   else
     fetch_namespace_objects "${refs[@]}"

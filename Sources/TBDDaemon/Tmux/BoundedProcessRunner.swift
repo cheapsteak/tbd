@@ -241,8 +241,15 @@ private final class CancellationRelay: @unchecked Sendable {
 /// `.timedOut` means the call exceeded its deadline — either the watchdog fired
 /// and killed the child, or the child's exit was only observed after the full
 /// deadline had already elapsed. Callers map it to their own timeout error type.
+///
+/// `.signaled` is a child that died of an uncaught signal before its deadline,
+/// so it has no exit status; `signal` is the signal number, the value
+/// `Process.terminationStatus` reports in that case. Callers that do not care
+/// about the difference treat it as a non-zero `.completed`, which is what it
+/// was reported as before the case existed.
 enum BoundedProcessOutcome {
     case completed(status: Int32, stdout: Data, stderr: Data)
+    case signaled(signal: Int32, stdout: Data, stderr: Data)
     case timedOut
 }
 
@@ -307,7 +314,8 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 }
 
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
-/// resolves to `.completed(status, stdout, stderr)` or `.timedOut` — or throws
+/// resolves to `.completed(status, stdout, stderr)`, `.signaled(signal, stdout,
+/// stderr)` or `.timedOut` — or throws
 /// the spawn error if `Process.run()` fails. Shared by
 /// `TmuxManager.runExternalCommand`, `GitManager.run`, and `ProviderRunner.run`,
 /// which map the outcome to their own error types (`TmuxError` / `GitError` /
@@ -411,6 +419,11 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 /// `aSecondDeadlineIsServedWhileAnotherCallsSnapshotIsWedged` observes without
 /// comparing any wall clock: with the snapshot held, a *second* bounded call
 /// must still get its deadline and its SIGKILL escalation.
+///
+/// `didCreateProcess` is a second test-only seam, defaulted the same way. It
+/// receives the `Process` once it and its stdio are fully configured, just
+/// before `run()`, so a test can hold a weak reference to it and record its
+/// pipe descriptors and then prove neither outlives a failed spawn.
 func runBoundedProcess(
     executable: String,
     arguments: [String],
@@ -420,7 +433,8 @@ func runBoundedProcess(
     timeout: Duration,
     stdio: BoundedProcessStdio = .pipes,
     clock: any Clock<Duration> = ContinuousClock(),
-    beforeDeadlineSnapshot: (@Sendable () -> Void)? = nil
+    beforeDeadlineSnapshot: (@Sendable () -> Void)? = nil,
+    didCreateProcess: (@Sendable (Process) -> Void)? = nil
 ) async throws -> BoundedProcessOutcome {
     if stdio == .pseudoTerminal, stdin != nil {
         throw BoundedProcessRunnerError.stdinUnsupportedOnPseudoTerminal
@@ -459,15 +473,26 @@ func runBoundedProcess(
         let stdoutHandle: FileHandle
         let stderrHandle: FileHandle?
         var replicaToClose: Int32 = -1
+        // The parent's copies of the child's stdout and stderr ends, which a
+        // failed spawn closes itself. Empty under `.pseudoTerminal`.
+        var outputWriteEnds: [FileHandle] = []
 
         switch stdio {
         case .pipes:
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
+            // See `isUsablePipe`. Refused before any armer exists, so there is
+            // nothing to disarm, and before any drain handler or snapshot could
+            // touch the descriptor a failed pipe(2) reports in place of its own.
+            guard isUsablePipe(stdoutPipe), isUsablePipe(stderrPipe) else {
+                continuation.resume(throwing: POSIXError(.EMFILE))
+                return
+            }
             stdoutHandle = stdoutPipe.fileHandleForReading
             stderrHandle = stderrPipe.fileHandleForReading
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+            outputWriteEnds = [stdoutPipe.fileHandleForWriting, stderrPipe.fileHandleForWriting]
         case .pseudoTerminal:
             var primary: Int32 = -1
             var replica: Int32 = -1
@@ -525,6 +550,13 @@ func runBoundedProcess(
         // Refused outright under `.pseudoTerminal` (guarded above).
         let stdinPipe = stdin.map { _ in Pipe() }
         if let stdinPipe {
+            // Same refusal as the output pipes. Only reachable under `.pipes`
+            // (a payload is refused under `.pseudoTerminal`), whose two pipes
+            // have no drain handlers yet and close when they deallocate.
+            guard isUsablePipe(stdinPipe) else {
+                continuation.resume(throwing: POSIXError(.EMFILE))
+                return
+            }
             process.standardInput = stdinPipe
         }
 
@@ -654,7 +686,7 @@ func runBoundedProcess(
             deadline.disarm()
         })
 
-        process.terminationHandler = { _ in
+        process.terminationHandler = { exited in
             // The direct child exited; everything it wrote is already in the
             // kernel pipe buffers. `snapshot` captures that without waiting for
             // EOF and closes the parent read ends.
@@ -669,14 +701,22 @@ func runBoundedProcess(
             // lie in the same direction.
             if ContinuousClock.now - start >= timeout {
                 continuation.resume(returning: .timedOut)
+            } else if exited.terminationReason == .uncaughtSignal {
+                continuation.resume(returning: .signaled(
+                    signal: exited.terminationStatus,
+                    stdout: outData,
+                    stderr: errData
+                ))
             } else {
                 continuation.resume(returning: .completed(
-                    status: process.terminationStatus,
+                    status: exited.terminationStatus,
                     stdout: outData,
                     stderr: errData
                 ))
             }
         }
+
+        didCreateProcess?(process)
 
         do {
             try process.run()
@@ -703,15 +743,34 @@ func runBoundedProcess(
                 }
             }
         } catch {
+            // Break the Process -> terminationHandler -> Process cycle (the
+            // handler reaches `process` through `deadline`, whose fire action
+            // captures it). Foundation clears the handler only after it fires,
+            // and a `run()` that throws never fires it, so without this the
+            // Process leaks together with its pipes' parent-held write ends —
+            // two descriptors per failed spawn, until pipe(2) hits EMFILE and
+            // every spawn in the daemon fails.
+            process.terminationHandler = nil
             if replicaToClose >= 0 {
                 Darwin.close(replicaToClose)
                 replicaToClose = -1
+            }
+            // The child never received the stdin pipe, so both ends are ours.
+            if let stdinPipe {
+                try? stdinPipe.fileHandleForReading.close()
+                try? stdinPipe.fileHandleForWriting.close()
             }
             // Spawn failed: no child will ever write — detach the drain handlers
             // and close the read ends so nothing lingers. `run()` fails
             // synchronously and immediately, long before the (>=100ms) watchdog
             // could fire, so this path reliably wins the claim.
             _ = snapshot()
+            // Nor did the child receive the output pipes' write ends. Closed
+            // after the snapshot, so the EOF they raise never wakes a drain
+            // handler, and through their handles, like stdin's, so the
+            // `Process`'s eventual deallocation does not close the numbers
+            // again. They go now instead of whenever that deallocation comes.
+            for handle in outputWriteEnds { try? handle.close() }
             guard state.claim() else { return }
             deadline.disarm()
             continuation.resume(throwing: error)
@@ -751,6 +810,27 @@ func runBoundedProcess(
         // continuation closure.
         cancellationRelay.requestCancel()
     })
+}
+
+/// Whether `fd` is an open descriptor that refers to a pipe.
+func isPipeDescriptor(_ fd: Int32) -> Bool {
+    var info = stat()
+    guard fstat(fd, &info) == 0 else { return false }
+    return (info.st_mode & S_IFMT) == S_IFIFO
+}
+
+/// Whether both ends of `pipe` are real, distinct pipe descriptors.
+///
+/// When pipe(2) fails — in practice only when the descriptor table is full —
+/// Foundation's `Pipe()` does not throw: it returns an object whose handles
+/// report descriptor 0. Spawning with it makes `run()` fail with a misleading
+/// EBADF, and draining or closing it would operate on whatever descriptor 0
+/// really is. Requiring two distinct FIFOs rejects that object even when the
+/// process's own descriptor 0 happens to be a pipe.
+private func isUsablePipe(_ pipe: Pipe) -> Bool {
+    let readFD = pipe.fileHandleForReading.fileDescriptor
+    let writeFD = pipe.fileHandleForWriting.fileDescriptor
+    return readFD != writeFD && isPipeDescriptor(readFD) && isPipeDescriptor(writeFD)
 }
 
 extension Duration {

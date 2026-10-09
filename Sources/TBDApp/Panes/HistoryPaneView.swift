@@ -105,7 +105,7 @@ struct HistoryPaneView: View {
                 .fill(Color(nsColor: .separatorColor))
                 .frame(width: 1)
                 .contentShape(Rectangle().inset(by: -3))
-                .cursor(.resizeLeftRight)
+                .pointerStyle(.columnResize)
                 .gesture(
                     DragGesture()
                         .onChanged { value in

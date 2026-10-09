@@ -219,6 +219,62 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let row = try #require(try await db.worktrees.get(id: pending.id))
         #expect(row.autoArchiveOnMerge == nil)
     }
+
+    /// A creation that fails in the background with a first message parked in
+    /// its row: the handler's rollback saves the message under the (fenced)
+    /// `TBD_HOME` and the failure broadcast names the file.
+    @Test func failedCreateWithAParkedPromptBroadcastsTheSavedPath() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let (router, deltas) = makeRouter(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // Hold the repo's lane so phase 2 cannot start until the prompt is
+        // parked and the repo is broken.
+        let gate = AsyncStream<Void>.makeStream()
+        await router.repoSerializer.submit(repoID: repo.id) {
+            for await _ in gate.stream { break }
+        }
+
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeCreate,
+            params: WorktreeCreateParams(repoID: repo.id)
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let pending = try response.decodeResult(Worktree.self)
+
+        try await db.worktrees.setPendingPrompt(
+            worktreeID: pending.id, text: "the parked first message", submit: true)
+        // No repository left at the path for `git worktree add` to work in.
+        // Moved rather than removed: git leaves read-only objects behind.
+        try FileManager.default.moveItem(
+            at: repoDir, to: tempDir.appendingPathComponent("moved-away", isDirectory: true))
+        gate.continuation.yield(())
+        gate.continuation.finish()
+
+        let failed = try await waitUntil {
+            deltas.snapshot().contains {
+                if case .worktreeArchived(let d) = $0 { return d.worktreeID == pending.id }
+                return false
+            }
+        }
+        #expect(failed, "the background create must fail and broadcast")
+
+        let delta = try #require(deltas.snapshot().compactMap { delta -> WorktreeIDDelta? in
+            if case .worktreeArchived(let d) = delta, d.worktreeID == pending.id { return d }
+            return nil
+        }.first)
+        #expect(delta.creationFailed)
+        let path = try #require(delta.unsentPromptPath)
+        #expect(path.hasPrefix(TBDConstants.unsentPromptsDir(repoID: repo.id).path + "/"))
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == "the parked first message\n")
+        #expect(try await db.worktrees.get(id: pending.id) == nil)
+    }
 }
 }
 

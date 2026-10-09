@@ -56,6 +56,10 @@ public struct OAuthUsageSnapshotStore: Sendable {
     /// All persisted snapshots keyed by profile ID. Malformed rows (bad UUID
     /// or undecodable JSON) are skipped with a logged warning, never thrown —
     /// this is a cache, and the poller refills it.
+    ///
+    /// Model-scoped buckets are stripped on load, by the same rule
+    /// `ClaudeUsagePayloadParser` applies to a fresh fetch, so a row written
+    /// while the parser still kept them cannot bring one back.
     public func loadAll() async throws -> [UUID: ProfileUsageSnapshot] {
         try await writer.read { db in
             let records = try OAuthUsageSnapshotRecord.fetchAll(db)
@@ -69,7 +73,12 @@ public struct OAuthUsageSnapshotStore: Sendable {
                     decodeLogger.warning("Skipping oauth_profile_usage_snapshot row: malformed \(record.profile_id, privacy: .public)")
                     continue
                 }
-                byProfileID[uuid] = snapshot
+                var cleaned = snapshot
+                cleaned.buckets.removeAll {
+                    ClaudeUsagePayloadParser.isModelScoped(kind: $0.kind,
+                                                           modelDisplayName: $0.modelDisplayName)
+                }
+                byProfileID[uuid] = cleaned
             }
             return byProfileID
         }

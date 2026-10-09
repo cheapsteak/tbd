@@ -867,6 +867,101 @@ import Testing
         assertReplacementState(unchanged, equals: woken)
     }
 
+    /// The in-place holder swap's re-home, for the plan that mints a new
+    /// session id: the profile and the fresh conversation are one guarded
+    /// write, so no failure can land between them.
+    @Test func parkedProfileSwapWritesTheFreshSessionWithTheProfile() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        try await database.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "blank-session",
+            transcriptPath: "/tmp/blank-session.jsonl")
+        try await database.terminals.setHibernated(
+            id: terminal.id, sessionID: "blank-session")
+        let parked = try #require(try await database.terminals.get(id: terminal.id))
+        let destination = UUID()
+
+        let swapped = try await database.terminals.setParkedProfileID(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: parked),
+            profileID: destination,
+            sessionID: "fresh-session",
+            transcriptPath: "/tmp/fresh-session.jsonl")
+
+        let returned = try #require(swapped, "the write the swap depends on was rejected")
+        #expect(returned.profileID == destination)
+        #expect(returned.claudeSessionID == "fresh-session")
+        #expect(returned.transcriptPath == "/tmp/fresh-session.jsonl")
+        // And the row, because the returned model is the caller's copy.
+        let stored = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(stored.profileID == destination)
+        #expect(stored.claudeSessionID == "fresh-session")
+        #expect(stored.transcriptPath == "/tmp/fresh-session.jsonl")
+        #expect(stored.isParked, "the write woke a row it must only have re-homed")
+    }
+
+    /// The property the single write exists for: a snapshot that no longer
+    /// matches writes NEITHER field. A profile recorded without the session id
+    /// — or a session id recorded without the profile — is the half-finished
+    /// state the swap cannot recover from.
+    @Test func parkedProfileSwapRejectingTheSnapshotWritesNeitherProfileNorSession() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        try await database.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "blank-session",
+            transcriptPath: "/tmp/blank-session.jsonl")
+        try await database.terminals.setHibernated(
+            id: terminal.id, sessionID: "blank-session")
+        let expected = try #require(try await database.terminals.get(id: terminal.id))
+        try await database.terminals.clearHibernated(id: terminal.id)
+        let woken = try #require(try await database.terminals.get(id: terminal.id))
+
+        let swapped = try await database.terminals.setParkedProfileID(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: expected),
+            profileID: UUID(),
+            sessionID: "fresh-session",
+            transcriptPath: "/tmp/fresh-session.jsonl")
+
+        #expect(swapped == nil)
+        let unchanged = try #require(try await database.terminals.get(id: terminal.id))
+        assertReplacementState(unchanged, equals: woken)
+        #expect(unchanged.claudeSessionID == "blank-session",
+                "a rejected write still renamed the conversation")
+        #expect(unchanged.transcriptPath == "/tmp/blank-session.jsonl",
+                "a rejected write still moved the transcript the row names")
+        #expect(unchanged.profileID == nil, "a rejected write still re-homed the row")
+    }
+
+    /// The cold path and every resume: no session is named, so the
+    /// conversation the row already holds is left exactly as it is.
+    @Test func parkedProfileSwapWithoutAFreshSessionLeavesTheConversation() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        try await database.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "resume-session",
+            transcriptPath: "/tmp/resume-session.jsonl")
+        try await database.terminals.setHibernated(
+            id: terminal.id, sessionID: "resume-session")
+        let parked = try #require(try await database.terminals.get(id: terminal.id))
+        let destination = UUID()
+
+        let swapped = try await database.terminals.setParkedProfileID(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: parked),
+            profileID: destination)
+
+        let returned = try #require(swapped)
+        #expect(returned.profileID == destination)
+        #expect(returned.claudeSessionID == "resume-session")
+        #expect(returned.transcriptPath == "/tmp/resume-session.jsonl")
+        let stored = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(stored.claudeSessionID == "resume-session",
+                "a re-home with no session named still renamed the conversation")
+        #expect(stored.transcriptPath == "/tmp/resume-session.jsonl",
+                "a re-home with no session named still moved the transcript")
+    }
+
     private func assertReplacementState(_ actual: Terminal, equals expected: Terminal) {
         #expect(actual.sessionIncarnationID == expected.sessionIncarnationID)
         #expect(actual.pendingSessionIncarnationID == expected.pendingSessionIncarnationID)

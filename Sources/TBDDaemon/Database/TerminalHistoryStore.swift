@@ -56,7 +56,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
 /// Captured TEXT is file-backed at
 /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
 /// (`TBDConstants.terminalHistoryPath`); the DB row keeps display metadata.
-/// Empty/whitespace-only captures store nothing (no file, no row).
+/// Empty/whitespace-only captures store nothing (no file, no row) on the
+/// tmux path (`captureOnClose`); the holder path (`recordOnClose`) writes the
+/// row without a file instead.
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
     // config knob only if someone actually asks for more retention.
@@ -103,17 +105,66 @@ public struct TerminalHistoryStore: Sendable {
         await store(terminal: terminal, text: text, closedAt: Date())
     }
 
+    /// Holder-transport close: writes an entry whether or not there is a
+    /// capture. NEVER throws.
+    ///
+    /// Unlike `captureOnClose`, a missing or blank capture still writes the
+    /// metadata row (no content file, `lineCount` 0). A holder's screen can be
+    /// unreadable at close for a reason that says nothing about the session —
+    /// a viewer holds the pty, so the daemon's copy is frozen — and the entry
+    /// is still what lets a Claude session be revived by its session id.
+    /// Revive already handles a missing file (the shell path skips the `cat`),
+    /// and the viewer reads a missing file as empty.
+    ///
+    /// A capture-less close of a terminal that already has an entry leaves
+    /// that entry alone. A second close of one terminal is a retried teardown
+    /// (the rows survived a failed delete or an unrecorded reconcile kill), and
+    /// by then the first close has disposed the holder, so the retry can only
+    /// answer "no capture": overwriting would throw away the first close's
+    /// capture, as the tmux path never does when its capture fails. The check
+    /// and the insert are one transaction, and a capture-less close touches no
+    /// file, so it cannot remove a capture a concurrent close is writing.
+    public func recordOnClose(terminal: Terminal, capture: String?) async {
+        await persist(
+            terminal: terminal, text: Self.nonBlank(capture), closedAt: Date(),
+            keepingExistingEntryWithoutText: true)
+    }
+
     /// Store seam (internal so tests can control `closedAt` for deterministic
     /// prune ordering). Best-effort: failures are logged, never thrown.
     func store(terminal: Terminal, text: String, closedAt: Date) async {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let text = Self.nonBlank(text) else { return }
+        await persist(terminal: terminal, text: text, closedAt: closedAt)
+    }
+
+    /// `text` unless it is empty or whitespace-only — the one statement of
+    /// what counts as "no capture" for both close paths. Scans only up to the
+    /// first visible character rather than trimming a copy of the capture.
+    private static func nonBlank(_ text: String?) -> String? {
+        guard let text, text.unicodeScalars.contains(where: {
+            !CharacterSet.whitespacesAndNewlines.contains($0)
+        }) else { return nil }
+        return text
+    }
+
+    /// Writes the content file (when there is text — callers pass it through
+    /// `nonBlank`), the metadata row, and prunes. Without text it writes the
+    /// row alone, and with `keepingExistingEntryWithoutText` only when the
+    /// terminal has no entry yet.
+    private func persist(
+        terminal: Terminal, text: String?, closedAt: Date,
+        keepingExistingEntryWithoutText: Bool = false
+    ) async {
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
+        let keepExisting = keepingExistingEntryWithoutText && text == nil
         do {
-            try FileManager.default.createDirectory(
-                atPath: (path as NSString).deletingLastPathComponent,
-                withIntermediateDirectories: true
-            )
-            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            if let text {
+                try FileManager.default.createDirectory(
+                    atPath: (path as NSString).deletingLastPathComponent,
+                    withIntermediateDirectories: true
+                )
+                try text.write(toFile: path, atomically: true, encoding: .utf8)
+            }
 
             let entry = TerminalHistoryEntry(
                 id: terminal.id,
@@ -122,11 +173,17 @@ public struct TerminalHistoryStore: Sendable {
                 kind: terminal.kind,
                 closedAt: closedAt,
                 claudeSessionID: terminal.claudeSessionID,
-                lineCount: text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+                lineCount: text.map {
+                    $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+                } ?? 0
             )
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID
             let pruned = try await writer.write { db -> [String] in
+                if keepExisting,
+                   try TerminalHistoryRecord.exists(db, key: record.id) {
+                    return []
+                }
                 try record.save(db)
                 // Prune to the newest N; rowid breaks closedAt ties (insertion order).
                 let stale = try String.fetchAll(db, sql: """

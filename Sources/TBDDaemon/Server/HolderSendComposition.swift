@@ -65,11 +65,33 @@ enum HolderSendComposition {
     /// Whether to wrap, given what the oracle answered and whether an
     /// unobserved guess should wrap for this child.
     ///
-    /// **An observed flag is obeyed either way.** `modes.bracketedPaste` is
-    /// then a fact about the child — it was seen to ask for bracketing, or seen
-    /// not to — so `unobservedShouldWrap` does not enter into it: an observed
-    /// `true` wraps and an observed `false` composes bare, whatever the child
-    /// is running.
+    /// **A live observed flag is obeyed either way.** When the answering store
+    /// is live — the daemon draining the pty, or a viewer that answered the
+    /// pull — and has watched the child since birth, `modes.bracketedPaste` is
+    /// a fact about the child as it stands, so `unobservedShouldWrap` does not
+    /// enter into it: an observed `true` wraps and an observed `false` composes
+    /// bare, whatever the child is running.
+    ///
+    /// **A stale `false` is not evidence, and falls back to the guess.** A
+    /// `staleDaemon` reading is the daemon's emulator as of the moment a viewer
+    /// took the pty, and a viewer ordinarily takes it within milliseconds of a
+    /// spawn or a wake — before an agent TUI has finished starting and turned
+    /// bracketing on. Field records showed exactly that: agent sends composed
+    /// against `staleDaemon, modesObserved: true, bracketedPaste: false`
+    /// snapshots taken about 19 ms after the holder spawned, long before the
+    /// TUI's `DECSET 2004`, delivered bare in one write and lost their Enter to
+    /// the paste-burst heuristic. So "off" from a frozen emulator is treated as
+    /// "not known", and the unobserved rule below decides it.
+    ///
+    /// **A stale `true` is still obeyed.** The child was seen to ask for
+    /// bracketing, and children turn it off far less often than they turn it
+    /// on — an agent TUI enables it once at startup and keeps it; a shell's
+    /// line editor re-enables it at every prompt. And of the two ways a stale
+    /// `true` can be wrong, wrapping is the lesser harm: a child that has since
+    /// turned bracketing off prints the markers around the text, which somebody
+    /// can see and the row's `modeSource` explains, while composing bare for a
+    /// TUI that kept it on loses the Enter silently — the failure this whole
+    /// composition exists to prevent.
     ///
     /// **An unobserved reading is a guess**, and where the guess lands depends
     /// on the child. `modesObserved: false` comes from an emulator built over a
@@ -91,12 +113,20 @@ enum HolderSendComposition {
     /// A `nil` reading composes bare regardless — nothing answered, the write
     /// is about to fail anyway, and bare bytes are what every child understood
     /// before any of this existed.
+    ///
+    /// Whatever this answers, the message stays one write: wrapping changes
+    /// which bytes go out, never how many writes carry them.
     static func bracketedPaste(
         for reading: TerminalModeReading?, unobservedShouldWrap: Bool
     ) -> Bool {
         guard let reading else { return false }
-        if reading.modesObserved { return reading.modes.bracketedPaste }
-        return unobservedShouldWrap
+        guard reading.modesObserved else { return unobservedShouldWrap }
+        switch reading.source {
+        case .daemon, .viewer:
+            return reading.modes.bracketedPaste
+        case .staleDaemon:
+            return reading.modes.bracketedPaste || unobservedShouldWrap
+        }
     }
 
     /// - Parameter body: everything the message says, envelope included. The

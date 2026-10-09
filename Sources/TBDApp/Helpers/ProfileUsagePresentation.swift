@@ -12,7 +12,6 @@ enum ProfileUsagePresentation {
     // Bucket kinds as the Claude OAuth usage API names them.
     static let sessionKind = "session"
     static let weeklyAllKind = "weekly_all"
-    static let weeklyScopedKind = "weekly_scoped"
 
     // MARK: - Bucket access
 
@@ -24,12 +23,6 @@ enum ProfileUsagePresentation {
     /// The weekly all-models bucket, if present.
     static func weeklyAllBucket(_ snapshot: ProfileUsageSnapshot?) -> ClaudeUsageLimitBucket? {
         snapshot?.buckets.first { $0.kind == weeklyAllKind }
-    }
-
-    /// Per-model-family weekly buckets (e.g. "Fable"), in API order. A family
-    /// absent from this list simply has no data for that account — render nothing.
-    static func scopedBuckets(_ snapshot: ProfileUsageSnapshot?) -> [ClaudeUsageLimitBucket] {
-        snapshot?.buckets.filter { $0.kind == weeklyScopedKind } ?? []
     }
 
     // MARK: - Severity
@@ -187,20 +180,6 @@ enum ProfileUsagePresentation {
         return formatter.string(from: rounded)
     }
 
-    /// "F" for "Fable" — single-letter family abbreviation for menu rows.
-    static func familyAbbreviation(_ displayName: String?) -> String {
-        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard let first = trimmed.first else { return "?" }
-        return String(first).uppercased()
-    }
-
-    /// Full family name for the roomier two-line menu secondary line, e.g.
-    /// "Fable". Falls back to "?" when the daemon reported no display name.
-    static func familyName(_ displayName: String?) -> String {
-        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "?" : trimmed
-    }
-
     /// Full phrase for relative "how long until" a reset, including the leading
     /// "in " prefix: "in 2d 5h", "in 5h", "in 43m", "now". Returns nil if the
     /// date is nil; otherwise always returns a string (even "now" for immediate resets).
@@ -228,8 +207,9 @@ enum ProfileUsagePresentation {
     }
 
     /// Compact usage summary without a leading separator:
-    /// "5h 0% ↺11:10pm · wk 76% · F 100%". nil when there is no snapshot or
-    /// it has no buckets (never logged in / poller hasn't fetched yet).
+    /// "5h 0% ↺11:10pm · wk 76%". nil when the snapshot carries neither a
+    /// session nor a weekly bucket (never logged in / poller hasn't fetched
+    /// yet); any other bucket kind contributes no segment.
     /// This legacy flat-string form keeps a FIXED format (clock for 5h,
     /// nothing for weekly) regardless of the `ResetTimeStyle` preference —
     /// the preference flows through `BucketPresentation` surfaces.
@@ -247,9 +227,6 @@ enum ProfileUsagePresentation {
         if let weekly = weeklyAllBucket(snapshot) {
             parts.append("wk \(percentText(weekly.percent))")
         }
-        for scoped in scopedBuckets(snapshot) {
-            parts.append("\(familyAbbreviation(scoped.modelDisplayName)) \(percentText(scoped.percent))")
-        }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " · ")
     }
@@ -265,7 +242,7 @@ enum ProfileUsagePresentation {
 
     /// Full "+"-menu row title: `ProfileLoginPresentation.menuItemTitle` plus
     /// the compact usage suffix, e.g.
-    /// "Gmail — gmail@… · 5h 0% ↺23:10 · wk 76% · F 100%".
+    /// "Gmail — gmail@… · 5h 0% ↺23:10 · wk 76%".
     static func menuItemTitle(for entry: ModelProfileWithUsage,
                               timeZone: TimeZone = .current) -> String {
         ProfileLoginPresentation.menuItemTitle(for: entry)
@@ -288,11 +265,10 @@ enum ProfileUsagePresentation {
     }
 
     /// Spelled-out usage line for the roomier second row: "5h 16% used ·
-    /// resets 11:09pm · week 79% · resets in 2d 5h · Fable 100%". Unlike
-    /// `usageSummary` this drops the ↺ glyph in favor of "resets " and uses
-    /// full family names instead of the single-letter abbreviation — the
-    /// second line has the width. nil when there is no snapshot or it has no
-    /// buckets. Like `usageSummary`, this legacy flat-string form keeps a
+    /// resets 11:09pm · week 79% · resets in 2d 5h". Unlike `usageSummary`
+    /// this drops the ↺ glyph in favor of "resets " — the second line has the
+    /// width. nil when the snapshot carries neither a session nor a weekly
+    /// bucket. Like `usageSummary`, this legacy flat-string form keeps a
     /// FIXED format (clock for 5h, countdown for weekly) regardless of the
     /// `ResetTimeStyle` preference.
     static func usageDetailLine(for snapshot: ProfileUsageSnapshot?,
@@ -323,9 +299,6 @@ enum ProfileUsagePresentation {
                 part += " · resets in \(relative)"
             }
             parts.append(part)
-        }
-        for scoped in scopedBuckets(snapshot) {
-            parts.append(percentPart(familyName(scoped.modelDisplayName), scoped.percent))
         }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " · ")
@@ -558,7 +531,7 @@ enum ProfileUsagePresentation {
         case weekdayClock
         /// "in 2h 10m" / "in 4d 2h" inline; tooltip "resets in …" (relative countdown).
         case countdown
-        /// Nothing inline; tooltip "resets in 2d 5h" (relative countdown, for scoped/model rows).
+        /// Nothing inline; tooltip "resets in 2d 5h" (relative countdown, for any kind other than the 5h and weekly windows).
         case tooltipOnly
     }
 
@@ -568,8 +541,8 @@ enum ProfileUsagePresentation {
     ///
     /// - sessionKind ("session") → `.clock` (time-of-reset) / `.countdown` (time-until)
     /// - weeklyAllKind ("weekly_all") → `.weekdayClock` (time-of-reset) / `.countdown` (time-until)
-    /// - any other kind → `.tooltipOnly` in BOTH styles (scoped/per-model,
-    ///   less critical to the main view)
+    /// - any other kind → `.tooltipOnly` in BOTH styles (not one of the two
+    ///   plan-wide windows the main view is built around)
     static func resetDisplay(forKind kind: String,
                              style: ResetTimeStyle = .timeOfReset) -> ResetDisplay {
         switch kind {
@@ -584,7 +557,7 @@ enum ProfileUsagePresentation {
     /// and to feed into pace-aware fill-level calculations.
     static func windowDuration(forKind kind: String) -> TimeInterval {
         switch kind {
-        case weeklyAllKind, weeklyScopedKind: return weeklyWindow
+        case weeklyAllKind: return weeklyWindow
         default: return sessionWindow
         }
     }

@@ -7,12 +7,29 @@ struct SidebarView: View {
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
+    /// See `AppState.sidebarWorkflowGroupsKey`. Handed to every
+    /// `revealSidebarGroups` call as `grouped`, which is the reveal's gate.
+    /// Off, the selection reveal is not even computed.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     /// Height of the scrolling repo list, measured by a `.background`
     /// GeometryReader on that list. Feeds `PinnedDockMetrics`' 40% clamp.
     /// Measured on the LIST, never on the dock — reading the dock's own
     /// geometry would feed its height back into its own input.
     @State private var sidebarHeight: CGFloat = 0
     @State private var hasRevealedInitialSelection = false
+
+    /// The `previous` handed to `revealSidebarGroups` for a selection-reveal
+    /// change. Nil — reveal as navigation, expanding a collapsed owning
+    /// section — only on the initial mount. Turning the toggle on mid-session
+    /// moves the observed value from nil to a reveal; that compares the
+    /// reveal against itself, so it opens the selection's groups but never
+    /// overrides a section the user collapsed.
+    static func revealBaseline(
+        previous: SidebarGroupReveal?, reveal: SidebarGroupReveal, hasRevealed: Bool
+    ) -> SidebarGroupReveal? {
+        hasRevealed ? (previous ?? reveal) : nil
+    }
 
     var filteredRepos: [Repo] {
         let base: [Repo]
@@ -44,7 +61,8 @@ struct SidebarView: View {
             }
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }
-                appState.revealSidebarGroups(appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil))
+                appState.revealSidebarGroups(
+                    appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil), grouped: workflowGroups)
                 // Defer to the next runloop tick so a freshly-expanded repo's
                 // rows are mounted in the List before we ask to scroll to them.
                 DispatchQueue.main.async {
@@ -52,10 +70,14 @@ struct SidebarView: View {
                     appState.pendingScrollToWorktreeID = nil
                 }
             }
-            .onChange(of: appState.sidebarSelectionReveal, initial: true) { previous, reveal in
+            .onChange(of: workflowGroups ? appState.sidebarSelectionReveal : nil, initial: true) { previous, reveal in
+                defer { hasRevealedInitialSelection = true }
+                guard let reveal else { return }
                 appState.revealSidebarGroups(
-                    reveal, previous: hasRevealedInitialSelection ? previous : nil)
-                hasRevealedInitialSelection = true
+                    reveal,
+                    previous: Self.revealBaseline(previous: previous, reveal: reveal,
+                                                  hasRevealed: hasRevealedInitialSelection),
+                    grouped: workflowGroups)
             }
             .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
                 GeometryReader { geo in

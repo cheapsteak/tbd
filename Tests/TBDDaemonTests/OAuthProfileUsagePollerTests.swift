@@ -77,8 +77,6 @@ private let okBuckets = [
     ClaudeUsageLimitBucket(kind: "session", group: "session", percent: 12,
                            resetsAt: Date(timeIntervalSince1970: 1_800_000_000)),
     ClaudeUsageLimitBucket(kind: "weekly_all", group: "weekly", percent: 34),
-    ClaudeUsageLimitBucket(kind: "weekly_scoped", group: "weekly", percent: 56,
-                           modelDisplayName: "Fable"),
 ]
 
 /// Build a poller over in-memory fixtures. `loggedIn` controls which profile
@@ -723,8 +721,7 @@ struct ProfileUsageRPCCompatTests {
         let data = try JSONEncoder().encode(value)
         let decoded = try JSONDecoder().decode(ModelProfileWithUsage.self, from: data)
         #expect(decoded.usageSnapshot == snapshot)
-        #expect(decoded.usageSnapshot?.buckets.first?.modelDisplayName == nil)
-        #expect(decoded.usageSnapshot?.buckets.last?.modelDisplayName == "Fable")
+        #expect(decoded.usageSnapshot?.buckets.allSatisfy { $0.modelDisplayName == nil } == true)
     }
 
     /// Old clients decode new payloads by ignoring unknown keys; simulate by

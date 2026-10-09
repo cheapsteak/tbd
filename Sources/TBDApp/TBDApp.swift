@@ -247,6 +247,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Diagnostics/HangWatchdog.swift.
         HangWatchdog.shared.start()
 
+        // Resolve the terminal latency diagnostic's gate here so its request
+        // directory is watched from launch rather than from whenever the first
+        // terminal panel happens to open. Off by default: this is one
+        // UserDefaults read that returns nil and does nothing else.
+        _ = TerminalLatencyDiagnostic.shared
+
         // Apply sidebar-under-titlebar chrome to the main window. SwiftUI scenes
         // create their NSWindow asynchronously after didFinishLaunching, so defer
         // a tick — then re-apply once more on a short delay as a defensive measure

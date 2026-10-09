@@ -177,6 +177,7 @@ struct NightwatchStatus: AsyncParsableCommand {
         if json {
             printJSON(["mode": config.nightwatchMode.rawValue])
         } else {
+            print(NightwatchHolderGate.deprecationNotice)
             print("Nightwatch mode: \(config.nightwatchMode.rawValue)")
         }
     }

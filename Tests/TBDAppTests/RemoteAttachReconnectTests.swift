@@ -48,11 +48,11 @@ struct RemoteAttachReconnectTests {
         RemoteSessionSelection(provider: provider, sessionID: id)
     }
 
-    /// Seeds one attach-capable session and selects it, so it is mounted.
+    /// Seeds one attach-capable session and attaches it, so it is mounted.
     private func attached(_ state: AppState) -> RemoteSessionSelection {
         seedProvider(state, name: "acme")
         seedSession(state, provider: "acme", id: "s1")
-        state.selectRemoteSession(provider: "acme", sessionID: "s1")
+        state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
         return sel("acme", "s1")
     }
 
@@ -85,8 +85,8 @@ struct RemoteAttachReconnectTests {
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             seedSession(state, provider: "acme", id: "s2")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+            state.selectRemoteSession(provider: "acme", sessionID: "s2", reattach: true)
 
             state.reconnectRemoteSession(sel("acme", "s2"))
 

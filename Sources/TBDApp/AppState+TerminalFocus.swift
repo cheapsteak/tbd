@@ -40,18 +40,16 @@ extension AppState {
     /// this touch, `canCloseFocusedTab` would register no dependency on the one
     /// property that actually moves when focus does, and the File ▸ Close Tab
     /// item would stay stuck at whatever it computed last. `TerminalPanelView`
-    /// writes `focusedTabCloseContext` on mouse-driven focus changes, in and
-    /// out, which makes it the best observable proxy available for a
+    /// writes `focusedTabCloseContext` when a terminal becomes first
+    /// responder and clears it when that terminal resigns, however focus
+    /// moves, which makes it the best observable proxy available for a
     /// first-responder change.
     ///
-    /// It is a proxy, not a mirror. Focus can also move programmatically —
-    /// `makeFirstResponder` from the webview find bar, an inline rename field,
-    /// a submitting text editor — and those paths do not write the property, so
-    /// Close Tab can stay *enabled* after focus leaves a terminal that way.
-    /// Pressing ⌘W then re-resolves and no-ops, so the consequence is a stale
-    /// menu state rather than a wrong close. Closing that gap properly means
-    /// writing nil on resign-first-responder, which is a change to the focus
-    /// bookkeeping rather than to this read.
+    /// It is a proxy, not a mirror: the property only moves for terminals
+    /// whose panel transport is live, and focus moving between two
+    /// non-terminal views writes nothing. Pressing ⌘W re-resolves from the
+    /// first responder regardless, so a stale proxy costs a stale menu state
+    /// rather than a wrong close.
     func resolvedFocusedTabCloseContext() -> TabCloseContext? {
         let lastFocused = focusedTabCloseContext
         if terminalFocusTargets.isEmpty {
@@ -96,6 +94,75 @@ extension AppState {
 
             terminalView.window?.makeFirstResponder(terminalView)
             self.focusedTabCloseContext = self.terminalTabCloseContexts[terminalID]
+        }
+    }
+}
+
+extension AppState {
+    /// Register the mounted `attach` terminal for `selection`, and have it
+    /// claim focus whenever it lands in a window while it is the selected
+    /// session: first mount, and a kept-alive pane that a pager tab switch
+    /// puts back on screen. Panes of other sessions are out of their window
+    /// (the pagers are `NSTabViewController`s); the selected session's own
+    /// pane can be in its window but transparent, which the claim's
+    /// `remoteAttachSlotShownSelection` check covers.
+    func registerRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+        remoteTerminalFocusTargets[selection] = TerminalFocusTarget(view)
+        view.onMovedToWindow = { [weak self] in
+            self?.focusRemoteTerminalAfterSelectionChange(selection)
+        }
+    }
+
+    /// Called by `RemoteSessionDetailView` whenever the selection whose
+    /// attach slot it shows changes — including a change in what fills the
+    /// pane (the session going gone and falling back to the log view, say),
+    /// which moves nothing in or out of a window and so never reaches
+    /// `onMovedToWindow`.
+    ///
+    /// Hiding the slot also takes focus back from a pane that holds it: the
+    /// log fallback keeps the pane in its window at zero opacity, so focus
+    /// left there would send typing to the remote session unseen. A pane that
+    /// leaves its window (a switch to another session) resigns on its own.
+    func setRemoteAttachSlotShown(_ selection: RemoteSessionSelection?) {
+        if let previous = remoteAttachSlotShownSelection, previous != selection,
+           let hidden = remoteTerminalFocusTargets[previous]?.view,
+           let window = hidden.window, window.firstResponder === hidden {
+            window.makeFirstResponder(nil)
+        }
+        remoteAttachSlotShownSelection = selection
+        if let selection {
+            focusRemoteTerminalAfterSelectionChange(selection)
+        }
+    }
+
+    func unregisterRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+        view.onMovedToWindow = nil
+        guard remoteTerminalFocusTargets[selection]?.view === view else { return }
+        remoteTerminalFocusTargets.removeValue(forKey: selection)
+    }
+
+    /// The remote counterpart of `focusTerminalAfterSelectionChange`. A kept-
+    /// alive pane never re-runs its spawn-time focus claim, so without this a
+    /// revisited session draws a hollow cursor until the user presses Tab.
+    /// Deferred one main turn, and re-checked then: the selection may have
+    /// moved on, the detail view may not be showing its attach slot (the Log
+    /// tab leaves the pane in its window at zero opacity, where typing would
+    /// reach the session unseen), and a pane not yet in a window is left to
+    /// `onMovedToWindow`. The selection path and the view's
+    /// `setRemoteAttachSlotShown` both claim, so whichever lands after the
+    /// view has rendered the new selection is the one that succeeds.
+    func focusRemoteTerminalAfterSelectionChange(_ selection: RemoteSessionSelection) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.selectedRemoteSession == selection,
+                  self.remoteAttachSlotShownSelection == selection,
+                  let terminalView = self.remoteTerminalFocusTargets[selection]?.view,
+                  let window = terminalView.window,
+                  window.firstResponder !== terminalView
+            else {
+                return
+            }
+            window.makeFirstResponder(terminalView)
         }
     }
 }

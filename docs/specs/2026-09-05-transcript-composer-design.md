@@ -25,15 +25,15 @@ sessions are out of scope. The archived transcript view never gets a composer.
 
 The composer is a text field pinned below the transcript table, inside the
 session workbench beside the index rail, wherever a live Claude Code transcript
-renders. A send button names the target terminal so the injection is never
-anonymous.
+renders. The send button is a return icon in the field's bottom-right corner;
+the message goes to the terminal the transcript belongs to.
 
 - **Running.** Enabled while Claude is working, idle, or in an informational
   state. A message sent mid-turn queues inside Claude Code, as it does when
   typed.
 - **Not running.** Enabled, with a note that Claude is not running and that
-  sending will resume it, and the send button labeled accordingly. This covers
-  a hibernated session and a session whose Claude process exited. Sending wakes
+  sending will resume it, and the send button's tooltip and accessibility label
+  reading "Resume" rather than "Send to". This covers a hibernated session and a session whose Claude process exited. Sending wakes
   the session with the message as its first prompt. While the wake is in
   flight the text stays in the field, shown as sending, until the session that
   wake started reports in. On a timeout the text is restored editable with the
@@ -179,8 +179,8 @@ an exit as hibernation means one state, one wake path, and one UI.
 An argument prompt cannot carry image attachments, so for a not-running target
 each image token is replaced inline with the quoted path as plain text. The
 sentence reads the same, and Claude reads the files with its Read tool, whose
-image reads are capped near 500 KB. The composer says so on the send button,
-because the transcript then shows a tool read after the message rather than an
+image reads are capped near 500 KB. The composer says so in the send button's
+tooltip, because the transcript then shows a tool read after the message rather than an
 image inside it. TBD spawns sessions with permissions skipped, so a read outside
 the worktree raises no prompt.
 
@@ -532,56 +532,43 @@ This is a new kind of durable resource, so it names its reconcilers:
   minutes, never days, so one that has sat untouched for two weeks belongs to a
   message nobody is going to send. It follows the existing leg shape: skip the
   whole leg on a failed database read, emit keep and reap lines into the plan,
-  record each reclaim. Fourteen days is a soak knob, not a load-bearing number.
+  record each reclaim. Fourteen days is a tuning knob, not a load-bearing number.
   A file whose token was deleted, or whose send failed, stays on disk for this
   sweep.
 
-## Flag
+## Gating
 
-One flag, `transcript_composer_enabled`, a `config` column added by a new SQL
-migration with no DEFAULT clause, resolved in the record's model conversion
-through `?? Config.transcriptComposerEnabledDefault`, default false. NULL means
-nobody chose, so graduation is a change to that constant that preserves every
-explicit opt-out. Migration, GRDB record, Codable model, and the migration
-manifest test land in one commit.
+The composer carries no feature flag of its own. It appears wherever a live
+Claude Code transcript of a local worktree renders, and its completions probe,
+its attachment writes and the OrphanGC leg that reclaims those attachments run
+whenever it does. The four parts are one unit: a composer with completions off,
+or with attachments off, would be a broken feature rather than a smaller one.
+The GC leg rides `gcEnabled`, the master switch every other reclaim leg rides,
+and a dry run plans it with GC off. The probe needs no switch either: with
+hooks and connectors disabled it has no visible side effect, and it runs only
+when a composer is shown.
 
-The daemon exposes it through `daemon.capabilities`, and Settings shows a
-toggle beside the live transcript pane toggle, the way the queued-prompt flag
-is surfaced. A flag with no toggle is not a shipped feature.
+The daemon's not-running refusal, with its exit stamp and inspector rail, and
+the app passing a wake prompt, are corrections to existing paths rather than
+new ways for input to reach a session. The wake prompt is an existing parameter
+that the CLI's wake command already passes and that the nightwatch skill
+already uses to resume a parked session with a composed prompt; the composer is
+one more caller of it.
 
-The flag gates the composer UI, the completions probe, attachment writes, and
-the OrphanGC leg. It is a config column rather than an app default because the
-GC leg lives in the daemon and cannot read the app's defaults. The probe needs
-no flag of its own: with hooks and connectors disabled it has no visible side
-effect, and it runs only when a composer is shown.
-
-Two changes ship ahead of the composer with no flag, as bug fixes: the daemon's
-not-running refusal with its exit stamp and inspector rail, and the app passing
-the wake prompt it has never passed. That change needs no flag because it
-adds no new way for input to reach a session: the wake prompt is an existing,
-unflagged parameter that the CLI's wake command already passes and that the
-nightwatch skill already uses to resume a parked session with a composed
-prompt. The app's side is the only new call site, and it stays inert until the
-composer exists: every parameter it adds defaults to nil, nothing in the app
-passes a prompt yet, and a nil prompt encodes no field. The envelope option,
-the parts list, and the opt-in gate land with the composer.
-
-The exit stamp earns the same unflagged treatment on its own terms, not by
-riding along with the wake prompt's. It records a fact the agent's own
-`SessionEnd` hook reported — that the process has already ended — and neither
-kills anything nor sends anything, which is exactly what distinguishes it from
-the two auto-park causes that do sit behind flags: the idle sweep's
-`auto_hibernate_enabled` decides to end a session nobody asked to end, and the
-merge park's gate in `HibernationGate` decides to interrupt one. The stamp
-decides nothing; it transcribes. It is scoped by session incarnation and
-excludes holder transport, so it can only ever describe the tmux process it
-was told about, and it is retracted the moment `SessionStart` or the wake path
-reports the session back — so a wrong stamp costs one stray banner and one
-refused send, never lost input. The refusal it enables is the bug fix: without
-it, a send to a parked pane finds a live shell prompt, pastes the message,
-presses Enter, and runs the text as a shell command while reporting success.
-
-Graduation: after a soak with the toggle on, flip the default constant.
+The exit stamp is safe to record unconditionally on its own terms. It
+transcribes a fact the agent's own `SessionEnd` hook reported — that the
+process has already ended — and neither kills anything nor sends anything,
+which is exactly what distinguishes it from the two auto-park causes that do
+sit behind flags: the idle sweep's `auto_hibernate_enabled` decides to end a
+session nobody asked to end, and the merge park's gate in `HibernationGate`
+decides to interrupt one. The stamp decides nothing. It is scoped by session
+incarnation and excludes holder transport, so it can only ever describe the
+tmux process it was told about, and it is retracted the moment `SessionStart`
+or the wake path reports the session back — so a wrong stamp costs one stray
+banner and one refused send, never lost input. The refusal it enables is the
+bug fix: without it, a send to a parked pane finds a live shell prompt, pastes
+the message, presses Enter, and runs the text as a shell command while
+reporting success.
 
 ## Testing
 
@@ -631,8 +618,8 @@ Graduation: after a soak with the toggle on, flip the default constant.
 - Image preparation: TIFF in, PNG out, downscale, orientation, oversize
   re-encode, undecodable input refused.
 - The GC leg with dry-run plans: live worktree kept, non-UUID kept, orphan older
-  than 14 days reaped, orphan younger kept, failed database read skips the leg.
-- Both branches of the flag, and the three states of the column.
+  than 14 days reaped, orphan younger kept, failed database read skips the leg,
+  GC disabled leaves everything alone while a dry run still plans.
 - Live verification in the app against a stub-backed session, because
   transcript work has greened headless while broken live.
 
@@ -716,10 +703,10 @@ Graduation: after a soak with the toggle on, flip the default constant.
   own supervisor uses the frame only when a session is blocked and otherwise
   types a bracketed paste into the pty. A future flagged experiment could use
   it for queue-while-blocked, the one place its owner uses it.
-- **A separate flag for the probe.** The probe spawns a process without a
+- **A separate switch for the probe.** The probe spawns a process without a
   keystroke. Rejected because, with hooks and connectors disabled, it has no
-  visible side effect, it runs only when a composer is shown, and a second
-  toggle would leave the composer half-working in one of its four states.
+  visible side effect, it runs only when a composer is shown, and a toggle for
+  it would leave the composer half-working in one of its four states.
 - **A chip strip with no inline anchors.** Rejected because it gives no way to
   refer to an image at a point in the sentence, which the terminal composer and
   Claude Desktop both allow.

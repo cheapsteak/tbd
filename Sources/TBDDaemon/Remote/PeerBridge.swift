@@ -494,7 +494,7 @@ extension PeerLinkState {
 ///
 /// The local host name is the natural namespace and the only identifier the
 /// machine already has that a human recognises. It is sanitised because the
-/// composed name is `<origin>:<display name> %<pane>`, so a colon or a space
+/// composed name is `<origin>:<display name> <terminal short id>`, so a colon or a space
 /// inside the origin would make the name ambiguous to read even though nothing
 /// parses it.
 public enum PeerLinkOrigin {

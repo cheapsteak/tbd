@@ -2,14 +2,14 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The one decision three callers share: whether a holder session's typed
+/// The one decision two callers share: whether a holder session's typed
 /// screen is something this daemon may judge.
 ///
 /// Tier 1 — a pure function of two facts, and the reason it is tested here
 /// rather than only through its callers is that the callers cannot see each
-/// other. The park, the idle sweep and the auto-`/login` pump each dress the
-/// answer in their own words; if the answer itself drifted, every one of them
-/// would keep passing its own tests while disagreeing with the others.
+/// other. The park and the idle sweep each dress the answer in their own
+/// words; if the answer itself drifted, both would keep passing their own
+/// tests while disagreeing with each other.
 @Suite("Holder screen evidence")
 struct HolderScreenEvidenceTests {
 

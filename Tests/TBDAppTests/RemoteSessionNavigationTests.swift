@@ -142,6 +142,31 @@ struct RemoteSessionNavigationTests {
         }
     }
 
+    @Test func backAndForwardBrowseWithoutRequestingAnAttachment() {
+        withState { state in
+            state.remoteProviders = [RemoteProviderStatus(
+                config: RemoteProviderConfig(name: "acme", exec: "/usr/bin/true"),
+                describe: ProviderDescribe(name: "acme", capabilities: ["attach", "log"]),
+                health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil
+            )]
+            state.remoteSessions = [session(provider: "acme", id: "s1"), session(provider: "acme", id: "s2")]
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+
+            state.navigateBack()
+
+            #expect(state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+
+            state.navigateForward()
+
+            #expect(state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s2"))
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+        }
+    }
+
     // MARK: - Stale-entry skipping
 
     /// `gone` (still reported by the provider's mirror, just no longer

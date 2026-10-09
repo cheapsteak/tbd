@@ -19,8 +19,8 @@ final class ExitReportRecorder {
 }
 
 /// Integration-through-`AppState` tests for the remote attach-lifecycle
-/// wiring: `selectRemoteSession`/`activateRemoteSession` touching recency
-/// and clearing (or not clearing) the explicit-detach flag,
+/// wiring: explicit Attach requests touching recency and clearing detach,
+/// while browsing leaves connection intent unchanged,
 /// `markRemoteSessionDetached`/`reattachRemoteSession` (including its
 /// unexpected-exit → `pendingReconnectRemoteSessions` routing and
 /// provider-health-driven auto-reattach), and pruning on mirror refresh.
@@ -58,10 +58,13 @@ struct RemoteAttachStateTests {
         ]
     }
 
-    private func seedSession(_ state: AppState, provider: String, id: String, gone: Bool = false, dismissed: Bool = false) {
+    private func seedSession(
+        _ state: AppState, provider: String, id: String, gone: Bool = false, dismissed: Bool = false,
+        processState: RemoteProcessState = .running
+    ) {
         state.remoteSessions.append(RemoteSessionInfo(
             provider: provider,
-            payload: RemoteSessionPayload(id: id, state: .running),
+            payload: RemoteSessionPayload(id: id, state: processState),
             gone: gone, dismissed: dismissed, lastSeen: Date()
         ))
     }
@@ -70,14 +73,14 @@ struct RemoteAttachStateTests {
         RemoteSessionSelection(provider: provider, sessionID: id)
     }
 
-    // MARK: - Selecting attaches (eligibility-gated)
+    // MARK: - Explicit attachment requests (eligibility-gated)
 
-    @Test func selectingAnAttachCapableSessionMakesItAttached() {
+    @Test func explicitlyAttachingAnAttachCapableSessionMakesItAttached() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
@@ -88,7 +91,7 @@ struct RemoteAttachStateTests {
             seedProvider(state, name: "acme", attachCapable: false)
             seedSession(state, provider: "acme", id: "s1")
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
@@ -99,7 +102,7 @@ struct RemoteAttachStateTests {
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1", gone: true)
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
@@ -115,7 +118,7 @@ struct RemoteAttachStateTests {
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1", dismissed: true)
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
             #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
@@ -127,25 +130,118 @@ struct RemoteAttachStateTests {
             // No `remoteProviders` entry at all for "acme".
             seedSession(state, provider: "acme", id: "s1")
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
     }
 
+    @Test func browsingAnAttachCapableSessionNeverRequestsAConnection() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(state.selectedRemoteSession == sel("acme", "s1"))
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+        }
+    }
+
+    @Test func browsingAnotherSessionKeepsAnExistingConnection() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            seedSession(state, provider: "acme", id: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+
+            #expect(state.attachedRemoteSelections == [sel("acme", "s1")])
+            #expect(state.recentlyAttachedRemoteSessions == [sel("acme", "s1")])
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.attachedRemoteSelections == [sel("acme", "s1")])
+        }
+    }
+
+    @Test func browsingDoesNotBypassReconnectBackoffOrPreventRecovery() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            seedSession(state, provider: "acme", id: "s2")
+            let selection = sel("acme", "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+            state.markRemoteSessionDetached(selection, exitCode: 1)
+            let pending = state.pendingReconnectRemoteSessions[selection]
+            #expect(pending != nil)
+            guard let pending else { return }
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(state.pendingReconnectRemoteSessions[selection]?.nextEligibleAt == pending.nextEligibleAt)
+            #expect(state.attachedRemoteSelections(now: pending.nextEligibleAt.addingTimeInterval(-1)).isEmpty)
+            #expect(state.attachedRemoteSelections(now: pending.nextEligibleAt) == [selection])
+        }
+    }
+
+    @Test func recoveryDoesNotAttachASessionThatWasOnlyBrowsed() {
+        withState { state in
+            seedProvider(state, name: "acme", health: .needsAuth)
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            seedProvider(state, name: "acme", health: .ok)
+
+            #expect(state.attachedRemoteSelections.isEmpty)
+            #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+        }
+    }
+
     // MARK: - Cap-bounded keep-alive across selections
 
-    @Test func recentlyViewedSessionsStayAttachedUpToTheCap() {
+    @Test func recentlyRequestedConnectionsStayAttachedUpToTheCap() {
         withState { state in
             seedProvider(state, name: "acme")
             for i in 0..<10 { seedSession(state, provider: "acme", id: "s\(i)") }
 
-            for i in 0..<10 { state.selectRemoteSession(provider: "acme", sessionID: "s\(i)") }
+            for i in 0..<10 { state.selectRemoteSession(provider: "acme", sessionID: "s\(i)", reattach: true) }
 
             // The cap plus the always-protected current selection.
             #expect(state.attachedRemoteSelections.count == state.remoteAttachKeepAliveLimit + 1)
-            // Most-recently-viewed survive; the earliest do not.
+            // Most-recent attachment requests survive; the earliest do not.
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s9")))
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s0")))
+        }
+    }
+
+    @Test func browsingReusesRetainedIntentButNeverRecreatesPrunedIntent() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            for index in 0...4 { seedSession(state, provider: "acme", id: "s\(index)") }
+            for index in 0...3 {
+                state.selectRemoteSession(provider: "acme", sessionID: "s\(index)", reattach: true)
+            }
+            let requested = state.recentlyAttachedRemoteSessions
+            #expect(state.attachedRemoteSelections.count == 4)
+
+            // A new browse uses no protected attachment slot. The oldest
+            // connection falls outside the background cap but retains intent.
+            state.selectRemoteSession(provider: "acme", sessionID: "s4")
+            #expect(state.attachedRemoteSelections.count == state.remoteAttachKeepAliveLimit)
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s0")))
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s4")))
+            #expect(state.recentlyAttachedRemoteSessions == requested)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s0")
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s0")))
+            #expect(state.recentlyAttachedRemoteSessions == requested)
+
+            // A fifth explicit request ages s0 out of the bounded intent log.
+            state.selectRemoteSession(provider: "acme", sessionID: "s4", reattach: true)
+            #expect(!state.recentlyAttachedRemoteSessions.contains(sel("acme", "s0")))
+            state.selectRemoteSession(provider: "acme", sessionID: "s0")
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s0")))
         }
     }
@@ -156,7 +252,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
@@ -174,7 +270,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
             // Redundant: same session, no explicit .attach tab request.
@@ -184,37 +280,35 @@ struct RemoteAttachStateTests {
         }
     }
 
-    /// A genuine transition INTO a previously-detached session (coming from
-    /// something else) DOES clear the stale flag — this is what makes
-    /// "come back later" auto-attach again without an explicit Reattach
-    /// click.
-    @Test func transitioningIntoADetachedSessionFromElsewhereReattaches() {
+    /// Returning to a detached session browses it without reconnecting.
+    @Test func transitioningIntoADetachedSessionPreservesTheDetach() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             seedSession(state, provider: "acme", id: "s2")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
             state.selectRemoteSession(provider: "acme", sessionID: "s2") // transition away
             state.selectRemoteSession(provider: "acme", sessionID: "s1") // transition back
 
-            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+            #expect(state.explicitlyDetachedRemoteSessions[sel("acme", "s1")] != nil)
         }
     }
 
-    /// The context menu's "Attach" item (`tab: .attach`) is an explicit
+    /// The context menu's "Attach" item (`reattach: true`) is an explicit
     /// re-attach request even when the row is ALREADY the current
     /// selection — this is the path that keeps "Keep the Attach
     /// context-menu item ... it's how you re-attach after detaching" true.
-    @Test func explicitAttachTabRequestReattachesEvenWithoutATransition() {
+    @Test func explicitAttachRequestReattachesEvenWithoutATransition() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1", tab: .attach)
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
 
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
@@ -224,7 +318,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
@@ -242,7 +336,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .stale)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
@@ -294,7 +388,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .stale)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
@@ -313,7 +407,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .stale)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
@@ -338,7 +432,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .stale)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
 
             // Provider is STILL unhealthy (no recovery) — confirm the block
@@ -360,7 +454,7 @@ struct RemoteAttachStateTests {
             seedProvider(state, name: "acme", health: .stale)
             for i in 0..<6 { seedSession(state, provider: "acme", id: "s\(i)") }
             for i in 0..<6 {
-                state.selectRemoteSession(provider: "acme", sessionID: "s\(i)")
+                state.selectRemoteSession(provider: "acme", sessionID: "s\(i)", reattach: true)
                 state.markRemoteSessionDetached(sel("acme", "s\(i)"), exitCode: 1)
             }
             for i in 0..<6 {
@@ -462,6 +556,70 @@ struct RemoteAttachStateTests {
         }
     }
 
+    // MARK: - Exited sessions are never attached
+
+    @Test func selectingAnExitedSessionNeverAttaches() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1", processState: .exited)
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+        }
+    }
+
+    /// A session that exits while attached drops out of the attached set,
+    /// and its viewer's own exit afterwards does not bring it back through
+    /// the reconnect path once provider health is ok.
+    @Test func aSessionThatExitsWhileAttachedIsDetachedAndNotReattached() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+            #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            state.remoteSessions = []
+            seedSession(state, provider: "acme", id: "s1", processState: .exited)
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+
+            state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 1)
+            seedProvider(state, name: "acme", health: .ok)
+            #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
+            #expect(!state.attachedRemoteSelections(now: Date().addingTimeInterval(3600))
+                .contains(sel("acme", "s1")))
+        }
+    }
+
+    // MARK: - remoteSessionAttachesWhenSelected
+
+    @Test func attachesWhenSelectedForAnEligibleRunningSession() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "s1")
+            // Browsing alone never attaches; an explicit Attach records intent.
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("acme", "s1")))
+            state.reattachRemoteSession(sel("acme", "s1"))
+            #expect(state.remoteSessionAttachesWhenSelected(sel("acme", "s1")))
+        }
+    }
+
+    @Test func doesNotAttachWhenSelectedOnceDetachedExitedOrUnauthenticated() {
+        withState { state in
+            seedProvider(state, name: "acme")
+            seedSession(state, provider: "acme", id: "detached")
+            seedSession(state, provider: "acme", id: "exited", processState: .exited)
+            state.markRemoteSessionDetached(sel("acme", "detached"), exitCode: 0)
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("acme", "detached")))
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("acme", "exited")))
+
+            seedProvider(state, name: "other", health: .needsAuth)
+            seedSession(state, provider: "other", id: "s1")
+            #expect(!state.remoteSessionAttachesWhenSelected(sel("other", "s1")))
+        }
+    }
+
     // MARK: - Provider health gates first-ever attach
 
     /// A NEVER-attached session under an already-`.needsAuth` provider must
@@ -475,7 +633,7 @@ struct RemoteAttachStateTests {
 
             #expect(!state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
     }
@@ -491,7 +649,7 @@ struct RemoteAttachStateTests {
 
             #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
     }
@@ -505,7 +663,7 @@ struct RemoteAttachStateTests {
 
             #expect(state.attachEligibleRemoteSelections.contains(sel("acme", "s1")))
 
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             #expect(state.attachedRemoteSelections.contains(sel("acme", "s1")))
         }
     }
@@ -516,7 +674,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .needsAuth)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             #expect(!state.attachedRemoteSelections.contains(sel("acme", "s1")))
 
             seedProvider(state, name: "acme", health: .ok)
@@ -542,7 +700,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme", health: .needsAuth)
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 4)
 
             let pending = state.pendingReconnectRemoteSessions[sel("acme", "s1")]
@@ -653,14 +811,14 @@ struct RemoteAttachStateTests {
     /// The core "survives navigating away" case: once nothing is selected
     /// (mirrors a worktree/repo/scratch section becoming active, which sets
     /// `selectedRemoteSession = nil`), the host selection falls back to the
-    /// most-recently-viewed remote session rather than going nil.
-    @Test func hostSelectionFallsBackToMostRecentlyViewedOnceNothingIsSelected() {
+    /// most-recent attachment request rather than going nil.
+    @Test func hostSelectionFallsBackToMostRecentAttachmentOnceNothingIsSelected() {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
             seedSession(state, provider: "acme", id: "s2")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s2")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+            state.selectRemoteSession(provider: "acme", sessionID: "s2", reattach: true)
 
             // Simulate navigating to a worktree section (AppState+Worktrees.swift
             // clears `selectedRemoteSession` on that transition).
@@ -676,7 +834,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
             // The daemon no longer reports s1 at all (dismissed elsewhere).
@@ -690,7 +848,7 @@ struct RemoteAttachStateTests {
         withState { state in
             seedProvider(state, name: "acme")
             seedSession(state, provider: "acme", id: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
             state.markRemoteSessionDetached(sel("acme", "s1"), exitCode: 0)
 
             state.pruneRemoteSessionState(toKnownSessions: state.remoteSessions)

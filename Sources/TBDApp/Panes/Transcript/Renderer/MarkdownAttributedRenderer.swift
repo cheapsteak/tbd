@@ -55,15 +55,24 @@ enum MarkdownAttributedRenderer {
     }
 
     /// Splits `markdown` into an ordered list of typed `MessageBlock`s: runs of
-    /// consecutive non-table top-level blocks are rendered into one `.prose`
-    /// `NSAttributedString` each (via the SAME visitor logic as `render`), and a
-    /// `Table` node becomes a `.table` block carrying its `TranscriptTableData`.
+    /// consecutive non-table blocks are rendered into one `.prose`
+    /// `NSAttributedString` each (via the SAME visitor logic as `render`), and
+    /// every `Table` node becomes a `.table` block carrying its
+    /// `TranscriptTableData`.
     ///
     /// Unlike `render`, prose is rendered WITHOUT touching TextKit-2 attachments —
     /// tables are broken out as native blocks instead — so the bubble cell can lay
     /// prose out on TextKit 1 (fast, exact `usedRect`) and host the table as its
-    /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
-    /// stay inside prose with unchanged inline rendering. (#129)
+    /// own view. That holds for a table NESTED in a list item or blockquote too:
+    /// the visitor lifts it out (`liftsNestedTables`) and the enclosing prose is
+    /// split around it in document order, because a card attachment draws only
+    /// through TextKit 2's `viewProvider` and would vanish on the TextKit 1 prose
+    /// view. The trade-off: a lifted table renders flush-left as its own block,
+    /// and text after it within the same list item or quote continues in a new
+    /// prose block. That text keeps its paragraph style — the item's hanging
+    /// indent or the quote's indent — but no marker is drawn for it. Code blocks,
+    /// lists, blockquotes, paragraphs, and headings all stay inside prose with
+    /// unchanged inline rendering. (#129)
     ///
     /// `recognizePastes` is for USER prompts only: it pulls Claude Code's
     /// `<pasted_content id="…">` spans out first (`TranscriptPastedContent`) and
@@ -76,7 +85,7 @@ enum MarkdownAttributedRenderer {
         linkResolver: TranscriptPathResolver?,
         recognizePastes: Bool = false
     ) -> [MessageBlock] {
-        var visitor = AttributedStringVisitor(theme: theme)
+        var visitor = AttributedStringVisitor(theme: theme, liftsNestedTables: true)
         var blocks: [MessageBlock] = []
         var proseRun = NSMutableAttributedString()
 
@@ -84,6 +93,46 @@ enum MarkdownAttributedRenderer {
             guard proseRun.length > 0 else { return }
             blocks.append(.prose(finalizedProse(proseRun, theme: theme, linkResolver: linkResolver)))
             proseRun = NSMutableAttributedString()
+        }
+
+        // Appends one rendered top-level block to the prose run, splitting it
+        // at each table the visitor lifted out of a list item or blockquote:
+        // the prose before the placeholder, then the table as its own block,
+        // then the prose after it. A slice before a table loses any trailing
+        // list markers (an item that OPENS with a table would otherwise leave
+        // a lone "• " or "2. " — alone, or after the previous item's text).
+        // A slice that follows a table loses its leading newlines so the next
+        // prose block does not open on a blank line. A slice left with only
+        // whitespace (the table's own terminator, the wrapper's paragraph
+        // break) is dropped.
+        func appendRendered(_ rendered: NSAttributedString) {
+            func appendSlice(_ range: NSRange, precedesTable: Bool) {
+                guard range.length > 0 else { return }
+                let slice = NSMutableAttributedString(attributedString: rendered.attributedSubstring(from: range))
+                if range.location > 0 {
+                    let ns = slice.string as NSString
+                    var start = 0
+                    while start < ns.length, ns.character(at: start) == 0x0A { start += 1 }
+                    if start > 0 { slice.deleteCharacters(in: NSRange(location: 0, length: start)) }
+                }
+                if precedesTable { Self.trimTrailingListMarkers(slice) }
+                guard !slice.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                proseRun.append(slice)
+            }
+            var cursor = 0
+            let full = NSRange(location: 0, length: rendered.length)
+            rendered.enumerateAttribute(.tbdLiftedTable, in: full, options: []) { value, range, _ in
+                guard let lifted = value as? LiftedTable else { return }
+                appendSlice(NSRange(location: cursor, length: range.location - cursor), precedesTable: true)
+                flushProse()
+                blocks.append(.table(lifted.data))
+                cursor = NSMaxRange(range)
+            }
+            if cursor == 0 {
+                proseRun.append(rendered)
+            } else {
+                appendSlice(NSRange(location: cursor, length: rendered.length - cursor), precedesTable: false)
+            }
         }
 
         // Attached-image markers are pulled out BEFORE markdown parsing: the
@@ -104,7 +153,7 @@ enum MarkdownAttributedRenderer {
                             let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
                             if data.columnCount > 0 { blocks.append(.table(data)) }
                         } else {
-                            proseRun.append(visitor.visit(child))
+                            appendRendered(visitor.visit(child))
                         }
                     }
                 }
@@ -133,6 +182,32 @@ enum MarkdownAttributedRenderer {
         return blocks
     }
 
+    /// Deletes the trailing run of characters the visitor marked
+    /// `.tbdListMarker`, together with the whitespace and newlines around
+    /// them, from the end of `slice`. That run is the "• " or "2. " of a list
+    /// item (possibly nested) whose content opens with a lifted table: it
+    /// belongs to the table, which draws without a marker, so left in place it
+    /// would draw as a lone marker at the end of the prose before the table.
+    /// A slice that does not end in a marker is left untouched.
+    private static func trimTrailingListMarkers(_ slice: NSMutableAttributedString) {
+        let ns = slice.string as NSString
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        var end = ns.length
+        var sawMarker = false
+        while end > 0 {
+            if slice.attribute(.tbdListMarker, at: end - 1, effectiveRange: nil) != nil {
+                sawMarker = true
+            } else if let scalar = Unicode.Scalar(ns.character(at: end - 1)), whitespace.contains(scalar) {
+                // Whitespace between or around markers goes with them.
+            } else {
+                break
+            }
+            end -= 1
+        }
+        guard sawMarker else { return }
+        slice.deleteCharacters(in: NSRange(location: end, length: ns.length - end))
+    }
+
     /// Back-fills body font/color onto runs that didn't set their own — the same
     /// finalization `render` applies, factored out so `renderBlocks` produces
     /// identically-styled prose. Returns an immutable copy.
@@ -142,6 +217,9 @@ enum MarkdownAttributedRenderer {
         linkResolver: TranscriptPathResolver?
     ) -> NSAttributedString {
         let full = NSRange(location: 0, length: run.length)
+        // The list-marker tag only serves `renderBlocks`' split; it never
+        // leaves the renderer.
+        run.removeAttribute(.tbdListMarker, range: full)
         run.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
             if value == nil { run.addAttribute(.font, value: theme.bodyFont, range: range) }
         }
@@ -180,8 +258,29 @@ enum MessageBlock {
     case image(TranscriptImageAttachment)
 }
 
+private extension NSAttributedString.Key {
+    /// Marks the one-character placeholder the visitor leaves where it lifted a
+    /// nested table out of the prose (`liftsNestedTables`). Its value is a
+    /// `LiftedTable` carrying the table's data. `renderBlocks` splits the prose
+    /// at every such character, so it never reaches a rendered string.
+    static let tbdLiftedTable = NSAttributedString.Key("tbdLiftedTable")
+
+    /// Marks a list item's "• " or "1. " marker run while `liftsNestedTables`
+    /// is set, so `renderBlocks` can tell a slice holding only markers from one
+    /// with content. Stripped in `finalizedProse`.
+    static let tbdListMarker = NSAttributedString.Key("tbdListMarker")
+}
+
+/// The value of a `.tbdLiftedTable` placeholder: the lifted table itself. A
+/// reference type, so each placeholder's value is distinct by identity and
+/// attribute enumeration never coalesces two tables into one run.
+private final class LiftedTable {
+    let data: TranscriptTableData
+    init(_ data: TranscriptTableData) { self.data = data }
+}
+
 /// Walks the swift-markdown AST and appends styled runs. Only ever instantiated
-/// and used on the main actor (inside `MarkdownAttributedRenderer.render`). (#129)
+/// and used on the main actor (inside `MarkdownAttributedRenderer`). (#129)
 ///
 /// `@MainActor` keeps theme access (non-Sendable `NSFont`/`NSColor`) compiler-checked.
 /// The `@preconcurrency` on the `MarkupVisitor` conformance reconciles the nonisolated
@@ -191,6 +290,14 @@ private struct AttributedStringVisitor {
     typealias Result = NSAttributedString
 
     let theme: TranscriptTextTheme
+
+    /// When set, `visitTable` does not emit a `TranscriptCardAttachment`: it
+    /// leaves a placeholder character marked `.tbdLiftedTable`, carrying the
+    /// table's data, for `renderBlocks` to split at; and list-item markers are
+    /// tagged `.tbdListMarker`. The live bubble path sets it, because its prose
+    /// views are TextKit 1 and a card attachment only draws through TextKit 2.
+    /// `render` leaves it off.
+    var liftsNestedTables = false
 }
 
 extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
@@ -338,6 +445,14 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         // attachment hosting a real SwiftUI grid. (#129)
         let data = MarkdownTable.data(table, theme: theme, render: { self.visit($0) })
         guard data.columnCount > 0 else { return NSAttributedString() }
+        if liftsNestedTables {
+            let out = NSMutableAttributedString(
+                string: "\u{FFFC}",
+                attributes: [.tbdLiftedTable: LiftedTable(data)]
+            )
+            out.append(NSAttributedString(string: "\n"))
+            return out
+        }
         let tableView = TranscriptTableView(
             data: data,
             borderColor: Color(theme.tableBorderColor)
@@ -389,7 +504,8 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
     }
 
     private mutating func visitListItem(_ item: ListItem, marker: String) -> NSAttributedString {
-        let inner = NSMutableAttributedString(string: marker)
+        let markerAttributes: [NSAttributedString.Key: Any] = liftsNestedTables ? [.tbdListMarker: true] : [:]
+        let inner = NSMutableAttributedString(string: marker, attributes: markerAttributes)
         // Render the item's content INLINE rather than via `visit(child)`. A
         // list item's text is wrapped by swift-markdown in a `Paragraph`, and
         // `visitParagraph` stamps the full 16pt inter-paragraph spacing plus a

@@ -9,21 +9,11 @@ import Testing
 @Suite("MarkdownPaneLayout")
 struct MarkdownPaneLayoutTests {
 
-    @Test("flag off keeps a single markdown file in the scrolling stack")
-    func flagOffStaysInScrollView() {
+    @Test("a single markdown file gets the whole pane")
+    func singleMarkdownTakesFullPane() {
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: false,
-            selectedFiles: ["/repo/README.md"],
-            useWebView: false
-        ) == false)
-    }
-
-    @Test("flag on gives a single markdown file the whole pane")
-    func flagOnTakesFullPane() {
-        #expect(MarkdownPaneLayout.usesFullPaneWebView(
-            showSourceCode: false,
-            selectedFiles: ["/repo/README.md"],
-            useWebView: true
+            selectedFiles: ["/repo/README.md"]
         ))
     }
 
@@ -31,8 +21,7 @@ struct MarkdownPaneLayoutTests {
     func markdownExtensionQualifies() {
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: false,
-            selectedFiles: ["/repo/NOTES.MARKDOWN"],
-            useWebView: true
+            selectedFiles: ["/repo/NOTES.MARKDOWN"]
         ))
     }
 
@@ -40,8 +29,7 @@ struct MarkdownPaneLayoutTests {
     func sourceCodeModeStaysInScrollView() {
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: true,
-            selectedFiles: ["/repo/README.md"],
-            useWebView: true
+            selectedFiles: ["/repo/README.md"]
         ) == false)
     }
 
@@ -49,19 +37,17 @@ struct MarkdownPaneLayoutTests {
     func nonMarkdownStaysInScrollView() {
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: false,
-            selectedFiles: ["/repo/main.swift"],
-            useWebView: true
+            selectedFiles: ["/repo/main.swift"]
         ) == false)
     }
 
     @Test("a multi-file selection falls back to the scrolling stack")
     func multiFileFallsBack() {
-        // Known limitation of the soak: N stacked webviews would each collapse
-        // to zero height, so multi-select keeps the MarkdownUI rendering.
+        // N stacked webviews would each collapse to zero height, so a
+        // multi-file selection shows markdown as highlighted source.
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: false,
-            selectedFiles: ["/repo/README.md", "/repo/CHANGELOG.md"],
-            useWebView: true
+            selectedFiles: ["/repo/README.md", "/repo/CHANGELOG.md"]
         ) == false)
     }
 
@@ -69,8 +55,7 @@ struct MarkdownPaneLayoutTests {
     func emptySelectionStaysInScrollView() {
         #expect(MarkdownPaneLayout.usesFullPaneWebView(
             showSourceCode: false,
-            selectedFiles: [],
-            useWebView: true
+            selectedFiles: []
         ) == false)
     }
 }

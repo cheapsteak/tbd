@@ -23,13 +23,54 @@ enum HibernateEligibilityPolicy: Sendable {
         inputVetoEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
+    /// The park half of an in-place profile swap.
+    ///
+    /// A fourth policy rather than a switch on the others, because it is the
+    /// only one that deliberately bypasses the live rails: the user asked for
+    /// this session to move accounts, the tmux arm of the same action has
+    /// never honoured any of them, and a "Switch account" that refuses on a
+    /// re-adopted row until its screen has been observed again would refuse
+    /// exactly the case a user reaching for it after a daemon restart is in.
+    /// See `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md`,
+    /// "The swap interrupts regardless, matching tmux".
+    case profileSwap
+}
+
+extension HibernateEligibilityPolicy {
+    /// Whether this park is judged by the rails that read live state — the
+    /// typed screen and the transcript tail — as opposed to the row alone.
+    ///
+    /// One predicate, named once, so the rails that do answer to it cannot
+    /// come to disagree about which policies they answer to.
+    ///
+    /// **What it reaches.** Three rails consult it: the holder park's
+    /// fail-closed screen reading and its typed-input check
+    /// (`HibernationCoordinator+Holder`), and the transcript-tail rail both
+    /// transports share (`transcriptTailRefusal`). A park it answers false for
+    /// still reads the screen once, for the display capture alone
+    /// (`holderSwapBackdrop`): the frame is kept as the row's
+    /// `suspendedSnapshot` like any other park's, and nothing it shows — nor
+    /// whether it can be read at all — refuses the park. The tmux leg's own
+    /// typed-input rail, which reads the pane through `capturePaneWithAnsi`
+    /// before taking the server lock, is **not** gated by this predicate and refuses under every
+    /// policy. That is not an oversight left to fix: `.profileSwap` is
+    /// holder-only today — `handleTerminalSwapProfile` branches on
+    /// `transport == .holder` and no other caller passes the policy — so a
+    /// tmux park never sees it, and gating a rail no `.profileSwap` park can
+    /// reach would be a behaviour change dressed as consistency.
+    var honoursLiveRails: Bool {
+        if case .profileSwap = self { return false }
+        return true
+    }
 }
 
 /// How an unparked terminal's pane disagreed with the row that claims it is
 /// awake. Only states tmux gave a positive answer for appear here; "the probe
 /// failed" is deliberately not a case, because it is not a disagreement.
 public enum UnparkedPaneDisagreement: Equatable, Sendable {
-    /// tmux cannot find the pane — it, its window, or the whole server is gone.
+    /// tmux answered about a reachable server and the pane is not on it — it,
+    /// or its window, is gone. A server that could not be REACHED is not this
+    /// case and never becomes a disagreement; it is `WakeResult.paneUnreadable`.
     case paneMissing
     /// The pane object survives (`remain-on-exit`) but its process has exited,
     /// so the row's "awake" refers to a shell, not a session.
@@ -55,6 +96,14 @@ public enum WakeResult: Equatable, Sendable {
     /// rather than silently discarded. Nothing is respawned — see
     /// `classifyUnparkedWake` for why repair is a separate change.
     case sessionGone(paneID: String, detail: UnparkedPaneDisagreement)
+    /// The row is NOT parked and its pane could not be READ: no tmux server
+    /// answered on the socket the daemon resolved. Distinct from `.sessionGone`
+    /// because nothing disagreed — the question was never answered — and
+    /// distinct from `.notHibernated` because the caller must learn the check
+    /// failed rather than be told "already awake, nothing to do". Nothing was
+    /// woken and any `initialPrompt` was NOT delivered, so an autonomous caller
+    /// has to know it should retry rather than assume delivery.
+    case paneUnreadable(paneID: String, server: String)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     case inFlight        // a wake for this terminal is already respawning
@@ -134,7 +183,8 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight wake respawn, so a double-focus can't
     /// spawn two `claude --resume` processes into the same window.
-    private var wakesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var wakesInFlight: Set<UUID> = []
 
     /// Invoked after EVERY `ensureServer` on the wake-recreate path (whether or
     /// not a server was actually created — the downstream control-mode
@@ -146,7 +196,30 @@ public actor HibernationCoordinator {
 
     /// Terminal ids with an in-flight hibernate, so a manual "Hibernate now"
     /// racing the idle sweep (or two sweeps) can't respawn-to-shell twice.
-    private var hibernatesInFlight: Set<UUID> = []
+    // Not private: `HibernationCoordinator+Holder` claims both.
+    var hibernatesInFlight: Set<UUID> = []
+
+    /// Terminal ids with an in-flight in-place profile swap, held across the
+    /// WHOLE of that swap rather than across either half of it.
+    ///
+    /// The swap is a composition — park, re-home, wake — and the two
+    /// singleflight sets above release between them: the park's claim is gone
+    /// the instant the park returns, and the wake's is not taken until several
+    /// suspension points later. The row is parked in that gap and nothing owns
+    /// it, so the app's wake-on-focus (which wakes exactly the active tab's
+    /// parked terminal, and the tab a user just pressed "Switch account" on is
+    /// the active tab) could un-park it and start a fresh session under the
+    /// OLD account before the re-home landed. The re-home's compare-and-set
+    /// then refused the write, which is safe but leaves the user told their
+    /// session is parked on its old account when it is in fact awake there.
+    ///
+    /// So the swap claims the row before it parks and releases it after the
+    /// wake, and the public `wake` answers a claimed row `.inFlight`. The
+    /// swap's OWN halves are exempt by construction, not by a flag a caller
+    /// could forget to pass: `performHibernate` consults only
+    /// `hibernatesInFlight`, and the swap wakes through
+    /// `wakeHolderForProfileSwap`, which consults only the two sets above.
+    private var swapsInFlight: Set<UUID> = []
 
     /// Debounce after a terminal first crosses the idle threshold: the sweep
     /// marks it `pendingKillSince`, and only actually hibernates on a LATER
@@ -238,6 +311,13 @@ public actor HibernationCoordinator {
     /// `nil` from the seam means the same thing as no reader: nothing answered.
     /// A throw means the same thing as a refused projection.
     var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+
+    /// Whether a recorded holder pid is still a live `TBDHolder` — the
+    /// holder half of `HolderChildDisposition.sessionHasEnded`. Production uses the shared
+    /// `HolderSpawner.isLiveHolder`; tests replace it through
+    /// `setHolderProcessIsLive`, because a fixture's holder pid is a number
+    /// the real kernel answers for.
+    var holderProcessIsLive: @Sendable (Int32) -> Bool = { HolderSpawner.isLiveHolder(pid: $0) }
 
     /// How the holder park observes and ends a child process. Injected so a
     /// test can state "the job declined `/exit`" in one line instead of
@@ -335,6 +415,11 @@ public actor HibernationCoordinator {
         modelProxySupervisor = supervisor
     }
 
+    /// Replace the holder liveness check. Tests only — see `holderProcessIsLive`.
+    func setHolderProcessIsLive(_ isLive: @escaping @Sendable (Int32) -> Bool) {
+        holderProcessIsLive = isLive
+    }
+
     /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
     func setHolderScreenOracle(
         _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
@@ -377,6 +462,61 @@ public actor HibernationCoordinator {
         }
         return await performHibernate(
             terminal: terminal, reason: .manual, policy: .manual)
+    }
+
+    /// Claim this row for the whole of an in-place profile swap, refusing if
+    /// any park, wake or other swap of it is already in flight.
+    ///
+    /// Paired with `releaseSwap(terminalID:)`, which the caller must reach on
+    /// every exit including a thrown one — a claim that leaks makes the row
+    /// unwakeable until the daemon restarts.
+    ///
+    /// - Returns: true when the claim was taken, false when it was refused and
+    ///   the caller must change nothing.
+    func claimSwap(terminalID: UUID) -> Bool {
+        guard !hibernatesInFlight.contains(terminalID),
+              !wakesInFlight.contains(terminalID),
+              !swapsInFlight.contains(terminalID) else { return false }
+        swapsInFlight.insert(terminalID)
+        return true
+    }
+
+    /// Release the claim `claimSwap(terminalID:)` took. Idempotent, so the
+    /// caller may release on a path it is not certain claimed.
+    func releaseSwap(terminalID: UUID) {
+        swapsInFlight.remove(terminalID)
+    }
+
+    /// Whether an in-place profile swap currently holds this row. For tests
+    /// and for the assertions that pin the claim's lifetime.
+    func isSwapInFlight(terminalID: UUID) -> Bool {
+        swapsInFlight.contains(terminalID)
+    }
+
+    /// Park a session because an in-place profile swap is about to re-home it
+    /// onto another account and resume it there.
+    ///
+    /// The park half of `terminal.swapProfile`'s holder arm, and the only
+    /// caller of `.profileSwap`. `.auto` rather than `.manual` as the reason,
+    /// deliberately: a daemon that dies between this park and the wake that
+    /// follows it leaves a row the next focus-wake heals, where a manual park
+    /// is excluded from wake-on-focus and would sit there until somebody woke
+    /// it by hand.
+    ///
+    /// It does not check the transport. The park mechanic exists on both, and
+    /// `performHibernate` already routes a holder row to the holder arm; what
+    /// the swap handler decides is which rows it calls this for — and today it
+    /// calls this for **holder rows only**, because `handleTerminalSwapProfile`
+    /// branches on `transport == .holder` before reaching the arm that calls
+    /// here. So `.profileSwap` never reaches a tmux park, and the rails a tmux
+    /// park applies unconditionally (its pre-lock typed-input check) are
+    /// untouched by this policy existing. See `honoursLiveRails`.
+    func parkForProfileSwap(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        return await performHibernate(
+            terminal: terminal, reason: .auto, policy: .profileSwap)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
@@ -537,11 +677,10 @@ public actor HibernationCoordinator {
         // unresumable jsonl (#18880). Only park when the last line is
         // complete JSON. Missing/empty transcript is allowed (nothing to
         // corrupt); the resume will just find no prior turns.
-        if let transcriptPath = terminal.transcriptPath,
-           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
-           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+        if let refusal = Self.transcriptTailRefusal(
+            transcriptPath: terminal.transcriptPath, policy: policy) {
             logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
-            return .notEligible(reason: "Transcript is mid-write; try again shortly")
+            return refusal
         }
 
         do {
@@ -801,7 +940,47 @@ public actor HibernationCoordinator {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
             }
             return nil
+
+        case .profileSwap:
+            // The one refusal this policy keeps. The swap handler routes an
+            // already-parked row down the cold path before it ever asks for a
+            // park, so reaching here means the row parked between that read
+            // and this call — a focus-wake, or the idle sweep, either mid-ladder
+            // or freshly complete. This is a refusal to the swap, not a signal
+            // to proceed: `holderInPlaceSwapUnderClaim` treats `.alreadyHibernated`
+            // as a hard error, records nothing, and never calls
+            // `reHomeParkedRow` — it tells the caller to retry, and a retry
+            // against a row whose park has by then completed takes the cold
+            // path instead. Every other rail is deliberately absent: the
+            // handler has already established that this is a resumable Claude
+            // session, and refusing a *working* session is precisely what this
+            // policy exists not to do.
+            guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
+            return nil
         }
+    }
+
+    /// The park's transcript-tail rail: the refusal a mid-write transcript
+    /// earns, or nil when the tail is complete, absent, or the policy does not
+    /// honour the rail.
+    ///
+    /// Killing claude mid-write can leave an unresumable jsonl, so both
+    /// transports ask this before they touch the process. Named and shared so
+    /// the tmux park, the holder park and the test assert one decision rather
+    /// than three copies of it — and so the `.profileSwap` bypass is stated
+    /// once. An unreadable or missing file is not a refusal: there is nothing
+    /// there to corrupt.
+    static func transcriptTailRefusal(
+        transcriptPath: String?,
+        policy: HibernateEligibilityPolicy
+    ) -> HibernateResult? {
+        guard policy.honoursLiveRails else { return nil }
+        guard let transcriptPath,
+              let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
+              !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) else {
+            return nil
+        }
+        return .notEligible(reason: "Transcript is mid-write; try again shortly")
     }
 
     /// Confirm the respawn-to-shell actually replaced claude, and log any
@@ -869,11 +1048,18 @@ public actor HibernationCoordinator {
     /// primitive that would drift from it. That probe already answers both
     /// halves of the question: is a process there, and is the pane still ours.
     ///
-    /// Only a POSITIVE disagreement downgrades the answer, exactly as on the
-    /// send path. A probe that merely threw keeps the benign historical no-op:
-    /// a failed tmux call proves nothing, and tmux calls fail spuriously
-    /// precisely when the machine is loaded enough for the session to be alive.
-    /// A pane carrying no identity at all is likewise left alone.
+    /// Only a POSITIVE disagreement downgrades the answer to `.sessionGone`,
+    /// exactly as on the send path. A probe that merely threw keeps the benign
+    /// historical no-op: a failed tmux call proves nothing, and tmux calls fail
+    /// spuriously precisely when the machine is loaded enough for the session
+    /// to be alive. A pane carrying no identity at all is likewise left alone.
+    ///
+    /// A probe that ran and reached no server is the third answer,
+    /// `.paneUnreadable`: like a throw it is not a disagreement, but unlike a
+    /// throw it is a fact the caller can act on — it names the server and pane
+    /// that could not be consulted, so an autonomous caller learns its prompt
+    /// was not delivered instead of reading "already awake" off a check that
+    /// never happened.
     ///
     /// This reports; it deliberately does NOT repair. Respawning an unparked
     /// row would make tmux authoritative over the parked flag, and then one
@@ -915,10 +1101,23 @@ public actor HibernationCoordinator {
                   paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
             else { return .notHibernated }
             disagreement = .paneBelongsToAnotherTerminal(actualTerminalID: paneTerminalID)
-        case .missing:
+        case .absent:
             disagreement = .paneMissing
         case .dead:
             disagreement = .processExited
+        case .unreachable:
+            // The probe ran and reached no server. That is not a
+            // disagreement — nothing answered to disagree — so it must not
+            // become `.sessionGone`, which asserts the session is gone. Report
+            // the failed read as itself so the caller knows its prompt was not
+            // delivered and a retry is the right move.
+            logger.warning("""
+                wake: could not reach tmux server \(worktree.tmuxServer, privacy: .public) to \
+                consult pane \(terminal.tmuxPaneID, privacy: .public) for unparked terminal \
+                \(terminal.id, privacy: .public) — reporting the failed read, not sessionGone
+                """)
+            return .paneUnreadable(
+                paneID: terminal.tmuxPaneID, server: worktree.tmuxServer)
         }
 
         logger.warning("""
@@ -962,6 +1161,10 @@ public actor HibernationCoordinator {
         // the replacement process.
         guard !hibernatesInFlight.contains(terminalID) else { return .inFlight }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
+        // An in-place profile swap owns this row from before its park until
+        // after its wake. A focus-wake landing in the gap between those halves
+        // would un-park the row under the account the swap is moving it off.
+        guard !swapsInFlight.contains(terminalID) else { return .inFlight }
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
 
@@ -1693,6 +1896,11 @@ public actor HibernationCoordinator {
     /// checks BOTH the authoritative `hibernatedAt` and the legacy `suspendedAt`
     /// so a row parked by either path is reconciled, and `clearHibernated` nils
     /// both. Called once on daemon startup.
+    ///
+    /// The window and process checks are joined by one more: if the pane's own
+    /// `@tbd_terminal_id` names a DIFFERENT terminal, the row stays parked even
+    /// though the liveness checks passed — see the guard below for why that is
+    /// the only identity signal strong enough to override them.
     public func reconcileOnStartup() async {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
@@ -1717,7 +1925,55 @@ public actor HibernationCoordinator {
                 continue
             }
 
-            // Window and process are alive — clear the parked state
+            // Refuse ONLY on a positive identity mismatch: the pane carries
+            // `@tbd_terminal_id` (every spawn stamps it — `createWindow` and
+            // `respawnWindow`) and it names a DIFFERENT terminal. A tmux
+            // server restart can reuse pane ids, and the window/process
+            // checks above alone cannot tell this terminal's own pane from a
+            // stranger's that happens to sit at the same coordinate and also
+            // runs `claude`. A false park is recoverable by `wake`; a false
+            // un-park is not.
+            //
+            // Matched jointly against `.live` AND `.dead` — mirroring the
+            // sibling reconciler's identical check in
+            // `WorktreeLifecycle+Reconcile.swift` — because `.dead`'s own doc
+            // comment exists precisely so a stranger pane whose process exited
+            // in the gap between this probe and the `paneCurrentCommand` check
+            // above still reads as a mismatch instead of silently slipping
+            // through unmatched.
+            //
+            // When the option is ABSENT — a pane spawned before this stamp
+            // existed — fall back to today's behavior (the window/process
+            // checks above) rather than refusing: the stamp is deliberately
+            // not backfilled onto existing panes (`stampTerminalID`'s doc
+            // comment), so treating "no answer" the same as "wrong answer"
+            // would leave every pre-existing session parked after every
+            // daemon restart — reproducing the "sessions keep falling asleep"
+            // symptom this reconcile pass exists to prevent. `.absent` (the
+            // pane vanished between the liveness checks above and this probe),
+            // `.unreachable` (the server could not be consulted) and a thrown
+            // probe error are each their own kind of
+            // inconclusive and, unlike an absent id, are not evidence the row
+            // is safe to un-park — mirroring the sibling reconciler's "an
+            // unreadable identity is not evidence of staleness," they leave
+            // the row parked for a later sweep to retry rather than guessing.
+            do {
+                switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
+                case .live(let paneTerminalID), .dead(let paneTerminalID):
+                    if let paneTerminalID,
+                       paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                        continue
+                    }
+                case .absent, .unreachable:
+                    continue
+                }
+            } catch {
+                logger.warning("startup: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public) — leaving it parked")
+                continue
+            }
+
+            // Window and process are alive, and the pane raised no identity
+            // objection — clear the parked state
             do {
                 try await db.terminals.clearHibernated(id: terminal.id)
                 logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")

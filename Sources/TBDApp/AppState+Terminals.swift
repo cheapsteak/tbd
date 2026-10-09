@@ -637,6 +637,7 @@ extension AppState {
         terminalPresentationOrderObservedAt.removeValue(forKey: terminalID)
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
+        if limitHits[terminalID] != nil { limitHits.removeValue(forKey: terminalID) }
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {
@@ -773,7 +774,7 @@ extension AppState {
     /// `profileID` pins the session to a specific model profile; when nil the
     /// daemon resolves the profile normally (repo override → global default →
     /// keychain login). `loginSession` marks the terminal as a profile login
-    /// session (daemon auto-types `/login`); it requires `profileID`.
+    /// session (the person types `/login` there); it requires `profileID`.
     ///
     /// Returns the created terminal, or nil on failure — the daemon fails
     /// loud for broken login sessions (e.g. deleted profile), and surfacing

@@ -171,4 +171,31 @@ struct HolderHandbackLedgerTests {
         await ledger.awaitSettled(terminalID: busy)
         #expect(!ledger.isInFlight(terminalID: busy))
     }
+
+    @MainActor
+    @Test("withdraw drops only the task it names, and at once")
+    func withdrawDropsOnlyItsOwnEntry() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let firstGate = Gate()
+        let secondGate = Gate()
+        let first = Task { await firstGate.wait() }
+        let second = Task { await secondGate.wait() }
+
+        ledger.register(terminalID: id, task: first)
+        ledger.withdraw(terminalID: id, task: first)
+        #expect(!ledger.isInFlight(terminalID: id),
+                "a withdrawn entry still read as in flight while its task was running")
+
+        // A newer registration is not the withdrawing caller's to remove.
+        ledger.register(terminalID: id, task: second)
+        ledger.withdraw(terminalID: id, task: first)
+        #expect(ledger.isInFlight(terminalID: id),
+                "withdrawing a superseded task erased the registration that replaced it")
+
+        await firstGate.open()
+        await secondGate.open()
+        await ledger.awaitSettled(terminalID: id)
+        #expect(!ledger.isInFlight(terminalID: id))
+    }
 }

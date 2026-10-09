@@ -6,8 +6,10 @@ import TBDShared
 /// The two narrow writers behind the exit stamp. They are deliberately NOT
 /// `setHibernated` / `clearHibernated`: those mint a session incarnation, cancel
 /// scheduled resumes and clear `suspendedAt`, all of which belong to a park TBD
-/// performed. A hook reporting that Claude left performed no park and must move
-/// exactly two columns.
+/// performed. A hook reporting that Claude left performed no park, so the
+/// session id, incarnation and resume stay untouched — but it does reset
+/// `activityState` to `.idle`, since nothing else will ever retract a stale
+/// `.working` once the process reporting it is gone.
 @Suite("TerminalStore exit stamp")
 struct TerminalExitStampStoreTests {
     private let stamp = Date(timeIntervalSince1970: 1_800_000_000)
@@ -35,6 +37,42 @@ struct TerminalExitStampStoreTests {
         #expect(row.isExitStamped)
         // Untouched: the session is still the one to resume.
         #expect(row.claudeSessionID == "sess-1")
+    }
+
+    /// The bug this stamp exists to fix: a session killed mid-turn — process
+    /// gone, `activityState` still reading the last thing it reported — must
+    /// not go on reading `.working` forever. Nothing else will ever retract
+    /// that once the reporting process is dead.
+    @Test func stampResetsAWorkingActivityStateToIdle() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        try await db.terminals.applyActivityObservation(
+            id: terminal.id, activityState: .working, source: .hookEvent("Stop"),
+            observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+
+        let changed = try await db.terminals.stampSessionExited(
+            id: terminal.id, reportedIncarnationID: nil, at: stamp)
+
+        #expect(changed)
+        let row = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(row.activityState == .idle)
+    }
+
+    /// The mirror: a row that was already idle stays idle — the stamp is
+    /// unconditional, not a transition guard.
+    @Test func stampLeavesAnAlreadyIdleActivityStateIdle() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        try await db.terminals.applyActivityObservation(
+            id: terminal.id, activityState: .idle, source: .hookEvent("Stop"),
+            observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+
+        let changed = try await db.terminals.stampSessionExited(
+            id: terminal.id, reportedIncarnationID: nil, at: stamp)
+
+        #expect(changed)
+        let row = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(row.activityState == .idle)
     }
 
     /// The load-bearing negative. A row TBD deliberately parked already carries

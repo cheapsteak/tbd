@@ -112,7 +112,8 @@ extension WorktreeLifecycle {
         // unchanged since its last successful check is skipped — no merge-base,
         // no merge-tree. On failure (e.g. no origin remote yet) `tips` is empty
         // and every worktree falls through to the ungated legacy path.
-        let tips = (try? await git.refTips(repoPath: repo.path)) ?? [:]
+        let resolvedTips = try? await git.refTips(repoPath: repo.path)
+        let tips = resolvedTips ?? [:]
         let baseTip = tips["origin/\(repo.defaultBranch)"]
         await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
 
@@ -129,6 +130,21 @@ extension WorktreeLifecycle {
             guard let branchTip = tips[wt.branch] else { continue }
             await branchTipTracker.record(
                 repoID: repoID, worktreeID: wt.id, branchTip: branchTip, at: observedAt)
+        }
+
+        // PR-poll trigger: a push moves `origin/<branch>`, and that makes the
+        // worktree's PR check due now. The local tip is deliberately ignored —
+        // a check before the push is wasted. Same tips map, no subprocess.
+        //
+        // Skipped when `refTips` failed: the empty map would read as "no
+        // remote ref" for every worktree, and a first sighting recorded that
+        // way is a nil baseline the next good sweep reports as a push — a
+        // trigger burst across the repo for nothing.
+        await remoteTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
+        if resolvedTips != nil {
+            for wt in worktrees {
+                await remoteTipTracker.observe(worktreeID: wt.id, remoteTip: tips["origin/\(wt.branch)"])
+            }
         }
 
         await withTaskGroup(of: Void.self) { group in
@@ -347,8 +363,26 @@ extension WorktreeLifecycle {
                         recordedEveryKill = false
                         continue
                     }
-                    await captureThenKillWindow(
-                        terminal: terminal, server: current.tmuxServer)
+                    // A holder row takes the holder teardown, as in
+                    // `beginArchiveWorktree`: its tmux coordinates are empty,
+                    // so `captureThenKillWindow` would capture and kill
+                    // nothing while the holder and its job outlive the rows
+                    // deleted below. Its Closed Terminals entry is written
+                    // before the disposal releases the reader it is read from.
+                    if terminal.transport == .holder {
+                        await Self.recordHolderClosedTerminal(
+                            terminal, registry: holderRegistry, history: db.terminalHistory)
+                        if let failure = await disposeHolder(for: terminal) {
+                            logger.warning(
+                                "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
+                            await actuationLog.appendOutcome(
+                                confirms: actuationID, result: .transportFailed, error: failure)
+                            continue
+                        }
+                    } else {
+                        await captureThenKillWindow(
+                            terminal: terminal, server: current.tmuxServer)
+                    }
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .dispatched)
                 }
@@ -786,8 +820,23 @@ extension WorktreeLifecycle {
                                     // attributed for backward compatibility.
                                     continue
                                 }
-                            case .missing:
+                            case .absent:
                                 break
+                            case .unreachable:
+                                // A failed READ, not evidence the pane is gone.
+                                // This is the destructive path — the next lines
+                                // park a session or delete its row — so an "I don't
+                                // know" must leave the row exactly as it is and let
+                                // a later sweep ask again. Treated identically to
+                                // the thrown-consultation case below, because it is
+                                // the same fact arriving by a different route.
+                                logger.warning("""
+                                    reconcile: could not reach tmux server \
+                                    \(wt.tmuxServer, privacy: .public) to consult pane \
+                                    \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                                    \(terminal.id, privacy: .public) — leaving the row untouched
+                                    """)
+                                continue
                             }
                         } catch {
                             // An unreadable identity is not evidence of staleness.
@@ -799,7 +848,7 @@ extension WorktreeLifecycle {
 
                     // Preserve the existing extra safety when the window probe
                     // itself says a Claude window is gone: if Claude is still
-                    // running, retain the row. A pane that answered `.missing` or
+                    // running, retain the row. A pane that answered `.absent` or
                     // with another terminal's identity is already definitive, so
                     // never inspect its current command. An owned dead pane
                     // continued above because remain-on-exit makes it an intended

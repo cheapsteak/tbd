@@ -40,6 +40,72 @@ struct StatusBarView: View {
         )
     }
 
+    /// The bottom-left cluster for a remote row: its `meta.location` and live
+    /// `meta.branch`, each nil when the key is absent or unparseable so it
+    /// hides only its own element. `location` is the verbatim value — shown
+    /// and copied as-is, never tilde-abbreviated, since the remote home is
+    /// unknown.
+    ///
+    /// `nonisolated` for the same reason as `PRChip` below — `StatusBarView`'s
+    /// `View` conformance infers whole-type `@MainActor` isolation onto a
+    /// nested value type, and a main-actor `init` reached from a nonisolated
+    /// context traps at runtime rather than failing to compile.
+    nonisolated struct RemoteStatusLabel: Equatable {
+        let location: String?
+        let branch: String?
+    }
+
+    /// What the bar renders for the single selected worktree. A local row
+    /// (including a landed lane, which is local with an origin) keeps the
+    /// ordinary `LocalWorktree` rendering; a remote row carries only what the
+    /// bar shows for it plus the id its PR chips are read by.
+    nonisolated enum StatusBarSelection: Equatable {
+        case local(LocalWorktree)
+        case remote(worktreeID: UUID, label: RemoteStatusLabel)
+
+        var worktreeID: UUID {
+            switch self {
+            case .local(let worktree): return worktree.worktree.id
+            case .remote(let id, _): return id
+            }
+        }
+    }
+
+    /// The remote row's label, read from the mirror entry for its own
+    /// `(provider, sessionID)` — gone or not, so a stale mirror shows the
+    /// last-known values. The location slot only ever holds a location: with
+    /// no matching session, or no usable key, it is empty, and the provider
+    /// name and session id are never substituted.
+    nonisolated static func remoteStatusLabel(
+        provider: String,
+        sessionID: String,
+        sessions: [RemoteSessionInfo]
+    ) -> RemoteStatusLabel {
+        let meta = sessions.first { $0.provider == provider && $0.payload.id == sessionID }?.payload.meta
+        return RemoteStatusLabel(
+            location: RemoteSessionPayload.metaLocation(meta)?.value,
+            branch: RemoteSessionPayload.metaLiveBranch(meta)
+        )
+    }
+
+    /// nil when nothing is selected, or for a local row with no directory yet
+    /// (the `.creating` placeholder), exactly as `LocalWorktree.init` rules.
+    nonisolated static func statusBarSelection(
+        _ worktree: Worktree?,
+        sessions: [RemoteSessionInfo]
+    ) -> StatusBarSelection? {
+        guard let worktree else { return nil }
+        switch worktree.location {
+        case .local:
+            return LocalWorktree(worktree).map { StatusBarSelection.local($0) }
+        case .remote(let provider, let sessionID):
+            return .remote(
+                worktreeID: worktree.id,
+                label: remoteStatusLabel(provider: provider, sessionID: sessionID, sessions: sessions)
+            )
+        }
+    }
+
     /// Tilde-abbreviates `path` against `home`, matching only whole path
     /// components so a sibling directory like `/Users/meadow` under a home of
     /// `/Users/me` is left alone.
@@ -152,25 +218,27 @@ struct StatusBarView: View {
                 state: state, reason: reason, mergeQueuePosition: mergeQueuePosition)
         }
         /// The PR's title, or nil when it was never observed (a chip lifted
-        /// from a cached `Worktree.prStatus` has none). The hover overlay
-        /// omits the line rather than fabricating a placeholder.
+        /// from a cached `Worktree.prStatus` has none). The hover overlay then
+        /// leads with the reference and state rather than a placeholder.
         let title: String?
         /// When `state` was read. nil = never, which the overlay says out loud
         /// rather than passing the cached state off as current.
         let observedAt: Date?
         /// The worktree's last poll attempt, carried whole rather than as a
-        /// rendered clause so the overlay composes its caption through the same
+        /// rendered clause so the overlay composes its warning through the same
         /// `PRFreshness` the toolbar and sidebar use. A chip that omitted it
         /// would render the more confident of two readings of one fact.
         let observation: PRObservation?
     }
 
-    /// How many chips the bar shows before the rest collapse into `+N`.
+    /// How many chips the bar shows before the rest collapse into `+N`. When
+    /// two or more PRs are finished and fold into the done chip, the limit
+    /// counts open PRs only (`PRBindingPresentation.statusBarGroups`).
     ///
     /// Seven is a judgement about how many numbers are worth scanning at a
     /// glance; past that the dropdown is the better surface. It is not a width
     /// calculation — nothing here consults the available width, and the
-    /// overflow count is a pure function of how many bindings there are.
+    /// overflow count is a pure function of the bindings and their states.
     ///
     /// It buys no width safety either, and the `layoutPriority(-1)` it carries
     /// does not provide any: the path/branch cluster beside it is at the same
@@ -182,10 +250,6 @@ struct StatusBarView: View {
     /// the real answer and is deliberately not built here.
     nonisolated static let prChipLimit = 7
 
-    /// The chip row for `bindings`, plus how many did not fit. Pure: delegates
-    /// the cap and the bind-order guarantee to `PRBindingPresentation` so the
-    /// status bar cannot disagree with the toolbar about which PRs are shown
-    /// or in what order.
     /// Whether the bar carries the selected worktree's first-message entry.
     ///
     /// Failures only. A `.pending` message is the pane banner's to announce —
@@ -203,6 +267,16 @@ struct StatusBarView: View {
         readback?.phase.undeliverableReason != nil
     }
 
+    /// The chip row for `bindings`, how many did not fit, the bindings the `+N`
+    /// menu lists, and the finished bindings folded into the done chip. Pure:
+    /// delegates the cap, the done-chip split and the bind-order guarantee to
+    /// `PRBindingPresentation.statusBarGroups` so the status bar cannot
+    /// disagree with the toolbar about which PRs are shown or in what order.
+    ///
+    /// When two or more PRs are finished, the cap and the overflow count cover
+    /// the open PRs only; otherwise they cover every binding and `done` is
+    /// empty.
+    ///
     /// `observation` is the worktree's last poll attempt, carried so the
     /// overlay can say when that attempt did not resolve — the same clause the
     /// toolbar and sidebar append. Without it a chip would render the more
@@ -211,8 +285,8 @@ struct StatusBarView: View {
         _ bindings: [PRBinding],
         limit: Int = prChipLimit,
         observation: PRObservation? = nil
-    ) -> (chips: [PRChip], overflow: Int) {
-        let selected = PRBindingPresentation.statusBarChips(bindings, limit: limit)
+    ) -> (chips: [PRChip], overflow: Int, overflowMenu: [PRBinding], done: [PRBinding]) {
+        let selected = PRBindingPresentation.statusBarGroups(bindings, limit: limit)
         let chips = selected.chips.map { binding in
             PRChip(
                 id: binding.id,
@@ -229,114 +303,171 @@ struct StatusBarView: View {
                 observation: observation
             )
         }
-        return (chips, selected.overflow)
+        return (chips, selected.overflow, selected.overflowMenu, selected.done)
     }
 
-    /// What a chip's hover overlay says: one headline naming the PR, its state
-    /// and its title, the age of that reading beneath it, and what the click
-    /// under the pointer will do.
+    /// How many finished PRs the done chip's card lists before summarising the
+    /// rest as "and N more". The card is read-only and cannot scroll, so it is
+    /// capped to stay a glance; the chip's click menu lists every one.
+    nonisolated static let doneCardRowLimit = 10
+
+    /// How many characters of a finished PR's title a done-card row shows
+    /// before an ellipsis — about three wrapped lines at the card's width, so
+    /// ten long titles cannot grow the card past the window it explains.
+    nonisolated static let doneCardLeadLimit = 120
+
+    /// What the `✓ N PRs done` chip's hover overlay says: the count as its title
+    /// (`5 merged or closed pull requests`), then one row per finished PR in
+    /// bind order — the PR's title as the value (`PRBindingPresentation.doneLead`:
+    /// the title, else the head branch) and beneath it the PR's
+    /// `PRBindingPresentation.doneReference` (`PR #930 · Merged`, `MR !931 ·
+    /// Closed` on GitLab), the same words the chip's menu rows end with. A PR
+    /// with neither title nor branch shows the reference as its value and no
+    /// caption, rather than the reference twice. A title longer than
+    /// `doneCardLeadLimit` is cut short with an ellipsis.
     ///
-    /// The age is not decoration. `PRStatus` is a display-tier cache and was
-    /// measured reading "Ready to merge" for pull requests merged days earlier,
-    /// so no surface may render it as current truth — the wording comes from
-    /// `PRFreshness`, shared with the toolbar and sidebar so the three cannot
-    /// describe one observation differently.
+    /// Past `doneCardRowLimit` the remainder collapses into a muted final row,
+    /// `and N more`.
     ///
     /// Pure, so the whole overlay can be asserted without a panel.
-    ///
-    /// `untrackTarget` says the pointer is over the icon slot *while that slot
-    /// is drawing the xmark*, and only changes the wording of the action row —
-    /// the row is always present, so the card cannot grow or shrink under a
-    /// pointer travelling between the chip's two click targets.
-    nonisolated static func chipHoverCard(
-        _ chip: PRChip, untrackTarget: Bool = false, now: Date = Date()
-    ) -> HoverCardModel {
+    nonisolated static func doneChipHoverCard(_ bindings: [PRBinding]) -> HoverCardModel {
         var model = HoverCardModel()
-        model.title = chipHeadline(chip)
-        // Age first, then whether the last attempt to reconfirm it failed —
-        // composed by `PRFreshness` itself, not restated here, so this cannot
-        // drift from the toolbar and sidebar. It sits under the headline rather
-        // than beside the state, because it dates the whole reading.
-        model.titleCaption = PRFreshness.clauses(
-            observedAt: chip.observedAt, observation: chip.observation, now: now
-        ).joined(separator: " · ")
-        model.rows = [
-            // Always present: the chip has two click targets in about twenty
-            // points of width, and nothing else on screen says which one the
-            // pointer is on. The alternate wording rides along so the row is
-            // laid out for both sentences at once — see `HoverCardRow`.
-            HoverCardRow(
-                value: chipActionValue(untrackTarget: untrackTarget, forge: chip.forge),
-                valueStyle: .mutedItalic,
-                alternateValue: chipActionValue(untrackTarget: !untrackTarget, forge: chip.forge)
-            )
-        ]
+        model.textSize = .compact
+        model.title = PRBindingPresentation.doneChipCardTitle(count: bindings.count)
+        model.rows = bindings.prefix(doneCardRowLimit).map { binding in
+            let reference = PRBindingPresentation.doneReference(binding)
+            guard let lead = PRBindingPresentation.doneLead(binding) else {
+                return HoverCardRow(value: reference)
+            }
+            return HoverCardRow(
+                value: PRBindingPresentation.clipped(lead, to: doneCardLeadLimit),
+                caption: reference)
+        }
+        let hidden = bindings.count - doneCardRowLimit
+        if hidden > 0 {
+            model.rows.append(HoverCardRow(value: "and \(hidden) more", valueStyle: .mutedItalic))
+        }
         return model
     }
 
-    /// The overlay's headline: `PR#412 (Checks failing) - Fix the login timeout`,
-    /// or `MR#412 (…)` under a chip bound to a merge request.
+    /// What a chip's hover overlay says: the PR's title as the card's title,
+    /// the reference and state beneath it (`PR#945 · Merged`), and — only when
+    /// it matters — a warning about the age of that reading.
     ///
-    /// One line rather than a labelled grid. The three facts are read together —
-    /// which PR, what state, what it is about — and a two-column table of them
-    /// spent most of a card's width on the words "PR" and "State" saying what
-    /// `#412` and "Checks failing" already say.
+    /// A chip with no title has nothing to lead with, so its title line is the
+    /// reference and state together (`PR#945 (Merged)`) and no second line
+    /// repeats them. See `chipHeadline` and `chipReference`.
     ///
-    /// The noun is the chip's own `forge.refNoun`, and `refNoun` rather than
-    /// `refLabel` because the headline is glued to the number the chip is
-    /// *already drawing*: the chip renders the bare `#412` on both forges, so a
-    /// headline built from `refLabel` would answer `MR !412` over a chip
-    /// reading `#412`. The card must never call a merge request a PR while its
-    /// own action row one line below offers to open it on GitLab.
+    /// The age is not decoration, but neither is it news on every hover. A
+    /// fresh reading says nothing about its age; a stale, never-observed or
+    /// unconfirmed one says so in the caution tint — see
+    /// `chipFreshnessWarning`. The wording comes from `PRFreshness`, shared
+    /// with the toolbar and sidebar, so the three cannot describe one
+    /// observation differently.
+    ///
+    /// The card says nothing about what a click does. The chip's two targets
+    /// show that themselves — the number opens the PR, and the xmark takes on
+    /// a button's emphasis while the pointer is on it and carries its own
+    /// accessibility label (`iconSlotLabel`) — so a sentence naming the
+    /// gesture would only restate them.
+    ///
+    /// Pure, so the whole overlay can be asserted without a panel.
+    nonisolated static func chipHoverCard(_ chip: PRChip, now: Date = Date()) -> HoverCardModel {
+        var model = HoverCardModel()
+        model.textSize = .compact
+        model.title = chipHeadline(chip)
+        // The reference line only exists under a real title: an untitled chip's
+        // headline already IS the reference, and repeating it would be noise.
+        if chipTitle(chip) != nil {
+            model.titleCaption = chipReference(chip)
+        }
+        if let warning = chipFreshnessWarning(chip, now: now) {
+            model.rows = [HoverCardRow(value: warning, tint: .caution)]
+        }
+        return model
+    }
+
+    /// The overlay's title line: the PR's own title when it has one, otherwise
+    /// `PR#412 (Checks failing)`, or `MR#412 (…)` under a chip bound to a merge
+    /// request.
+    ///
+    /// The title leads because it is the one fact the chip itself cannot show —
+    /// the number and the state's color are already on the bar under the
+    /// pointer. Without a title the card falls back to naming the request and
+    /// its state in one line, so it never opens on an empty slot.
     ///
     /// Everything but the number is optional and degrades by *omission*: a
     /// synthetic chip has no title, a never-polled binding has no state, and
-    /// neither an empty `()` nor a dangling separator may appear for either.
+    /// an empty `()` may appear for neither.
+    nonisolated static func chipHeadline(_ chip: PRChip) -> String {
+        if let title = chipTitle(chip) { return title }
+        let reference = "\(chip.forge.refNoun)\(chip.label)"
+        guard let state = chipState(chip) else { return reference }
+        return "\(reference) (\(state))"
+    }
+
+    /// The line under a titled chip's headline: `PR#412 · Checks failing`, or
+    /// the bare `PR#412` when no state has been observed — never a dangling
+    /// separator.
+    ///
+    /// The noun is the chip's own `forge.refNoun`, and `refNoun` rather than
+    /// `refLabel` because it is glued to the number the chip is *already
+    /// drawing*: the chip renders the bare `#412` on both forges, so a line
+    /// built from `refLabel` would answer `MR !412` over a chip reading `#412`.
     /// The state is deliberately not tinted with the PR palette — the dot the
     /// pointer is on already carries that color, and this card colors words
     /// only for a caution the reader must not miss.
-    nonisolated static func chipHeadline(_ chip: PRChip) -> String {
-        var headline = "\(chip.forge.refNoun)\(chip.label)"
-        // The status's own words when it has any, composed by the very function
-        // the overflow menu and the toolbar dropdown compose their rows with —
-        // including the queue clause a queued PR leads with. See
-        // `PRStatusPresentation.stateDescription`.
-        if let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !state.isEmpty {
-            headline += " (\(state))"
-        }
-        if let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !title.isEmpty {
-            headline += " - \(title)"
-        }
-        return headline
+    nonisolated static func chipReference(_ chip: PRChip) -> String {
+        let reference = "\(chip.forge.refNoun)\(chip.label)"
+        guard let state = chipState(chip) else { return reference }
+        return "\(reference) · \(state)"
     }
 
-    /// What the overlay's action row says the click under the pointer will do.
+    /// The chip's title with surrounding whitespace removed, or nil when it is
+    /// absent or blank.
+    private nonisolated static func chipTitle(_ chip: PRChip) -> String? {
+        guard let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else { return nil }
+        return title
+    }
+
+    /// The status's own words when it has any, composed by the very function
+    /// the overflow menu and the toolbar dropdown compose their rows with —
+    /// including the queue clause a queued PR leads with. See
+    /// `PRStatusPresentation.stateDescription`.
+    private nonisolated static func chipState(_ chip: PRChip) -> String? {
+        guard let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !state.isEmpty else { return nil }
+        return state
+    }
+
+    /// How old a chip's reading may be before its overlay says so.
     ///
-    /// Two sentences rather than a reuse of `untrackLabel` / `openLabel`: those
-    /// name the PR by number and the open one appends its state, both of which
-    /// the card has already said on its own rows. Here the subject is the click,
-    /// so the sentences start with the gesture and say nothing twice. The
-    /// untrack half still names the worktree scope, for the same reason
-    /// `untrackLabel` does — the gesture removes an association, not the PR.
+    /// `PRStatus` is a display-tier cache, and was measured reading "Ready to
+    /// merge" for pull requests merged days earlier, so a reading past this age
+    /// must not be rendered without its age. It IS the boundary of
+    /// `PRFreshness.checkedLabel`'s "checked just now" bucket
+    /// (`PRFreshness.justNowWindow`): the card stays quiet exactly while that
+    /// label would have said "just now", and the first age it does show is the
+    /// first one the label stops calling "just now".
+    nonisolated static let chipStaleAfter: TimeInterval = PRFreshness.justNowWindow
+
+    /// The caution under a chip's overlay, or nil when the reading is fresh and
+    /// the last attempt to reconfirm it did not fail.
     ///
-    /// Both sentences take the chip's own `forge`, so a GitLab-bound chip says
-    /// "MR" and "GitLab" where a GitHub-bound one says "PR" and "GitHub" — the
-    /// same vocabulary `refLabel` names the binding with, minus the number the
-    /// headline already carries. The card lays the pair out together, and a
-    /// chip has exactly one forge, so the width reservation still spans both
-    /// sentences it can swap between.
-    nonisolated static func chipActionValue(untrackTarget: Bool, forge: Forge) -> String {
-        untrackTarget ? chipUntrackActionValue(forge) : chipOpenActionValue(forge)
-    }
-
-    nonisolated static func chipOpenActionValue(_ forge: Forge) -> String {
-        "Click to open this \(forge.refNoun) on \(forge.displayName)"
-    }
-
-    nonisolated static func chipUntrackActionValue(_ forge: Forge) -> String {
-        "Click to stop tracking this \(forge.refNoun) in this worktree"
+    /// Shown when the reading is older than `chipStaleAfter`, was never
+    /// observed at all, or the worktree's last poll came back undetermined. In
+    /// every one of those cases it is the full `PRFreshness.clauses` sentence —
+    /// age first, then the undetermined clause — so the caveat always carries
+    /// the age it qualifies and reads exactly as the toolbar and sidebar word
+    /// it.
+    nonisolated static func chipFreshnessWarning(_ chip: PRChip, now: Date) -> String? {
+        let isStale = chip.observedAt.map { now.timeIntervalSince($0) >= Self.chipStaleAfter } ?? true
+        let isUnresolved = PRFreshness.undeterminedClause(chip.observation) != nil
+        guard isStale || isUnresolved else { return nil }
+        return PRFreshness.clauses(
+            observedAt: chip.observedAt, observation: chip.observation, now: now
+        ).joined(separator: " · ")
     }
 
     /// Tooltip and accessibility label for a chip's untrack target — the xmark
@@ -468,11 +599,16 @@ struct StatusBarView: View {
         // Resolve the single-selected worktree ONCE per body evaluation —
         // selectedWorktreeInfo (the editor button) uses it, instead of
         // re-running findWorktree per render.
-        let selected = appState.selectedWorktreeIDs.count == 1
-            ? appState.selectedWorktreeIDs.first
-                .flatMap { appState.findWorktree(id: $0) }
-                .flatMap(LocalWorktree.init)
+        let row = appState.selectedWorktreeIDs.count == 1
+            ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
             : nil
+        let selection = Self.statusBarSelection(row, sessions: appState.remoteSessions)
+        // The local-only elements — path cluster, parked prompt, auto-archive
+        // chip, editor button — all read this, which is nil for a remote row.
+        let selected: LocalWorktree? = {
+            if case .local(let worktree)? = selection { return worktree }
+            return nil
+        }()
         let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
             if let location = Self.locationLabel(selected) {
@@ -487,22 +623,36 @@ struct StatusBarView: View {
                     if let branch = location.branch {
                         // The branch glyph doubles as the separator from the
                         // path, so no interpunct is needed between them.
-                        CopyableStatusText(
-                            icon: GitBranchIcon(),
-                            text: branch,
-                            copyValue: branch,
-                            truncation: .tail,
-                            tooltip: "Click to copy branch \(branch)",
-                            confirmation: "Copied branch"
-                        )
+                        BranchStatusText(branch: branch)
                     }
                 }
                 // Yields to the version/display-name label on the right, which
                 // is short and must never truncate.
                 .layoutPriority(-1)
             }
-            // Chips render for a SINGLE selection only — `selected` is already
-            // nil for a multi-selection, matching the path/branch cluster and
+            // A remote row's cluster: its verbatim `meta.location` and live
+            // `meta.branch`, each hidden alone when missing or unparseable.
+            // The slot never falls back to the provider or session id.
+            if case .remote(_, let label)? = selection,
+               label.location != nil || label.branch != nil {
+                HStack(spacing: 8) {
+                    if let location = label.location {
+                        // Middle truncation keeps both the host and the leaf
+                        // directory visible in a narrow window.
+                        CopyableStatusText(
+                            text: location,
+                            copyValue: location,
+                            truncation: .middle,
+                            tooltip: "Click to copy \(location)",
+                            confirmation: "Copied location"
+                        )
+                    }
+                    if let branch = label.branch {
+                        BranchStatusText(branch: branch)
+                    }
+                }
+                .layoutPriority(-1)
+            }
             // Failures only; a message merely waiting is the pane banner's.
             // `selected` is nil for a remote worktree, which has no local pane
             // to have parked a prompt against in the first place.
@@ -511,16 +661,18 @@ struct StatusBarView: View {
                    appState.parkedPrompt(for: selected.worktree)) {
                 ParkedPromptStatusItem(worktree: selected.worktree)
             }
-            // the toolbar's PR control.
-            if let selected {
+            // Chips render for a SINGLE selection only — `selection` is nil
+            // for a multi-selection, matching the location cluster and the
+            // toolbar's PR control. Remote rows get chips too.
+            if let selection {
                 // Same accessor as the toolbar control and the sidebar
                 // indicator — bindings when there are any, else the legacy
                 // single status lifted into one synthetic binding — so the
                 // three surfaces cannot show different PRs for one worktree.
-                let bindings = appState.effectivePRBindings(worktreeID: selected.id)
+                let bindings = appState.effectivePRBindings(worktreeID: selection.worktreeID)
                 if !bindings.isEmpty {
                     PRChipCluster(bindings: bindings,
-                                  observation: appState.prObservations[selected.id])
+                                  observation: appState.prObservations[selection.worktreeID])
                         // Same reason as the path cluster: yield width to the
                         // version/display-name label rather than squeezing it.
                         .layoutPriority(-1)
@@ -532,10 +684,11 @@ struct StatusBarView: View {
             // always on screen and already scoped to the selection, so this is
             // where that promise gets said out loud, with its own way out.
             //
-            // Local worktrees only, like every other cluster in this bar:
-            // `selected` is a `LocalWorktree`, which a remote row cannot be.
-            // The daemon does auto-archive remote lanes, so a remote worktree's
-            // arming is still stated by the toolbar badge and its help text.
+            // Local worktrees only: a remote row gets location, branch and PR
+            // chips in this bar, but no auto-archive chip, parked-prompt item
+            // or editor button. The daemon does auto-archive remote lanes, so a
+            // remote worktree's arming is still stated by the toolbar badge and
+            // its help text.
             if let selected,
                let chip = Self.autoArchiveChip(
                    armed: appState.effectiveAutoArchive(for: selected.worktree),
@@ -597,7 +750,9 @@ private struct StatusBarHoverAffordance: ViewModifier {
 }
 
 /// The status bar's PR cluster: one chip per bound PR up to
-/// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest.
+/// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest. With two or
+/// more merged or closed PRs, those fold into a leading `✓ N PRs done` chip and
+/// the cap and `+N` cover the open PRs only.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
     /// The worktree's last poll attempt, so a chip's overlay can say when that
@@ -607,11 +762,37 @@ private struct PRChipCluster: View {
     var body: some View {
         let model = StatusBarView.prChips(bindings, observation: observation)
         HStack(spacing: 6) {
+            // Leading, ahead of the open chips: bind order puts the oldest PRs
+            // on the left and they usually finish first, so a PR folds into the
+            // chip beside it and the row reads oldest to newest.
+            if !model.done.isEmpty {
+                let count = model.done.count
+                // No tooltip: the hover card already leads with the count the
+                // tooltip would say, and both would stack over the chip.
+                PRChipMenu(
+                    rows: PRBindingPresentation.doneMenuRows(model.done),
+                    label: PRBindingPresentation.doneChipLabel(model.done),
+                    tooltip: nil,
+                    spokenLabel: PRBindingPresentation.doneChipAccessibilityLabel(count: count),
+                    hoverCard: StatusBarView.doneChipHoverCard(model.done))
+            }
             ForEach(model.chips) { chip in
                 PRChipView(chip: chip)
             }
             if model.overflow > 0 {
-                PRChipOverflowMenu(bindings: bindings, overflow: model.overflow)
+                // The label counts what didn't fit; the menu lists everything
+                // it covers — the open PRs only while the done chip holds the
+                // rest. The wording says so — see
+                // `PRBindingPresentation.overflowChipTooltip`.
+                let total = model.overflowMenu.count
+                let openOnly = !model.done.isEmpty
+                PRChipMenu(
+                    rows: PRBindingPresentation.menuRows(model.overflowMenu),
+                    label: "+\(model.overflow)",
+                    tooltip: PRBindingPresentation.overflowChipTooltip(
+                        total: total, overflow: model.overflow, openOnly: openOnly),
+                    spokenLabel: PRBindingPresentation.overflowChipAccessibilityLabel(
+                        total: total, overflow: model.overflow, openOnly: openOnly))
             }
         }
     }
@@ -636,9 +817,9 @@ private struct PRChipView: View {
 
     @State private var isHovering = false
     /// The pointer is over the icon slot specifically, rather than anywhere on
-    /// the chip. Read ONLY for emphasis and for what the overlay says the click
-    /// will do — never for the glyph, which stays on `isHovering` so travelling
-    /// from the number onto the slot cannot flicker the xmark back to a dot.
+    /// the chip. Read ONLY for emphasis — never for the glyph, which stays on
+    /// `isHovering` so travelling from the number onto the slot cannot flicker
+    /// the xmark back to a dot.
     @State private var isSlotHovered = false
 
     /// The fixed square this chip's resting glyph and the untrack xmark share.
@@ -693,10 +874,10 @@ private struct PRChipView: View {
                 // The gap beside the number is part of the open target.
                 .contentShape(Rectangle())
                 // No `.help` here, deliberately: the hover overlay already
-                // names this PR, its state and the age of that reading, and a
-                // tooltip would surface a second, smaller box saying less on
-                // top of it. The icon slot keeps its tooltip because the
-                // overlay says nothing about what clicking the slot does.
+                // names this PR and its state, and a tooltip would surface a
+                // second, smaller box saying less on top of it. The icon slot
+                // keeps its tooltip because the overlay says nothing about
+                // what clicking the slot does.
                 // Accessibility is unaffected — the hint below carries the same
                 // sentence.
                 // Opens the DEFAULT BROWSER, not an in-app tab. Intentional,
@@ -731,14 +912,8 @@ private struct PRChipView: View {
         }
         // Anchored to the whole chip, so the overlay survives the pointer
         // moving from the number onto the xmark.
-        .hoverCard(StatusBarView.chipHoverCard(chip, untrackTarget: isUntrackTarget))
+        .hoverCard(StatusBarView.chipHoverCard(chip))
     }
-
-    /// The pointer is over the untrack target *and* the slot is drawing the
-    /// xmark — the same conjunction `iconSlotLabel` gates the slot's action on.
-    /// Anything the user is told about the click is derived from it, so the card
-    /// can never advertise untracking while the slot is showing a status dot.
-    private var isUntrackTarget: Bool { isHovering && isSlotHovered }
 
     /// The fixed-size leading slot: at rest the merge-queue bus for a queued PR
     /// and the status dot for every other, the untrack xmark while the chip is
@@ -794,10 +969,9 @@ private struct PRChipView: View {
                 // the glyph, so the click can never mean something other than
                 // what the slot is drawing — see `iconSlotLabel`.
                 .help(StatusBarView.iconSlotLabel(chip, isHovering: isHovering))
-                // Drives the emphasis and the overlay's action row, and nothing
-                // else: the glyph and the click both stay on the whole-chip
-                // `isHovering`, so this can only change what the user is TOLD,
-                // never what the slot does.
+                // Drives the emphasis and nothing else: the glyph and the click
+                // both stay on the whole-chip `isHovering`, so this can only
+                // change how the xmark LOOKS, never what the slot does.
                 .onHover { isSlotHovered = $0 }
                 .onTapGesture {
                     if isHovering { detach() } else { open() }
@@ -835,65 +1009,128 @@ private struct PRChipView: View {
     }
 }
 
-/// The `+N` chip. Clicking it drops down the same list the toolbar's multi-PR
-/// dropdown shows — `PRBindingPresentation.menuRows`, in bind order — so the
-/// two surfaces cannot describe the same worktree differently.
+/// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N PRs done`
+/// chip. Clicking it drops down the rows its caller built, in bind order. The
+/// `+N` chip's rows come from the toolbar's multi-PR dropdown's own builder —
+/// `PRBindingPresentation.menuRows` — so the two surfaces cannot describe the
+/// same PR differently: without a done group it lists every binding, exactly
+/// the toolbar's list, and with one it lists the open bindings. The done chip's
+/// rows come from `PRBindingPresentation.doneMenuRows`, which lead with each
+/// PR's title. Neither chip offers an untrack action; that lives on the
+/// individual chips.
 ///
-/// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
-/// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`
-/// exists for and `PRSplitButtonIDTests` tripwires. These rows carry two fields
-/// that move on their own: the queue position, which counts down on every merge
-/// ahead of the PR, and the status `reason`. A menu built at position 3 and left
-/// open would sit two pixels from a chip whose baked bus badge already read 1 —
-/// exactly the disagreement the shared sentence exists to remove. So the `Menu`
-/// takes an `.id` keyed on the rendered rows (`PRBindingPresentation.menuRowsID`)
-/// and is recreated whenever their text or targets change.
+/// The label is a plain-styled SwiftUI `Button` around a `Text`, and the menu
+/// is an `NSMenu` popped up on click, rather than a SwiftUI `Menu`. A `Menu`
+/// with `.menuStyle(.borderlessButton)` is backed on macOS by an AppKit pop-up
+/// button that draws its label in the system control font and ignores the
+/// environment font, so its label would draw a size larger than the `.caption`
+/// text around it. A `Text` inherits the bar's font like every other entry.
 ///
-/// It still renders **no PR title**, and that is a decision rather than an
-/// omission: titles reach the chips through the hover overlay, an ordinary
-/// SwiftUI view re-evaluated on every change, which has room to show one
-/// properly. Sharing `menuRows` with the toolbar is what keeps the two surfaces
-/// from disagreeing; forking it for one field would give that up to duplicate
-/// what the overlay already says better.
-private struct PRChipOverflowMenu: View {
-    let bindings: [PRBinding]
-    let overflow: Int
+/// Building the `NSMenu` at click time from the current `rows` also keeps the
+/// rows current. These rows carry two fields that move on their own — the
+/// queue position, which counts down on every merge ahead of the PR, and the
+/// status `reason` — and a menu materialized once and reused would let a row
+/// contradict the chip two pixels away. A menu built fresh on every click
+/// cannot go stale, so no `.id` re-materialization key is needed.
+///
+/// The menu hangs just under the chip (`PRChipMenuAnchor`), the way a pull-down
+/// hangs off its button. Popping it up posts `NSMenu.didBeginTracking`, which
+/// `HoverCardController` observes to cancel a dwelling card and hide a shown
+/// one, so the hover card cannot open over the menu.
+///
+/// The `+N` menu renders **no PR title**, and that is a decision rather than
+/// an omission: the PRs it lists are open, their titles reach the chips through
+/// the hover overlay, and sharing `menuRows` with the toolbar is what keeps the
+/// two surfaces from disagreeing. The done chip is the exception because its
+/// PRs have no chips: there, the title is the one thing that says what each
+/// finished PR was, so its rows lead with it and its hover card lists them.
+private struct PRChipMenu: View {
+    let rows: [MenuRow]
+    let label: String
+    /// nil when a hover card says what the tooltip would — two boxes over one
+    /// chip, the larger one saying more.
+    let tooltip: String?
+    let spokenLabel: String
+    var hoverCard: HoverCardModel?
 
     @State private var isHovering = false
+    @State private var anchor = PRChipMenuAnchor.Box()
 
     var body: some View {
-        let rows = PRBindingPresentation.menuRows(bindings)
-        Menu {
-            ForEach(rows) { row in
-                // The default browser, matching the chips beside it — see
-                // `PRChipView`'s tap handler for why the status bar differs
-                // from the toolbar here.
-                Button(row.title) {
-                    guard let url = row.url else { return }
-                    NSWorkspace.shared.open(url)
-                }
-                .disabled(row.url == nil)
-            }
-        } label: {
-            Text("+\(overflow)")
+        Button(action: showMenu) {
+            Text(label)
                 .lineLimit(1)
                 .underline(isHovering)
                 .foregroundStyle(.secondary)
         }
-        // Forces AppKit to re-materialize the NSMenu when the rows' text or
-        // targets move — see this view's doc comment for why a queued PR makes
-        // that mandatory rather than tidy.
-        .id(PRBindingPresentation.menuRowsID(rows))
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
-        // The label counts what didn't fit; the menu lists everything. The
-        // wording says so — see `PRBindingPresentation.overflowChipTooltip`.
-        .help(PRBindingPresentation.overflowChipTooltip(
-            total: bindings.count, overflow: overflow))
+        .background(PRChipMenuAnchor(box: anchor))
+        .help(tooltip ?? "")
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
-        .accessibilityLabel(PRBindingPresentation.overflowChipAccessibilityLabel(
-            total: bindings.count, overflow: overflow))
+        .hoverCard(hoverCard)
+        .accessibilityLabel(spokenLabel)
+    }
+
+    private func showMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let target = PRChipMenuTarget()
+        for row in rows {
+            // The default browser, matching the chips beside it — see
+            // `PRChipView`'s tap handler for why the status bar differs from
+            // the toolbar here.
+            let item = NSMenuItem(title: row.title,
+                                  action: #selector(PRChipMenuTarget.openRow(_:)),
+                                  keyEquivalent: "")
+            item.target = target
+            item.representedObject = row.url
+            item.isEnabled = row.url != nil
+            menu.addItem(item)
+        }
+        // `NSMenuItem.target` is weak: the menu owns the target for its lifetime.
+        objc_setAssociatedObject(menu, "prChipMenuTarget", target, .OBJC_ASSOCIATION_RETAIN)
+
+        if let view = anchor.view, view.window != nil {
+            // Top-left of the menu at the chip's bottom-left corner.
+            let underChip = NSPoint(x: view.bounds.minX,
+                                    y: view.isFlipped ? view.bounds.maxY : view.bounds.minY)
+            menu.popUp(positioning: nil, at: underChip, in: view)
+        } else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }
+    }
+}
+
+/// Routes a `PRChipMenu` item's click from AppKit's target/action world to the
+/// default browser. Each item carries its PR's url in `representedObject`.
+@MainActor
+private final class PRChipMenuTarget: NSObject {
+    @objc func openRow(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+/// A zero-content `NSView` laid behind a `PRChipMenu`'s label, sized to it, so
+/// the chip's menu can be popped up in the chip's own coordinate space. The
+/// view is handed out through a reference `Box` held in the chip's `@State`,
+/// which a click reads without causing a SwiftUI update.
+private struct PRChipMenuAnchor: NSViewRepresentable {
+    final class Box {
+        weak var view: NSView?
+    }
+
+    let box: Box
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        box.view = nsView
     }
 }
 
@@ -1042,6 +1279,23 @@ private struct AutoArchiveChipView: View {
         .accessibilityHint(chip.tooltip)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { cancel() }
+    }
+}
+
+/// The branch control, shared by the local and remote clusters so a remote
+/// lane's live branch renders exactly as a local row's branch does.
+private struct BranchStatusText: View {
+    let branch: String
+
+    var body: some View {
+        CopyableStatusText(
+            icon: GitBranchIcon(),
+            text: branch,
+            copyValue: branch,
+            truncation: .tail,
+            tooltip: "Click to copy branch \(branch)",
+            confirmation: "Copied branch"
+        )
     }
 }
 

@@ -235,7 +235,13 @@ extension WorktreeLifecycle {
                 transport: transport,
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
-            if let initialWindowID {
+            // Kill the untracked initial window that new-session created, but skip
+            // if a restarted tmux server reused the window ID for the replacement
+            // we just created (ABA scenario: the fresh window and the old ID are
+            // textually identical, so killing it would destroy the session we just
+            // spawned). Within one live tmux incarnation, window IDs are unique, so
+            // this is defense in depth.
+            if let initialWindowID, initialWindowID != terminal.tmuxWindowID {
                 try? await tmux.killWindow(
                     server: currentWorktree.tmuxServer,
                     windowID: initialWindowID)
@@ -385,6 +391,7 @@ extension WorktreeLifecycle {
         completionAction: PreSessionCompletionAction,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
+        codexModelOverride: String? = nil,
         primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
@@ -422,9 +429,25 @@ extension WorktreeLifecycle {
             logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
             switch preSession.transport {
             case .tmux:
-                try? await tmux.killWindow(
-                    server: preSession.tmuxServer, windowID: preSession.windowID
-                )
+                // Refuse to kill a window whose pane belongs to a DIFFERENT
+                // terminal — see `TmuxManager.paneOwnership`. The wait
+                // this follows can run arbitrarily long, so the tmux server
+                // can be recreated (window/pane numbering reset) before this
+                // cleanup ever runs — the same hazard class as PR #902.
+                let ownership = await tmux.paneOwnership(
+                    terminalID: preSession.terminalID, server: preSession.tmuxServer,
+                    paneID: preSession.paneID)
+                if ownership.permitsTeardown {
+                    try? await tmux.killWindow(
+                        server: preSession.tmuxServer, windowID: preSession.windowID
+                    )
+                } else {
+                    logger.warning("""
+                        phase-3: leaving window \(preSession.windowID, privacy: .public) \
+                        untouched for terminal \(preSession.terminalID, privacy: .public) — \
+                        \(ownership.refusalDetail ?? "", privacy: .public)
+                        """)
+                }
             case .holder:
                 // The terminal row went with the worktree, so nothing can read
                 // the pids back any more — this is the last moment either can
@@ -475,6 +498,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover,
@@ -539,8 +563,8 @@ extension WorktreeLifecycle {
     /// delete the terminal + tab rows, broadcast `.terminalRemoved`.
     ///
     /// Deliberately NOT reusing `RPCRouter.handleTerminalDelete`: that handler
-    /// also cancels scheduled resumes, clears pending questions, cancels
-    /// auto-login, and reclaims a per-session `ClaudeHookOverlay` — all Claude
+    /// also cancels scheduled resumes, clears pending questions, and reclaims
+    /// a per-session `ClaudeHookOverlay` — all Claude
     /// concerns, all no-ops for this `.shell` tab, and several reach for
     /// `RPCRouter` state the lifecycle doesn't hold.
     ///
@@ -578,6 +602,7 @@ extension WorktreeLifecycle {
             tmuxServer: preSession.tmuxServer,
             terminalID: preSession.terminalID,
             windowID: preSession.windowID,
+            paneID: preSession.paneID,
             unreadableRowTransport: preSession.transport,
             holderPID: preSession.holderPID,
             childPID: preSession.childPID,
@@ -590,18 +615,20 @@ extension WorktreeLifecycle {
     /// coordinates describe.
     ///
     /// No production caller: every hook tab is torn down from the descriptor
-    /// its spawn returned. It is kept because the tmux-coordinate tests
-    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`,
-    /// `HookTabTransportGateTests`) address the teardown the way a caller
-    /// without a descriptor would, and that is a shape worth keeping reachable.
+    /// its spawn returned. It is kept because the tmux-coordinate test
+    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`)
+    /// addresses the teardown the way a caller without a descriptor would,
+    /// and that is a shape worth keeping reachable.
     func closeHookTerminal(
-        worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
+        worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String,
+        paneID: String
     ) async {
         await closeHookTerminal(
             worktree: worktree,
             tmuxServer: tmuxServer,
             terminalID: terminalID,
             windowID: windowID,
+            paneID: paneID,
             unreadableRowTransport: .tmux,
             holderPID: nil,
             childPID: nil,
@@ -620,6 +647,7 @@ extension WorktreeLifecycle {
         tmuxServer: String,
         terminalID: UUID,
         windowID: String,
+        paneID: String,
         unreadableRowTransport: TerminalTransport,
         holderPID: Int32?,
         childPID: Int32?,
@@ -628,12 +656,11 @@ extension WorktreeLifecycle {
         let terminal = try? await db.terminals.get(id: terminalID)
         switch terminal?.transport ?? unreadableRowTransport {
         case .holder:
-            // No Closed Terminals capture for a holder hook tab: the holder has
-            // no scrollback dump yet (issue #851 §4, Phase 2 item "Closed-
-            // terminal history on holder dispose"), which is exactly what
-            // `disposeHolder` already does on every other teardown of a holder
-            // row. The tmux kill would be worse than a no-op here — a holder
-            // row's `windowID` names nothing, and the holder, its job and its
+            // The Closed Terminals entry comes from the daemon's own emulator,
+            // through the same helper every history-keeping holder teardown
+            // uses, and before the reclaim below releases the reader. The tmux
+            // kill would be worse than a no-op here — a holder row's
+            // `windowID` names nothing, and the holder, its job and its
             // rendezvous files would outlive the row that is their only record.
             //
             // Reclaimed through `abandonHookHolder` on both halves, not
@@ -645,6 +672,8 @@ extension WorktreeLifecycle {
             // `HolderRegistry.abandonVerifiedJob`). The row is still the better
             // source for the pids while it can be read.
             if let terminal {
+                await Self.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
                 await abandonHookHolder(
                     terminalID: terminal.id,
                     holderPID: terminal.holderPID,
@@ -663,6 +692,22 @@ extension WorktreeLifecycle {
                     childStartedAt: childStartedAt)
             }
         case .tmux:
+            // Refuse to capture or kill a pane that belongs to a DIFFERENT
+            // terminal — see `TmuxManager.paneOwnership`. A hook tab's
+            // wait for its setup script can run arbitrarily long, so the
+            // tmux server can be recreated (and its window/pane numbering
+            // reset) in the gap between spawning this hook tab and tearing
+            // it down here — the same hazard class as PR #902.
+            let ownership = await tmux.paneOwnership(
+                terminalID: terminalID, server: tmuxServer, paneID: paneID)
+            guard ownership.permitsTeardown else {
+                logger.warning("""
+                    closeHookTerminal: leaving window \(windowID, privacy: .public) untouched \
+                    for terminal \(terminalID, privacy: .public) — \
+                    \(ownership.refusalDetail ?? "", privacy: .public)
+                    """)
+                break
+            }
             // Preserve the hook tab's output before the window dies so a user
             // can read an auto-closed setup/pre-session run later (Session
             // History → Closed Terminals). Best-effort: captureOnClose logs

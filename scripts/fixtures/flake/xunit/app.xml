@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<testsuites>
+<testsuite name="TestResults" errors="0" tests="2" failures="0" time="2.778439376">
+<testcase classname="TBDAppTests.ArchiveTombstoneTests" name="testArchivingActiveWorktreeDoesNotShowAlert" time="0.191821083">
+</testcase>
+<testcase classname="TBDAppTests.ArchiveTombstoneTests" name="testArchivingUnknownWorktreeHandledGracefully" time="0.191728291">
+</testcase>
+</testsuite>
+</testsuites>

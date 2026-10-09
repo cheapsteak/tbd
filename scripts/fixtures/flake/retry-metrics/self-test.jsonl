@@ -1,0 +1,1 @@
+{"attempts":2,"file":"Tests/TBDDaemonTests/FlakyQuarantineSelfTests.swift","issue":499,"line":29,"outcome":"passedOnRetry","schema":1,"testID":"TBDDaemonTests.FlakyQuarantineSelfTests/retriesUntilPass()"}

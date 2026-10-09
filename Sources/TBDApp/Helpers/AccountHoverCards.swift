@@ -68,8 +68,8 @@ enum AccountHoverCards {
         return model
     }
 
-    /// Usage rows for a snapshot: 5h window (with reset time), weekly, and
-    /// per-family scoped buckets. Numbers are monospaced digits; tinted per
+    /// Usage rows for a snapshot: 5h window (with reset time) and weekly.
+    /// Any other bucket kind renders no row. Numbers are monospaced digits; tinted per
     /// pace-aware fill level. Empty when the profile has no usage data.
     /// The weekly row now shows its reset countdown when available (closing
     /// a gap where it silently omitted the weekly reset).
@@ -96,12 +96,6 @@ enum AccountHoverCards {
             }
             rows.append(HoverCardRow(label: "Week",
                                      value: value,
-                                     monospacedDigits: true, tint: tint(for: presentation)))
-        }
-        for scoped in ProfileUsagePresentation.scopedBuckets(snapshot) {
-            let presentation = ProfileUsagePresentation.bucketPresentation(scoped, now: now, timeZone: timeZone)
-            rows.append(HoverCardRow(label: scoped.modelDisplayName ?? "Model",
-                                     value: presentation.percentText,
                                      monospacedDigits: true, tint: tint(for: presentation)))
         }
         return rows

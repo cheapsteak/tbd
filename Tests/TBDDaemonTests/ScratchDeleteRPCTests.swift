@@ -238,6 +238,80 @@ struct ScratchDeleteRPCTests {
                 "scratch.delete reached tmux kill-window for a holder row: \(recorded.snapshot())")
     }
 
+    /// A scratch space whose only terminal is a holder row, on a router whose
+    /// registry has recorded that session as ended — the observable only
+    /// `abandon` clears. Shared by the Closed Terminals history tests below.
+    private func holderScratch(
+        name: String
+    ) async throws -> (RPCRouter, TBDDatabase, Worktree, Terminal, HolderRegistry) {
+        let db = try TBDDatabase(inMemory: true)
+        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: name)))
+        let wt = try created.decodeResult(Worktree.self)
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        // `childPID: 0`: see `scratchDeleteDisposesHolderInsteadOfKillingAWindow`.
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: "sess-scratch-holder",
+            kind: .claude, transport: .holder, holderPID: 9101, childPID: 0)
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-sd-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [terminal] })
+        _ = await registry.adoptAll()
+        let armed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+        router.holderRegistry = registry
+        return (router, db, wt, terminal, registry)
+    }
+
+    /// Archive keeps the scratch space's history, so a holder row gets its
+    /// Closed Terminals entry before the disposal releases the reader — the
+    /// same as a repo worktree's archive. Nothing answers at the rendezvous, so
+    /// there is no live screen and the entry carries no capture; it carries
+    /// the Claude session id revive resumes by.
+    @Test func scratchArchiveWritesAHolderRowsClosedTerminalsEntry() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (router, db, wt, terminal, registry) = try await holderScratch(name: "holder-archive")
+
+        let archived = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchArchive, params: ScratchArchiveParams(worktreeID: wt.id)))
+
+        #expect(archived.success, "error: \(archived.error ?? "nil")")
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil, "scratch.archive removed the row without disposing of its holder")
+        let entries = try await db.terminalHistory.list(worktreeID: wt.id)
+        #expect(entries.map(\.id) == [terminal.id],
+                "scratch.archive disposed a holder row without writing its Closed Terminals entry")
+        #expect(entries.first?.kind == .claude)
+        #expect(entries.first?.claudeSessionID == "sess-scratch-holder")
+        #expect(entries.first?.lineCount == 0)
+    }
+
+    /// Delete hard-deletes the history right after the teardown, so the
+    /// teardown writes no entry for it to wipe. Asserted on the teardown
+    /// itself: through the RPC the hard delete would empty the table either
+    /// way, and the assertion would pass whether or not the entry was written.
+    @Test func scratchDeleteTeardownWritesNoHolderClosedTerminalsEntry() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (router, db, wt, terminal, registry) = try await holderScratch(name: "holder-delete")
+
+        try await router.closeScratchTerminals(wt, keepsHistory: false)
+
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil, "the delete teardown removed the row without disposing of its holder")
+        #expect(try await db.terminalHistory.list(worktreeID: wt.id).isEmpty,
+                "the delete teardown wrote a Closed Terminals entry the hard delete is about to wipe")
+    }
+
     /// The other leg. An inverted transport comparison would leave a real tmux
     /// window running while its row was deleted.
     @Test func scratchDeleteStillKillsAnIdenticalTmuxWindow() async throws {

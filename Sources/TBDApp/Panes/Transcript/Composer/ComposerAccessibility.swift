@@ -27,6 +27,10 @@ enum ComposerAccessibility {
     static let blockedReveal = "composer.blocked.reveal"
     /// The banner raised by a failed send or a refused attachment.
     static let error = "composer.error"
+    /// The banner raised by a remote send whose outcome is unknown, and the
+    /// button that confirms sending the same text again.
+    static let unknownSend = "composer.unknownSend.message"
+    static let unknownSendConfirm = "composer.unknownSend.confirm"
     /// The completion list, and one row inside it.
     static let menu = "composer.menu"
     /// The attachment strip.

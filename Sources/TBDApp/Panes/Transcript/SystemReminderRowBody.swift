@@ -28,6 +28,9 @@ struct SystemReminderRowBody: View {
     let text: String
     let truncatedTo: Int?
     let terminalID: UUID?
+    /// The transcript file to read a full body from when there is no
+    /// terminal — see `TranscriptFullBodySource`.
+    let detailPath: String?
 
     @State private var fullText: String? = nil
     @State private var metadata: TranscriptAttachmentMetadata? = nil
@@ -37,6 +40,10 @@ struct SystemReminderRowBody: View {
     /// every other reminder kind would round-trip for a guaranteed-nil result.
     private var carriesInjectionMetadata: Bool {
         kind == .hookOutput || kind == .nestedMemory
+    }
+
+    var fullBodySource: TranscriptFullBodySource? {
+        TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
     }
 
     var body: some View {
@@ -53,7 +60,7 @@ struct SystemReminderRowBody: View {
                 .foregroundStyle(.primary)
                 .transcriptSelectableText()
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if let cap = truncatedTo, fullText == nil, terminalID != nil {
+            if let cap = truncatedTo, fullText == nil, fullBodySource != nil {
                 TruncationFooter(truncatedTo: cap, currentLength: text.count) {
                     Task { await fetchFull() }
                 }
@@ -141,19 +148,15 @@ struct SystemReminderRowBody: View {
     // MARK: Fetches
 
     private func fetchMetadata() async {
-        guard carriesInjectionMetadata, metadata == nil, let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(
-            terminalID: terminalID, itemID: id, includeBody: false, path: path), let attachment = r.attachment {
-            await MainActor.run { metadata = attachment }
+        guard carriesInjectionMetadata, metadata == nil, let source = fullBodySource else { return }
+        if let attachment = await source.fetch(itemID: id, includeBody: false, appState: appState)?.attachment {
+            metadata = attachment
         }
     }
 
     private func fetchFull() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
-            await MainActor.run { fullText = r.text }
+        if let r = await fullBodySource?.fetch(itemID: id, appState: appState) {
+            fullText = r.text
         }
     }
 }

@@ -40,8 +40,21 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
     var claudeSettings: String?
 
+    @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
+    var model: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    mutating func validate() throws {
+        guard let model else { return }
+        guard type == .codex else {
+            throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
+        }
+        if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError("--model must not be empty.")
+        }
+    }
 
     mutating func run() async throws {
         let client = SocketClient()
@@ -49,7 +62,7 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
             resultType: Terminal.self
         )
 
@@ -105,15 +118,18 @@ struct TerminalList: AsyncParsableCommand {
                 print("No terminals found.")
                 return
             }
-            let header = tableRow([("ID", 36), ("WINDOW", 10), ("PANE", 10), ("LABEL", 0)])
+            let header = tableRow([
+                ("ID", 36), ("WINDOW", 10), ("PANE", 10), ("LABEL", 20), ("STATE", 0)
+            ])
             print(header)
-            print(String(repeating: "-", count: 80))
+            print(String(repeating: "-", count: 96))
             for term in terminals {
                 let line = tableRow([
                     (term.id.uuidString, 36),
                     (term.tmuxWindowID, 10),
                     (term.tmuxPaneID, 10),
-                    (term.label ?? "-", 0)
+                    (term.label ?? "-", 20),
+                    (parkedStateMarker(for: term), 0)
                 ])
                 print(line)
             }
@@ -814,9 +830,7 @@ struct TerminalCompletions: AsyncParsableCommand {
         abstract: "Show the slash commands, skills and subagents this session knows",
         discussion: """
             Asks the session's OWN Claude Code binary, so a command that binary \
-            has and another version does not is listed correctly. Requires the \
-            transcript composer to be enabled (Settings → General, next to \
-            "Live transcript pane").
+            has and another version does not is listed correctly.
 
             `source` says which mechanism answered: `probe` means the binary \
             itself, `scan` means a filesystem read of the same directories, \

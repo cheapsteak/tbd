@@ -273,6 +273,7 @@ mk_stub_wrapper() {
   printf 'lock_timeout=%s\n' "${TBD_SWIFT_LOCK_TIMEOUT_SECONDS-<unset>}"
   printf 'TBD_REMOTE_VERIFY=%s\n' "${TBD_REMOTE_VERIFY-<unset>}"
   printf 'TBD_SWIFT_QUEUE_YIELD_SECONDS=%s\n' "${TBD_SWIFT_QUEUE_YIELD_SECONDS-<unset>}"
+  printf 'TBD_RETRY_METRICS_PATH=%s\n' "${TBD_RETRY_METRICS_PATH-<unset>}"
   printf 'argv=%s\n' "$*"
 } > "$STUB_RECORD"
 EOF
@@ -419,14 +420,320 @@ test_every_target_names_an_issue_and_a_floor() {
 }
 
 test_targets_reference_only_open_ledger_issues() {
-  # The issues this loop comments on are #494, #503 and #496 — stated in the PR
+  # The issues this loop comments on are #494, #961, #496 and #962 — stated in the PR
   # and asserted here so the two cannot drift apart silently.
   local spec issue seen=""
   for spec in "${TARGETS[@]}"; do
     issue="$(printf '%s' "$spec" | cut -d'|' -f4)"
     case " $seen " in *" $issue "*) ;; *) seen="$seen $issue" ;; esac
   done
-  assert_eq "the loop attaches to exactly the documented issue set" " 494 503 496" "$seen"
+  assert_eq "the loop attaches to exactly the documented issue set" " 494 961 496 962" "$seen"
+}
+
+# ---------------------------------------------------------------------------
+# Structured outputs (flake autofix, docs/specs/2026-10-07-flake-autofix-design.md §4.1, §6.4)
+# ---------------------------------------------------------------------------
+
+test_xunit_dir_names_one_file_per_iteration() {
+  local out
+  out="$(XUNIT_DIR=/x; iteration_args FastPassWhole 3 | tr '\n' ' ')"
+  assert_contains "xunit-dir passes --xunit-output per iteration" "$out" "--xunit-output /x/FastPassWhole-3.xml"
+  assert_contains "and asks for failure messages inside the XML" "$out" "--experimental-xunit-message-failure"
+  out="$(XUNIT_DIR=""; iteration_args FastPassWhole 3)"
+  assert_eq "no xunit-dir, no extra args" "" "$out"
+}
+
+test_filters_are_never_glob_expanded() {
+  # `[A-O]` in an unquoted expansion is a glob. A file in cwd named like the
+  # pattern would silently replace the filter.
+  local d; d="$(mktmpd)"
+  local want=$'--parallel\n--filter\n^TBDDaemonTests\\.[A-O]'
+  ( cd "$d" && : > '^TBDDaemonTests.A' && filter_args_of '--parallel --filter ^TBDDaemonTests\.[A-O]' ) > "$d/out"
+  assert_eq "filter survives a matching file in cwd" "$want" "$(cat "$d/out")"
+  # MUTATION: the unquoted word-split this replaced. The file in the cwd wins.
+  local mutant
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of 's/read -r -a parts <<< "\$1"/parts=($1)/')"
+  ( cd "$d" && bash -c "source '$mutant'; filter_args_of '--parallel --filter ^TBDDaemonTests\.[A-O]'" ) > "$d/mutant.out"
+  assert_contains "mutation: an unquoted split expands the filter into the file name" \
+    "$(cat "$d/mutant.out")" "^TBDDaemonTests.A"
+  assert_eq "mutation: and the filter is gone" "0" "$(grep -c '\[A-O\]' "$d/mutant.out")"
+  rm -rf "$d"
+}
+
+test_results_tsv_records_every_iteration_verdict() {
+  local d; d="$(mktmpd)"
+  local old="$RESULTS_TSV"
+  RESULTS_TSV="$d/r.tsv"
+  record_result Test 1 "PASS 1" 0 "2.5" 4 4 31
+  record_result Test 2 "FAIL rc=1 with 1 tests executed" 1 "3.0" 4 4 29
+  record_result Test 3 "FAIL ran 0 tests, below the measured floor of 1" 0 "3.0" 4 4 2
+  record_result Test 4 "FAIL no 'Test run with N tests' summary — truncated log or wedged run (rc=1)" 1 "3.0" 4 4 5
+  RESULTS_TSV="$old"
+  assert_eq "four rows" "4" "$(wc -l < "$d/r.tsv" | tr -d ' ')"
+  assert_eq "every row has ten columns" "10" "$(awk -F'\t' '{print NF}' "$d/r.tsv" | sort -u)"
+  assert_eq "row 2 verdict column" "FAIL" "$(sed -n 2p "$d/r.tsv" | cut -f3)"
+  assert_eq "row 1 count column" "1" "$(sed -n 1p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 2 count column parsed from reason" "1" "$(sed -n 2p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 3 below-floor count parsed" "0" "$(sed -n 3p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 4 no summary, no count" "" "$(sed -n 4p "$d/r.tsv" | cut -f4)"
+  assert_eq "row 1 seconds column" "31" "$(sed -n 1p "$d/r.tsv" | cut -f9)"
+  assert_eq "row 2 reason column" "rc=1 with 1 tests executed" "$(sed -n 2p "$d/r.tsv" | cut -f10)"
+  rm -rf "$d"
+}
+
+test_metrics_dir_reaches_the_fenced_run() {
+  local d; d="$(mktmpd)"
+  local record="$d/record"
+  mk_stub_wrapper "$d/scripts" test.sh
+  ( SCRIPT_DIR="$d/scripts"; ITER_METRICS_PATH="$d/m/T-1.jsonl"
+    STUB_RECORD="$record" run_governed_fenced 5 "$d/log" --no-fingerprint )
+  assert_eq "TBD_RETRY_METRICS_PATH set per iteration" "$d/m/T-1.jsonl" "$(recorded "$record" TBD_RETRY_METRICS_PATH)"
+  ( SCRIPT_DIR="$d/scripts"; ITER_METRICS_PATH=""
+    STUB_RECORD="$record" run_governed_fenced 5 "$d/log" --no-fingerprint )
+  assert_eq "and not set at all without --metrics-dir" "<unset>" "$(recorded "$record" TBD_RETRY_METRICS_PATH)"
+  rm -rf "$d"
+}
+
+# Drive one real iteration of run_target against the stub wrapper, in a child
+# shell so the globals it sets stay there. The caller reads the stub's record
+# and the files left behind.
+run_one_stub_iteration() {
+  local script="$1" d="$2"
+  STUB_RECORD="$d/record" bash -c "source '$script'
+    SCRIPT_DIR='$d/scripts'; REPORT_DIR='$d/reports'; NCPU=4
+    XUNIT_DIR='$d/x'; METRICS_DIR='$d/m'; LOG_DIR='$d/logs'; RESULTS_TSV='$d/r.tsv'
+    run_target 'Stub|--parallel --filter ^M\\.S/f\\(\\)|1|adhoc|stub target' 1 '$d/work'" >/dev/null 2>&1
+}
+
+test_run_target_wires_every_structured_output() {
+  local d; d="$(mktmpd)"
+  mk_stub_wrapper "$d/scripts" test.sh
+  mkdir -p "$d/reports" "$d/x" "$d/m" "$d/logs" "$d/work"
+  run_one_stub_iteration "$SCRIPT" "$d"
+  assert_eq "the metrics file is pre-created, empty" "empty" \
+    "$( [[ -f "$d/m/Stub-1.jsonl" && ! -s "$d/m/Stub-1.jsonl" ]] && echo empty || echo absent-or-nonempty)"
+  assert_eq "and its path reached the test process" "$d/m/Stub-1.jsonl" "$(recorded "$d/record" TBD_RETRY_METRICS_PATH)"
+  assert_eq "the filter and the xunit args reach test.sh as separate words" \
+    "--no-fingerprint --parallel --filter ^M\\.S/f\\(\\) --xunit-output $d/x/Stub-1.xml --experimental-xunit-message-failure" \
+    "$(recorded "$d/record" argv)"
+  assert_eq "the iteration log lands in --log-dir" "yes" "$([[ -f "$d/logs/Stub-1.log" ]] && echo yes || echo no)"
+  assert_eq "one results row" "1" "$(wc -l < "$d/r.tsv" | tr -d ' ')"
+  assert_eq "scored FAIL: the stub printed no summary" "FAIL" "$(cut -f3 "$d/r.tsv")"
+  assert_eq "with the core count" "4" "$(cut -f8 "$d/r.tsv")"
+  assert_eq "and a numeric seconds column" "yes" "$([[ "$(cut -f9 "$d/r.tsv")" =~ ^[0-9]+$ ]] && echo yes || echo no)"
+
+  # MUTATION: drop the pre-create, and an iteration whose test process never
+  # wrote a record leaves no file at all.
+  local e; e="$(mktmpd)"
+  mk_stub_wrapper "$e/scripts" test.sh
+  mkdir -p "$e/reports" "$e/x" "$e/m" "$e/logs" "$e/work"
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  run_one_stub_iteration "$(mutant_of '/: > "\$ITER_METRICS_PATH"/d')" "$e"
+  assert_eq "mutation: without the pre-create the metrics file is absent" "absent" \
+    "$([[ -e "$e/m/Stub-1.jsonl" ]] && echo present || echo absent)"
+  rm -rf "$d" "$e"
+}
+
+# ---------------------------------------------------------------------------
+# Ad hoc targets: --test and --pass-of (spec §4.2, §6.2, §6.4)
+# ---------------------------------------------------------------------------
+
+test_filter_form_converts_the_xunit_id() {
+  assert_eq "top-level suite unchanged" 'M.S/f()' "$(filter_form_of 'M.S/f()')"
+  assert_eq "nested suite" 'M.A/B/f()' "$(filter_form_of 'M.A.B/f()')"
+  assert_eq "doubly nested suite" 'M.A/B/C/f()' "$(filter_form_of 'M.A.B.C/f()')"
+  assert_eq "no suite" 'M.f()' "$(filter_form_of 'M/f()')"
+  assert_eq "argument labels survive" 'M.S/f(x:y:)' "$(filter_form_of 'M.S/f(x:y:)')"
+  # flake_lib.filter_id (a later slice) must agree; until it exists this
+  # compares against the expected literal.
+  assert_eq "agrees with flake_lib.filter_id" \
+    "$(python3 -c "import sys; sys.path.insert(0,'$HERE'); import flake_lib; print(flake_lib.filter_id('M.A.B/f()'))" 2>/dev/null || echo 'M.A/B/f()')" \
+    "$(filter_form_of 'M.A.B/f()')"
+}
+
+test_exact_id_filter_escapes_the_id() {
+  assert_eq "parens and dots escaped, anchored at start" \
+    '^TBDSharedTests\.HolderLockTests/lockIsReacquirableAfterRelease\(\)(/|$)' \
+    "$(exact_id_filter 'TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()')"
+  assert_eq "argument labels survive" '^M\.S/f\(x:\)(/|$)' "$(exact_id_filter 'M.S/f(x:)')"
+  assert_eq "a nested suite is escaped in its filter form" '^M\.A/B/f\(\)(/|$)' "$(exact_id_filter 'M.A.B/f()')"
+  assert_eq "a suite-less test too" '^M\.f\(\)(/|$)' "$(exact_id_filter 'M/f()')"
+  # The escaped filter must match exactly the filter form, as an ERE.
+  local re; re="$(exact_id_filter 'M.S/f(x:)')"
+  assert_eq "the filter matches its own test" "yes" "$([[ 'M.S/f(x:)' =~ $re ]] && echo yes || echo no)"
+  assert_eq "and not a test whose dot is another character" "no" "$([[ 'MxS/f(x:)' =~ $re ]] && echo yes || echo no)"
+  # The trailing group (spec §6.4): an XCTest name has no `()` to end it.
+  re="$(exact_id_filter 'M.S/testFoo')"
+  assert_eq "an XCTest name matches itself" "yes" "$([[ 'M.S/testFoo' =~ $re ]] && echo yes || echo no)"
+  assert_eq "and a trailing component" "yes" "$([[ 'M.S/testFoo/File.swift:12:3' =~ $re ]] && echo yes || echo no)"
+  assert_eq "but not a test whose name extends it" "no" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
+  # MUTATION: stop escaping `(`, and the filter is no longer the ID.
+  local mutant
+  mutant="$(mutant_of 's/\+\?\(/+?/')"
+  assert_eq "mutation: without the ( escape the filter changes" \
+    '^M\.S/f(x:\)(/|$)' "$(bash -c "source '$mutant'; exact_id_filter 'M.S/f(x:)'")"
+  # MUTATION: drop the trailing group, and testFooBar matches.
+  mutant="$(mutant_of "s/printf '\\^%s\\(\\/\\|\\\$\\)'/printf '^%s'/")"
+  re="$(bash -c "source '$mutant'; exact_id_filter 'M.S/testFoo'")"
+  assert_eq "mutation: without the trailing group testFooBar matches" "yes" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
+}
+
+test_test_mode_floor_is_one() {
+  local spec; spec="$(adhoc_test_spec 'M.S/f()')"
+  assert_eq "floor 1" "1" "$(spec_field "$spec" 3)"
+  assert_contains "filter built from the ID" "$spec" '--filter ^M\.S/f\(\)(/|$)'
+  assert_eq "no parallelism flag of its own" '--filter ^M\.S/f\(\)(/|$)' "$(spec_field "$spec" 2)"
+  adhoc_test_spec 'M.S/f()' > /dev/null
+  assert_eq "test scope uses the ordinary iteration deadline" "$ITERATION_DEADLINE_S" "$(iteration_deadline_for 1)"
+}
+
+test_pass_of_maps_each_target_to_its_ci_pass() {
+  local cases=(
+    'TBDDaemonTests.HolderTests/a()|Pass-fast-pass-daemon-a|1200'
+    'TBDDaemonTests.ArchiveTests/x()|Pass-fast-pass-daemon-a|1200'
+    'TBDDaemonTests.OrphanGCTests/a()|Pass-fast-pass-daemon-a|1200'
+    'TBDDaemonTests.PRStatusTests/x()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonTests.SupervisionBrakeRPCTests/a()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/a()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonTests/nilPreferredKeepsOrder()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonLiveTests.GitManagerTimeoutTests/a()|Pass-quiet-pass|35'
+    'TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()|Pass-fast-pass-app|1900'
+    'TBDSharedTests/topLevel()|Pass-fast-pass-app|1900'
+    'TBDAppTests.ArchiveTombstoneTests/testArchiving|Pass-fast-pass-app|1900'
+  )
+  local c id want_name want_floor spec
+  for c in "${cases[@]}"; do
+    IFS='|' read -r id want_name want_floor <<< "$c"
+    spec="$(pass_spec_of "$id")"
+    assert_eq "$id -> pass" "$want_name" "$(spec_field "$spec" 1)"
+    assert_eq "$id -> floor" "$want_floor" "$(spec_field "$spec" 3)"
+    assert_eq "$id -> ad hoc" "adhoc" "$(spec_field "$spec" 4)"
+  done
+  # A suite-less test's xunit classname is the bare module, which `^TBDDaemonTests\.`
+  # does not match; only its FILTER form does. Matching the classname instead
+  # would send it to fast pass 2, where CI never runs it.
+  local mutant
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of 's/^  form="\$\(filter_form_of "\$id"\)"/  form="${id%\/*}"/')"
+  assert_eq "mutation: matching the classname misplaces a suite-less test" "Pass-fast-pass-app" \
+    "$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests/nilPreferredKeepsOrder()'" | cut -d'|' -f1)"
+}
+
+test_a_filter_containing_a_pipe_keeps_its_floor() {
+  # Fast pass 2's skip regex holds a `|`. Read with `IFS='|'`, the floor field
+  # would be the tail of that regex and every iteration would fail its floor.
+  local spec; spec="$(pass_spec_of 'TBDAppTests.X/y()')"
+  assert_eq "the whole filter" "--parallel --skip ^(TBDDaemonTests|TBDDaemonLiveTests)\\." "$(spec_field "$spec" 2)"
+  assert_eq "the floor" "1900" "$(spec_field "$spec" 3)"
+  assert_eq "the issue field" "adhoc" "$(spec_field "$spec" 4)"
+  assert_eq "a TARGETS line reads as before" "GitManagerTimeout|3|503" \
+    "$(s='GitManagerTimeout|--no-parallel --filter ^X|3|503|desc'; printf '%s|%s|%s' "$(spec_field "$s" 1)" "$(spec_field "$s" 3)" "$(spec_field "$s" 4)")"
+}
+
+test_pass_of_ranges_are_code_point_ranges() {
+  # A lowercase first letter is outside `[A-O]` for SwiftPM. In a collating
+  # locale bash's `[A-O]` can admit it; the harness pins C collation. No
+  # mutation case: whether a collating range admits lowercase depends on the
+  # platform's regex library, so removing the pin flips this only on some hosts.
+  assert_eq "lowercase suite name -> 1b, under any caller locale" "Pass-fast-pass-daemon-b" \
+    "$(LC_ALL=en_US.UTF-8 pass_spec_of 'TBDDaemonTests.lowercaseSuite/x()' 2>/dev/null | cut -d'|' -f1)"
+}
+
+test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
+  # MUTATION: widen 1a to every letter. SupervisionBrakeRPCTests is then run by
+  # 1a AND 1b, and the harness must refuse rather than pick one.
+  local mutant out rc=0
+  mutant="$(mutant_of 's/^(  "fast-pass-daemon-a.*)\[A-O\]/\1[A-Z]/')"
+  assert_contains "the mutant really widened 1a" "$(grep fast-pass-daemon-a "$mutant" | head -1)" "[A-Z]"
+  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SupervisionBrakeRPCTests/a()'" 2>&1)" || rc=$?
+  assert_eq "mutation: a 1a widened to [A-Z] no longer maps the P-Z suite" "1" "$rc"
+  assert_contains "and says it is run by two passes" "$out" "two CI passes"
+  # MUTATION: drop the quiet pass. A live test then lands in no pass.
+  mutant="$(mutant_of '/^  "quiet-pass\|/d')"
+  rc=0
+  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()'" 2>&1)" || rc=$?
+  assert_eq "mutation: without the quiet pass a live test is unmatched" "1" "$rc"
+  assert_contains "and says so" "$out" "no CI pass runs"
+}
+
+# Spec §13: the pass table is checked against the watched-test-pass.sh
+# invocations PARSED from test.yml, and a fixture test.yml with a changed filter
+# or floor must make the check fail.
+test_the_pass_table_matches_test_yml() {
+  local wf="$HERE/../.github/workflows/test.yml"
+  assert_eq "four invocations parsed from test.yml" "4" "$(pass_table_from_workflow "$wf" | grep -c .)"
+  assert_eq "real test.yml agrees" "0" "$(check_pass_table "$wf" >/dev/null 2>&1; echo $?)"
+  local d; d="$(mktmpd)"
+  sed 's/--floor 1500/--floor 1600/' "$wf" > "$d/floor.yml"
+  assert_eq "a changed floor is caught" "1" "$(check_pass_table "$d/floor.yml" >/dev/null 2>&1; echo $?)"
+  sed "s/\[A-O\]/[A-N]/g" "$wf" > "$d/filter.yml"
+  assert_eq "a changed filter is caught" "1" "$(check_pass_table "$d/filter.yml" >/dev/null 2>&1; echo $?)"
+  sed "s/ --no-parallel / /" "$wf" > "$d/par.yml"
+  assert_eq "a changed parallelism flag is caught" "1" "$(check_pass_table "$d/par.yml" >/dev/null 2>&1; echo $?)"
+  : > "$d/empty.yml"
+  assert_eq "a workflow with no invocations is caught" "1" "$(check_pass_table "$d/empty.yml" >/dev/null 2>&1; echo $?)"
+  rm -rf "$d"
+}
+
+test_pass_of_filters_match_test_yml_verbatim() {
+  # The pass map must not drift from CI. Each filter string, as CI spells it
+  # inside single quotes, has to appear in test.yml along with its floor.
+  local wf="$HERE/../.github/workflows/test.yml" body; body="$(cat "$wf")"
+  assert_contains "1a filter in test.yml"  "$body" "--parallel --filter '^TBDDaemonTests\.[A-O]'"
+  assert_contains "1b filter in test.yml"  "$body" "--parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]'"
+  assert_contains "2 filter in test.yml"   "$body" "--parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'"
+  assert_contains "quiet filter in test.yml" "$body" "--filter '^TBDDaemonLiveTests\.' --no-parallel"
+  local floor; for floor in 1200 1500 1900 35; do
+    assert_contains "floor $floor in test.yml" "$body" "--floor $floor"
+  done
+  # And the harness's own copies equal those strings once CI's quotes are removed.
+  assert_eq "harness 1a args" "--parallel --filter ^TBDDaemonTests\.[A-O]" "$(spec_field "$(pass_spec_of 'TBDDaemonTests.A/x()')" 2)"
+}
+
+test_pass_of_first_iteration_gets_the_warmup_deadline() {
+  pass_spec_of 'TBDSharedTests.X/y()' > /dev/null
+  assert_eq "first iteration" "$PASS_FIRST_ITERATION_DEADLINE_S" "$(iteration_deadline_for 1)"
+  assert_eq "later iteration" "$PASS_ITERATION_DEADLINE_S" "$(iteration_deadline_for 2)"
+  pass_spec_of 'TBDDaemonLiveTests.X/y()' > /dev/null
+  assert_eq "quiet pass first iteration" "$QUIET_FIRST_ITERATION_DEADLINE_S" "$(iteration_deadline_for 1)"
+  assert_eq "quiet pass later iteration" "$QUIET_ITERATION_DEADLINE_S" "$(iteration_deadline_for 2)"
+  ADHOC_FIRST_DEADLINE_S=""; ADHOC_DEADLINE_S=""; ADHOC_INDUCE_LOAD=1
+  assert_eq "a TARGETS entry keeps the ordinary deadline" "$ITERATION_DEADLINE_S" "$(iteration_deadline_for 1)"
+}
+
+test_the_quiet_pass_runs_without_induced_load() {
+  # Both branches of the gate: the quiet pass turns load off, a fast pass and a
+  # single test leave it on, and --no-load still wins everywhere.
+  pass_spec_of 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()' > /dev/null
+  assert_eq "quiet pass: no spinners" "off" "$(should_induce_load 1 && echo on || echo off)"
+  pass_spec_of 'TBDDaemonTests.HolderTests/a()' > /dev/null
+  assert_eq "fast pass: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
+  assert_eq "fast pass with --no-load: none" "off" "$(should_induce_load 0 && echo on || echo off)"
+  adhoc_test_spec 'TBDDaemonTests.HolderTests/a()' > /dev/null
+  assert_eq "test alone: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
+  # Test scope loads whatever pass the test is in: a quiet-pass test alone,
+  # right after its pass turned load off, still gets spinners.
+  pass_spec_of 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()' > /dev/null
+  adhoc_test_spec 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()' > /dev/null
+  assert_eq "a live-suite test alone: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
+  ADHOC_INDUCE_LOAD=1
+  assert_eq "a TARGETS run: spinners" "on" "$(should_induce_load 1 && echo on || echo off)"
+}
+
+test_test_and_pass_of_are_exclusive() {
+  local out rc=0
+  out="$(bash "$SCRIPT" --test 'A.B/c()' --pass-of 'A.B/c()' 2>&1)" || rc=$?
+  assert_eq "both modes refused with exit 2" "2" "$rc"
+  assert_contains "and says why" "$out" "mutually exclusive"
+  rc=0
+  out="$(bash "$SCRIPT" --test 'A.B/c()' --target FastPassWhole 2>&1)" || rc=$?
+  assert_eq "--test with --target refused" "2" "$rc"
+  assert_contains "and says why" "$out" "mutually exclusive"
+  rc=0
+  out="$(bash "$SCRIPT" --pass-of 'not-an-id' 2>&1)" || rc=$?
+  assert_eq "an ID without a / is refused" "2" "$rc"
+  assert_contains "and says what an ID looks like" "$out" "<xunit classname>/<name>"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do

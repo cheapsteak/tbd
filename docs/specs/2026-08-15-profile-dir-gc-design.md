@@ -125,8 +125,11 @@ read (row listing, terminal references, the pre-reap re-read), mirroring how
 - Same-commit updates to the GRDB record and the Codable `Config` model in
   `Sources/TBDShared/Models.swift` (optional with default, so existing rows
   and JSON decode).
-- A config RPC setter mirroring `setGCEnabled`, reachable from the CLI, is
-  the soak-time enablement path. No app UI toggle until graduation.
+- A config RPC setter mirroring `setGCEnabled` is the one write path. Two
+  surfaces reach it: `tbd gc profile-dirs on|off` (no argument prints the
+  current value) and the Settings → Cleanup toggle "Reclaim orphaned profile
+  config dirs", which reads the same `Config` field. Both ship showing off;
+  graduation flips `Config.gcProfileDirsEnabledDefault`.
 - Tests cover the three states: a pre-migration row reads NULL (not `0`); an
   explicit `false` survives a change to the default constant; NULL follows
   the constant.

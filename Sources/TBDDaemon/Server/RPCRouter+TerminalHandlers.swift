@@ -93,8 +93,14 @@ actor TranscriptParseCache {
 /// record gets and the message the caller sees.
 ///
 /// One type for both typing paths — the send handler and the verifier's
-/// retry — so a refusal cannot be classified two ways depending on which one
+/// retry — so a decline cannot be classified two ways depending on which one
 /// asked.
+///
+/// `outcome` is the full `ActuationOutcome` rather than a `RefusedReason`
+/// because not every "do not type here" is a refusal: a consultation that could
+/// not reach the server declined nothing about the target, and carries
+/// `.transportFailed` instead. Collapsing that into a refusal reason would make
+/// the record claim the daemon decided something it never learned.
 struct PaneSendRefusal: Sendable {
     let outcome: ActuationOutcome
     let message: String
@@ -136,6 +142,13 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
+
+        // A model override is a Codex launch argument. Refuse it for every
+        // other kind rather than silently dropping it: Claude models come from
+        // TBD model profiles, and a shell has no model.
+        if params.model != nil, params.type != .codex {
+            return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
+        }
 
         // Look up the worktree to get tmux server and path
         guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
@@ -295,7 +308,8 @@ extension RPCRouter {
                         workingDirectory: currentWorktree.path,
                         command: CodexSpawnCommandBuilder.build(
                             initialPrompt: params.prompt,
-                            executablePath: codexPreparation.executablePath),
+                            executablePath: codexPreparation.executablePath,
+                            model: params.model),
                         env: codexSpawnEnv,
                         sensitiveEnv: codexEnvOverrides,
                         cols: resolvedCols,
@@ -334,7 +348,13 @@ extension RPCRouter {
                 if let overrideID = params.overrideProfileID {
                     resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
                 } else {
-                    resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                    // A resumed conversation belongs to the account holding its
+                    // transcript, which the history row does not record, so a
+                    // resume keeps the stable pre-balancing resolution.
+                    resolvedProfile = try await modelProfileResolver.resolve(
+                        repoID: worktree.repoID,
+                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
+                        worktreeID: params.worktreeID)
                 }
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
@@ -365,10 +385,6 @@ extension RPCRouter {
         }
 
         // A login session takes the decided transport like every other spawn.
-        // Its auto-`/login` pump is transport-agnostic: `armLoginSession`
-        // hands it a closure pair per transport — a captured tmux pane and
-        // `send-keys`, or the daemon's retained emulator and the holder's
-        // injection courier.
         let transport = decidedTransport
 
         // Build the spawn command via the pure helper.
@@ -536,7 +552,7 @@ extension RPCRouter {
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
-        let (terminal, currentServer) = try await actuating(actuationID) {
+        let terminal = try await actuating(actuationID) {
             try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: params.worktreeID,
                 allowedStatuses: [worktree.status]
@@ -561,16 +577,19 @@ extension RPCRouter {
                     transport: transport,
                     attachment: attachment,
                     modelProxySupervisor: modelProxySupervisor)
-                return (terminal, currentWorktree.tmuxServer)
+                return terminal
             }
         }
+        // The row is in, so its live count now carries a balanced pick's
+        // load; hand the reservation back so it stops counting too.
+        await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
         )))
 
         if isLoginSession, let profile = resolvedProfile {
-            await armLoginSession(terminal: terminal, server: currentServer, profile: profile)
+            await armLoginSession(profile: profile)
         }
 
         await finishActuation(actuationID, .dispatched)
@@ -605,32 +624,12 @@ extension RPCRouter {
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
     }
 
-    /// Post-spawn wiring for a profile login session:
-    /// 1. starts the verified auto-`/login` pump — poll the session's screen
-    ///    until Claude's TUI is interactive, type `/login` + Enter, then verify
-    ///    the login dialog actually appeared (retrying, capped) so a send that
-    ///    lands before the input loop is ready doesn't silently vanish;
-    /// 2. starts the login-identity watcher so the Settings badge flips to
-    ///    "Logged in as …" the moment the profile's isolated `.claude.json`
-    ///    gains an `oauthAccount`.
-    ///
-    /// Transport-agnostic: the pump is one loop and one classifier, and what
-    /// differs per transport is the pair of closures `loginPumpClosures(for:)`
-    /// builds for it.
-    private func armLoginSession(
-        terminal: Terminal,
-        server: String,
-        profile: ResolvedModelProfile
-    ) async {
-        let terminalID = terminal.id
-        let closures = loginPumpClosures(for: terminal, server: server)
-        await loginSessions.registerPendingAutoLogin(terminalID: terminalID)
-        await loginSessions.startAutoLoginPump(
-            terminalID: terminalID,
-            paneText: closures.paneText,
-            typeLogin: closures.typeLogin
-        )
-
+    /// Post-spawn wiring for a profile login session: starts the
+    /// login-identity watcher so the Settings badge flips to "Logged in as …"
+    /// the moment the profile's isolated `.claude.json` gains an
+    /// `oauthAccount`. Nothing is typed into the session — the person runs
+    /// `/login` from the footer hint Claude renders.
+    private func armLoginSession(profile: ResolvedModelProfile) async {
         let configDirManager = self.configDirManager
         let subscriptions = self.subscriptions
         let profileID = profile.profileID
@@ -641,137 +640,6 @@ extension RPCRouter {
             identity: { configDirManager.loginIdentity(forProfileID: profileID) },
             onLogin: { subscriptions.broadcast(delta: .modelProfilesChanged) }
         )
-    }
-
-    /// How the auto-`/login` pump reads and types for one login tab, chosen by
-    /// the transport its row records.
-    ///
-    /// A factory rather than two branches inside `armLoginSession` so a test
-    /// can take the pair and drive it: arming also starts the identity watcher
-    /// against a profile's config dir, which a test of the typing has no
-    /// business running.
-    ///
-    /// - **tmux** — a captured pane, which the daemon can always judge because
-    ///   the tmux server renders it for everybody, and `send-keys` twice: the
-    ///   text, then `Enter`.
-    /// - **holder** — the daemon's own retained emulator through the typed
-    ///   screen, judged only when it is live and fully observed
-    ///   (`LoginSessionCoordinator.paneReading(from:)`), and two courier writes
-    ///   for the same two acts, paced `PacedKeySender.interKeyPause` apart so
-    ///   the body and the submit reach the child as separate reads.
-    ///
-    /// `server` is the tmux server the spawn ran in, and is consulted on the
-    /// tmux arm alone — a holder row has no server behind it.
-    func loginPumpClosures(
-        for terminal: Terminal,
-        server: String
-    ) -> (
-        paneText: @Sendable () async -> LoginSessionCoordinator.PaneReading,
-        typeLogin: @Sendable () async -> Void
-    ) {
-        let terminalID = terminal.id
-        switch terminal.transport {
-        case .tmux:
-            let tmux = self.tmux
-            let paneID = terminal.tmuxPaneID
-            return (
-                paneText: {
-                    // A capture that failed is an empty pane, which classifies
-                    // as `notReady` — the same wait it has always taken.
-                    let captured = try? await tmux.capturePaneOutput(
-                        server: server, paneID: paneID)
-                    return .text(captured ?? "")
-                },
-                typeLogin: {
-                    do {
-                        try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
-                        try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
-                    } catch {
-                        logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
-                    }
-                }
-            )
-        case .holder:
-            return (
-                paneText: {
-                    let screen: TerminalScreen?
-                    do {
-                        screen = try await self.holderLoginScreen(terminalID: terminalID)
-                    } catch {
-                        // A refused projection is a producer bug rather than a
-                        // session state, so it is said out loud on every read
-                        // that hits it — the pump then waits, exactly as it
-                        // does for a screen it may not judge.
-                        logger.warning("auto-login: could not project terminal \(terminalID, privacy: .public)'s screen: \(error.localizedDescription, privacy: .public)")
-                        screen = nil
-                    }
-                    return LoginSessionCoordinator.paneReading(from: screen)
-                },
-                typeLogin: {
-                    guard let courier = self.holderInjectionCourier else {
-                        logger.warning("auto-login: terminal \(terminalID, privacy: .public) runs on the pty-holder transport and this daemon has no injection path; nothing was typed")
-                        return
-                    }
-                    // Enter comes through the named-key table, against whatever
-                    // modes the session's store reports, so the login tab
-                    // resolves a key the one way every other holder send does.
-                    // The reading is taken once, before anything is written:
-                    // a submit this daemon cannot spell types nothing at all
-                    // rather than leaving a `/login` sitting in the composer.
-                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
-                    guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
-                        logger.warning("auto-login: no holder byte mapping for Enter; nothing was typed into terminal \(terminalID, privacy: .public)")
-                        return
-                    }
-                    // Two writes with a pause between them, which is the shape
-                    // the tmux arm has — `send-keys -l` and then a separate
-                    // `Enter` command — and the shape this pump was proven
-                    // against live. Back-to-back raw writes coalesce into one
-                    // child `read()` on the daemon-write path, and the TUI's
-                    // paste heuristic can absorb the `\r` into the body it
-                    // arrives with. `PacedKeySender.interKeyPause` is the pause
-                    // every other holder key sequence already takes.
-                    let bodyLanded = await self.deliverLoginBytes(
-                        Data("/login".utf8), terminalID: terminalID, courier: courier)
-                    guard bodyLanded else { return }
-                    try? await self.clock.sleep(for: PacedKeySender.interKeyPause)
-                    _ = await self.deliverLoginBytes(
-                        enter, terminalID: terminalID, courier: courier)
-                }
-            )
-        }
-    }
-
-    /// One courier write for the login pump. `false` when nothing was written,
-    /// which stops the pair rather than submitting a `/login` that never landed.
-    private func deliverLoginBytes(
-        _ bytes: Data, terminalID: UUID, courier: HolderInjectionCourier
-    ) async -> Bool {
-        switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
-        case .viewerWrote, .daemonWrote:
-            return true
-        case .notDelivered(let reason):
-            logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(reason, privacy: .public)")
-            return false
-        }
-    }
-
-    /// The holder-backed login tab's screen, for the pump to read.
-    ///
-    /// The seam first so a test can pin all four of the pump's readings without
-    /// a real holder; otherwise the registry's own reader, which is retained
-    /// across an attach and so answers for an open session as well as a
-    /// detached one. `nil` from either means the same thing: nothing answered.
-    ///
-    /// The depth is `terminal.output`'s own default. The pump reads a tail of
-    /// the session rather than a pane, and the classifier's markers are what
-    /// Claude paints in the last handful of rows.
-    private func holderLoginScreen(terminalID: UUID) async throws -> TerminalScreen? {
-        if let holderScreenOracle {
-            return try await holderScreenOracle(terminalID)
-        }
-        guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
-        return try await reader.screen(maxLines: 50)
     }
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
@@ -969,6 +837,10 @@ extension RPCRouter {
         // carried out separately, or the record would call a close that
         // reclaimed nothing `dispatched`.
         var transportCleanupFailure: String?
+        // Set when the tmux-side teardown was deliberately skipped because the
+        // pane now belongs to a different terminal. Recorded as a refusal, not
+        // a transport failure: nothing failed, the guard did its job.
+        var teardownRefusal: String?
         if terminal.transport == .holder {
             // The one path in the holder family that DOES the work instead of
             // refusing it. Its siblings refuse because acting on a holder row's
@@ -982,22 +854,58 @@ extension RPCRouter {
             // nothing while the holder process, the job it forked, and the
             // socket and lock files at its rendezvous all outlive the row. The
             // row was the only record of those pids, so this is the last moment
-            // anything can reclaim them. Nothing is captured for Session
-            // History: the holder's screen lives in the daemon's own emulator,
-            // not in a tmux pane, and asking tmux for pane "" never produced a
-            // history entry for a holder row anyway.
+            // anything can reclaim them.
+            //
+            // The Closed Terminals entry is written first, from the daemon's
+            // own emulator rather than a tmux pane: disposal releases the
+            // reader the capture is read from. Only for a local worktree, as
+            // on the tmux branch: an entry under a worktree this daemon has no
+            // row for is one no history view lists and no worktree delete
+            // reclaims.
+            if worktree != nil {
+                await WorktreeLifecycle.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
+            }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
-            await db.terminalHistory.captureOnClose(terminal: terminal) {
-                try await tmux.capturePaneScrollback(
-                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
-            }
-            // Kill the tmux window
-            do {
-                try await tmux.killWindow(
-                    server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            } catch {
-                transportCleanupFailure = "\(error)"
+            // Refuse to kill a window whose pane belongs to a DIFFERENT
+            // terminal — see `TmuxManager.paneOwnership` for why. A
+            // close racing a recycled coordinate must not `kill-window` a
+            // session it was never asked to touch.
+            //
+            // The two refusals are recorded as what they are rather than as a
+            // tmux error: a recycled coordinate is a deliberate protective
+            // skip (`refused(.targetMismatch)`); an unreadable identity means
+            // the read-only consultation itself failed to run, which IS a
+            // transport failure — just not one caused by the kill.
+            let ownership = await tmux.paneOwnership(
+                terminalID: terminal.id, server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+
+            if let detail = ownership.refusalDetail {
+                let message =
+                    "pane \(terminal.tmuxPaneID): \(detail), so the window was left untouched"
+                logger.warning("""
+                    terminalDelete: refusing to kill-window for terminal \
+                    \(terminal.id.uuidString, privacy: .public) — \
+                    \(message, privacy: .public)
+                    """)
+                if case .ownedByAnother = ownership {
+                    teardownRefusal = message
+                } else {
+                    transportCleanupFailure = message
+                }
+            } else {
+                await db.terminalHistory.captureOnClose(terminal: terminal) {
+                    try await tmux.capturePaneScrollback(
+                        server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+                }
+                // Kill the tmux window
+                do {
+                    try await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+                } catch {
+                    transportCleanupFailure = "\(error)"
+                }
             }
         }
 
@@ -1008,7 +916,6 @@ extension RPCRouter {
         }
         await pendingQuestions.clear(terminalID: params.terminalID)
         await broadcastPendingQuestions(terminalID: params.terminalID)
-        await loginSessions.cancelPendingAutoLogin(terminalID: params.terminalID)
         await continueInClaudeReadiness.clear(terminalID: params.terminalID)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
@@ -1021,6 +928,8 @@ extension RPCRouter {
 
         if let transportCleanupFailure {
             await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
+        } else if let teardownRefusal {
+            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
         } else {
             await finishActuation(actuationID, .dispatched)
         }
@@ -1268,7 +1177,11 @@ extension RPCRouter {
             }
             var resolvedProfile: ResolvedModelProfile? = nil
             do {
-                resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so a
+                // revive keeps the stable pre-balancing resolution.
+                resolvedProfile = try await modelProfileResolver.resolve(
+                    repoID: worktree.repoID, balance: false)
             } catch {
                 logger.warning("revive: model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
@@ -1474,26 +1387,14 @@ extension RPCRouter {
             + "tmux window to recreate. Its session is unchanged."
     }
 
-    /// The refusal an `.inPlace` `terminal.swapProfile` returns for a
-    /// holder-backed row. A sibling of `holderRecreateRefusal` rather than a
-    /// reuse of it: both refuse the same transport for the same reason, and the
-    /// only thing that differs is the tmux verb each one had no coordinate for,
-    /// so the wording tracks the verb and nothing else. One named factory per
-    /// verb, so the app, the CLI and the tests assert the same text.
-    static func holderInPlaceSwapRefusal(terminalID: UUID) -> String {
-        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
-            + "tmux window to respawn in place. Its session and profile are unchanged "
-            + "— fork the session instead."
-    }
-
     /// The refusal `terminal.recreateWindow` returns when tmux gave no usable
     /// answer about the window.
     ///
-    /// A sibling of `holderRecreateRefusal` and `holderInPlaceSwapRefusal` for
-    /// the same reason: one named factory per refusal, so the app, the CLI and
-    /// the tests assert the same text. This one is not about a transport that
-    /// has no window — it is about a window whose state could not be
-    /// established, which is a retry rather than a category error.
+    /// A sibling of `holderRecreateRefusal` for the same reason: one named
+    /// factory per refusal, so the app, the CLI and the tests assert the same
+    /// text. This one is not about a transport that has no window — it is
+    /// about a window whose state could not be established, which is a retry
+    /// rather than a category error.
     static func unansweredWindowProbeRefusal(terminalID: UUID) -> String {
         "tmux did not answer whether terminal \(terminalID)'s window is still "
             + "there within \(TmuxManager.commandTimeout). The window was left "
@@ -1599,6 +1500,16 @@ extension RPCRouter {
                     // The durable park intent above preserves the old token.
                     // Once the dead pane is eliminated, rotate the token and
                     // clear its process-local facts before exposing the park.
+                    //
+                    // No `paneOwnership` check needed here (unlike the
+                    // codex/shell branches below): the `probeWindow` switch
+                    // above already returned `.absent` — tmux's own
+                    // definitive "no such window" answer — so there is no
+                    // live occupant, stranger or otherwise, for a pane-
+                    // identity probe to protect. And this whole closure runs
+                    // inside `tmux.withWorktreeServerLock`, so no sibling
+                    // spawn can race a fresh window into this coordinate
+                    // between the probe and this kill.
                     try? await self.tmux.killWindow(
                         server: currentWorktree.tmuxServer,
                         windowID: currentTerminal.tmuxWindowID)
@@ -1717,6 +1628,17 @@ extension RPCRouter {
                     var replacementEnv = codexEnv
                     // Kill the old window and rebuild the server while holding
                     // the same lock reconciliation uses for ownership reads.
+                    // Refuse to kill a window whose pane belongs to a
+                    // DIFFERENT terminal — see `TmuxManager.paneOwnership`.
+                    // A recreate racing a recycled coordinate must not destroy
+                    // a live stranger's session; the row itself is genuinely
+                    // stale at that point, so the same error every other
+                    // staleness check in this closure throws applies here too.
+                    guard await tmux.paneOwnership(
+                        terminalID: currentTerminal.id, server: currentWorktree.tmuxServer,
+                        paneID: currentTerminal.tmuxPaneID).permitsTeardown else {
+                        throw StaleTerminalReplacementError()
+                    }
                     try? await tmux.killWindow(
                         server: currentWorktree.tmuxServer,
                         windowID: currentTerminal.tmuxWindowID)
@@ -1829,6 +1751,14 @@ extension RPCRouter {
                     let expectedIncarnation = TerminalSessionIncarnation(
                         terminal: currentTerminal)
                     var replacementEnv = env
+                    // Refuse to kill a window whose pane belongs to a
+                    // DIFFERENT terminal — see `TmuxManager.paneOwnership`
+                    // and the matching guard in the codex branch above.
+                    guard await tmux.paneOwnership(
+                        terminalID: currentTerminal.id, server: currentWorktree.tmuxServer,
+                        paneID: currentTerminal.tmuxPaneID).permitsTeardown else {
+                        throw StaleTerminalReplacementError()
+                    }
                     try? await tmux.killWindow(
                         server: currentWorktree.tmuxServer,
                         windowID: currentTerminal.tmuxWindowID)
@@ -2084,8 +2014,10 @@ extension RPCRouter {
         /// Session has prior content — `claude --resume <id>` and recapture
         /// the forked session ID after a brief delay.
         case resume(sessionID: String)
-        /// Session JSONL is missing or has no conversation — start a new
-        /// session with the system prompt, no recapture needed.
+        /// Session JSONL has no conversation (or, for `.inPlace` only, is
+        /// missing — a `.fork` of a missing transcript is refused before a
+        /// plan is made) — start a new session with the system prompt, no
+        /// recapture needed.
         case fresh(sessionID: String)
     }
 
@@ -2192,6 +2124,50 @@ extension RPCRouter {
         return fm.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
+    /// The last look a fork takes before refusing a session as having no
+    /// transcript. Tries, in order: `resolveSwapSourceTranscript` against each
+    /// of `searchConfigDirs` (the row's `transcriptPath`, then the worktree's
+    /// slug dir under that config dir's `projects/`), then a shallow
+    /// by-session-ID scan of each config dir's `projects/` tree
+    /// (`TranscriptProjectDirSync.locateSessionTranscript`). The scan is what
+    /// the resume path's own sync falls back to; it lists directories
+    /// directly, so neither a moved worktree (the slug no longer matches) nor
+    /// a stale cached miss in `ClaudeProjectDirectory.resolve` can hide a
+    /// transcript from it. Runs detached: the scan is filesystem work an RPC
+    /// handler must not block its executor on.
+    static func locateForkSourceTranscript(
+        transcriptPath: String?,
+        sessionID: String,
+        worktreePath: String,
+        searchConfigDirs: [URL]
+    ) async -> URL? {
+        return await Task.detached {
+            // De-duplicate on the RESOLVED `projects/` root: a profile's
+            // `projects` slot is normally a symlink into the host store, so
+            // the source and ambient dirs often name one physical tree.
+            var seen = Set<String>()
+            let dirs = searchConfigDirs.filter {
+                seen.insert($0.appendingPathComponent("projects", isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL.path).inserted
+            }
+            for dir in dirs {
+                if let hit = resolveSwapSourceTranscript(
+                    transcriptPath: transcriptPath, sessionID: sessionID,
+                    worktreePath: worktreePath, sourceConfigDir: dir) {
+                    return hit
+                }
+            }
+            for dir in dirs {
+                if let hit = TranscriptProjectDirSync.locateSessionTranscript(
+                    sessionID: sessionID,
+                    projectsRoot: dir.appendingPathComponent("projects", isDirectory: true)) {
+                    return hit
+                }
+            }
+            return nil
+        }.value
+    }
+
     func handleTerminalSwapProfile(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2206,7 +2182,6 @@ extension RPCRouter {
         guard let worktree = try await db.worktrees.getLocal(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
-        let expectedReplacementState = TerminalReplacementSnapshot(terminal: oldTerminal)
 
         // Resolve the requested profile (nil = no override; keychain login).
         // We do NOT touch the old terminal — both tabs coexist after the swap.
@@ -2240,12 +2215,15 @@ extension RPCRouter {
         // loads the row's profile via loadByID and resolves that profile's config
         // dir, so a wake after this resumes under the new account automatically.
         if oldTerminal.isParked {
-            let blank = ClaudeSessionScanner.isSessionBlank(
+            // Parked rows are re-homed whatever the mode asks, and a re-home
+            // with no transcript simply wakes fresh later — so missing and
+            // blank are the same answer here.
+            let state = ClaudeSessionScanner.transcriptState(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 transcriptFilePath: oldTerminal.transcriptPath
             )
-            if !blank {
+            if state == .hasConversation {
                 let sourceConfigDir: URL
                 if let oldProfileID = oldTerminal.profileID {
                     sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
@@ -2270,32 +2248,21 @@ extension RPCRouter {
                 }
             }
 
-            let destProfileID: UUID? = resolved?.profileID
-            let updated = try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-            ) { _ in
-                guard let updated = try await self.db.terminals.setParkedProfileID(
-                    id: oldTerminal.id,
-                    expectedState: expectedReplacementState,
-                    profileID: destProfileID) else {
-                    throw StaleTerminalReplacementError()
-                }
-                return updated
-            }
-            subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
-                terminalID: updated.id,
-                worktreeID: updated.worktreeID,
-                newProfileID: destProfileID
-            )))
-            logger.info("cold swap: re-homed parked terminal \(oldTerminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public) — not woken")
+            let updated = try await reHomeParkedRow(
+                terminal: oldTerminal,
+                worktree: worktree,
+                destProfileID: resolved?.profileID)
+            logger.info("cold swap: parked terminal \(oldTerminal.id, privacy: .public) re-homed and deliberately not woken")
             return try RPCResponse(result: updated)
         }
 
         // Two reshaping modes (see `TerminalSwapMode`):
-        //   .inPlace (default) — SEAMLESS "Switch account": interrupt the
-        //     pane's Claude, respawn `claude --resume <id>` under the new
-        //     profile IN THE SAME window, and update the existing terminal row.
-        //     One tab, no new row.
+        //   .inPlace (default) — "Switch account": replace the session's
+        //     process with `claude --resume <id>` under the new profile and
+        //     update the existing terminal row. One tab, no new row. How the
+        //     replacement happens is the transport's — a tmux row is respawned
+        //     in its own window and never stops painting, a holder row is
+        //     parked and woken and blinks.
         //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
         //     leaving the source session untouched (the old behavior).
         //
@@ -2310,31 +2277,11 @@ extension RPCRouter {
         // so we spawn a brand-new session instead.
         let mode = params.resolvedMode
 
-        // Taken the instant the mode is known, and deliberately not one line
-        // later: everything below — the actuation row, the transcript carried
-        // into the destination profile's config dir, the trust seed — is
-        // already state outside this handler, and `inPlaceSwapRespawn` then
-        // commits the new profile and session identity to the row BEFORE it
-        // touches tmux. On a holder row every one of those steps would land and
-        // only the last would fail, because the graceful interrupt addresses
-        // `tmuxPaneID == ""` (so the real process is never interrupted) and the
-        // `respawn-window` addresses `tmuxWindowID == ""`. The row would end up
-        // naming a session that never started while the original process ran on
-        // under an identity nothing records.
-        //
-        // Scoped to `.inPlace`, not to the whole handler: `.fork` builds a
-        // fresh tmux window and a fresh row and never touches this one, and the
-        // cold (parked) swap above only re-homes `profile_id`. Refusing those
-        // would take away a working action to close a hole they do not have.
-        //
-        // Milestone A has no holder equivalent for an in-place respawn, so this
-        // refuses rather than teaching one. An action the user has to take
-        // another way is recoverable; a row that lies about a live process is
-        // not.
-        if mode == .inPlace, oldTerminal.transport == .holder {
-            return RPCResponse(error: Self.holderInPlaceSwapRefusal(terminalID: oldTerminal.id))
-        }
-
+        // `.inPlace` on a holder row is a holder arm, not a refusal: park the
+        // session, re-home its profile, wake it under the new account. See
+        // `holderInPlaceSwap` for why the order is exactly that, and
+        // `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md` for
+        // why the blink that costs is the right trade.
         let repo: Repo?
         if let rid = worktree.repoID {
             repo = try await db.repos.get(id: rid)
@@ -2355,10 +2302,11 @@ extension RPCRouter {
         let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
         // The transport gate, asked once per swap from that one config read.
-        // Only `.fork` spawns anything — `.inPlace` respawns the row it already
-        // has, and refused above on a holder row — so this is the transport the
-        // fork tab is born onto, decided before the command is composed and
-        // carried into the spawn rather than re-derived there.
+        // Only `.fork` decides a transport at all — `.inPlace` reshapes the row
+        // it already has, on whichever transport that row is already on — so
+        // this is the transport the fork tab is born onto, decided before the
+        // command is composed and carried into the spawn rather than
+        // re-derived there.
         let forkTransport = TerminalSpawnTransport.decide(
             config: swapConfig, registry: holderRegistry)
         var env = SystemPromptBuilder.promptLayers(
@@ -2367,12 +2315,83 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
-        let blank = ClaudeSessionScanner.isSessionBlank(
+        var transcriptState = ClaudeSessionScanner.transcriptState(
             sessionID: sessionID,
             worktreePath: worktree.path,
             transcriptFilePath: oldTerminal.transcriptPath
         )
-        let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+        // A fork is about to be refused on `missing`, so make sure the answer
+        // is not an artifact of where or how the scanner looked: the scan
+        // above searches only the host store's `projects/`, by the current
+        // worktree path's slug, through a resolver that caches misses for 30
+        // seconds. `locateForkSourceTranscript` also searches the SOURCE
+        // profile's config dir and falls back to a by-session-ID scan, which
+        // neither the slug nor the miss cache can defeat. If it finds the
+        // file, classify that file instead, and hand the same file to the
+        // transcript carry below so the resume sees what this check saw.
+        var forkSourceTranscript: URL?
+        if mode == .fork, case .missing = transcriptState {
+            forkSourceTranscript = await Self.locateForkSourceTranscript(
+                transcriptPath: oldTerminal.transcriptPath,
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                searchConfigDirs: [
+                    oldTerminal.profileID.map {
+                        configDirManager.configDirectory(forProfileID: $0)
+                    } ?? configDirManager.ambientConfigDirectory,
+                    configDirManager.ambientConfigDirectory,
+                ])
+            if let forkSourceTranscript {
+                transcriptState = ClaudeSessionScanner.transcriptState(
+                    sessionID: sessionID,
+                    worktreePath: worktree.path,
+                    transcriptFilePath: forkSourceTranscript.path)
+            }
+        }
+
+        // A fork of a session with NO transcript on disk is refused rather
+        // than planned fresh: a fresh spawn would open a blank tab that the
+        // user asked for as a fork of a conversation, and nothing about that
+        // tab says the conversation did not come with it. A BLANK transcript
+        // (file present, no turns yet) still forks fresh — there is genuinely
+        // nothing to carry. `.inPlace` is deliberately unchanged: it replaces
+        // the session on the row the user is already looking at, so a fresh
+        // start under the new account is the visible result either way.
+        if mode == .fork, case .missing(let lookedFor) = transcriptState {
+            let actuationID = try await beginActuation(
+                .terminalSwapProfile, actor: actor,
+                target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+                agent: TerminalKind.claude.rawValue,
+                profile: resolved?.profileID.uuidString)
+            // Name every place a user could expect the file: the scan's own
+            // path, the row's recorded path when it has one, and the fact
+            // that the source config dir was searched by session id too.
+            let recorded = oldTerminal.transcriptPath.flatMap { $0.isEmpty || $0 == lookedFor ? nil : $0 }
+            let message = "Fork refused: session \(sessionID) has no transcript to fork "
+                + "(looked for \(lookedFor)"
+                + (recorded.map { " and the recorded \($0)" } ?? "")
+                + ", and searched the source config dir's projects by session id)"
+            logger.warning("\(message, privacy: .public)")
+            await finishActuation(actuationID, .refused(.notFound), error: message)
+            return RPCResponse(error: message)
+        }
+
+        let plan = Self.planTerminalSwap(
+            oldSessionID: sessionID, isBlank: transcriptState != .hasConversation)
+
+        // The two facts the plan decides that are not the command itself. A
+        // resume keeps the session id and wants the post-resume recapture; a
+        // fresh spawn names a new id and has nothing to recapture.
+        let storedSessionID: String
+        let scheduleRecapture: Bool
+        switch plan {
+        case .resume(let resumeID):
+            storedSessionID = resumeID
+            scheduleRecapture = true
+        case .fresh(let newSessionID):
+            storedSessionID = newSessionID
+            scheduleRecapture = false
+        }
 
         // One row for the whole swap, on the two branches that actually reshape
         // a live session. It sits here, as soon as the plan names what will be
@@ -2395,6 +2414,11 @@ extension RPCRouter {
         // forked `claude --resume <id>` finds the conversation. Only matters on
         // the resume path — a fresh spawn has no prior transcript to carry.
         // Best-effort: never blocks the swap.
+        //
+        // The destination profile's `projects/` tree, held past this block for
+        // the holder arm's post-park re-carry. nil on a fresh spawn, which has
+        // no conversation to carry at all.
+        var resumeProjectsRoot: URL?
         if case .resume = plan {
             // Source config dir: where the OLD session's transcript lives — the
             // old terminal's profile config dir, or the ambient (host) config
@@ -2414,7 +2438,7 @@ extension RPCRouter {
                 destConfigDir = configDirManager.ambientConfigDirectory
             }
 
-            if let sourceTranscript = Self.resolveSwapSourceTranscript(
+            if let sourceTranscript = forkSourceTranscript ?? Self.resolveSwapSourceTranscript(
                 transcriptPath: oldTerminal.transcriptPath,
                 sessionID: sessionID,
                 worktreePath: worktree.path,
@@ -2431,12 +2455,17 @@ extension RPCRouter {
             // — looks in the dir derived from the CURRENT path instead. Make
             // sure the session is fresh there too (copy-if-newer, best-effort,
             // detached off this handler's executor).
+            let destProjectsRoot = destConfigDir
+                .appendingPathComponent("projects", isDirectory: true)
             await TranscriptProjectDirSync.ensureSessionResumableDetached(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
-                projectsRoot: destConfigDir.appendingPathComponent("projects", isDirectory: true),
-                storedTranscriptPath: oldTerminal.transcriptPath
+                projectsRoot: destProjectsRoot,
+                // A fork that had to search for its transcript syncs the file
+                // it classified, not whatever a fresh lookup would pick.
+                storedTranscriptPath: forkSourceTranscript?.path ?? oldTerminal.transcriptPath
             )
+            resumeProjectsRoot = destProjectsRoot
         }
 
         let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
@@ -2449,94 +2478,54 @@ extension RPCRouter {
         )
         // Pre-accept the folder-trust dialog before either swap spawn (resume
         // or fresh) — a swap onto a new profile's isolated config dir has never
-        // seen this path and would otherwise re-prompt. Both build calls below
-        // resolve the same `resolveConfigDir(for: resolved)`; seed it once here.
-        // Claude-only handler. `swapConfig` is a `try?` read; fall back to the
-        // shipped default.
+        // seen this path and would otherwise re-prompt. Claude-only handler.
+        // `swapConfig` is a `try?` read; fall back to the shipped default.
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree.worktree,
             autoTrustNonScratch: swapConfig?.autoTrustWorktrees ?? true,
             profileConfigDir: await configDirManager.resolveConfigDir(for: resolved))
 
-        let spawn: ClaudeSpawnCommandBuilder.Result
-        let storedSessionID: String
-        let scheduleRecapture: Bool
-        switch plan {
-        case .resume(let resumeID):
-            logger.debug("swap: resuming session \(resumeID, privacy: .public)")
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: resumeID,
-                forkSession: mode == .fork,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: resolved?.secret,
-                profileKind: resolved?.kind,
-                profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
-                profileAwsRegion: resolved?.awsRegion,
-                profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: await configDirManager.resolveConfigDir(for: resolved),
-                cmd: nil,
-                shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    watchDeskRole: swapDeskRole,
-                    worktreePath: worktree.path,
-                    profileConfigDir: await configDirManager.resolveConfigDir(for: resolved)
-                ),
-                pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
-            )
-            storedSessionID = resumeID
-            scheduleRecapture = true
-        case .fresh(let newSessionID):
-            logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
-            let appendPrompt = SystemPromptBuilder.build(
-                repo: repo, worktree: worktree.worktree, isResume: false,
-                scratchInstructions: swapConfig?.scratchInstructions,
-                scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: newSessionID,
-                appendSystemPrompt: appendPrompt,
-                initialPrompt: nil,
-                profileSecret: resolved?.secret,
-                profileKind: resolved?.kind,
-                profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
-                profileAwsRegion: resolved?.awsRegion,
-                profileAwsProfile: resolved?.awsProfile,
-                profileConfigDir: await configDirManager.resolveConfigDir(for: resolved),
-                cmd: nil,
-                shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolved?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    watchDeskRole: swapDeskRole,
-                    worktreePath: worktree.path,
-                    profileConfigDir: await configDirManager.resolveConfigDir(for: resolved)
-                ),
-                pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
-            )
-            storedSessionID = newSessionID
-            scheduleRecapture = false
+        // Resolved here, after the actuation is open and the transcript carry
+        // and trust seed have both succeeded — not earlier, because both calls
+        // below have real side effects: the config-dir lookup creates the
+        // profile's OAuth dir, and the overlay resolution writes an overlay
+        // file and (for a roleless session) deletes the row's statusline
+        // capture. Neither should fire for a swap `beginActuation` goes on to
+        // reject. Both arms need them, and the routing decision the holder arm
+        // makes needs the overlay before any command is composed (whether the
+        // overlay sets `ANTHROPIC_BASE_URL` decides whether a route can be
+        // honoured at all).
+        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
+        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: resolved?.fallbackModels,
+            sessionKey: plannedTerminalID.uuidString,
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            watchDeskRole: swapDeskRole,
+            worktreePath: worktree.path,
+            profileConfigDir: profileConfigDir
+        )
+
+        // The spawn each arm runs, as a closure rather than a value: the
+        // holder arm cannot compose its own until after its park, because its
+        // endpoint comes from a model proxy route and that route may only be
+        // minted once the park has finished retiring the old one.
+        let composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result = { builderBaseURL in
+            self.swapSpawn(
+                plan: plan, mode: mode, resolved: resolved,
+                builderBaseURL: builderBaseURL,
+                overlayPath: overlayPath, profileConfigDir: profileConfigDir,
+                worktree: worktree, repo: repo, swapConfig: swapConfig,
+                claudeEnvOverrides: claudeEnvOverrides)
         }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
-        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
         let response: RPCResponse
-        // Set when the in-place respawn's tmux call failed. That failure is
+        // Set when the in-place swap's transport half failed: the tmux arm's
+        // respawn, or the holder arm's park, re-home or wake. That failure is
         // deliberately swallowed downstream — the RPC still returns the updated
         // row (pre-existing contract) — so it is invisible in the response and
         // has to be carried out separately, or the record would call a failed
@@ -2545,6 +2534,8 @@ extension RPCRouter {
         do {
             switch mode {
             case .fork:
+                let spawn = composeSpawn(resolved?.baseURL)
+                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
@@ -2559,7 +2550,26 @@ extension RPCRouter {
                     transport: forkTransport
                 )
 
+            case .inPlace where oldTerminal.transport == .holder:
+                let outcome = try await holderInPlaceSwap(
+                    oldTerminal: oldTerminal,
+                    worktree: worktree,
+                    storedSessionID: storedSessionID,
+                    env: env,
+                    envOverrides: mergedEnvOverrides,
+                    overlayPath: overlayPath,
+                    resolved: resolved,
+                    swapConfig: swapConfig,
+                    cols: resolvedCols,
+                    rows: resolvedRows,
+                    resumeProjectsRoot: resumeProjectsRoot,
+                    composeSpawn: composeSpawn)
+                response = outcome.response
+                respawnFailure = outcome.failure
+
             case .inPlace:
+                let spawn = composeSpawn(resolved?.baseURL)
+                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 let expectedIncarnation = TerminalSessionIncarnation(terminal: oldTerminal)
                 let replacementBaseEnv = env
                 let outcome = try await tmux.withWorktreeServerLock(
@@ -2602,6 +2612,465 @@ extension RPCRouter {
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
         }
         return response
+    }
+
+    /// Re-home a PARKED row onto another profile: set `profile_id` and tell
+    /// the app, and touch nothing else.
+    ///
+    /// The whole mutation of the cold swap, and the middle step of the holder
+    /// in-place arm — one helper, because they are the same act on the same
+    /// row shape and a second copy would be a second opinion about what
+    /// re-homing means. The transcript carry is the caller's: it has already
+    /// happened upstream by the time either reaches here.
+    ///
+    /// Under the worktree's tmux-server lock, as the cold swap has always
+    /// been. That lock does not start a server and is not about tmux here: it
+    /// is the daemon's per-worktree mutual exclusion, and it re-reads the
+    /// worktree under the caller's `allowedStatuses` so a row being archived
+    /// out from under the write is rejected rather than raced. It is taken for
+    /// this write alone and never held across the park, which polls for a
+    /// process to exit.
+    ///
+    /// - Parameter freshSessionID: the conversation the row is to hold once it
+    ///   is re-homed, for the holder arm's `.fresh` plan — a blank session is
+    ///   spawned under a NEW id rather than resumed, and the row has to name
+    ///   it. It rides in the same guarded write as the profile rather than in
+    ///   one of its own, so a failure cannot land between them and leave the
+    ///   row on the destination account naming a conversation whose transcript
+    ///   was never carried there. nil — the cold path, and every resume, where
+    ///   the id the row already holds is the whole point of `.inPlace`.
+    /// - Parameter freshTranscriptPath: the file that conversation is written
+    ///   to, written only alongside `freshSessionID`. The fresh spawn's own
+    ///   file is named by its `SessionStart` hook, so the arm passes the path
+    ///   the row already carries and this write moves it nowhere.
+    /// - Throws: `StaleTerminalReplacementError` when the row changed under
+    ///   the caller, and whatever the database throws.
+    private func reHomeParkedRow(
+        terminal: Terminal,
+        worktree: LocalWorktree,
+        destProfileID: UUID?,
+        freshSessionID: String? = nil,
+        freshTranscriptPath: String? = nil
+    ) async throws -> Terminal {
+        let expected = TerminalReplacementSnapshot(terminal: terminal)
+        let updated = try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+        ) { _ in
+            guard let updated = try await self.db.terminals.setParkedProfileID(
+                id: terminal.id,
+                expectedState: expected,
+                profileID: destProfileID,
+                sessionID: freshSessionID,
+                transcriptPath: freshTranscriptPath) else {
+                throw StaleTerminalReplacementError()
+            }
+            return updated
+        }
+        subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
+            terminalID: updated.id,
+            worktreeID: updated.worktreeID,
+            newProfileID: destProfileID
+        )))
+        // Only when this write named a new conversation. `.inPlace` keeps the
+        // tab, so `swapTerminalProfile` discards the RPC's result entirely and
+        // reconciles its cached row from the deltas — without this one the row
+        // would keep pointing at the conversation the fresh spawn replaced.
+        if freshSessionID != nil, let sessionID = updated.claudeSessionID {
+            subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+                terminalID: updated.id,
+                worktreeID: updated.worktreeID,
+                sessionID: sessionID,
+                transcriptPath: updated.transcriptPath,
+                sessionOrderObservedAt: updated.sessionOrderObservedAt
+            )))
+        }
+        logger.info("swap: re-homed parked terminal \(terminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public)")
+        return updated
+    }
+
+    /// The spawn a `terminal.swapProfile` will run, composed from its plan.
+    ///
+    /// A named helper rather than the inline switch it replaces, because the
+    /// arms compose it at different moments. The tmux and fork arms compose as
+    /// soon as they are chosen, from the profile's own endpoint. The holder
+    /// arm cannot: its spawn's endpoint is decided by a model proxy route, and
+    /// that route has to be minted AFTER the park — the park ends by retiring
+    /// whatever route its terminal id holds, so a route minted before it is
+    /// one the park itself may drop.
+    ///
+    /// - Parameter builderBaseURL: the endpoint the built command re-exports
+    ///   inline, where the export runs after the shell's rc files — a route's
+    ///   own URL where one is in play, the profile's otherwise. Callers with a
+    ///   route pass `ModelProxyRouteAttachment.Outcome.builderBaseURL(profile:)`
+    ///   rather than deriving it a second way.
+    private func swapSpawn(
+        plan: SwapSpawnPlan,
+        mode: TerminalSwapMode,
+        resolved: ResolvedModelProfile?,
+        builderBaseURL: String?,
+        overlayPath: String?,
+        profileConfigDir: String?,
+        worktree: LocalWorktree,
+        repo: Repo?,
+        swapConfig: Config?,
+        claudeEnvOverrides: [String: ClaudeEnvValue]
+    ) -> ClaudeSpawnCommandBuilder.Result {
+        switch plan {
+        case .resume(let resumeID):
+            logger.debug("swap: resuming session \(resumeID, privacy: .public)")
+            return ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID,
+                forkSession: mode == .fork,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                initialPrompt: nil,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: builderBaseURL,
+                profileModel: resolved?.model,
+                profileAwsRegion: resolved?.awsRegion,
+                profileAwsProfile: resolved?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: "",
+                settingsOverlayPath: overlayPath,
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
+            )
+        case .fresh(let newSessionID):
+            logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
+            return ClaudeSpawnCommandBuilder.build(
+                resumeID: nil,
+                freshSessionID: newSessionID,
+                appendSystemPrompt: SystemPromptBuilder.build(
+                    repo: repo, worktree: worktree.worktree, isResume: false,
+                    scratchInstructions: swapConfig?.scratchInstructions,
+                    scratchRenamePrompt: swapConfig?.scratchRenamePrompt),
+                initialPrompt: nil,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: builderBaseURL,
+                profileModel: resolved?.model,
+                profileAwsRegion: resolved?.awsRegion,
+                profileAwsProfile: resolved?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: "",
+                settingsOverlayPath: overlayPath,
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
+            )
+        }
+    }
+
+    /// `.inPlace` swap of a HOLDER-backed row: park the session, re-home its
+    /// profile, and wake it under the new account. One tab, one row, one
+    /// session id — and one visible blink, because a holder's pty dies with
+    /// its child and no replacement can keep the viewer's attachment painting
+    /// the way tmux's `respawn-window` does.
+    ///
+    /// **Park comes before re-home, and the order is load-bearing.** If the
+    /// profile were re-homed first and the child then survived the ladder, the
+    /// row would claim the new account while the old process ran on under the
+    /// old one — the state the removed refusal existed to prevent. With park
+    /// first, every point at which the daemon could die lands in a state
+    /// something owns: parked on the old profile (the next focus-wake resumes
+    /// it there, and a retry of the swap takes the cold path), or parked on
+    /// the new one (the next focus-wake resumes it there).
+    ///
+    /// Each half fails into a named state, and the answer names the half:
+    ///
+    /// - **Park refused, or the child survived the ladder.** The row stays
+    ///   awake on the old profile with nothing changed. The park's own reason
+    ///   is both the RPC error and the actuation's.
+    ///
+    ///   A park **already in flight** for this row is one of those refusals,
+    ///   and the reason it cannot be read as "parked now, carry on" is the
+    ///   rollback. `performHibernate`'s singleflight guard answers
+    ///   `.alreadyHibernated` whenever any other hibernate of this terminal is
+    ///   mid-ladder — the idle sweep's autopark, a racing "Hibernate now" —
+    ///   independent of whether that ladder will finish. The holder park
+    ///   writes `hibernatedAt` as INTENT before it sends the polite `/exit`,
+    ///   so the row can read parked while its ladder is still deciding, and a
+    ///   child that survives the escalation makes that ladder call
+    ///   `clearHibernated`. A re-home committed in between would land the row
+    ///   awake, labelled with the NEW account, while the un-killed process
+    ///   runs on under the old one — the exact state the park-before-re-home
+    ///   order exists to prevent. `reHomeParkedRow`'s CAS does not cover it:
+    ///   it guards the write against a park state that changed BEFORE the
+    ///   write, not against a rollback that lands after. So this arm changes
+    ///   nothing and says so, and a retry is sound either way — the ladder
+    ///   either finished, in which case the retry takes the cold path at the
+    ///   top of `handleTerminalSwapProfile` and re-homes a parked row with no
+    ///   process to interrupt, or it rolled back, in which case the retry
+    ///   parks the row itself.
+    /// - **Re-home failed.** The row is parked on the old profile, on the
+    ///   conversation it already had; the message says so, and that a retry
+    ///   now takes the cold path. Both facts hold because the re-home is ONE
+    ///   guarded write: on the plan that mints a fresh session id, that id is
+    ///   committed in the same statement as the profile, so a failure leaves
+    ///   neither behind.
+    /// - **Wake failed.** The row is parked on the NEW profile, so the switch
+    ///   has taken effect at the account level and the next focus-wake or menu
+    ///   wake retries the resume. The response is the updated row and the
+    ///   failure is reported out of band — the same contract the tmux arm has,
+    ///   where the row keeps the new profile before the respawn.
+    ///
+    /// No tmux server lock is taken around any of this. A holder session has
+    /// no server, the park polls for a process to exit, and `reHomeParkedRow`
+    /// takes the lock for its own write. What IS held for the whole
+    /// composition is the coordinator's swap claim on the row, so an ordinary
+    /// wake arriving while the row is parked mid-swap — the app wakes the
+    /// active tab's parked terminal on a selection change, and that is this
+    /// tab — answers in-flight instead of racing the re-home.
+    ///
+    /// - Parameter resumeProjectsRoot: the destination profile's `projects/`
+    ///   tree on a resume, nil on a fresh spawn. The park's polite `/exit` is
+    ///   what makes Claude flush the tail of its transcript, so the copy the
+    ///   handler took before the park is short by exactly that flush; this is
+    ///   where the arm re-takes it.
+    /// - Parameter composeSpawn: the swap's command, composed from the base
+    ///   URL the route decides. A closure because the route may only be minted
+    ///   after the park.
+    /// - Returns: the response to send, and the transport failure to record
+    ///   against the actuation (nil when the swap completed).
+    private func holderInPlaceSwap(
+        oldTerminal: Terminal,
+        worktree: LocalWorktree,
+        storedSessionID: String,
+        env: [String: String],
+        envOverrides: [String: String],
+        overlayPath: String?,
+        resolved: ResolvedModelProfile?,
+        swapConfig: Config?,
+        cols: Int,
+        rows: Int,
+        resumeProjectsRoot: URL?,
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+    ) async throws -> (response: RPCResponse, failure: String?) {
+        // THE CLAIM, ahead of the park and released after the wake.
+        //
+        // The three verbs below each singleflight themselves, and each releases
+        // the instant it returns: the park's claim is gone before the transcript
+        // re-carry, and the wake's is not taken until several suspension points
+        // later. The row is PARKED across that gap, and the app wakes exactly
+        // the active tab's parked terminal on a selection change — the tab this
+        // very switch was pressed on. Without a claim spanning the whole
+        // composition an ordinary focus-wake could land there, un-park the row
+        // and start a fresh session under the account being switched AWAY from;
+        // `reHomeParkedRow`'s compare-and-set would then refuse its write, which
+        // costs no correctness but leaves the person told their session is
+        // parked on its old account while it is in fact awake there.
+        //
+        // The swap's own halves are unaffected: `performHibernate` consults
+        // `hibernatesInFlight` and `wakeHolderForProfileSwap` consults that and
+        // `wakesInFlight`, and neither reads the swap claim.
+        guard await hibernationCoordinator.claimSwap(terminalID: oldTerminal.id) else {
+            let reason = "Terminal \(oldTerminal.id) was not switched to the other account: another pause, wake or account switch of this session is in flight; nothing was changed. Retry once it has finished."
+            logger.warning("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) is already claimed by a park, wake or swap; refusing rather than racing it")
+            return (RPCResponse(error: reason), reason)
+        }
+        // Released on EVERY exit, thrown ones included. `defer` cannot await,
+        // so the release is written out on both paths rather than implied.
+        do {
+            let outcome = try await holderInPlaceSwapUnderClaim(
+                oldTerminal: oldTerminal,
+                worktree: worktree,
+                storedSessionID: storedSessionID,
+                env: env,
+                envOverrides: envOverrides,
+                overlayPath: overlayPath,
+                resolved: resolved,
+                swapConfig: swapConfig,
+                cols: cols,
+                rows: rows,
+                resumeProjectsRoot: resumeProjectsRoot,
+                composeSpawn: composeSpawn)
+            await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
+            return outcome
+        } catch {
+            await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
+            throw error
+        }
+    }
+
+    /// The three steps of the holder arm, run with the swap claim on the row
+    /// already held. Split from `holderInPlaceSwap` only so the claim's release
+    /// can be structural around every exit this body has.
+    private func holderInPlaceSwapUnderClaim(
+        oldTerminal: Terminal,
+        worktree: LocalWorktree,
+        storedSessionID: String,
+        env: [String: String],
+        envOverrides: [String: String],
+        overlayPath: String?,
+        resolved: ResolvedModelProfile?,
+        swapConfig: Config?,
+        cols: Int,
+        rows: Int,
+        resumeProjectsRoot: URL?,
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+    ) async throws -> (response: RPCResponse, failure: String?) {
+        // 1. PARK, through the coordinator's own holder park under the
+        //    `.profileSwap` policy: the ladder and its rollback unchanged, the
+        //    live rails bypassed, `.auto` as the reason so a daemon that dies
+        //    here leaves a row the next focus-wake heals.
+        switch await hibernationCoordinator.parkForProfileSwap(terminalID: oldTerminal.id) {
+        case .ok:
+            break
+        case .alreadyHibernated:
+            let reason = "Terminal \(oldTerminal.id) was not paused for its account switch: another park of this session is in flight, or it was parked a moment ago; nothing was changed. Retry: a parked row takes the cold path."
+            logger.warning("inPlace swap: holder terminal \(oldTerminal.id, privacy: .public) has a park in flight; refusing rather than re-homing a row whose park may still roll back")
+            return (RPCResponse(error: reason), reason)
+        case .notFound:
+            let reason = "Terminal not found: \(oldTerminal.id)"
+            return (RPCResponse(error: reason), reason)
+        case .notEligible(let reason):
+            logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
+            return (RPCResponse(error: reason), reason)
+        }
+        guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
+              parkedRow.isParked else {
+            let reason = "Terminal \(oldTerminal.id) did not pause for its account switch; its session and profile are unchanged"
+            return (RPCResponse(error: reason), reason)
+        }
+
+        // The seam a test uses to stage the re-home failure. Production leaves
+        // it nil and this awaits nothing. See its declaration on `RPCRouter`.
+        await holderSwapBetweenParkAndReHome?(oldTerminal.id)
+
+        // 1b. RE-CARRY the transcript, now that the park has ended. The handler
+        //     copied it into the destination config dir before the transport
+        //     branch, and that copy skips a destination that already exists —
+        //     but the park's polite `/exit` is precisely the gesture that makes
+        //     Claude flush the tail of the conversation, and that flush lands
+        //     in the SOURCE profile's jsonl afterwards. Without this pass the
+        //     resume below reads a copy that stops short of the last turn.
+        //     Copy-if-newer, detached off this handler's executor, and
+        //     best-effort in the same way the carry upstream is: every failure
+        //     inside it is logged where it happens and none of them fails the
+        //     swap.
+        if let resumeProjectsRoot {
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                sessionID: storedSessionID,
+                worktreePath: worktree.path,
+                projectsRoot: resumeProjectsRoot,
+                storedTranscriptPath: oldTerminal.transcriptPath)
+        }
+
+        // 2. RE-HOME, the same write the cold path makes — and, on the plan
+        //    that mints a new session id, the conversation the row is to hold,
+        //    in that same guarded statement. A blank session is spawned fresh
+        //    rather than resumed (resuming one shows "no conversation found"),
+        //    so the row has to name the new conversation; committing it beside
+        //    the profile is what the tmux arm does through
+        //    `prepareProfileAgentRespawn`, and it means there is no write left
+        //    that could fail after the re-home and leave the row on the new
+        //    account pointing at a conversation with no transcript there. A
+        //    resume names nothing here and keeps the id it has, which is the
+        //    whole point of `.inPlace`. The transcript was carried into the
+        //    destination config dir upstream, and re-taken just above now that
+        //    the park has flushed the conversation's tail.
+        let freshSessionID = storedSessionID == parkedRow.claudeSessionID ? nil : storedSessionID
+        let target: Terminal
+        do {
+            target = try await reHomeParkedRow(
+                terminal: parkedRow, worktree: worktree, destProfileID: resolved?.profileID,
+                freshSessionID: freshSessionID,
+                freshTranscriptPath: parkedRow.transcriptPath)
+        } catch is StaleTerminalReplacementError {
+            // The row moved under the switch, so nothing can be said about
+            // where it is parked — it may not be parked at all. The swap claim
+            // keeps an ordinary focus-wake out of this window, but the
+            // compare-and-set guards more than the claim covers: a row deleted
+            // mid-swap, or a worktree whose status left the set the write is
+            // allowed in, both land here too.
+            logger.error("inPlace swap: re-home refused for holder terminal \(oldTerminal.id, privacy: .public): the row changed under the switch")
+            let reason = "This session was paused for the account switch, but the session changed under the switch (another action took the row); the switch recorded nothing — check the tab and try again."
+            return (RPCResponse(error: reason), reason)
+        } catch {
+            logger.error("inPlace swap: re-home failed for holder terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            let reason = "This session was paused for the account switch, but the switch could not be recorded (\(error)). It is parked on its previous account, on the conversation it already had — the next focus wakes it there, and switching again now takes the path that has no process to interrupt."
+            return (RPCResponse(error: reason), reason)
+        }
+
+        // 3. WAKE. The routing decision first, because the builder re-exports
+        //    the endpoint inline into the command and that export runs after
+        //    the shell's rc files — the same five steps, through the same
+        //    function, that the create path and `HibernationCoordinator.wake`
+        //    take. It is minted HERE rather than before the park: the park
+        //    ends by retiring whatever route this terminal id holds.
+        let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: target.id,
+            isHolderSpawn: true,
+            config: swapConfig,
+            profileKind: resolved?.kind,
+            profileBaseURL: resolved?.baseURL,
+            envOverrides: envOverrides,
+            overlayPath: overlayPath,
+            holderEnvironment: holderRegistry?.environment,
+            supervisor: modelProxySupervisor)
+        let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
+        let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
+        let woken = await hibernationCoordinator.wakeHolderForProfileSwap(
+            terminal: target,
+            worktree: worktree,
+            sessionID: storedSessionID,
+            expectedReplacementState: TerminalReplacementSnapshot(terminal: target),
+            spawnCommand: spawn.command,
+            env: env,
+            attachment: attachment.withEnvironment(sensitiveEnv),
+            cols: cols,
+            rows: rows)
+
+        guard let updated = try await db.terminals.get(id: target.id) else {
+            return (RPCResponse(error: "Terminal vanished after swap"), nil)
+        }
+        guard let failure = Self.swapWakeFailure(woken) else {
+            // No `SessionRecaptureScheduler`: a holder wake knows the id it
+            // started, and the hooks report the id the agent settles on.
+            logger.info("inPlace swap: holder terminal \(updated.id, privacy: .public) switched to profile \(resolved?.profileID.uuidString ?? "ambient", privacy: .public) and resumed session \(storedSessionID, privacy: .public)")
+            return (try RPCResponse(result: updated), nil)
+        }
+        logger.warning("inPlace swap: holder terminal \(updated.id, privacy: .public) is on its new account but was not resumed: \(failure, privacy: .public)")
+        return (try RPCResponse(result: updated), failure)
+    }
+
+    /// The wake half's failure, or nil when it woke — so the arm above states
+    /// "did the resume happen" once, and the actuation cannot inherit a
+    /// success the session did not have.
+    ///
+    /// Every case is listed and there is no `default:`, deliberately: these
+    /// strings are read by a person whose account switch half-finished, and a
+    /// catch-all would quietly render a new `WakeResult` case as a raw enum in
+    /// front of them. A case added later is a compile error here instead.
+    private static func swapWakeFailure(_ result: WakeResult) -> String? {
+        switch result {
+        case .ok:
+            return nil
+        case .respawnFailed(let reason):
+            return reason
+        case .inFlight:
+            return "another wake for this session was already running; it resumes under the new account"
+        case .notHibernated:
+            return "this session moved to the new account, but TBD no longer saw it as paused and did not resume it; focus the tab to start it there"
+        case .sessionGone:
+            return "this session moved to the new account, but the paused session could not be found to resume; focus the tab to start it there"
+        case .paneUnreadable(_, let server):
+            return "this session moved to the new account, but TBD could not reach its tmux server (\(server)) to check it, so it was not resumed; focus the tab to start it there"
+        case .notFound:
+            return "this session moved to the new account, but its row could not be read back, so nothing was resumed"
+        case .noSessionID:
+            return "this session moved to the new account, but it names no conversation to resume"
+        case .worktreeMissing(let path):
+            return "this session moved to the new account, but its worktree directory is missing (\(path)), so nothing was resumed"
+        case .profileMissing(let profileID):
+            return "this session moved to the new account, but that account could not be resolved (profile \(profileID.uuidString)), so it was not resumed"
+        case .paneBusy(let pid):
+            return "this session moved to the new account, but another process (pid \(pid)) still holds its terminal, so it was not resumed"
+        }
     }
 
     /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,
@@ -3354,10 +3823,11 @@ extension RPCRouter {
         }
 
         // Ask the pane about itself before typing into it — the honest-transport
-        // check of issue #384 and the dead-pane class beside it. A decline here
-        // is a refusal, never a transport failure: the daemon declined without
-        // touching the transport. The consultation itself failing is the
-        // opposite, and is classified as such.
+        // check of issue #384 and the dead-pane class beside it. A decline made
+        // on an ANSWER is a refusal: the daemon declined without touching the
+        // transport. A consultation that could not be completed — thrown here,
+        // or answered `.unreachable` — is the opposite, and carries
+        // `.transportFailed` on the record instead of a refusal reason.
         let refusal: PaneSendRefusal?
         do {
             refusal = try await consultPaneBeforeTyping(
@@ -3638,13 +4108,13 @@ extension RPCRouter {
     /// one uninterrupted write.
     ///
     /// **The child's modes decide the bytes.** `HolderSendComposition` wraps a
-    /// non-empty body in `ESC[200~`…`ESC[201~` exactly when the child has
-    /// bracketed paste on, and the submitting `\r` follows the end marker — so
-    /// the Enter is provably outside the paste, which is the property the tmux
-    /// arm gets from delivering in two acts and a mode-blind composition cannot
-    /// have at all. A child
-    /// that never asked for bracketing gets bare bytes, because markers it does
-    /// not understand are markers it prints.
+    /// non-empty body in `ESC[200~`…`ESC[201~` when the child has bracketed
+    /// paste on — or, for an agent session, when the reading cannot rule that
+    /// out — and the submitting `\r` follows the end marker, so the Enter is
+    /// provably outside the paste, which is the property the tmux arm gets from
+    /// delivering in two acts and a mode-blind composition cannot have at all.
+    /// A child seen not to ask for bracketing gets bare bytes, because markers
+    /// it does not understand are markers it prints.
     ///
     /// The oracle is consulted at composition time, which is a moment, and the
     /// child can change a mode between that moment and the write. **How wide
@@ -3656,6 +4126,17 @@ extension RPCRouter {
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
     /// the child changed since then is invisible here for as long as the viewer
     /// holds it — possibly hours.
+    ///
+    /// **So a stale reading is trusted in one direction only.** A viewer
+    /// ordinarily takes the pty within milliseconds of a spawn or a wake,
+    /// before an agent TUI has turned bracketing on, so the frozen emulator's
+    /// commonest answer is "off" about a child that is now on — and composing
+    /// bare on it loses the Enter silently, the defect this composition exists
+    /// to end. A stale "off" therefore falls back to the unobserved rule below
+    /// (wrap for an agent session, bare for a shell), while a stale "on" is
+    /// obeyed: the child was seen to ask for bracketing, and if it has since
+    /// turned it off the cost is markers printed around the text, which
+    /// somebody can see.
     ///
     /// **A third case is not a window at all.** A reading whose `modesObserved`
     /// is `false` comes from an emulator built over a child that was already
@@ -3671,20 +4152,19 @@ extension RPCRouter {
     /// wrapping it would only hand a `sudo`/`ssh`/`rm -i` prompt markers to
     /// print for a stall that cannot happen.
     /// `HolderSendComposition.bracketedPaste(for:unobservedShouldWrap:)` owns
-    /// that rule, keyed on `carriesDispatchEnvelope`, and the row's
-    /// `modesObserved` discloses the guess.
+    /// both rules, keyed on `carriesDispatchEnvelope`, and the row records the
+    /// reading's own flag (`modeBracketedPaste`) beside what was made of it
+    /// (`bracketedPaste`), with `modeSource` and `modesObserved` saying why.
     ///
-    /// Both windows are accepted, and the wide one is accepted by ruling: the
-    /// design's "Proceeding on stale modes" section weighs a rare wrong
-    /// composition against rails that fail closed exactly when supervision most
-    /// needs to send. What a wrong reading costs is a wrong composition, and a
-    /// wrong composition is visible in the composer or diagnosable from the
-    /// row's `modeSource` and its age — never a send that vanished. Read as on
-    /// when it is off, a shell that has bracketing off prints the `ESC[200~` and
-    /// `ESC[201~` markers around the text and runs the line it made of them.
-    /// Read as off when it is on, a multi-line body goes bare to a TUI that
-    /// turned bracketing on after the attach, and its paste-burst heuristic can
-    /// absorb the submitting `\r` into the text.
+    /// What remains is accepted by ruling: the design's "Proceeding on stale
+    /// modes" section weighs a rare wrong composition against rails that fail
+    /// closed exactly when supervision most needs to send. What a wrong reading
+    /// costs is a wrong composition, and a wrong composition is visible in the
+    /// composer or diagnosable from the row — never a send that vanished. A
+    /// stale "on" for a child that has since turned bracketing off prints the
+    /// `ESC[200~` and `ESC[201~` markers around the text; a shell that did so
+    /// runs the line it made of them. A stale "off" for a shell that has since
+    /// turned bracketing on goes bare, which its line editor submits anyway.
     private func performHolderSend(
         payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
@@ -3873,6 +4353,9 @@ extension RPCRouter {
         // whose age or provenance these could be.
         let modeAge = reading?.ageMilliseconds
         let modesObserved = reading?.modesObserved
+        let modeBracketedPaste = reading?.modes.bracketedPaste
+        let bracketedPaste = HolderSendComposition.bracketedPaste(
+            for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal))
 
         // Same envelope rule as the tmux arm, and for the same reasons — see
         // the long comment there. Empty text stays empty: `--text "" --submit`
@@ -3885,9 +4368,7 @@ extension RPCRouter {
                     id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
                 : text)
         let message = HolderSendComposition.compose(
-            body: body, submit: submit,
-            bracketedPaste: HolderSendComposition.bracketedPaste(
-                for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
+            body: body, submit: submit, bracketedPaste: bracketedPaste)
 
         guard !message.isEmpty else {
             // Nothing to write, reached two ways. `--text ""` with no
@@ -3908,7 +4389,9 @@ extension RPCRouter {
                 actuationID, .dispatched,
                 modeSource: composed ? modeSource : nil,
                 modeAgeMilliseconds: composed ? modeAge : nil,
-                modesObserved: composed ? modesObserved : nil)
+                modesObserved: composed ? modesObserved : nil,
+                modeBracketedPaste: composed ? modeBracketedPaste : nil,
+                bracketedPaste: composed ? bracketedPaste : nil)
             return .ok()
         }
 
@@ -3917,7 +4400,8 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .dispatched,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste,
+                bracketedPaste: bracketedPaste)
             // Hand off to the observation, exactly as the tmux arm does after
             // `.dispatched`: reached only on a successful write, only when the
             // send was verify-armed, and only for a non-empty body — a
@@ -3943,7 +4427,8 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .transportFailed, error: reason,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste,
+                bracketedPaste: bracketedPaste)
             return RPCResponse(error: reason)
         }
     }
@@ -3972,6 +4457,7 @@ extension RPCRouter {
         let modeAge = reading?.ageMilliseconds
         let modesObserved = reading?.modesObserved
         let modes = reading?.modes
+        let modeBracketedPaste = modes?.bracketedPaste
 
         // Validate the whole sequence before writing a byte: an unknown name
         // refuses the send by that name and records a refusal, not a transport
@@ -4002,14 +4488,14 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .transportFailed, error: reason,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
-                modesObserved: modesObserved)
+                modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste)
             return RPCResponse(error: reason)
         }
 
         await finishActuation(
             actuationID, .dispatched,
             modeSource: modeSource, modeAgeMilliseconds: modeAge,
-            modesObserved: modesObserved)
+            modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste)
         return .ok()
     }
 
@@ -4041,8 +4527,9 @@ extension RPCRouter {
     /// Consult the pane the send names, and classify the answer.
     ///
     /// `nil` means "proceed" — the pane is alive and either agrees it is this
-    /// terminal or claims no identity at all. Anything else is a refusal the
-    /// caller records and returns, with the message a human reads.
+    /// terminal or claims no identity at all. Anything else is a decline the
+    /// caller records and returns, with the message a human reads: a refusal
+    /// when tmux answered, a transport failure when it could not be reached.
     ///
     /// tmux's own exit status cannot carry this: `send-keys` into a
     /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
@@ -4058,10 +4545,29 @@ extension RPCRouter {
         terminal: Terminal, server: String
     ) async throws -> PaneSendRefusal? {
         switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
-        case .missing:
+        case .absent:
             return PaneSendRefusal(outcome: .refused(.notFound), message: """
                 tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
                 no longer exists on server \(server) — nothing was sent
+                """)
+        case .unreachable:
+            // NOT a refusal, and above all not "no longer exists": the daemon
+            // could not reach the server, so it knows nothing about the pane.
+            // `transportFailed` is the honest classification — the daemon
+            // reached for the transport and the transport did not answer — and
+            // it is what keeps this out of the refusal reasons, none of which
+            // can describe a failed read without asserting something false
+            // about the target.
+            logger.warning("""
+                terminal.send: could not reach tmux server \(server, privacy: .public) to \
+                consult pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public); nothing was sent
+                """)
+            return PaneSendRefusal(outcome: .transportFailed, message: """
+                could not reach tmux server \(server) to check pane \(terminal.tmuxPaneID) \
+                for terminal \(terminal.id.uuidString) — nothing was sent, and the pane's \
+                state is unknown (this is a failed read, not a missing pane). Retry; if it \
+                persists, check that the daemon and your shell resolve the same tmux socket.
                 """)
         case .dead:
             return PaneSendRefusal(outcome: .refused(.notEligible), message: """
@@ -4919,6 +5425,9 @@ extension RPCRouter {
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        // Any hook event marks the worktree active for the PR schedule.
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
         // validate, so we fall back to the old behavior.
@@ -5112,6 +5621,8 @@ extension RPCRouter {
             return .ok()
         }
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+        await activityLedger.recordHookEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         if let cwd = params.cwd, !cwd.isEmpty {
             guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
@@ -5320,6 +5831,10 @@ extension RPCRouter {
         // an agent hook, so it must not inflate the hook-event counter.
         if params.origin == nil {
             await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
+            // The same rule for the PR schedule's activity: a user interrupt is
+            // not agent activity.
+            await activityLedger.recordHookEvent(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
 
         // Stop-hook transcript sync (Stop/StopFailure reach the daemon as

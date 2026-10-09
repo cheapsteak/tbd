@@ -257,8 +257,12 @@ actor PendingPromptCoordinator {
         }
 
         do {
-            try await db.worktrees.setPendingPrompt(
-                worktreeID: worktreeID, text: text, submit: submit)
+            // The row was read above, but this method suspends since; a failed
+            // creation's rollback can have deleted it in between.
+            guard try await db.worktrees.setPendingPrompt(
+                worktreeID: worktreeID, text: text, submit: submit) else {
+                return .refused(reason: "worktree not found: \(worktreeID.uuidString)")
+            }
         } catch {
             return .refused(reason: "could not park the prompt: \(error)")
         }

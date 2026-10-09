@@ -205,7 +205,13 @@ enum ClaudeCompletionProbe {
             throw ProbeError.launchFailed(error.localizedDescription)
         }
 
-        guard case .completed(_, let stdout, let stderr) = result else {
+        let stdout: Data
+        let stderr: Data
+        switch result {
+        case .completed(_, let out, let err), .signaled(_, let out, let err):
+            stdout = out
+            stderr = err
+        case .timedOut:
             logger.warning("""
             completions probe timed out after \(String(describing: timeout), privacy: .public) \
             and was killed: \(executablePath, privacy: .public)

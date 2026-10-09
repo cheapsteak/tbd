@@ -19,7 +19,14 @@ struct PRCommand: AsyncParsableCommand {
     /// owner/repo yet — the daemon fills those in from the worktree's own repo
     /// — so it comes back with empty `owner`/`repo`/`url` and only `number` set.
     /// Returns nil for anything else.
+    ///
+    /// A whole URL is read exactly first, so a GitHub Enterprise pull request
+    /// (`https://<host>/<owner>/<repo>/pull/<n>`) is accepted as well; the
+    /// daemon's repo and host checks decide what it may bind or detach.
     static func parseReference(_ raw: String) -> ParsedPRURL? {
+        if let url = PRBindingExtractor.parsePRURL(exactly: raw) {
+            return url
+        }
         if let url = PRBindingExtractor.parsePRURLs(in: raw).first {
             return url
         }

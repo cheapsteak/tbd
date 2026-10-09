@@ -140,31 +140,31 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     /// message assertion and fail the contract.
     @Test func retainRefusesAndNeverSpawnsWhenCapabilityUndeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["import", "recall"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptImport, RemoteCapability.transcriptRecall])])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.retain", retainParams)
         #expect(response.success == false)
-        #expect(response.error?.contains("retain") == true)
+        #expect(response.error?.contains(RemoteCapability.transcriptRetain) == true)
         #expect(invoker.calls == [["describe"]])
     }
 
     @Test func importRefusesAndNeverSpawnsWhenCapabilityUndeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["retain", "recall"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRetain, RemoteCapability.transcriptRecall])])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.import", importParams)
         #expect(response.success == false)
-        #expect(response.error?.contains("import") == true)
+        #expect(response.error?.contains(RemoteCapability.transcriptImport) == true)
         #expect(invoker.calls == [["describe"]])
     }
 
     @Test func recallRefusesAndNeverSpawnsWhenCapabilityUndeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["retain", "import"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRetain, RemoteCapability.transcriptImport])])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.recall", recallParams(key: "k"))
         #expect(response.success == false)
-        #expect(response.error?.contains("recall") == true)
+        #expect(response.error?.contains(RemoteCapability.transcriptRecall) == true)
         #expect(invoker.calls == [["describe"]])
     }
 
@@ -173,10 +173,29 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     /// Declaring one must never admit the other.
     @Test func declaringRetainDoesNotAdmitImport() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
-        let invoker = FakeProviderInvoker(script: [describeDeclaring(["retain"])])
+        let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.transcriptRetain])])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.import", importParams)
         #expect(response.success == false)
+        #expect(invoker.calls == [["describe"]])
+    }
+
+    /// The hard cutover: the bare pre-namespace spellings admit nothing. A
+    /// provider that still declares `retain`, `import` and `recall` is refused
+    /// all three exchange verbs and never spawned for any of them.
+    @Test func barePreNamespaceCapabilitiesAdmitNoExchangeVerb() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["retain", "import", "recall"])])
+        let r = await router(invoker: invoker)
+        let retain = await call(r, "remote.retain", retainParams)
+        #expect(retain.success == false)
+        #expect(retain.error?.contains(RemoteCapability.transcriptRetain) == true)
+        let imported = await call(r, "remote.import", importParams)
+        #expect(imported.success == false)
+        #expect(imported.error?.contains(RemoteCapability.transcriptImport) == true)
+        let recall = await call(r, "remote.recall", recallParams(key: "k"))
+        #expect(recall.success == false)
+        #expect(recall.error?.contains(RemoteCapability.transcriptRecall) == true)
         #expect(invoker.calls == [["describe"]])
     }
 
@@ -198,13 +217,13 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func retainInvokesTheVerbAndStoresTheReceiptRow() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["retain"]),
+            describeDeclaring([RemoteCapability.transcriptRetain]),
             providerOK(receiptJSON),
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.retain", retainParams)
         #expect(response.success)
-        #expect(invoker.calls == [["describe"], ["retain", "fix-flaky-ci"]])
+        #expect(invoker.calls == [["describe"], RemoteVerb.transcriptRetain(sessionID: "fix-flaky-ci")])
 
         let receipt = try response.decodeResult(RetainReceipt.self)
         #expect(receipt.key == "opaque-provider-string")
@@ -222,7 +241,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func retainStoresAnAbsentExpiryAsNoClaim() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["retain"]),
+            describeDeclaring([RemoteCapability.transcriptRetain]),
             providerOK(#"{"key": "k", "bytes": 5}"#),
         ])
         let r = await router(invoker: invoker)
@@ -249,7 +268,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
             now: Date())
 
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["retain"]),
+            describeDeclaring([RemoteCapability.transcriptRetain]),
             providerOK(receiptJSON),
         ])
         let r = await router(invoker: invoker)
@@ -264,7 +283,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func retainSurfacesTheProvidersErrorMessage() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["retain"]),
+            describeDeclaring([RemoteCapability.transcriptRetain]),
             providerError("not_found", "no such session"),
         ])
         let r = await router(invoker: invoker)
@@ -277,13 +296,13 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func retainReportsATimeoutInWords() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(outcomes: [
-            .result(describeDeclaring(["retain"])),
+            .result(describeDeclaring([RemoteCapability.transcriptRetain])),
             .timeout,
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.retain", retainParams)
         #expect(response.success == false)
-        #expect(response.error == "provider 'agentbox' timed out running 'retain'")
+        #expect(response.error == "provider 'agentbox' timed out running 'transcript retain'")
     }
 
     // MARK: - import
@@ -291,13 +310,13 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func importFeedsJSONLOnStdinAndStoresTheReceipt() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["import"]),
+            describeDeclaring([RemoteCapability.transcriptImport]),
             providerOK(receiptJSON),
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.import", importParams)
         #expect(response.success)
-        #expect(invoker.calls == [["describe"], ["import"]])
+        #expect(invoker.calls == [["describe"], RemoteVerb.transcriptImport])
         let sent = invoker.stdinsSnapshot().last ?? nil
         #expect(sent.map { String(decoding: $0, as: UTF8.self) } == "{\"type\":\"user\"}\n")
 
@@ -315,7 +334,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func importSurfacesInvalidParams() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["import"]),
+            describeDeclaring([RemoteCapability.transcriptImport]),
             providerError("invalid_params", "line 3 is not JSON"),
         ])
         let r = await router(invoker: invoker)
@@ -330,13 +349,13 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func recallReturnsJSONLAndWritesNoFileByDefault() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["recall"]),
+            describeDeclaring([RemoteCapability.transcriptRecall]),
             providerOK("{\"type\":\"user\"}\n"),
         ])
         let r = await router(invoker: invoker)
         let response = await call(r, "remote.recall", recallParams(key: "opaque-key"))
         #expect(response.success)
-        #expect(invoker.calls == [["describe"], ["recall", "opaque-key"]])
+        #expect(invoker.calls == [["describe"], RemoteVerb.transcriptRecall(key: "opaque-key")])
         let result = try response.decodeResult(RemoteRecallResult.self)
         #expect(result.jsonl == "{\"type\":\"user\"}\n")
         #expect(result.localPath == nil)
@@ -351,7 +370,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
             RetainedTranscript(provider: "agentbox", key: key, bytes: 16))
         let body = "{\"type\":\"user\"}\n"
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["recall"]),
+            describeDeclaring([RemoteCapability.transcriptRecall]),
             providerOK(body),
         ])
         let r = await router(invoker: invoker)
@@ -377,7 +396,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
         try await db.retainedTranscripts.insert(
             RetainedTranscript(provider: "agentbox", key: "short", bytes: 148_213))
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["recall"]),
+            describeDeclaring([RemoteCapability.transcriptRecall]),
             providerOK("{\"type\":\"user\"}\n"),
         ])
         let r = await router(invoker: invoker)
@@ -392,7 +411,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func recallSurfacesTheExpiredCode() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["recall"]),
+            describeDeclaring([RemoteCapability.transcriptRecall]),
             providerError("expired", "that transcript has aged out"),
         ])
         let r = await router(invoker: invoker)
@@ -404,7 +423,7 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
     @Test func recallSurfacesTheNotFoundCode() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            describeDeclaring(["recall"]),
+            describeDeclaring([RemoteCapability.transcriptRecall]),
             providerError("not_found", "unknown key"),
         ])
         let r = await router(invoker: invoker)

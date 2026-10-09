@@ -10,6 +10,11 @@ extension RPCRouter {
     /// notification always run; only the scheduled send is gated on
     /// `autoResumeOnLimitReset` (spec §Constraints "Gated, default OFF").
     ///
+    /// The notification and the `terminalLimitHit` delta also name a
+    /// suggested profile with room, when one exists (account load balancing
+    /// §7.1). That is only a suggestion: the app offers a one-click switch,
+    /// and nothing here swaps the session or resumes the turn on its own.
+    ///
     /// Latch: when the terminal already has a pending resume (a repeat
     /// StopFailure while parked), do nothing — no duplicate notification.
     func handleRateLimitDetected(_ paramsData: Data) async throws -> RPCResponse {
@@ -20,8 +25,17 @@ extension RPCRouter {
             return .ok()
         }
 
-        let enabled = (try? await db.config.get())?.autoResumeOnLimitReset ?? false
-        let message: String
+        let config = try? await db.config.get()
+        let enabled = config?.autoResumeOnLimitReset ?? false
+        let suggestion = await limitSuggestion(for: terminal, defaultProfileID: config?.defaultProfileID)
+        let limitedProfileName: String?
+        if let profileID = terminal.profileID {
+            limitedProfileName = (try? await db.modelProfiles.get(id: profileID))?.name
+        } else {
+            limitedProfileName = nil
+        }
+        let onAccount = limitedProfileName.map { " on \($0)" } ?? ""
+        var message: String
 
         if enabled, let scheduler = limitResumeScheduler {
             guard let scheduled = await scheduler.schedule(
@@ -32,7 +46,7 @@ extension RPCRouter {
             else {
                 return .ok()   // latch: already pending — no duplicate notification
             }
-            message = "Session limit hit — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            message = "Session limit hit\(onAccount) — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
         } else {
             // Gate off: record the detection for audit, notify with the reset
             // time, schedule nothing (spec Testing→Gate: "row recorded +
@@ -49,11 +63,65 @@ extension RPCRouter {
             } catch {
                 logger.warning("handleRateLimitDetected: audit insert failed for terminal \(terminal.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
             }
-            message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            message = "Session limit hit\(onAccount) — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
         }
+        if let name = suggestion?.profileName, let usage = suggestion?.usageSummary {
+            message.append(". \(name) has room (\(usage))")
+        }
+
+        subscriptions.broadcast(delta: .terminalLimitHit(TerminalLimitHitDelta(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            profileID: terminal.profileID,
+            resetsAt: params.resetsAt,
+            limitType: params.limitType,
+            suggestedProfileID: suggestion?.profileID
+        )))
 
         try await notify(terminal: terminal, type: .limitReached, message: message)
         return .ok()
+    }
+
+    /// The profile a limited terminal could switch to (§7.1): the pool pick
+    /// with the limited profile's account excluded. An ambient terminal has
+    /// no profile, so nothing is excluded. A suggestion only — it places
+    /// nothing, so it takes no spawn reservation.
+    private func limitSuggestion(
+        for terminal: Terminal, defaultProfileID: UUID?
+    ) async -> (profileID: UUID, profileName: String?, usageSummary: String?)? {
+        guard let source = profilePoolCandidateSource else { return nil }
+        do {
+            var excluded: Set<String> = []
+            if let profileID = terminal.profileID,
+               let key = try await source.accountKey(forProfileID: profileID) {
+                excluded.insert(key)
+            }
+            let candidates = try await source.candidates(defaultProfileID: defaultProfileID)
+            let decision = ProfilePoolPicker.pick(
+                candidates: candidates, excludingAccountKeys: excluded, now: Date())
+            guard let chosen = decision.chosen else { return nil }
+            // The winning candidate carries the very snapshot the picker
+            // judged; re-reading the store here could race a poller write.
+            let usage = candidates.first(where: { $0.profileID == chosen })?.snapshot
+                .flatMap { formatUsageForNotification(snapshot: $0) }
+            let name = (try? await db.modelProfiles.get(id: chosen))?.name
+            return (chosen, name, usage)
+        } catch {
+            logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Format a ProfileUsageSnapshot's 5h and weekly percents for notification.
+    private func formatUsageForNotification(snapshot: ProfileUsageSnapshot) -> String? {
+        var parts: [String] = []
+        if let sessionBucket = snapshot.buckets.first(where: { $0.kind == "session" }) {
+            parts.append("5h \(Int(sessionBucket.percent))%")
+        }
+        if let weeklyBucket = snapshot.buckets.first(where: { $0.kind == "weekly_all" }) {
+            parts.append("week \(Int(weeklyBucket.percent))%")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// A transient API error killed a turn (spec 2026-07-08). Gate OFF → not

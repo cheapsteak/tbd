@@ -204,8 +204,33 @@ struct ModelProxySpawnerTests {
         kill(child, SIGKILL)
         var ignored: Int32 = 0
         _ = waitpid(child, &ignored, 0)
-        let reacquired = try HolderLock.acquire(path: fixture.paths.lockPath)
-        reacquired.release()
+        // Retried while `.alreadyHeld`, and only then. The daemon's copy was
+        // open from `acquire` to `release`, and a parallel suite that forked
+        // in that window (SwiftTerm's `forkpty`) holds the open file
+        // description until its child execs — O_CLOEXEC drops it only then.
+        // Any other error ends the poll and fails; a daemon copy that never
+        // went away still fails, once the budget is spent.
+        var reacquired: HolderLock?
+        var unexpected: (any Error)?
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(10)
+        ) {
+            do {
+                reacquired = try HolderLock.acquire(path: fixture.paths.lockPath)
+                return true
+            } catch HolderLock.Error.alreadyHeld {
+                return false
+            } catch {
+                unexpected = error
+                return true
+            }
+        }
+        reacquired?.release()
+        if let unexpected { throw unexpected }
+        guard outcome != .cancelled else { return }
+        #expect(
+            outcome == .satisfied,
+            "the lock was still held after the spawned child died")
     }
 
     // MARK: - The budget

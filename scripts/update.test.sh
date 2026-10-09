@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/update.sh — run: bash scripts/update.test.sh
+# Tests for scripts/update.sh — run: /bin/bash scripts/update.test.sh (macOS bash 3.2; any bash works)
 #
 # Nothing here builds, installs, signals a daemon, or touches a real ~/tbd.
 # HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
@@ -25,6 +25,15 @@ fi
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
+# Every nested `bash` — the cases' `bash "$SCRIPT"`, update.sh's own re-exec,
+# and `#!/usr/bin/env bash` stubs — runs the same interpreter as this harness,
+# so `/bin/bash scripts/update.test.sh` exercises macOS's bash 3.2 all the way
+# down rather than whichever bash comes first on PATH.
+mkdir -p "$TEST_TMP/bash-pin"
+ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
+PATH="$TEST_TMP/bash-pin:$PATH"
+export PATH
+
 # Source the script for the pure-function cases. Sourcing defines functions and
 # runs nothing: main is guarded on BASH_SOURCE. TBD_HOME is set first because
 # the derived paths are computed at source time.
@@ -35,6 +44,8 @@ source "$SCRIPT"
 # main() sources this at run time; the function-level cases need it too.
 # shellcheck source=/dev/null
 source "$HERE/restart-bundle-lib.sh"
+# shellcheck source=/dev/null
+source "$HERE/update-release-lib.sh"
 OPT_AUTO=true   # keep the sourced log() out of the harness output
 
 # Nothing in this harness may signal a real process. The app stage resolves its
@@ -126,6 +137,8 @@ mkremote() {
     fi
     cp "$HERE/restart-bundle-lib.sh" "$d/scripts/restart-bundle-lib.sh"
     cp "$HERE/restart-environment-lib.sh" "$d/scripts/restart-environment-lib.sh"
+    cp "$HERE/restart-build-lib.sh" "$d/scripts/restart-build-lib.sh"
+    cp "$HERE/update-release-lib.sh" "$d/scripts/update-release-lib.sh"
     cat > "$d/scripts/swift-safe" << 'EOF'
 #!/bin/sh
 # Fake build: create the outputs the installer looks for and record the call.
@@ -138,10 +151,26 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-mkdir -p ".build/$config"
+# A product named in FAKE_BUILD_FAILS_PRODUCT fails to compile.
+if [ -n "${FAKE_BUILD_FAILS_PRODUCT-}" ] && [ "$product" = "$FAKE_BUILD_FAILS_PRODUCT" ]; then
+    echo "error: fake compile failure ($product)"
+    exit 1
+fi
+# Like SwiftPM: outputs go to the triple directory, and .build/<config> is a
+# link to it, re-pointed on every build.
+mkdir -p ".build/arm64-apple-macosx/$config"
+ln -sfn "arm64-apple-macosx/$config" ".build/$config.tmp" && mv -f ".build/$config.tmp" ".build/$config"
 printf '#!/bin/sh\nexit 0\n' > ".build/$config/$product"
 chmod +x ".build/$config/$product"
+if [ "$product" = TBDApp ]; then
+    mkdir -p ".build/$config/TBD_TBDApp.bundle"
+    printf 'css' > ".build/$config/TBD_TBDApp.bundle/markdown-default.css"
+fi
 printf '%s\n' "built $product $config" >> "${FAKE_BUILD_LOG:-/dev/null}"
+# What the compiler would have inherited, for the environment-scrub cases.
+printf 'SDKROOT=%s DEVELOPER_DIR=%s IN_NIX_SHELL=%s CPATH=%s NIX_LDFLAGS=%s TOOLCHAINS=%s\n' \
+    "${SDKROOT-unset}" "${DEVELOPER_DIR-unset}" "${IN_NIX_SHELL-unset}" "${CPATH-unset}" \
+    "${NIX_LDFLAGS-unset}" "${TOOLCHAINS-unset}" >> "${FAKE_ENV_LOG:-/dev/null}"
 echo "Build complete! ($product)"
 EOF
     chmod +x "$d/scripts/swift-safe"
@@ -234,6 +263,7 @@ run_update() {
         TBD_HOME="$case_dir/home/tbd" \
         FAKE_TBD_STATE="$case_dir/state" \
         FAKE_BUILD_LOG="$case_dir/build.log" \
+        FAKE_ENV_LOG="$case_dir/build-env.log" \
         FAKE_OPEN_LOG="$case_dir/open.log" \
         PATH="$case_dir/bin:$PATH" \
         bash "$SCRIPT" "$@" 2>&1
@@ -381,6 +411,50 @@ test_update_refuses_while_another_run_holds_the_lock() {
     fi
     assert_contains "a live lock is explained" "another update is already running" "$out"
     assert_not_contains "a live lock stops the run before it fetches" "fetching origin/main" "$out"
+}
+
+# THE REGRESSION: run from inside another project's dev shell, the build
+# inherited its SDKROOT and failed in a dependency ("'sqlite3.h' file not
+# found"). The compiler must not see those variables; a deliberate toolchain
+# selection must survive; and the caller must be told what was ignored.
+test_the_build_ignores_an_inherited_dev_shell_sdk() {
+    local case_dir out seen
+    case_dir="$(mkcase sdk-scrub-case)"
+    out="$(SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk \
+        DEVELOPER_DIR=/nix/store/acme-apple-sdk \
+        IN_NIX_SHELL=impure CPATH=/nix/store/acme/include \
+        NIX_LDFLAGS=-L/nix/store/acme/lib TOOLCHAINS=org.acme.swift \
+        run_update "$case_dir" --dry-run --no-wake)"
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "the compiler sees no dev-shell SDKROOT" \
+        "SDKROOT=unset DEVELOPER_DIR=unset IN_NIX_SHELL=unset CPATH=unset NIX_LDFLAGS=unset" "$seen"
+    assert_contains "a deliberate TOOLCHAINS selection is left alone" "TOOLCHAINS=org.acme.swift" "$seen"
+    assert_contains "the update says what it ignored" "ignoring inherited compiler-environment variables" "$out"
+    assert_contains "and names the variable" "SDKROOT" "$out"
+}
+
+test_an_xcode_sdk_selection_is_kept() {
+    local case_dir seen
+    case_dir="$(mkcase sdk-keep-case)"
+    SDKROOT=/Applications/Xcode-beta.app/Contents/Developer/SDKs/MacOSX.sdk \
+        DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+        run_update "$case_dir" --dry-run --no-wake >/dev/null
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "an Xcode SDKROOT reaches the compiler" \
+        "SDKROOT=/Applications/Xcode-beta.app/Contents/Developer/SDKs/MacOSX.sdk" "$seen"
+    assert_contains "a Command Line Tools DEVELOPER_DIR reaches the compiler" \
+        "DEVELOPER_DIR=/Library/Developer/CommandLineTools" "$seen"
+}
+
+test_keep_build_env_switch_turns_the_scrub_off() {
+    local case_dir out seen
+    case_dir="$(mkcase sdk-optout-case)"
+    out="$(SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk TBD_KEEP_BUILD_ENV=1 \
+        run_update "$case_dir" --dry-run --no-wake)"
+    seen="$(cat "$case_dir/build-env.log")"
+    assert_contains "TBD_KEEP_BUILD_ENV=1 passes SDKROOT through" \
+        "SDKROOT=/nix/store/acme-apple-sdk/SDKs/MacOSX.sdk" "$seen"
+    assert_not_contains "and nothing is reported as ignored" "ignoring inherited" "$out"
 }
 
 test_a_stale_lock_is_taken_over() {
@@ -1025,6 +1099,134 @@ EOF
     assert_not_contains "a failed build does not hand over" "handing over" "$out"
 }
 
+# THE REGRESSION: the update clone under $UPDATE_HOME is one long-lived
+# checkout every update reuses (docs/updating.md), and its build identity
+# sidecar used to be stamped BEFORE build_products ran. A build that then
+# failed left that sidecar naming the commit it never finished building,
+# right next to the still-old binaries a first, successful update had left
+# there — and nothing ever wrote it again to put that right, since the only
+# later write in the same clone is the next update's, success or failure.
+# Reproduce exactly that: one good update stamps commit A, then a second,
+# broken commit B fails to build, and the sidecar this clone carries must
+# still say A — not B, and not disappear.
+test_a_failed_build_leaves_the_previous_stamp_alone() {
+    local case_dir sidecar commit_a commit_b out
+    case_dir="$(mkcase stamp-on-failure-case)"
+    sidecar="$case_dir/home/tbd/updates/src/.build/release/TBDBuildIdentity.json"
+
+    run_update "$case_dir" --dry-run >/dev/null 2>&1
+    commit_a="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    if [ -f "$sidecar" ]; then
+        pass "the first, successful update stamps the sidecar"
+    else
+        fail "the first, successful update stamps the sidecar: missing $sidecar"
+    fi
+    assert_eq "the sidecar names the first build's commit" "$commit_a" \
+        "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$sidecar")"
+
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "error: it did not compile" >&2
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+    commit_b="$(git -C "$case_dir/remote" rev-parse HEAD)"
+
+    out="$(run_update "$case_dir" --dry-run 2>&1)"
+    assert_contains "the second, broken update still fetches the new commit" \
+        "latest main is $commit_b" "$out"
+    assert_eq "the sidecar still names the commit that actually built" "$commit_a" \
+        "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$sidecar")"
+}
+
+# A failed compile names its first errors, not SwiftPM's last lines, and the
+# full output survives in build.log next to update.log.
+test_a_failed_build_reports_its_first_errors() {
+    local case_dir out update_log build_log
+    case_dir="$(mkcase first-errors-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "Compiling GRDBSQLite shim.h"
+echo "shim.h:1:10: error: 'sqlite3.h' file not found" >&2
+echo "CLIInstaller.swift:31:13: error: let 'logger' is not concurrency-safe" >&2
+i=0
+while [ "$i" -lt 30 ]; do echo "noise line $i"; i=$((i + 1)); done
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+
+    out="$(run_update "$case_dir")"
+    if [ "$?" -ne 0 ]; then
+        pass "a compile failure exits non-zero"
+    else
+        fail "a compile failure exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    build_log="$case_dir/home/tbd/updates/build.log"
+    assert_contains "the output names the first error" "sqlite3.h' file not found" "$out"
+    assert_contains "the output names the second error" "is not concurrency-safe" "$out"
+    assert_not_contains "the output skips the trailing noise" "noise line 29" "$out"
+    assert_contains "update.log names the first error" "sqlite3.h' file not found" "$update_log"
+    assert_contains "update.log points at the full output" "full build output: $build_log" "$update_log"
+    assert_not_contains "a compile failure is not called a slot timeout" "waiting for the build slot" "$update_log"
+    assert_contains "build.log keeps the full output" "noise line 29" "$(cat "$build_log")"
+}
+
+# swift-safe's 75 means the build never got the machine-wide slot. Nothing was
+# compiled, and saying "failed" sends the reader hunting for a compile error.
+test_a_slot_timeout_is_not_reported_as_a_compile_failure() {
+    local case_dir out update_log
+    case_dir="$(mkcase slot-timeout-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "swift-safe: timed out after 1800s waiting for the build lock" >&2
+exit 75
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "hold the slot"
+
+    out="$(run_update "$case_dir")"
+    if [ "$?" -ne 0 ]; then
+        pass "a slot timeout exits non-zero"
+    else
+        fail "a slot timeout exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    assert_contains "a slot timeout says so" "timed out waiting for the build slot" "$out"
+    assert_contains "update.log records the slot timeout" "nothing was compiled" "$update_log"
+    assert_not_contains "a slot timeout is not called a compile failure" "failed (exit" "$update_log"
+    assert_contains "a slot timeout still says the installation is untouched" \
+        "the running installation is untouched" "$out"
+}
+
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log() {
+    local case_dir out update_log
+    case_dir="$(mkcase auto-failure-case)"
+    cat > "$case_dir/remote/scripts/swift-safe" << 'EOF'
+#!/bin/sh
+echo "Compiling module"
+echo "source.swift:10:5: error: 'foo' is not defined" >&2
+exit 1
+EOF
+    chmod +x "$case_dir/remote/scripts/swift-safe"
+    git -C "$case_dir/remote" commit -q -am "break the build"
+
+    out="$(run_update "$case_dir" --auto)"
+    if [ "$?" -ne 0 ]; then
+        pass "a build failure with --auto exits non-zero"
+    else
+        fail "a build failure with --auto exits non-zero"
+    fi
+    update_log="$(cat "$case_dir/home/tbd/updates/update.log")"
+    assert_eq "--auto prints nothing to the terminal (silent)" "" "$out"
+    assert_contains "the error excerpt goes to update.log when --auto is set" \
+        "'foo' is not defined" "$update_log"
+    assert_contains "the failure message goes to update.log when --auto is set" \
+        "the running installation is untouched" "$update_log"
+}
+
 test_auto_logs_without_printing() {
     local case_dir out
     case_dir="$(mkcase auto-case)"
@@ -1073,6 +1275,47 @@ test_no_app_skips_the_relaunch() {
     assert_contains_literal "the stop is anchored on the installed bundle's binary" \
         "pkill -f ^$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")\$" \
         "$(cat "$TEST_TMP/app-kill.log" 2>/dev/null)"
+}
+
+# A manual app stage seeds the saved tmux fallback on both branches of
+# --no-app: the next login relaunch needs it whether or not this run
+# relaunched. An --auto stage does not: its PATH carries fixed-directory
+# guesses rather than the user's shell.
+test_app_stage_seeds_the_tmux_fallback() {
+    local bin tmuxbin opt
+    bin="$TEST_TMP/seed-stage-bin"
+    tmuxbin="$TEST_TMP/seed-stage-tmux"
+    mkstub_tbd "$bin"
+    mkdir -p "$tmuxbin"
+    printf '#!/bin/sh\n' > "$tmuxbin/tmux"; chmod +x "$tmuxbin/tmux"
+
+    for opt in true false; do
+        rm -f "$TBD_HOME_DIR/tmux-executable-path"
+        (
+            export PATH="$tmuxbin:$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/seed-open.log" \
+                FAKE_KILL_LOG="$TEST_TMP/seed-kill.log"
+            OPT_AUTO=false
+            OPT_NO_APP="$opt"
+            run_app_stage
+        ) >/dev/null 2>&1
+        assert_eq "the app stage seeds the tmux fallback (--no-app=$opt)" \
+            "$tmuxbin/tmux" "$(cat "$TBD_HOME_DIR/tmux-executable-path" 2>/dev/null)"
+    done
+
+    rm -f "$TBD_HOME_DIR/tmux-executable-path"
+    (
+        export PATH="$tmuxbin:$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/seed-open.log" \
+            FAKE_KILL_LOG="$TEST_TMP/seed-kill.log"
+        OPT_AUTO=true
+        OPT_NO_APP=true
+        run_app_stage
+    ) >/dev/null 2>&1
+    if [ -f "$TBD_HOME_DIR/tmux-executable-path" ]; then
+        fail "an --auto app stage does not seed the tmux fallback"
+    else
+        pass "an --auto app stage does not seed the tmux fallback"
+    fi
+    rm -f "$TBD_HOME_DIR/tmux-executable-path"
 }
 
 test_no_wake_skips_the_stage() {
@@ -1387,6 +1630,623 @@ test_cli_refresh_only_touches_an_existing_install() {
         "$(file_inode "$new_cli")" "$(file_inode "$target")"
 }
 
+# MARK: - Installing a published build
+
+# A published build for <commit> under <case>/release: the archive, its
+# checksum and a manifest, laid out as the release workflow publishes them.
+# Echoes nothing; the stub curl serves files from that directory by name.
+#
+#   mkrelease <case_dir> <commit> [arch]
+mkrelease() {
+    local d="$1" commit="$2" arch="${3:-arm64}"
+    local name="tbd-$commit-macos-arm64"
+    local stage="$d/release-stage/$name"
+    mkdir -p "$stage/TBD_TBDDaemonLib.bundle/Migrations" "$d/release"
+    for product in "${RELEASE_PRODUCTS[@]}"; do
+        printf '#!/bin/sh\necho %s\n' "$product" > "$stage/$product"
+        chmod +x "$stage/$product"
+    done
+    printf 'select 1;\n' > "$stage/TBD_TBDDaemonLib.bundle/Migrations/0001.sql"
+    python3 - "$stage" "$commit" "$arch" << 'EOF'
+import hashlib, json, os, sys
+stage, commit, arch = sys.argv[1:4]
+files = {}
+for root, _, names in os.walk(stage):
+    for n in names:
+        p = os.path.join(root, n)
+        files[os.path.relpath(p, stage)] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+json.dump({"schema": 1, "commit": commit, "arch": arch,
+           "builtAt": "2026-09-23T00:00:00Z",
+           "runUrl": "https://example.invalid/runs/1", "files": files},
+          open(os.path.join(stage, "manifest.json"), "w"))
+EOF
+    tar -czf "$d/release/$name.tar.gz" -C "$d/release-stage" "$name"
+    printf '%s  %s\n' "$(shasum -a 256 "$d/release/$name.tar.gz" | awk '{print $1}')" \
+        "$name.tar.gz" > "$d/release/$name.tar.gz.sha256"
+}
+
+# Stubs for the network and the machine: curl serves <case>/release by file
+# name and 404s (exit 22) otherwise; gh answers `auth status` from
+# FAKE_GH_AUTH and `attestation verify` from FAKE_GH_ATTEST; uname reports
+# FAKE_ARCH.
+mkstub_release_tools() {
+    local bin="$1"
+    cat > "$bin/curl" << 'EOF'
+#!/bin/sh
+out=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) shift; out="$1" ;;
+        --connect-timeout|--max-time|--retry) shift ;;
+        -*) ;;
+        *) url="$1" ;;
+    esac
+    shift
+done
+printf 'curl %s\n' "$url" >> "${FAKE_CURL_LOG:-/dev/null}"
+src="$FAKE_RELEASE_DIR/${url##*/}"
+[ -f "$src" ] || exit 22
+cp "$src" "$out"
+EOF
+    cat > "$bin/gh" << 'EOF'
+#!/bin/sh
+case "$1 $2" in
+    "auth status") exit "${FAKE_GH_AUTH:-1}" ;;
+    "attestation verify")
+        printf 'gh %s\n' "$*" >> "${FAKE_GH_LOG:-/dev/null}"
+        exit "${FAKE_GH_ATTEST:-1}"
+        ;;
+esac
+exit 1
+EOF
+    cat > "$bin/uname" << 'EOF'
+#!/bin/sh
+[ "$1" = "-m" ] && { echo "${FAKE_ARCH:-arm64}"; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "$bin/curl" "$bin/gh" "$bin/uname"
+}
+
+# Run update.sh's main with the stages past the install stubbed out: the
+# handover, the app and the wake each have their own cases above, and a real
+# handover would wait two minutes for a daemon the stub cannot start. What
+# this drives is everything before it — source selection, download,
+# verification, the link, the stamp — and the prune after it.
+run_update_release() {
+    local case_dir="$1"; shift
+    env \
+        HOME="$case_dir/home" \
+        TBD_HOME="$case_dir/home/tbd" \
+        FAKE_TBD_STATE="$case_dir/state" \
+        FAKE_BUILD_LOG="$case_dir/build.log" \
+        FAKE_OPEN_LOG="$case_dir/open.log" \
+        FAKE_CURL_LOG="$case_dir/curl.log" \
+        FAKE_GH_LOG="$case_dir/gh.log" \
+        FAKE_RELEASE_DIR="$case_dir/release" \
+        TBD_RELEASE_REPO="acme/tbd" \
+        PATH="$case_dir/bin:$PATH" \
+        bash -c '
+            script="$1"; shift
+            # shellcheck source=/dev/null
+            source "$script"
+            assemble_app_bundle() { mkdir -p "$2/TBD.app/Contents/MacOS"; }
+            sign_app_bundle() { :; }
+            install_and_handover() {
+                printf "handover-daemon %s\n" "$3"
+                [ "${FAKE_HANDOVER_FAILS:-0}" = 1 ] && return 1
+                HANDOVER_STARTED=now
+            }
+            refresh_installed_cli() { :; }
+            run_app_stage() { :; }
+            run_wake_stage() { WAKE_CANDIDATES=0; WAKE_WOKEN=0; WAKE_FAILED=0; }
+            set -uo pipefail
+            main "$@"
+        ' _ "$SCRIPT" "$@" 2>&1
+}
+
+# A release case: the fixture remote with a second commit on main, stubs for
+# the release tools, and a daemon reporting the first commit.
+mkcase_release() {
+    local name="$1" d first
+    d="$(mkcase "$name")"
+    mkstub_release_tools "$d/bin"
+    first="$(git -C "$d/remote" rev-parse HEAD)"
+    echo "// second" >> "$d/remote/Sources/Seed.swift"
+    git -C "$d/remote" commit -q -am "second"
+    cat > "$d/state/status.json" << EOF
+{
+  "executablePath": "$d/worktree/.build/release/TBDDaemon",
+  "buildIdentity": {"commit": "$first", "sourceWorktree": "$d/worktree"}
+}
+EOF
+    printf '%s\n' "$d"
+}
+
+sidecar_field() {
+    python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1" "$2"
+}
+
+test_update_source_resolution() {
+    (
+        UPDATE_SOURCE_FILE="$TEST_TMP/no-such-source"
+        OPT_FROM_RELEASE=false
+        unset TBD_UPDATE_SOURCE
+        assert_eq "the shipped default is a local build" "build" "$(resolve_update_source)"
+        assert_eq "the shipped default constant is build" "build" "$UPDATE_SOURCE_DEFAULT"
+        printf 'release\n' > "$TEST_TMP/source-file"
+        UPDATE_SOURCE_FILE="$TEST_TMP/source-file"
+        assert_eq "the update-source file opts in" "release" "$(resolve_update_source)"
+        TBD_UPDATE_SOURCE=build
+        assert_eq "the environment beats the file" "build" "$(resolve_update_source)"
+        OPT_FROM_RELEASE=true
+        assert_eq "--from-release beats everything" "release" "$(resolve_update_source)"
+        OPT_FROM_RELEASE=false
+        TBD_UPDATE_SOURCE=nonsense
+        assert_eq "an unknown source builds locally" "build" "$(resolve_update_source 2>/dev/null)"
+    ) || FAIL=1
+    (
+        parse_args --from-release
+        assert_eq "--from-release is recorded" "true" "$OPT_FROM_RELEASE"
+    ) || FAIL=1
+    assert_contains "--help documents --from-release" "--from-release" "$(bash "$SCRIPT" --help 2>&1)"
+}
+
+test_check_ref_follows_the_standing_source() {
+    (
+        UPDATE_HOME="$TEST_TMP/check-ref-home"
+        CHECK_REF_FILE="$UPDATE_HOME/check-ref"
+        UPDATE_SOURCE_FILE="$UPDATE_HOME/update-source"
+        OPT_FROM_RELEASE=false
+        unset TBD_UPDATE_SOURCE
+        mkdir -p "$UPDATE_HOME"
+        printf 'release\n' > "$UPDATE_SOURCE_FILE"
+        sync_check_ref
+        assert_eq "a standing release source points the check at the release tag" \
+            "refs/tags/main-builds" "$(cat "$CHECK_REF_FILE" 2>/dev/null)"
+        rm -f "$UPDATE_SOURCE_FILE"
+        OPT_FROM_RELEASE=true
+        sync_check_ref
+        if [ -e "$CHECK_REF_FILE" ]; then
+            fail "a one-off --from-release leaves the check on main"
+        else
+            pass "a one-off --from-release leaves the check on main"
+        fi
+    ) || FAIL=1
+}
+
+test_release_products_partition_the_runtime_products() {
+    assert_eq "published plus locally built products are exactly the runtime products" \
+        "$(printf '%s\n' "${RUNTIME_PRODUCTS[@]}" | sort | tr '\n' ' ')" \
+        "$(printf '%s\n' "${RELEASE_PRODUCTS[@]}" "${RELEASE_LOCAL_PRODUCTS[@]}" | sort | tr '\n' ' ')"
+}
+
+test_release_dry_run_leaves_the_running_link() {
+    local case_dir out head previous
+    case_dir="$(mkcase_release release-dry-run)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    # A first run creates the clone; plant the running build's link, then dry-run.
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run >/dev/null
+    mkdir -p "$previous"
+    ln -sfn "$previous" "$case_dir/home/tbd/updates/src/.build/release"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run)"
+    assert_eq "a release dry run exits zero" "0" "$?"
+    assert_contains "it says it installs nothing" "installing nothing" "$out"
+    assert_eq "a release dry run leaves .build/release on the running build" "$previous" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    assert_not_contains "a release dry run hands nothing over" "handover-daemon" "$out"
+}
+
+test_release_repo_slug_parses_github_remotes() {
+    (
+        unset TBD_RELEASE_REPO
+        assert_eq "an https remote" "acme/tbd" "$(release_repo_slug https://github.com/acme/tbd.git)"
+        assert_eq "an ssh remote" "acme/tbd" "$(release_repo_slug git@github.com:acme/tbd.git)"
+        assert_fail "a non-GitHub remote has no releases" release_repo_slug /tmp/some/repo
+    ) || FAIL=1
+}
+
+test_release_install_verified() {
+    local case_dir out head tree sidecar
+    case_dir="$(mkcase_release release-verified)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    # An older prebuilt tree that the prune must remove.
+    mkdir -p "$case_dir/home/tbd/updates/prebuilt/0000000000000000000000000000000000000000"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release)"
+    assert_eq "a verified release install exits zero" "0" "$?"
+    tree="$case_dir/home/tbd/updates/prebuilt/$head"
+    assert_contains "the provenance is verified" "build provenance verified" "$out"
+    assert_contains "every file is checked against the manifest" "every file matches the manifest" "$out"
+    assert_not_contains "a verified download compiles no daemon" "building TBDDaemon" "$out"
+    assert_eq "a verified download builds only the app" "built TBDApp release" \
+        "$(cat "$case_dir/build.log" 2>/dev/null)"
+    if [ -x "$tree/TBDApp" ] && [ -f "$tree/TBD_TBDApp.bundle/markdown-default.css" ]; then
+        pass "the locally built app and its resources join the downloaded tree"
+    else
+        fail "the locally built app and its resources join the downloaded tree"
+    fi
+    assert_eq "the sidecar names what was built here" "['TBDApp']" \
+        "$(sidecar_field "$tree/TBDBuildIdentity.json" locallyBuiltProducts)"
+    assert_eq "the clone's .build/release points at the prebuilt tree" "$tree" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    assert_contains "the handover starts the daemon through the link" \
+        "handover-daemon $case_dir/home/tbd/updates/src/.build/release/TBDDaemon" "$out"
+    assert_eq "the clone is left at the installed commit" "$head" \
+        "$(git -C "$case_dir/home/tbd/updates/src" rev-parse HEAD)"
+    sidecar="$tree/TBDBuildIdentity.json"
+    assert_eq "the sidecar names the installed commit" "$head" "$(sidecar_field "$sidecar" commit)"
+    assert_eq "the sidecar names the update clone" "$case_dir/home/tbd/updates/src" \
+        "$(sidecar_field "$sidecar" sourceWorktree)"
+    assert_eq "the sidecar records the release provenance" "release" \
+        "$(sidecar_field "$sidecar" provenance)"
+    assert_eq "the sidecar carries CI's build time" "2026-09-23T00:00:00Z" \
+        "$(sidecar_field "$sidecar" builtAt)"
+    if [ -d "$case_dir/home/tbd/updates/prebuilt/0000000000000000000000000000000000000000" ]; then
+        fail "a completed install prunes older prebuilt trees"
+    else
+        pass "a completed install prunes older prebuilt trees"
+    fi
+    assert_eq "no partial download is left behind" "" \
+        "$(find "$case_dir/home/tbd/updates/prebuilt" -maxdepth 1 -name '*.partial')"
+}
+
+test_release_walks_back_to_the_newest_published_commit() {
+    local case_dir out head parent
+    case_dir="$(mkcase_release release-walkback)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    parent="$(git -C "$case_dir/remote" rev-parse HEAD~1)"
+    # Only the first commit is published, and it is the one running.
+    mkrelease "$case_dir" "$parent"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release)"
+    assert_eq "a run already at the newest published build exits zero" "0" "$?"
+    assert_contains "it finds the older published commit" "newest published build is $parent" "$out"
+    assert_contains "it installs nothing when that is what is running" "nothing to install" "$out"
+    assert_not_contains "and builds nothing" "building TBDDaemon" "$out"
+}
+
+test_release_attestation_missing_in_auto_mode_refuses() {
+    local case_dir out head
+    case_dir="$(mkcase_release release-auto-no-gh)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    out="$(FAKE_GH_AUTH=1 run_update_release "$case_dir" --auto --from-release;
+        printf 'rc=%s\n' "$?")"
+    out="$out$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+    assert_contains "an unattended install without provenance fails" "rc=1" "$out"
+    assert_contains "it says why" "requires a verified build provenance" "$out"
+    assert_not_contains "it does not build in its place" "building TBDDaemon" "$out"
+    if [ -e "$case_dir/home/tbd/updates/src/.build/release" ]; then
+        fail "an unverified download is never linked into place"
+    else
+        pass "an unverified download is never linked into place"
+    fi
+
+    # gh signed in, but no attestation for this archive: refused the same way.
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=1 run_update_release "$case_dir" --auto --from-release;
+        printf 'rc=%s\n' "$?")"
+    out="$out$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+    assert_contains "an attestation that does not verify fails the run" "rc=1" "$out"
+    assert_contains "and names the provenance" "build provenance did not verify" "$out"
+}
+
+test_release_attestation_missing_in_manual_mode() {
+    local case_dir out head
+    case_dir="$(mkcase_release release-manual-no-gh)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    out="$(FAKE_GH_AUTH=1 run_update_release "$case_dir" --from-release)"
+    assert_eq "a manual install without gh proceeds on the checksum" "0" "$?"
+    assert_contains "and warns that provenance went unchecked" \
+        "build provenance was not checked" "$out"
+    assert_eq "the download is linked into place" \
+        "$case_dir/home/tbd/updates/prebuilt/$head" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+
+    case_dir="$(mkcase_release release-manual-bad-attest)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=1 run_update_release "$case_dir" --from-release;
+        printf 'rc=%s\n' "$?")"
+    assert_contains "a manual install whose attestation fails is refused" "rc=1" "$out"
+    assert_not_contains "and does not fall back to a build" "building TBDDaemon" "$out"
+}
+
+test_release_checksum_mismatch_aborts() {
+    local case_dir out head name
+    case_dir="$(mkcase_release release-bad-checksum)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    name="tbd-$head-macos-arm64.tar.gz"
+    printf '%064d  %s\n' 0 "$name" > "$case_dir/release/$name.sha256"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release;
+        printf 'rc=%s\n' "$?")"
+    assert_contains "a checksum mismatch fails the run" "rc=1" "$out"
+    assert_contains "and says so" "checksum mismatch" "$out"
+    assert_not_contains "a manual run does not build in its place" "building TBDDaemon" "$out"
+    if [ -d "$case_dir/home/tbd/updates/prebuilt/$head" ]; then
+        fail "a mismatched download is not unpacked into place"
+    else
+        pass "a mismatched download is not unpacked into place"
+    fi
+}
+
+test_release_manifest_mismatch_aborts() {
+    local case_dir out head
+    case_dir="$(mkcase_release release-bad-manifest)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    # A well-formed archive whose manifest names another commit.
+    mkrelease "$case_dir" "$head"
+    rm -rf "$case_dir/release-stage"
+    mkdir -p "$case_dir/release-other"
+    (
+        d="$case_dir/release-other"
+        mkrelease "$d" "$(git -C "$case_dir/remote" rev-parse HEAD~1)"
+        mkdir -p "$d/x" && tar -xzf "$d/release/"*.tar.gz -C "$d/x"
+        mv "$d/x/"* "$d/x/tbd-$head-macos-arm64"
+        tar -czf "$case_dir/release/tbd-$head-macos-arm64.tar.gz" -C "$d/x" "tbd-$head-macos-arm64"
+        printf '%s  x\n' "$(shasum -a 256 "$case_dir/release/tbd-$head-macos-arm64.tar.gz" | awk '{print $1}')" \
+            > "$case_dir/release/tbd-$head-macos-arm64.tar.gz.sha256"
+    )
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release;
+        printf 'rc=%s\n' "$?")"
+    assert_contains "a manifest naming another commit fails the run" "rc=1" "$out"
+    assert_contains "and says what did not match" "does not match its manifest" "$out"
+}
+
+test_release_no_asset_auto_skips() {
+    local case_dir out
+    case_dir="$(mkcase_release release-none-auto)"
+    mkdir -p "$case_dir/release"
+    out="$(run_update_release "$case_dir" --auto --from-release; printf 'rc=%s\n' "$?")"
+    out="$out$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+    assert_contains "an unattended run with nothing published exits zero" "rc=0" "$out"
+    assert_contains "and says it skipped" "skipping this unattended update" "$out"
+    if [ -f "$case_dir/build.log" ]; then
+        fail "an unattended run with nothing published builds nothing"
+    else
+        pass "an unattended run with nothing published builds nothing"
+    fi
+}
+
+test_release_no_asset_manual_builds_locally() {
+    local case_dir out
+    case_dir="$(mkcase_release release-none-manual)"
+    mkdir -p "$case_dir/release"
+    out="$(run_update_release "$case_dir" --from-release --dry-run)"
+    assert_eq "a manual run with nothing published still succeeds" "0" "$?"
+    assert_contains "it says it falls back" "building locally instead" "$out"
+    assert_contains "and builds" "building TBDDaemon" "$out"
+    assert_eq "every product is built" "6" "$(grep -c 'release' "$case_dir/build.log" 2>/dev/null)"
+}
+
+test_release_non_arm64_builds_locally() {
+    local case_dir out head
+    case_dir="$(mkcase_release release-intel)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    out="$(FAKE_ARCH=x86_64 run_update_release "$case_dir" --auto --from-release --dry-run;
+        printf 'rc=%s\n' "$?")"
+    out="$out$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+    assert_contains "an Intel machine is told why" "this machine is x86_64" "$out"
+    assert_contains "and builds locally, even unattended" "building TBDDaemon" "$out"
+    assert_contains "and succeeds" "rc=0" "$out"
+    if [ -f "$case_dir/curl.log" ]; then
+        fail "an Intel machine downloads nothing"
+    else
+        pass "an Intel machine downloads nothing"
+    fi
+}
+
+test_release_failed_handover_restores_the_link() {
+    local case_dir out previous
+    case_dir="$(mkcase_release_live release-handover-fails)"
+    previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_HANDOVER_FAILS=1 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run reaches the handover" "handover-daemon" "$out"
+    assert_contains "a failed handover fails the run" "rc=1" "$out"
+    assert_eq "a failed handover points the link back at the running build" "$previous" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    if [ -d "$previous" ]; then
+        pass "a failed handover keeps the live tree"
+    else
+        fail "a failed handover keeps the live tree"
+    fi
+    assert_eq "a failed handover leaves no new tree" "1111111111111111111111111111111111111111" \
+        "$(prebuilt_entries "$case_dir")"
+}
+
+# The trees under <case>/home/tbd/updates/prebuilt, by name, space-separated
+# and sorted. Dotfiles (the rollback record) are not trees.
+prebuilt_entries() {
+    local dir="$1/home/tbd/updates/prebuilt"
+    [ -d "$dir" ] || return 0
+    find "$dir" -mindepth 1 -maxdepth 1 ! -name '.*' -exec basename {} \; | sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# A release case whose clone exists and whose .build/release points at a
+# planted live tree 1111…. Echoes the case directory.
+mkcase_release_live() {
+    local case_dir head live
+    case_dir="$(mkcase_release "$1")"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkrelease "$case_dir" "$head"
+    # A first run creates the clone; a dry run installs nothing.
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run >/dev/null
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    mkdir -p "$live"
+    ln -sfn "$live" "$case_dir/home/tbd/updates/src/.build/release"
+    printf '%s\n' "$case_dir"
+}
+
+test_release_dry_run_keeps_nothing_it_downloaded() {
+    local case_dir out
+    case_dir="$(mkcase_release release-dry-run-prune)"
+    mkrelease "$case_dir" "$(git -C "$case_dir/remote" rev-parse HEAD)"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run)"
+    assert_contains "a first release dry run downloads" "installing nothing" "$out"
+    assert_eq "a release dry run with nothing live leaves no tree" "" "$(prebuilt_entries "$case_dir")"
+
+    case_dir="$(mkcase_release_live release-dry-run-prune-live)"
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release --dry-run >/dev/null
+    assert_eq "a release dry run leaves no new tree beside the live one" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+}
+
+test_release_failed_app_build_leaves_no_new_tree() {
+    local case_dir out
+    case_dir="$(mkcase_release_live release-app-build-fails)"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_BUILD_FAILS_PRODUCT=TBDApp \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "a failed app build fails the run" "rc=1" "$out"
+    assert_eq "a failed app build leaves no new tree" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+    assert_eq "a failed app build leaves the link on the live tree" \
+        "$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+}
+
+test_release_failed_link_restores_the_running_link() {
+    local case_dir out live real_python
+    case_dir="$(mkcase_release_live release-link-fails)"
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    # point_release_link swaps the link with a python3 os.replace. A python3
+    # that refuses that swap for any target but the live tree makes pointing
+    # the link at the download fail, and pointing it back succeed.
+    real_python="$(command -v python3)"
+    cat > "$case_dir/bin/python3" << EOF
+#!/bin/sh
+case "\$2" in
+    *os.replace*)
+        [ "\$(readlink "\$3")" = "$live" ] || exit 1
+        ;;
+esac
+exec "$real_python" "\$@"
+EOF
+    chmod +x "$case_dir/bin/python3"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    rm -f "$case_dir/bin/python3"
+    assert_contains "a failed link fails the run" "rc=1" "$out"
+    assert_not_contains "a failed link hands nothing over" "handover-daemon" "$out"
+    assert_eq "a failed link points .build/release back at the running build" "$live" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    assert_eq "a failed link leaves no new tree" \
+        "1111111111111111111111111111111111111111" "$(prebuilt_entries "$case_dir")"
+}
+
+test_release_failed_runs_never_grow_the_prebuilt_home() {
+    local case_dir home i ok=true
+    case_dir="$(mkcase_release_live release-failed-runs)"
+    home="$case_dir/home/tbd/updates/prebuilt"
+    # A rollback tree on record, and a stray older tree nothing names.
+    mkdir -p "$home/2222222222222222222222222222222222222222" \
+        "$home/0000000000000000000000000000000000000000" "$home/download.partial"
+    printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
+    for i in 1 2 3 4; do
+        case "$i" in
+            1|3) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_HANDOVER_FAILS=1 \
+                    run_update_release "$case_dir" --from-release >/dev/null ;;
+            2) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_BUILD_FAILS_PRODUCT=TBDApp \
+                    run_update_release "$case_dir" --from-release >/dev/null ;;
+            4) FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+                    run_update_release "$case_dir" --from-release --dry-run >/dev/null ;;
+        esac
+        if [ "$(prebuilt_entries "$case_dir")" != \
+            "1111111111111111111111111111111111111111 2222222222222222222222222222222222222222" ]; then
+            ok=false
+        fi
+    done
+    if [ "$ok" = true ]; then
+        pass "successive failed runs keep exactly the live tree and one rollback"
+    else
+        fail "successive failed runs keep exactly the live tree and one rollback (got: $(prebuilt_entries "$case_dir"))"
+    fi
+}
+
+test_release_completed_install_keeps_the_replaced_tree_as_rollback() {
+    local case_dir head home
+    case_dir="$(mkcase_release_live release-rollback)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    home="$case_dir/home/tbd/updates/prebuilt"
+    mkdir -p "$home/2222222222222222222222222222222222222222"
+    printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    assert_eq "a completed install keeps the new tree and the one it replaced" \
+        "$(printf '%s\n' 1111111111111111111111111111111111111111 "$head" | sort | tr '\n' ' ' | sed 's/ $//')" \
+        "$(prebuilt_entries "$case_dir")"
+    assert_eq "the replaced tree is recorded as the rollback" \
+        "$home/1111111111111111111111111111111111111111" "$(cat "$home/.previous" 2>/dev/null)"
+}
+
+# A local build hands .build/release to SwiftPM; every way the run can end
+# short of a completed install must put it back on the downloaded tree that
+# is running, or a reboot respawns a partial or missing TBDDaemon.
+test_local_build_short_of_an_install_restores_the_downloaded_link() {
+    local case_dir out live how
+    for how in compile handover dry-run sign; do
+        case_dir="$(mkcase_release_live "local-restore-$how")"
+        live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+        case "$how" in
+            compile) out="$(FAKE_BUILD_FAILS_PRODUCT=TBDDaemon \
+                    run_update_release "$case_dir"; printf 'rc=%s\n' "$?")" ;;
+            handover) out="$(FAKE_HANDOVER_FAILS=1 \
+                    run_update_release "$case_dir"; printf 'rc=%s\n' "$?")" ;;
+            dry-run) out="$(run_update_release "$case_dir" --dry-run; printf 'rc=%s\n' "$?")" ;;
+            sign)
+                printf '#!/bin/sh\nexit 1\n' > "$case_dir/bin/codesign"
+                out="$(run_update_release "$case_dir"; printf 'rc=%s\n' "$?")"
+                ;;
+        esac
+        assert_contains "a local build is what ran ($how)" "building TBDDaemon" "$out"
+        if [ "$how" = dry-run ]; then
+            assert_contains "a local dry run succeeds" "rc=0" "$out"
+        else
+            assert_contains "a local build that fails at $how fails the run" "rc=1" "$out"
+        fi
+        assert_eq "a local build that stops at $how points the link back at the running download" \
+            "$live" "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    done
+}
+
+test_release_failed_signing_restores_the_link() {
+    local case_dir out live
+    case_dir="$(mkcase_release_live release-sign-fails)"
+    live="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    printf '#!/bin/sh\nexit 1\n' > "$case_dir/bin/codesign"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "a failed signing fails the run" "rc=1" "$out"
+    assert_not_contains "a failed signing hands nothing over" "handover-daemon" "$out"
+    assert_eq "a failed signing points the link back at the running build" "$live" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+}
+
+test_local_build_takes_the_link_back_from_a_download() {
+    local link home
+    home="$TEST_TMP/yield/prebuilt"
+    link="$TEST_TMP/yield/src/.build/release"
+    mkdir -p "$home/abc" "$(dirname "$link")"
+    ln -s "$home/abc" "$link"
+    release_link_yield_to_swiftpm "$link" "$home"
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        fail "a link into the prebuilt home is removed before a local build"
+    else
+        pass "a link into the prebuilt home is removed before a local build"
+    fi
+    mkdir -p "$TEST_TMP/yield/src/.build/arm64-apple-macosx/release"
+    ln -s "arm64-apple-macosx/release" "$link"
+    release_link_yield_to_swiftpm "$link" "$home"
+    assert_eq "SwiftPM's own link is left alone" "arm64-apple-macosx/release" "$(link_target "$link")"
+    rm -f "$link"
+    mkdir -p "$link"
+    assert_fail "a real build directory is never replaced by a link" \
+        point_release_link "$link" "$home/abc"
+}
+
 # MARK: - Installing and handing over
 
 # A directory that looks enough like an assembled bundle for install and
@@ -1637,9 +2497,17 @@ test_check_fallback_decides_ancestry_like_the_daemon
 test_dry_run_builds_but_installs_nothing
 test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
+test_a_failed_build_leaves_the_previous_stamp_alone
+test_a_failed_build_reports_its_first_errors
+test_a_slot_timeout_is_not_reported_as_a_compile_failure
+test_build_failure_excerpt_with_auto_flag_goes_only_to_log
+test_the_build_ignores_an_inherited_dev_shell_sdk
+test_an_xcode_sdk_selection_is_kept
+test_keep_build_env_switch_turns_the_scrub_off
 test_auto_logs_without_printing
 test_no_wake_skips_the_stage
 test_no_app_skips_the_relaunch
+test_app_stage_seeds_the_tmux_fallback
 test_wake_candidate_filter
 test_wake_batches_and_paces
 test_wake_counts_failures
@@ -1658,6 +2526,29 @@ test_paths_match_resolves_symlinks
 test_handover_wait_gives_up
 test_a_timed_out_handover_stops_the_successor
 test_stopping_a_successor_that_is_already_gone_is_not_an_error
+test_update_source_resolution
+test_check_ref_follows_the_standing_source
+test_release_products_partition_the_runtime_products
+test_release_dry_run_leaves_the_running_link
+test_release_repo_slug_parses_github_remotes
+test_release_install_verified
+test_release_walks_back_to_the_newest_published_commit
+test_release_attestation_missing_in_auto_mode_refuses
+test_release_attestation_missing_in_manual_mode
+test_release_checksum_mismatch_aborts
+test_release_manifest_mismatch_aborts
+test_release_no_asset_auto_skips
+test_release_no_asset_manual_builds_locally
+test_release_non_arm64_builds_locally
+test_release_failed_handover_restores_the_link
+test_release_dry_run_keeps_nothing_it_downloaded
+test_release_failed_app_build_leaves_no_new_tree
+test_release_failed_link_restores_the_running_link
+test_release_failed_runs_never_grow_the_prebuilt_home
+test_release_completed_install_keeps_the_replaced_tree_as_rollback
+test_local_build_takes_the_link_back_from_a_download
+test_local_build_short_of_an_install_restores_the_downloaded_link
+test_release_failed_signing_restores_the_link
 
 if [ "$FAIL" -ne 0 ]; then
     echo "SOME UPDATE TESTS FAILED"

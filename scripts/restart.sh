@@ -271,6 +271,13 @@ else
     APP_EXEC_PATTERN="$WORKTREE_EXEC_PATTERN"
 fi
 
+# MARK: - Seed the tmux fallback
+
+# A login relaunch ignores LSEnvironment.PATH, so record this shell's tmux as
+# the saved fallback unless a usable one is already saved. Runs on every path,
+# --daemon-only included: the next login relaunch needs the file regardless.
+seed_tmux_fallback "${TBD_HOME:-$HOME/tbd}"
+
 # MARK: - Restart Daemon
 
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then

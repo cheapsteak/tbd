@@ -48,10 +48,16 @@ private func entry(name: String,
     )
 }
 
-/// The live-verified Gmail shape: 5h 0% resetting 11:10pm, weekly 76%, Fable 100%.
+/// The live-verified Gmail shape: 5h 0% resetting 11:10pm, weekly 76%.
 private let gmailSnapshot = snapshot(buckets: [
     bucket(kind: "session", percent: 0, severity: "normal", resetsAt: resetDate),
     bucket(kind: "weekly_all", percent: 76, severity: "warning"),
+])
+
+/// The same account with a `weekly_scoped` Fable bucket pinned at 100% /
+/// critical riding along, as a stored snapshot can still carry. Fable usage
+/// counts toward the plan's all-models limits, so no surface may render it.
+private let legacyScopedSnapshot = snapshot(buckets: gmailSnapshot.buckets + [
     bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
 ])
 
@@ -70,7 +76,7 @@ private func claudeTerminal(profileID: UUID? = nil,
 struct UsageSuffixTests {
     @Test func fullSnapshotComposesCompactSuffix() {
         let suffix = ProfileUsagePresentation.usageSuffix(for: gmailSnapshot, timeZone: utc)
-        #expect(suffix == " · 5h 0% ↺11:10pm · wk 76% · F 100%")
+        #expect(suffix == " · 5h 0% ↺11:10pm · wk 76%")
     }
 
     @Test func missingSnapshotProducesEmptySuffix() {
@@ -81,14 +87,17 @@ struct UsageSuffixTests {
         #expect(ProfileUsagePresentation.usageSuffix(for: snapshot(buckets: [])) == "")
     }
 
-    @Test func missingScopedBucketOmitsFamilySegment() {
-        // No data for the family on this account → segment absent, not "F 0%".
-        let noFable = snapshot(buckets: [
-            bucket(kind: "session", percent: 19),
-            bucket(kind: "weekly_all", percent: 24),
+    @Test func legacyScopedBucketRendersNoFamilySegment() {
+        #expect(ProfileUsagePresentation.usageSuffix(for: legacyScopedSnapshot, timeZone: utc)
+                == " · 5h 0% ↺11:10pm · wk 76%")
+    }
+
+    @Test func snapshotWithOnlyAScopedBucketHasNoSuffix() {
+        let scopedOnly = snapshot(buckets: [
+            bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
         ])
-        #expect(ProfileUsagePresentation.usageSuffix(for: noFable, timeZone: utc)
-                == " · 5h 19% · wk 24%")
+        #expect(ProfileUsagePresentation.usageSuffix(for: scopedOnly, timeZone: utc) == "")
+        #expect(ProfileUsagePresentation.usageDetailLine(for: scopedOnly, timeZone: utc) == nil)
     }
 
     @Test func sessionWithoutResetOmitsClockFragment() {
@@ -104,19 +113,12 @@ struct UsageSuffixTests {
     @Test func menuItemTitleCombinesIdentityAndUsage() {
         let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
         #expect(ProfileUsagePresentation.menuItemTitle(for: gmail, timeZone: utc)
-                == "Gmail — g@x.co · 5h 0% ↺11:10pm · wk 76% · F 100%")
+                == "Gmail — g@x.co · 5h 0% ↺11:10pm · wk 76%")
     }
 
     @Test func menuItemTitleWithoutSnapshotIsIdentityOnly() {
         let bare = entry(name: "Work", loginIdentity: "a@b.co")
         #expect(ProfileUsagePresentation.menuItemTitle(for: bare) == "Work — a@b.co")
-    }
-
-    @Test func familyAbbreviationTakesFirstLetterUppercased() {
-        #expect(ProfileUsagePresentation.familyAbbreviation("Fable") == "F")
-        #expect(ProfileUsagePresentation.familyAbbreviation("opus") == "O")
-        #expect(ProfileUsagePresentation.familyAbbreviation(nil) == "?")
-        #expect(ProfileUsagePresentation.familyAbbreviation("  ") == "?")
     }
 }
 
@@ -126,13 +128,13 @@ struct UsageSuffixTests {
 struct TwoLineMenuTests {
     @Test func fullSnapshotSpellsOutUsageWithUsedLabelOnce() {
         let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc)
-        #expect(line == "5h 0% used · resets 11:10pm · week 76% · Fable 100%")
+        #expect(line == "5h 0% used · resets 11:10pm · week 76%")
     }
 
     @Test func usedLabelAppearsExactlyOnceOnTheFirstPercentage() {
         let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc) ?? ""
         #expect(line.components(separatedBy: "used").count - 1 == 1)
-        // It rides the first (5h) segment, not the weekly/family ones.
+        // It rides the first (5h) segment, not the weekly one.
         #expect(line.hasPrefix("5h 0% used"))
     }
 
@@ -144,13 +146,21 @@ struct TwoLineMenuTests {
         #expect(ProfileUsagePresentation.usageDetailLine(for: snapshot(buckets: [])) == nil)
     }
 
-    @Test func withoutScopedFamilyBucketOmitsFamilySegment() {
-        let noFable = snapshot(buckets: [
+    @Test func legacyScopedBucketRendersNoFamilySegment() {
+        #expect(ProfileUsagePresentation.usageDetailLine(for: legacyScopedSnapshot, timeZone: utc)
+                == "5h 0% used · resets 11:10pm · week 76%")
+    }
+
+    @Test func unknownBucketKindRendersNoSegment() {
+        let withFuture = snapshot(buckets: [
             bucket(kind: "session", percent: 16, resetsAt: resetDate),
             bucket(kind: "weekly_all", percent: 79),
+            bucket(kind: "future_kind", percent: 100, severity: "critical"),
         ])
-        #expect(ProfileUsagePresentation.usageDetailLine(for: noFable, timeZone: utc)
+        #expect(ProfileUsagePresentation.usageDetailLine(for: withFuture, timeZone: utc)
                 == "5h 16% used · resets 11:10pm · week 79%")
+        #expect(ProfileUsagePresentation.usageSuffix(for: withFuture, timeZone: utc)
+                == " · 5h 16% ↺11:10pm · wk 79%")
     }
 
     @Test func sessionWithoutResetOmitsClockFragmentButKeepsUsed() {
@@ -171,7 +181,7 @@ struct TwoLineMenuTests {
         let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
         let line = ProfileUsagePresentation.menuLine(for: gmail, timeZone: utc)
         #expect(line.primary == "Gmail — g@x.co")
-        #expect(line.secondary == "5h 0% used · resets 11:10pm · week 76% · Fable 100%")
+        #expect(line.secondary == "5h 0% used · resets 11:10pm · week 76%")
     }
 
     @Test func menuLineWithoutSnapshotHasNilSecondary() {
@@ -187,13 +197,6 @@ struct TwoLineMenuTests {
         let line = ProfileUsagePresentation.menuLine(for: needsLogin)
         #expect(line.primary == "Spare — needs /login")
         #expect(line.secondary == nil)
-    }
-
-    @Test func familyNameSpellsOutTheDisplayNameOrFallsBack() {
-        #expect(ProfileUsagePresentation.familyName("Fable") == "Fable")
-        #expect(ProfileUsagePresentation.familyName("  Opus  ") == "Opus")
-        #expect(ProfileUsagePresentation.familyName(nil) == "?")
-        #expect(ProfileUsagePresentation.familyName("  ") == "?")
     }
 }
 
@@ -328,10 +331,6 @@ struct ResetDisplayPolicyTests {
         #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_all") == .weekdayClock)
     }
 
-    @Test func scopedKindUsesTooltipOnlyDisplay() {
-        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_scoped") == .tooltipOnly)
-    }
-
     @Test func unknownKindDefaultsToTooltipOnly() {
         #expect(ProfileUsagePresentation.resetDisplay(forKind: "future_kind") == .tooltipOnly)
     }
@@ -348,9 +347,7 @@ struct ResetDisplayPolicyTests {
                                                       style: .timeUntilReset) == .countdown)
     }
 
-    @Test func scopedAndUnknownKindsStayTooltipOnlyUnderTimeUntilStyle() {
-        #expect(ProfileUsagePresentation.resetDisplay(forKind: "weekly_scoped",
-                                                      style: .timeUntilReset) == .tooltipOnly)
+    @Test func unknownKindStaysTooltipOnlyUnderTimeUntilStyle() {
         #expect(ProfileUsagePresentation.resetDisplay(forKind: "future_kind",
                                                       style: .timeUntilReset) == .tooltipOnly)
     }
@@ -364,10 +361,6 @@ struct WindowDurationTests {
 
     @Test func weeklyAllKindUsesWeeklyWindow() {
         #expect(ProfileUsagePresentation.windowDuration(forKind: "weekly_all") == ProfileUsagePresentation.weeklyWindow)
-    }
-
-    @Test func scopedKindUsesWeeklyWindow() {
-        #expect(ProfileUsagePresentation.windowDuration(forKind: "weekly_scoped") == ProfileUsagePresentation.weeklyWindow)
     }
 
     @Test func unknownKindDefaultsToSessionWindow() {
@@ -410,10 +403,10 @@ struct BucketPresentationTests {
         #expect(presentation.elapsedFraction == nil)
     }
 
-    @Test func scopedBucketBuildsTooltipDisplay() {
-        let scopedBucket = bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable")
-        let presentation = ProfileUsagePresentation.bucketPresentation(scopedBucket, now: now, timeZone: utc)
-        #expect(presentation.kind == "weekly_scoped")
+    @Test func unknownKindBucketBuildsTooltipDisplay() {
+        let futureBucket = bucket(kind: "future_kind", percent: 100, severity: "critical")
+        let presentation = ProfileUsagePresentation.bucketPresentation(futureBucket, now: now, timeZone: utc)
+        #expect(presentation.kind == "future_kind")
         #expect(presentation.percent == 100)
         #expect(presentation.percentText == "100%")
         #expect(presentation.resetDisplay == .tooltipOnly)
@@ -482,12 +475,12 @@ struct BucketPresentationTests {
         #expect(presentation.resetPhrase == "resets in 4d 2h")
     }
 
-    @Test func scopedStaysTooltipOnlyInBothStyles() {
-        let scoped = bucket(kind: "weekly_scoped", percent: 45,
-                            resetsAt: now.addingTimeInterval(2 * 24 * 3600), family: "Fable")
+    @Test func unknownKindStaysTooltipOnlyInBothStyles() {
+        let future = bucket(kind: "future_kind", percent: 45,
+                            resetsAt: now.addingTimeInterval(2 * 24 * 3600))
         for style in ProfileUsagePresentation.ResetTimeStyle.allCases {
             let presentation = ProfileUsagePresentation.bucketPresentation(
-                scoped, style: style, now: now, timeZone: utc)
+                future, style: style, now: now, timeZone: utc)
             #expect(presentation.resetDisplay == .tooltipOnly)
             #expect(presentation.resetInline == nil)
             #expect(presentation.resetPhrase == "resets in 2d")
@@ -724,7 +717,7 @@ struct StalenessNoteTests {
 struct SecondaryLineHonestyTests {
     @Test func healthyFreshShowsUsageNumbers() {
         let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, kind: .oauth, timeZone: utc)
-        #expect(line == "5h 0% used · resets 11:10pm · week 76% · Fable 100%")
+        #expect(line == "5h 0% used · resets 11:10pm · week 76%")
     }
 
     @Test func rateLimitedProfileShowsRetryNoteNotStaleNumbers() {
@@ -787,7 +780,7 @@ struct SessionTooltipTests {
         )
         #expect(tooltip == """
         Account: g@x.co (Gmail)
-        Usage: 5h 0% ↺11:10pm · wk 76% · F 100%
+        Usage: 5h 0% ↺11:10pm · wk 76%
         Spawned: 2026-07-03 23:10
         """)
     }
@@ -1001,12 +994,10 @@ struct CompactResetCountdownTests {
         let snap = snapshot(buckets: [
             bucket(kind: "session", percent: 16, severity: "normal", resetsAt: resetDate),
             bucket(kind: "weekly_all", percent: 79, severity: "normal", resetsAt: weeklyReset),
-            bucket(kind: "weekly_scoped", percent: 45, severity: "normal",
-                   resetsAt: weeklyReset, family: "Fable"),
         ])
         let line = ProfileUsagePresentation.usageDetailLine(for: snap, timeZone: utc, now: now)
-        #expect(line == "5h 16% used · resets 11:10pm · week 79% · resets in 2d 5h · Fable 45%")
-        // The shared weekly instant renders once (on the week segment), not per family.
+        #expect(line == "5h 16% used · resets 11:10pm · week 79% · resets in 2d 5h")
+        // The weekly instant renders once, on the week segment.
         #expect(line?.components(separatedBy: "resets in").count == 2)
     }
 }

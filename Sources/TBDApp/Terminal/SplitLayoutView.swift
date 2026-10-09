@@ -53,7 +53,7 @@ struct SplitContainer: View {
             let totalSize = direction == .horizontal
                 ? geometry.size.width
                 : geometry.size.height
-            let dividerThickness: CGFloat = 4
+            let dividerThickness = SplitDividerMetrics.lineThickness
             let totalDividerSpace = dividerThickness * CGFloat(children.count - 1)
             let availableSpace = max(totalSize - totalDividerSpace, 0)
 
@@ -101,6 +101,7 @@ struct SplitContainer: View {
                             availableSpace: availableSpace,
                             onDragEnd: { commitRatios() }
                         )
+                        .zIndex(1)
                     }
                 }
             }
@@ -124,6 +125,7 @@ struct SplitContainer: View {
                             availableSpace: availableSpace,
                             onDragEnd: { commitRatios() }
                         )
+                        .zIndex(1)
                     }
                 }
             }
@@ -138,6 +140,17 @@ struct SplitContainer: View {
 }
 
 // MARK: - SplitDivider
+
+/// Shared geometry for the split dividers (pane splits, the pinned-terminal
+/// dock, and the dock's own column divider). The visible line takes
+/// `lineThickness` of layout space; a transparent overlay `grabThickness` wide,
+/// centered on the line, carries the resize cursor and the drag gesture, so the
+/// cursor area and the drag area are identical. Callers raise the divider's
+/// `zIndex` so the overhang wins hit-testing over the following sibling pane.
+enum SplitDividerMetrics {
+    static let lineThickness: CGFloat = 1
+    static let grabThickness: CGFloat = 7
+}
 
 /// A draggable divider between split children.
 /// Uses deferred resize: tracks drag offset for an indicator overlay, commits on release.
@@ -154,104 +167,73 @@ struct SplitDivider: View {
     @State private var dragOffset: CGFloat = 0
 
     var body: some View {
+        let isHorizontal = direction == .horizontal
         Rectangle()
             .fill(Color.gray.opacity(0.3))
             .frame(
-                width: direction == .horizontal ? thickness : nil,
-                height: direction == .vertical ? thickness : nil
+                width: isHorizontal ? thickness : nil,
+                height: isHorizontal ? nil : thickness
             )
-            .contentShape(Rectangle())
-            .cursor(direction == .horizontal ? .resizeLeftRight : .resizeUpDown)
-            .overlay(alignment: direction == .horizontal ? .leading : .top) {
+            .overlay {
                 if dragOffset != 0 {
                     Rectangle()
                         .fill(Color.accentColor.opacity(0.6))
                         .frame(
-                            width: direction == .horizontal ? 2 : nil,
-                            height: direction == .vertical ? 2 : nil
+                            width: isHorizontal ? 2 : nil,
+                            height: isHorizontal ? nil : 2
                         )
                         .offset(
-                            x: direction == .horizontal ? dragOffset : 0,
-                            y: direction == .vertical ? dragOffset : 0
+                            x: isHorizontal ? dragOffset : 0,
+                            y: isHorizontal ? 0 : dragOffset
                         )
                         .allowsHitTesting(false)
                 }
             }
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        if dragStartRatios.isEmpty {
-                            dragStartRatios = ratios
-                        }
-                        guard availableSpace > 0 else { return }
-
-                        let translation: CGFloat = direction == .horizontal
-                            ? value.translation.width
-                            : value.translation.height
-
-                        // Clamp the drag offset to respect min ratios
-                        let minRatio: CGFloat = 0.1
-                        let maxForward = (dragStartRatios[index + 1] - minRatio) * availableSpace
-                        let maxBackward = -(dragStartRatios[index] - minRatio) * availableSpace
-                        dragOffset = max(maxBackward, min(maxForward, translation))
-                    }
-                    .onEnded { _ in
-                        guard availableSpace > 0 else {
-                            dragOffset = 0
-                            dragStartRatios = []
-                            return
-                        }
-                        let delta = dragOffset / availableSpace
-                        var newRatios = dragStartRatios
-                        newRatios[index] = dragStartRatios[index] + delta
-                        newRatios[index + 1] = dragStartRatios[index + 1] - delta
-                        ratios = newRatios
-
-                        dragOffset = 0
-                        dragStartRatios = []
-                        onDragEnd()
-                    }
-            )
-    }
-}
-
-// MARK: - Cursor helper
-
-extension View {
-    /// Overlays an AppKit cursor rect on the view. More reliable than `.onHover` +
-    /// push/pop, which can miss events when a gesture is attached or leave the
-    /// cursor stack unbalanced if the view disappears while hovered.
-    func cursor(_ cursor: NSCursor) -> some View {
-        self.overlay(CursorRectView(cursor: cursor).allowsHitTesting(false))
-    }
-}
-
-/// NSViewRepresentable that installs an `addCursorRect` over its bounds so the
-/// cursor changes whenever the pointer enters, regardless of SwiftUI gestures.
-private struct CursorRectView: NSViewRepresentable {
-    let cursor: NSCursor
-
-    func makeNSView(context: Context) -> CursorNSView {
-        let view = CursorNSView()
-        view.cursor = cursor
-        return view
+            .overlay {
+                Color.clear
+                    .frame(
+                        width: isHorizontal ? SplitDividerMetrics.grabThickness : nil,
+                        height: isHorizontal ? nil : SplitDividerMetrics.grabThickness
+                    )
+                    .contentShape(Rectangle())
+                    .pointerStyle(isHorizontal ? .columnResize : .rowResize)
+                    .gesture(dragGesture)
+            }
     }
 
-    func updateNSView(_ nsView: CursorNSView, context: Context) {
-        nsView.cursor = cursor
-        nsView.window?.invalidateCursorRects(for: nsView)
+    private var dragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragStartRatios.isEmpty {
+                    dragStartRatios = ratios
+                }
+                guard availableSpace > 0 else { return }
+
+                let translation: CGFloat = direction == .horizontal
+                    ? value.translation.width
+                    : value.translation.height
+
+                // Clamp the drag offset to respect min ratios
+                let minRatio: CGFloat = 0.1
+                let maxForward = (dragStartRatios[index + 1] - minRatio) * availableSpace
+                let maxBackward = -(dragStartRatios[index] - minRatio) * availableSpace
+                dragOffset = max(maxBackward, min(maxForward, translation))
+            }
+            .onEnded { _ in
+                guard availableSpace > 0 else {
+                    dragOffset = 0
+                    dragStartRatios = []
+                    return
+                }
+                let delta = dragOffset / availableSpace
+                var newRatios = dragStartRatios
+                newRatios[index] = dragStartRatios[index] + delta
+                newRatios[index + 1] = dragStartRatios[index + 1] - delta
+                ratios = newRatios
+
+                dragOffset = 0
+                dragStartRatios = []
+                onDragEnd()
+            }
     }
-}
-
-final class CursorNSView: NSView {
-    var cursor: NSCursor = .arrow
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: cursor)
-    }
-
-    override var isFlipped: Bool { true }
-
-    // Don't intercept mouse events — let SwiftUI handle them.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

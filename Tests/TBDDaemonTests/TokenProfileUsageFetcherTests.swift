@@ -47,15 +47,14 @@ struct TokenUsageHeaderParserTests {
         #expect(buckets[0].severity == "warning")
     }
 
-    /// No per-model breakdown exists in headers — a token profile renders two
-    /// bars, never a scoped one.
-    @Test func neverProducesAScopedBucket() {
+    /// A token profile reports exactly the two plan-wide windows, neither
+    /// scoped to a model — the same pair a signed-in profile keeps.
+    @Test func producesOnlyThePlanWideBuckets() {
         let buckets = TokenUsageHeaderParser.buckets(from: headers([
             "anthropic-ratelimit-unified-5h-utilization": "0.1",
             "anthropic-ratelimit-unified-7d-utilization": "0.2",
         ]))
-        #expect(buckets.count == 2)
-        #expect(buckets.allSatisfy { $0.kind != "weekly_scoped" })
+        #expect(buckets.map(\.kind) == ["session", "weekly_all"])
         #expect(buckets.allSatisfy { $0.modelDisplayName == nil })
     }
 

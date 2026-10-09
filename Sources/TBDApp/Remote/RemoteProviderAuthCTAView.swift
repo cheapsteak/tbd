@@ -16,11 +16,11 @@ import SwiftUI
 /// what it is about to execute.
 struct RemoteProviderAuthCTAView: View {
     let presentation: RemoteProviderAuthPresentation
-    /// Whether to include the contract's reassurance that the remote session
-    /// is unaffected. Shown on the session detail pane (where the user is
-    /// looking at one specific session) and omitted in the sidebar popover,
-    /// which is provider-level chrome with no session in view.
-    var showsSessionReassurance = false
+    /// A line about the viewed session's fate
+    /// (`RemoteSessionStatePresentation.detachedFateLine`). Passed by the
+    /// session detail pane, where the user is looking at one specific
+    /// session; `nil` on provider-level surfaces with no session in view.
+    var sessionFateLine: String?
     /// Invoked when the user asks to run the command. The caller owns the
     /// terminal presentation, since a popover can't host its own sheet.
     let onRun: () -> Void
@@ -40,12 +40,12 @@ struct RemoteProviderAuthCTAView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if showsSessionReassurance {
+            if let sessionFateLine {
                 // Contract-correct framing: the PROVIDER is what can't
                 // authenticate. Only `list`/`events` are authoritative about
                 // a session's fate, and neither an attach exiting nor an
                 // expired credential says anything about it.
-                Text("The session keeps running remotely.")
+                Text(sessionFateLine)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

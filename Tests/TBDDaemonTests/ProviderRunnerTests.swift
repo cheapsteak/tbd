@@ -24,6 +24,18 @@ struct ProviderRunnerTests: ~Copyable {
         return RemoteProviderConfig(name: "stub", exec: path.path)
     }
 
+    /// A timeout names the operation that hung. The four `transcript`
+    /// subcommands are four different operations, so their name carries the
+    /// subcommand; operands never appear.
+    @Test func verbNameCarriesTheTranscriptSubcommandButNoOperand() {
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptRetain(sessionID: "s-1")) == "transcript retain")
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptImport) == "transcript import")
+        #expect(ProviderRunner.verbName(RemoteVerb.transcriptRead(sessionID: "s-1", since: "c")) == "transcript read")
+        #expect(ProviderRunner.verbName(["send", "s-1", "--submit"]) == "send")
+        #expect(ProviderRunner.verbName(["delete", "s-1", "--retain"]) == "delete")
+        #expect(ProviderRunner.verbName([]) == "?")
+    }
+
     @Test func successCapturesStdoutAndContractVersionEnv() async throws {
         let config = try stub(#"echo "{\"ok\": true, \"v\": \"$TBD_CONTRACT_VERSION\"}""#)
         let result = try await ProviderRunner().run(
@@ -57,6 +69,23 @@ struct ProviderRunnerTests: ~Copyable {
         let w = try await ProviderRunner().run(
             weird, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(w.failureClass == .permanent)
+    }
+
+    /// A provider killed by a signal keeps the non-zero `exitCode` every verb
+    /// already reads, and says it had no exit status of its own.
+    @Test func aProviderKilledBySignalIsMarkedTerminatedBySignal() async throws {
+        let killed = try stub("kill -9 $$")
+        let result = try await ProviderRunner().run(
+            killed, verb: ["send", "s-1", "--submit"], stdin: nil, timeout: 10, contractVersion: 1)
+        #expect(result.terminatedBySignal)
+        #expect(result.exitCode == SIGKILL)
+        #expect(result.failureClass != nil)
+
+        let exited = try stub("exit 9")
+        let plain = try await ProviderRunner().run(
+            exited, verb: ["send", "s-1", "--submit"], stdin: nil, timeout: 10, contractVersion: 1)
+        #expect(!plain.terminatedBySignal)
+        #expect(plain.exitCode == 9)
     }
 
     @Test func stderrIsCapturedSeparately() async throws {

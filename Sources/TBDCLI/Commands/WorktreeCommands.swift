@@ -56,6 +56,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
     var claudeSettings: String?
 
+    @Option(name: .long, help: "Codex model for the primary terminal when it is Codex, passed as -c model=<id>. Ignored for Claude and shell primaries.")
+    var codexModel: String?
+
     @Option(
         name: .customLong("position"),
         help: ArgumentHelp(
@@ -79,6 +82,10 @@ struct WorktreeCreate: AsyncParsableCommand {
     var archiveOnMerge = false
 
     mutating func validate() throws {
+        if let codexModel,
+           codexModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError("--codex-model must not be empty.")
+        }
         if let folder = folder {
             if folder.isEmpty {
                 throw ValidationError("Folder name must not be empty.")
@@ -133,7 +140,8 @@ struct WorktreeCreate: AsyncParsableCommand {
                 callerWorktreeID: parentingFields.callerWorktreeID,
                 suppressAutoParent: parentingFields.suppressAutoParent,
                 claudeSettingsOverlay: claudeSettings,
-                autoArchiveOnMerge: archiveOnMerge ? true : nil
+                autoArchiveOnMerge: archiveOnMerge ? true : nil,
+                codexModel: codexModel
             ),
             resultType: Worktree.self
         )

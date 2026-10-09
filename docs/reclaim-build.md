@@ -122,6 +122,10 @@ A scratchpad is **kept** when either:
 
 Everything else is removed by default. Use `--dry-run` to preview. See the Env vars section above for `SWEEP_BASE`, `SWEEP_LSOF_CMD`, and `SWEEP_DAYS`.
 
+## Foreign worktree sweep (`scripts/sweep-foreign-worktrees.sh`)
+
+A third sibling, run by hand only (not from `restart.sh`, not from launchd). It reports git worktrees that registered repos list but TBD does not manage — created by another tool or by hand — and with `--apply` removes those with a merged PR containing HEAD, a clean tree, no live process and 24 hours of idleness. `--salvage-remove <path>` archives one named worktree's state before removing it. Unlike its siblings it reports by default and acts only on `--apply`. Rules, seams and rationale: [`docs/specs/2026-10-05-foreign-worktree-sweep-design.md`](specs/2026-10-05-foreign-worktree-sweep-design.md).
+
 ## Swift build admission
 
 Local SwiftPM `build`, `test`, and `run` compilation goes through

@@ -106,8 +106,8 @@ public struct ShadowPeerDropCounts: Sendable, Equatable {
 /// Where a remote session lands locally.
 ///
 /// A shadow needs both halves and can be published with neither invented. The
-/// display name is the whole of its identity — the pane join that disambiguates
-/// local peers is unavailable to it — and the path is a `cwd` that must exist
+/// display name is the whole of its identity — the terminal join that
+/// disambiguates local peers is unavailable to it — and the path is a `cwd` that must exist
 /// on **this** machine, because a remote path resolves to nothing here and a
 /// surface filtering on the directory existing would drop the row.
 public struct ShadowPeerSite: Sendable, Equatable {

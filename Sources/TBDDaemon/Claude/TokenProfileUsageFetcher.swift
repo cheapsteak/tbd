@@ -11,11 +11,11 @@ private let tokenProbeLogger = Logger(subsystem: "com.tbd.daemon", category: "to
 /// endpoint produces. Pure and separately testable — no networking, which is
 /// the point: the header math is the part worth testing exhaustively.
 ///
-/// Headers carry no per-model breakdown, so this never emits a
-/// `weekly_scoped` bucket. A token profile therefore renders two bars where a
-/// signed-in profile renders three or more. `UsageBarsView` draws the 5-hour
-/// and weekly bars from optional lookups and then loops over the scoped
-/// buckets, so an empty scoped set simply contributes no rows.
+/// The headers carry the same two plan-wide windows a signed-in profile
+/// reports, the 5-hour session and the weekly all-models window, so a token
+/// profile renders the same two bars. They carry no per-model breakdown,
+/// and none is wanted: model-scoped buckets are dropped for signed-in
+/// profiles too (see `ClaudeUsagePayloadParser`).
 public enum TokenUsageHeaderParser {
 
     /// Bucket `kind` values, matching what `/api/oauth/usage` names them so

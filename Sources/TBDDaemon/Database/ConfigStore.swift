@@ -13,8 +13,17 @@ private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config
 /// `holder_hibernation_enabled`. Holder-ness is a transport property, not a
 /// separate opt-in: each of those legs now derives from the subsystem flag it
 /// belongs to (`gc_enabled`, `auto_hibernate_enabled`) or runs unconditionally,
-/// so nothing reads the columns. They stay in the schema because a landed
-/// migration is never edited and GRDB ignores columns a record does not name.
+/// so nothing reads the columns.
+///
+/// `transcript_composer_enabled` and `remote_transcript_enabled` are absent
+/// for a different reason: the transcript composer and the remote session
+/// transcript have no gate. The composer's UI, the `terminal.completions`
+/// probe, attachment writes and the attachments GC leg run unconditionally, as
+/// do `remote.transcriptSync`, the remote transcript pane and the remote
+/// composer, so nothing reads either column.
+///
+/// Every one of these columns stays in the schema because a landed migration is
+/// never edited and GRDB ignores columns a record does not name.
 struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "config"
 
@@ -125,16 +134,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
-    /// The live-transcript message composer's gate. **Genuinely tri-state**,
-    /// same shape as `gc_retained_transcripts_enabled`: the
-    /// `20260905120000_config_transcript_composer` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.transcriptComposerEnabledDefault`, never through
-    /// `?? false`.
-    var transcript_composer_enabled: Bool?
     /// Gate for routing pty-holder sessions through the TBD model proxy.
-    /// **Genuinely tri-state**, same shape as `transcript_composer_enabled`: the
-    /// `20260907215724_config_model_proxy` migration carries no SQL default, so
+    /// **Genuinely tri-state**, same shape as `gc_retained_transcripts_enabled`:
+    /// the `20260907215724_config_model_proxy` migration carries no SQL default, so
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.modelProxyDefault`, never through `?? false`.
     var model_proxy_enabled: Bool?
@@ -155,6 +157,20 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// the first port, and there is no literal the shipped code could fall back
     /// to that would not collide with whatever already holds it.
     var model_proxy_port: Int?
+    /// Gate for profile balancing across multiple Claude accounts. When enabled,
+    /// new sessions land on the eligible profile with the most room, adjusted for
+    /// live session count (design 2026-09-05 §6). **Genuinely tri-state**, same
+    /// shape as `gc_retained_transcripts_enabled`: the
+    /// `20260905080315_config_profile_balancing` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.profileBalancingEnabledDefault`, never through
+    /// `?? false`.
+    var profile_balancing_enabled: Bool?
+    /// Schedule-based PR polling gate. **Genuinely tri-state**: the
+    /// `20261002143454_config_pr_poll_schedule` migration carries no SQL default, so
+    /// `nil` means "never chose". Resolve it through
+    /// `Config.prPollScheduleDefault`, never through `?? false`.
+    var pr_poll_schedule_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -212,10 +228,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
-    /// - Parameter transcriptComposerDefault: same shape once more, for
-    ///   `transcript_composer_enabled` — the live-transcript composer's gate,
-    ///   which is one switch for the composer UI, its completions probe,
-    ///   attachment writes and the attachments GC leg together.
     /// - Parameter modelProxyDefault: same shape once more, for
     ///   `model_proxy_enabled` — the gate on routing a session's Messages API
     ///   traffic through the loopback model proxy.
@@ -229,6 +241,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   parameter proves both properties at once: a NULL row follows a changed
     ///   shipped default, and a string this build does not recognise resolves
     ///   the same way rather than to a hardcoded `.off`.
+    /// - Parameter profileBalancingDefault: same shape again, for
+    ///   `profile_balancing_enabled` — the launch policy's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -241,10 +255,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
-        transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
-        updateModeDefault: UpdateMode = Config.updateModeDefault
+        updateModeDefault: UpdateMode = Config.updateModeDefault,
+        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
+        prPollScheduleDefault: Bool = Config.prPollScheduleDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -320,15 +335,16 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // gate — NOT `?? false`.
             gcRetainedTranscriptsEnabled:
                 gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
-            // And once more, for the composer's gate — NOT `?? false`.
-            transcriptComposerEnabled:
-                transcript_composer_enabled ?? transcriptComposerDefault,
             // Same reasoning once more, for the update mode — NOT `?? .off`.
             // The `flatMap` covers the second way a value can be absent: a
             // string no `UpdateMode` case matches is as unusable as NULL, so it
             // resolves to the shipped default rather than silently arming a
             // mode this build cannot run.
             updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
+            // Profile balancing gate — NOT `?? false`.
+            profileBalancingEnabled: profile_balancing_enabled ?? profileBalancingDefault,
+            // PR poll schedule gate — NOT `?? false`.
+            prPollScheduleEnabled: pr_poll_schedule_enabled ?? prPollScheduleDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -824,16 +840,26 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the transcript-composer gate (default OFF, soaking). It gates the
-    /// composer UI, the completions probe, attachment writes and the attachments
-    /// GC leg together — one switch, because a half-enabled composer would leave
-    /// the feature broken in one of its four states rather than absent.
-    /// The column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    public func setTranscriptComposerEnabled(_ enabled: Bool) async throws {
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setProfileBalancingEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE config SET transcript_composer_enabled = ? WHERE id = ?",
+                sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the schedule-based PR polling gate. Written on every call, so
+    /// either value is the explicit gesture that lifts the column out of NULL.
+    public func setPRPollScheduleEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

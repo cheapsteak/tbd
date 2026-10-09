@@ -945,7 +945,14 @@ or date box. This file is the whole shared surface:
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
 - `await clock.advanceWhenSuspended(by:)` — the one you want by default.
-- `await clock.waitForSuspension()` — the same wait without advancing.
+- `await clock.waitForSuspension()` — the same wait without advancing. Each
+  `checkSuspension()` probe is raced against what is left of `timeout`, because
+  its megaYield can go unscheduled for minutes under saturation and the guard is
+  only read between probes: unbounded, one stuck probe held the test past its
+  45 s guard until `.clockDriven`'s 240 s limit cut it off with nothing recorded
+  (#503). A probe still running at the deadline counts as "not suspended" and
+  the named diagnostic fires. `advance` itself still megaYields and is not
+  bounded; a suite that stalls there belongs on `EventDrivenTestClock`.
 - `TestDateSource` — a lock-guarded box behind the `now: @Sendable () -> Date`
   seam. Deliberately a class with a lock rather than an actor, because that
   seam is a *synchronous* `() -> Date`.
@@ -1064,7 +1071,11 @@ ceiling, one scheduling excursion from tripping it; and the tier-3
 `GitManagerTimeoutTests`, whose arming sits behind an unstructured task inside
 `runBoundedProcess` and whose polled handshake starved past its own real
 `/bin/sleep 30` child under induced load — the call then returned normally
-instead of throwing, at 1–3 of 10 targeted nightly iterations (#503). Design:
+instead of throwing, at 1–3 of 10 targeted nightly iterations (#503); and
+`ProvisionalRowPublishTests` and the `--keys` tests in
+`TerminalSendDispatchTests`, which hit `.clockDriven`'s 240 s limit with nothing
+recorded on the nightly stress loop because a single `megaYield` probe never
+returned, so the 45 s guard checked between probes never ran (#503). Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 
 `PollerClock` is **not** this seam and must not be copied as a template — see

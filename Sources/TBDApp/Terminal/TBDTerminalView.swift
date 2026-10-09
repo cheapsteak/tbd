@@ -4,6 +4,7 @@ import SwiftTerm
 import os
 
 private let terminalViewLogger = Logger(subsystem: "com.tbd.app", category: "terminalRenderer")
+private let clickLogger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
 private extension CharacterSet {
     /// Characters that require shell quoting when they appear in a file path.
@@ -49,6 +50,10 @@ class TBDTerminalView: TerminalView {
     /// Used to start the tmux client as soon as the terminal has real dimensions.
     var onReady: (() -> Void)?
     private var didFireReady = false
+
+    /// Called every time the view is inserted into a window — including a
+    /// kept-alive pane that a tab switch puts back on screen.
+    var onMovedToWindow: (() -> Void)?
 
     /// Intercept a pasteboard paste of ANY size (the paste ruling v2). Set while
     /// a control-mode attach is live; cleared on detach/cleanup. Returns true
@@ -151,16 +156,37 @@ class TBDTerminalView: TerminalView {
         return .passthrough
     }
 
-    /// Instrumented only while the commit-latency diagnostic is on. With the
-    /// flag off `shared` is nil and this is `super.viewWillDraw()` plus one
-    /// branch: no timestamps, no completion block, no logging.
+    /// This panel's latency tap, installed by the panel coordinator only while
+    /// the default-off terminal latency diagnostic is on. Nil is the gate: the
+    /// draw hook below then does one nil-check.
+    var latencyTap: TerminalLatencyTap?
+
+    /// Instrumented only while a terminal diagnostic is on. With both flags
+    /// off this is `super.viewWillDraw()` plus two nil-checks: no timestamps,
+    /// no completion block, no logging.
+    ///
+    /// The two instruments are independent and neither gates the other. The
+    /// latency tap reports the wait BEFORE this draw (how long the oldest
+    /// chunk in this frame sat parsed but undrawn); the commit probe reports
+    /// what happens FROM here on. They are the two halves of the same trail,
+    /// so a run with one enabled and the other not is a legitimate
+    /// configuration and the early `guard` must not swallow either.
     ///
     /// `viewWillDraw` rather than `draw(_:)` because SwiftTerm's `draw(_:)` is
     /// `public`, not `open`, and so cannot be overridden from this module. See
     /// `TerminalCommitLatencyProbe` for how the far end of the draw is stamped
-    /// and for what the numbers do and do not cover.
+    /// and for what the numbers do and do not cover, and `TerminalLatencyTap`
+    /// for what the wait before it does and does not include.
     override func viewWillDraw() {
         super.viewWillDraw()
+        if let tap = latencyTap {
+            // The screen check walks the view hierarchy, so it is taken FIRST
+            // and the tap is called last. The tap stamps the draw itself, under
+            // its own lock — a stamp taken out here would predate any chunk the
+            // IO thread appends while the call waits for that lock.
+            let isOnScreen = TerminalCommitLatencyProbe.isOnScreen(self)
+            tap.noteDrawWillBegin(isOnScreen: isOnScreen)
+        }
         guard let probe = TerminalCommitLatencyProbe.shared else { return }
         probe.recordDrawWillBegin(
             at: probe.timestamp(),
@@ -516,54 +542,174 @@ class TBDTerminalView: TerminalView {
         return (col, row)
     }
 
-    // MARK: - Mouse click pass-through
-    // Track mouseDown position to distinguish clicks from drags.
-    // Single clicks are forwarded to tmux for pane switching;
-    // click-drags are handled locally by SwiftTerm for text selection.
+    // MARK: - Mouse clicks
+    // SwiftTerm declares `mouseDown` / `mouseDragged` / `mouseUp` `open`, so
+    // clicks are handled here rather than by app-wide `NSEvent` monitors. That
+    // matters for anything drawn over the terminal — a split divider's grab
+    // strip, a transcript overlay, a popover: AppKit hands a click only to the
+    // hit-tested top view, so a view covering the terminal receives the click
+    // and this one never sees it. A geometry-only monitor could not tell.
     //
-    // Because SwiftTerm's TerminalView declares its mouse overrides as
-    // `public` (not `open`), we cannot override them from another module.
-    // Instead we install a local event monitor that observes mouseDown /
-    // mouseDragged / mouseUp and forwards clicks after SwiftTerm has
-    // already processed them.
-    private var mouseDownLocation: CGPoint = .zero
-    private var didDrag: Bool = false
-    private static let dragThreshold: CGFloat = 3.0
-    nonisolated(unsafe) private var mouseMonitor: Any?
+    // Every override calls `super`, so SwiftTerm's selection, link and
+    // semantic-prompt handling still run — except for the whole of a press
+    // whose mouse-down TBD consumed (`pressBypassesSwiftTerm`).
 
-    private func installMouseMonitor() {
-        guard mouseMonitor == nil else { return }
-        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
-            guard let self = self else { return event }
-            // Only handle events that target this view
-            guard let eventWindow = event.window, eventWindow == self.window else { return event }
-            let locationInSelf = self.convert(event.locationInWindow, from: nil)
-            guard self.bounds.contains(locationInSelf) else { return event }
+    /// The hosting panel's click routing, installed once its transport is
+    /// live (`TerminalPanelRepresentable.Coordinator`). Called on every left
+    /// mouse-down this view receives, before SwiftTerm's own handling: the
+    /// panel makes this view first responder. Returns false when the panel
+    /// declines the click — a SwiftUI overlay owns this terminal's events —
+    /// and Cmd+click routing then stands down too. Nil — a remote attach
+    /// terminal, or a panel still connecting — leaves clicks to SwiftTerm
+    /// alone, Cmd+click included.
+    var onMouseDownClaimFocus: (() -> Bool)?
+    /// Called with `true` when this view becomes first responder and `false`
+    /// when it gives that up, however focus moved — a click, the key view
+    /// loop, a find bar handing focus back — so the panel can keep its tab
+    /// named as the one Cmd+W closes exactly while this view has focus. Set
+    /// alongside `onMouseDownClaimFocus`.
+    var onFocusChange: ((Bool) -> Void)?
 
-            switch event.type {
-            case .leftMouseDown:
-                self.mouseDownLocation = locationInSelf
-                self.didDrag = false
-            case .leftMouseDragged:
-                let dx = locationInSelf.x - self.mouseDownLocation.x
-                let dy = locationInSelf.y - self.mouseDownLocation.y
-                if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
-                    self.didDrag = true
-                }
-            case .leftMouseUp:
-                self.handleClickPassthrough(at: locationInSelf, modifiers: event.modifierFlags)
-            default:
-                break
-            }
-            return event  // always pass the event through
+    /// SwiftTerm's `becomeFirstResponder` / `resignFirstResponder` are
+    /// `public`, not `open`; each reports a successful change through this
+    /// `open` property, which is the only focus hook reachable from this
+    /// module.
+    override var hasFocus: Bool {
+        get { super.hasFocus }
+        set {
+            super.hasFocus = newValue
+            onFocusChange?(newValue)
         }
     }
 
-    private func removeMouseMonitor() {
-        if let monitor = mouseMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseMonitor = nil
+    /// A panel-routed terminal takes the click that activates its window, so
+    /// clicking a terminal in a background window focuses that terminal
+    /// instead of only raising the window. The activating click does nothing
+    /// else, as in any macOS terminal: it reaches neither SwiftTerm — whose
+    /// mouse-down would drop the selection the user came back to copy — nor
+    /// the pane. A Cmd+click still opens its path or link, through
+    /// SwiftTerm's mouse-up for an OSC 8 hyperlink.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        guard onMouseDownClaimFocus != nil else { return false }
+        activationClickEventNumber = event?.eventNumber
+        return true
+    }
+    /// Under the Metal renderer SwiftTerm covers this view with a
+    /// `CAMetalLayer`-backed surface that does not override `hitTest`, so
+    /// AppKit would ask *it* whether to take the activating click — and it
+    /// declines. A hit on that surface is a hit on the terminal; every other
+    /// subview (scroller, find bar) keeps its own clicks.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if let hit, hit !== self, hit.superview === self, hit.layer is CAMetalLayer {
+            return self
         }
+        return hit
+    }
+
+    /// The event number of the mouse-down AppKit last asked about in
+    /// `acceptsFirstMouse`, which it asks only for a click into a window
+    /// that is not key. The matching `mouseDown` is that activating click.
+    private var activationClickEventNumber: Int?
+
+    // Track the mouse-down position to distinguish clicks from drags.
+    // Single clicks are forwarded to tmux for pane switching;
+    // click-drags are handled locally by SwiftTerm for text selection.
+    private var mouseDownLocation: CGPoint = .zero
+    private var didDrag: Bool = false
+    private static let dragThreshold: CGFloat = 3.0
+    /// Set when TBD consumed this press's mouse-down (a Cmd+click that opened
+    /// a path or link, or a window's activating click), so its drags and
+    /// release skip SwiftTerm and the pane too. SwiftTerm never saw the press
+    /// begin, and its mouse-up would
+    /// otherwise open the same implicit link a second time, or, with Cmd let
+    /// go before the button, the release would reach the pane as a plain
+    /// click.
+    private(set) var pressBypassesSwiftTerm = false
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownLocation = convert(event.locationInWindow, from: nil)
+        didDrag = false
+        pressBypassesSwiftTerm = false
+        let isActivationClick = event.eventNumber == activationClickEventNumber
+        activationClickEventNumber = nil
+        if let claimFocus = onMouseDownClaimFocus, claimFocus() {
+            // Cmd+click routing belongs to panel-routed terminals, the ones
+            // that resolve paths against a worktree. A consumed click never
+            // reaches SwiftTerm, so it starts no selection.
+            if event.modifierFlags.contains(.command),
+               handleCommandClick(atWindowLocation: event.locationInWindow) {
+                pressBypassesSwiftTerm = true
+                return
+            }
+        }
+        // An activating Cmd+click on an OSC 8 hyperlink goes on to SwiftTerm,
+        // whose mouse-up opens it; anything else TBD did not open is consumed.
+        if isActivationClick,
+           !(event.modifierFlags.contains(.command)
+             && hasOSC8Payload(atWindowLocation: event.locationInWindow)) {
+            pressBypassesSwiftTerm = true
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = location.x - mouseDownLocation.x
+        let dy = location.y - mouseDownLocation.y
+        if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
+            didDrag = true
+        }
+        guard !pressBypassesSwiftTerm else { return }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard !pressBypassesSwiftTerm else {
+            pressBypassesSwiftTerm = false
+            return
+        }
+        let location = convert(event.locationInWindow, from: nil)
+        // AppKit delivers the mouse-up to the view that took the mouse-down
+        // even when the pointer has left it; a release outside is no click.
+        if bounds.contains(location) {
+            handleClickPassthrough(at: location, modifiers: event.modifierFlags)
+        }
+        super.mouseUp(with: event)
+    }
+
+    /// Opens the file path or link under a Cmd+click. Returns true when it
+    /// handled the click, which the caller then consumes.
+    private func handleCommandClick(atWindowLocation location: CGPoint) -> Bool {
+        // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
+        // (requestOpenLink). If we also fired here on mouseDown,
+        // a single cmd+click would route through both paths and
+        // open two viewer panes.
+        if hasOSC8Payload(atWindowLocation: location) {
+            clickLogger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
+            return false
+        }
+
+        if let filePath = extractFilePath(atWindowLocation: location) {
+            clickLogger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
+            onFilePathClicked?(filePath)
+            return true
+        }
+        // Fall back to hyperlink detection (PR pattern; OSC 8 was
+        // already short-circuited above).
+        if let urlString = extractHyperlinkURL(atWindowLocation: location) {
+            if let resolved = resolveAsFilePath(urlString) {
+                clickLogger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
+                onFilePathClicked?(resolved)
+                return true
+            }
+            if urlString.contains("://"), let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+                return true
+            }
+        }
+        return false
     }
 
     override func viewDidMoveToWindow() {
@@ -577,10 +723,8 @@ class TBDTerminalView: TerminalView {
                 wantsMetalRendererOnWindow = false
                 _ = enableMetalRenderer()
             }
-            installMouseMonitor()
             registerForDraggedTypes([.fileURL])
-        } else {
-            removeMouseMonitor()
+            onMovedToWindow?()
         }
     }
 
@@ -630,12 +774,6 @@ class TBDTerminalView: TerminalView {
         return "'\(escaped)'"
     }
 
-    deinit {
-        if let monitor = mouseMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
-
     /// Plain (unmodified) clicks are forwarded into the pane; clicks carrying
     /// a modifier belong to TBD's own file/link handling and must not also be
     /// forwarded — otherwise a Cmd+click both opens a file and clicks Claude.
@@ -645,12 +783,12 @@ class TBDTerminalView: TerminalView {
             .isDisjoint(with: [.command, .shift, .control, .option])
     }
 
-    /// This monitor is one of two possible forwarders of a click to the pty —
-    /// the other is SwiftTerm's own native mouseDown/mouseUp, gated by
+    /// `handleClickPassthrough` is one of two possible forwarders of a click
+    /// to the pty — the other is SwiftTerm's own native mouseDown/mouseUp, gated by
     /// `allowMouseReporting`. Exactly one must be active at a time, or a
     /// single left click reaches the remote session twice. Callers with
     /// `allowMouseReporting == true` (e.g. `RemoteAttachTerminalView`) rely on
-    /// SwiftTerm as the sole forwarder, so this monitor must stand down.
+    /// SwiftTerm as the sole forwarder, so the passthrough must stand down.
     nonisolated static func clickPassthroughActive(allowMouseReporting: Bool) -> Bool {
         !allowMouseReporting
     }
@@ -698,7 +836,7 @@ class TBDTerminalView: TerminalView {
 
     /// True if the cell at the given window point carries an OSC 8 hyperlink
     /// payload. SwiftTerm's `mouseUp` will dispatch these via
-    /// `requestOpenLink`, so our local mouseDown monitor must not also handle
+    /// `requestOpenLink`, so the Cmd+click handling in `mouseDown` must not also handle
     /// them — otherwise a single cmd+click opens two viewer panes.
     ///
     /// `CharData.getPayload()` is `Any?` — SwiftTerm also uses it for sixel

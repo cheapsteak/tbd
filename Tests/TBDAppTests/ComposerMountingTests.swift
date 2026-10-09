@@ -46,10 +46,10 @@ struct ComposerMountingTests {
         let view = NSView()
 
         state.registerComposerView(view, for: id)
-        #expect(state.composerFocusTargets[id]?.view === view)
+        #expect(state.composerFocusTargets[.terminal(id)]?.view === view)
 
         state.unregisterComposerView(view, for: id)
-        #expect(state.composerFocusTargets[id] == nil)
+        #expect(state.composerFocusTargets[.terminal(id)] == nil)
     }
 
     /// A LATER registration wins, and an earlier view's teardown must not
@@ -65,7 +65,7 @@ struct ComposerMountingTests {
         state.registerComposerView(new, for: id)
         state.unregisterComposerView(old, for: id)
 
-        #expect(state.composerFocusTargets[id]?.view === new)
+        #expect(state.composerFocusTargets[.terminal(id)]?.view === new)
     }
 
     /// Unregistering a terminal that never registered is a no-op, not a crash:
@@ -87,9 +87,9 @@ struct ComposerMountingTests {
         do {
             let view = NSView()
             state.registerComposerView(view, for: id)
-            #expect(state.composerFocusTargets[id]?.view != nil)
+            #expect(state.composerFocusTargets[.terminal(id)]?.view != nil)
         }
-        #expect(state.composerFocusTargets[id]?.view == nil)
+        #expect(state.composerFocusTargets[.terminal(id)]?.view == nil)
     }
 
     /// Focusing a terminal with no registered composer is a no-op, not a crash —
@@ -117,7 +117,7 @@ struct ComposerMountingTests {
 
         state.focusTranscript(terminalID: id)
 
-        #expect(state.composerFocusTargets[id]?.view === composerView)
+        #expect(state.composerFocusTargets[.terminal(id)]?.view === composerView)
     }
 
     /// The Reveal Terminal action moves AppKit's first responder to the
@@ -330,22 +330,12 @@ struct ComposerMountingTests {
     }
 
     private func mount(
-        terminal: Terminal?, worktree: Worktree?, enabled: Bool = true
+        terminal: Terminal?, worktree: Worktree?
     ) -> TableTranscriptPaneView.ComposerMount? {
-        TableTranscriptPaneView.composerMount(
-            terminal: terminal, worktree: worktree, composerEnabled: enabled)
+        TableTranscriptPaneView.composerMount(terminal: terminal, worktree: worktree)
     }
 
-    /// **The flag-off branch.** With the daemon capability off the pane renders
-    /// exactly as it did before: no composer is built at all, so
-    /// `MessageComposerView` — which reads `AppState` non-optionally from the
-    /// environment — is never evaluated.
-    @Test func theFlagOffMountsNoComposer() {
-        let wt = worktree()
-        #expect(mount(terminal: terminal(worktreeID: wt.id), worktree: wt, enabled: false) == nil)
-    }
-
-    /// **The flag-on branch.** A live Claude terminal on a local worktree gets a
+    /// A live Claude terminal on a local worktree gets a
     /// running composer, and the mount carries the `LocalWorktree` the view's
     /// initializer takes.
     @Test func aLiveClaudeTerminalOnALocalWorktreeMounts() throws {
@@ -397,10 +387,10 @@ struct ComposerMountingTests {
         let table = NSTableView()
 
         state.registerTranscriptView(table, for: id)
-        #expect(state.transcriptFocusTargets[id]?.view === table)
+        #expect(state.transcriptFocusTargets[.terminal(id)]?.view === table)
 
         state.unregisterTranscriptView(table, for: id)
-        #expect(state.transcriptFocusTargets[id] == nil)
+        #expect(state.transcriptFocusTargets[.terminal(id)] == nil)
     }
 
     /// Same newer-wins rule as the composer registry, and for the same reason:
@@ -416,7 +406,7 @@ struct ComposerMountingTests {
         state.registerTranscriptView(new, for: id)
         state.unregisterTranscriptView(old, for: id)
 
-        #expect(state.transcriptFocusTargets[id]?.view === new)
+        #expect(state.transcriptFocusTargets[.terminal(id)]?.view === new)
     }
 
     /// **Escape's destination.** With a transcript table registered,
@@ -503,8 +493,8 @@ struct ComposerMountingTests {
         #expect(state.composerCommandTerminalID == transcript)
     }
 
-    /// **The negative.** No composer registered anywhere — the flag is off, or
-    /// the pane has not mounted one — and the accessor answers nil, which is
+    /// **The negative.** No composer registered anywhere — the pane has not
+    /// mounted one — and the accessor answers nil, which is
     /// what the two menu items' `.disabled(…)` reads. `focusComposer` on a
     /// terminal with no registered composer is a no-op, so an enabled item there
     /// would be an offer of nothing.
@@ -538,7 +528,7 @@ struct ComposerMountingTests {
 
         state.closeTab(worktreeID: worktreeID, index: 0)
 
-        #expect(state.composerDrafts[terminalID] == nil)
+        #expect(state.composerDrafts[.terminal(terminalID)] == nil)
     }
 
     /// The focus registries hold their views weakly, so nothing leaks — but an
@@ -557,8 +547,8 @@ struct ComposerMountingTests {
 
         state.closeTab(worktreeID: worktreeID, index: 0)
 
-        #expect(state.composerFocusTargets[terminalID] == nil)
-        #expect(state.transcriptFocusTargets[terminalID] == nil)
+        #expect(state.composerFocusTargets[.terminal(terminalID)] == nil)
+        #expect(state.transcriptFocusTargets[.terminal(terminalID)] == nil)
         #expect(state.lastStartedIncarnation[terminalID] == nil)
     }
 
@@ -580,9 +570,9 @@ struct ComposerMountingTests {
         state.removeDeletedTerminalFromState(
             terminalID: terminalID, worktreeID: worktreeID)
 
-        #expect(state.composerDrafts[terminalID] == nil)
-        #expect(state.composerFocusTargets[terminalID] == nil)
-        #expect(state.transcriptFocusTargets[terminalID] == nil)
+        #expect(state.composerDrafts[.terminal(terminalID)] == nil)
+        #expect(state.composerFocusTargets[.terminal(terminalID)] == nil)
+        #expect(state.transcriptFocusTargets[.terminal(terminalID)] == nil)
         #expect(state.lastStartedIncarnation[terminalID] == nil)
     }
 
@@ -621,9 +611,9 @@ struct ComposerMountingTests {
 
         state.forgetComposerState(for: dying)
 
-        #expect(state.composerFocusTargets[dying] == nil)
-        #expect(state.composerFocusTargets[surviving]?.view === survivingView)
-        #expect(state.transcriptFocusTargets[surviving]?.view === survivingView)
+        #expect(state.composerFocusTargets[.terminal(dying)] == nil)
+        #expect(state.composerFocusTargets[.terminal(surviving)]?.view === survivingView)
+        #expect(state.transcriptFocusTargets[.terminal(surviving)]?.view === survivingView)
         #expect(state.lastStartedIncarnation[surviving] == incarnation)
     }
 
@@ -642,7 +632,7 @@ struct ComposerMountingTests {
 
         state.closeTab(worktreeID: worktreeID, index: 0)
 
-        #expect(state.composerDrafts[closing] == nil)
-        #expect(state.composerDrafts[surviving]?.text == "staying")
+        #expect(state.composerDrafts[.terminal(closing)] == nil)
+        #expect(state.composerDrafts[.terminal(surviving)]?.text == "staying")
     }
 }

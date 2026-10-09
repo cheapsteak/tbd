@@ -17,6 +17,13 @@ extension RPCRouter {
 
     func handleSetNightwatchMode(_ data: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NightwatchSetModeParams.self, from: data)
+        // Refusal, not a rewrite — a watch mode and the pty-holder transport
+        // are never both on (docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md).
+        // Nothing is written and nothing is broadcast when this refuses.
+        let config = try await db.config.get()
+        if NightwatchHolderGate.refusesMode(params.mode, holderEnabled: config.ptyHolderEnabled) {
+            return RPCResponse(error: NightwatchHolderGate.modeRefusal)
+        }
         try await db.config.setNightwatchMode(params.mode)
         // Apply the mode to the runner (start/stop the loop).
         if let runner = daywatchRunner {

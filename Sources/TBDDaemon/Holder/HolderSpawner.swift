@@ -108,6 +108,21 @@ struct HolderSpawner {
     /// process outside this tree can name.
     static let launchDescriptorNumber: Int32 = 10
 
+    /// The holder process's own cwd: a directory that is never inside a
+    /// worktree, so nothing that classifies processes by cwd can tie a holder
+    /// to whichever worktree happened to launch the daemon. See `launchHolder`.
+    static let holderWorkingDirectory = "/"
+
+    /// Whether `pid` is a live `TBDHolder` process. The one liveness check for
+    /// a recorded holder pid, shared by the attach path's "ended" answer and
+    /// the park's ended-session path so the two cannot disagree about which
+    /// sessions are over. By executable name, so a pid the kernel reissued to
+    /// anything else reads as not a holder; a pid reissued to another session's
+    /// holder reads as live, which is the keep-favoring direction.
+    static func isLiveHolder(pid: Int32) -> Bool {
+        ProcessLiveness.isLiveNamedProcess(pid: pid, name: "TBDHolder")
+    }
+
     /// The lowest number the spawner will relocate an inherited descriptor to.
     ///
     /// Above **every** target number, not merely above its own: with two dup2
@@ -789,6 +804,24 @@ struct HolderSpawner {
         posix_spawn_file_actions_adddup2(&actions, logFD, 2)
         posix_spawn_file_actions_adddup2(&actions, lockSource, Self.lockDescriptorNumber)
         posix_spawn_file_actions_adddup2(&actions, relocatedLaunch, Self.launchDescriptorNumber)
+        // **The holder runs from `/`, never from the daemon's cwd.** A cwd is
+        // inherited, and the daemon's is whichever directory launched it —
+        // the worktree `scripts/restart.sh` ran in. A holder outlives the
+        // daemon at `ppid == 1`, so once that worktree was archived the
+        // orphan-process sweep, which attributes a launchd-parented process to
+        // a worktree by its cwd, read every holder spawned from it as an
+        // escaped job of a dead worktree and killed it with its session's
+        // job. The job's own cwd is unaffected: the holder `chdir`s its child
+        // to `launch.workingDirectory` between fork and exec.
+        // Checked, unlike the dup2s above: a chdir action that was not recorded
+        // would spawn the holder in the daemon's cwd — exactly the hazard this
+        // exists to remove — so failing the spawn is the honest outcome. It
+        // returns the error number rather than setting `errno`.
+        let chdirStatus = posix_spawn_file_actions_addchdir_np(
+            &actions, Self.holderWorkingDirectory)
+        guard chdirStatus == 0 else {
+            throw Error.spawnFailed(executable: executableURL.path, errno: chdirStatus)
+        }
 
         // Everything the daemon happens to have open without FD_CLOEXEC would
         // otherwise arrive in a process that outlives it. The five descriptors

@@ -358,7 +358,9 @@ On TBD's side there are two: `retained_transcript` rows, and the JSONL files
 under `~/tbd/transcripts/`. **`OrphanGC` gains a leg** that deletes files no row
 references and rows whose `expiresAt` has passed, gated by
 `gcRetainedTranscriptsEnabled`, default-off during soak, following the
-profile-dir and holder-rendezvous legs. The teleport flow is what makes this
+profile-dir and holder-rendezvous legs. It is switched by
+`tbd gc retained-transcripts on|off` or the Settings → Cleanup toggle, both
+over one RPC. The teleport flow is what makes this
 load-bearing rather than tidy: `import` succeeding and `create` then failing
 leaves a retained blob and a row nobody will ever use.
 

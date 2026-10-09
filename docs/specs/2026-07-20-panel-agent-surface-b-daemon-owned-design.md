@@ -245,4 +245,4 @@ Both branches tested (CLAUDE.md branching-conditional rule). Rollout order: land
 - **Show/render (deferred design):** new content types — rendered HTML strings, diffs, richer markdown targets — arrive as new `PaneContent` cases; under B they slot in with zero new sync work (one enum case + renderer + allowlist entry).
 - **Two-way:** agent queries of view state (scroll position, selection) and eventually user **annotations** on content. B's daemon-owned store is the natural home: annotations become rows keyed by (paneID, content ref), agents read them via `layout.get` extensions.
 - **Pane-content read-back** (agent reads what a panel displays) — explicitly out of scope until the show/render design lands.
-- Migrating the three sanctioned TUI scrapers and the transcript overlay/History-mode sprawl remain independent tracks.
+- Migrating the two sanctioned TUI scrapers and the transcript overlay/History-mode sprawl remain independent tracks.

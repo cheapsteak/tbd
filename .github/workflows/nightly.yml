@@ -57,6 +57,7 @@ env:
   PROBE_LOG: /tmp/nightly-probes.log
   STRESS_LOG: /tmp/nightly-stress.log
   STRESS_REPORT_DIR: /tmp/nightly-stress-reports
+  XUNIT_DIR: /tmp/nightly-xunit
   AUDIT_REPORT: /tmp/nightly-audit.md
 
 jobs:
@@ -122,8 +123,9 @@ jobs:
             --post
 
       # ── Step 2: flake-ledger stress loop ────────────────────────────────────
-      # Attaches to #494 (ControlModeInputHealthTests), #503 (GitManagerTimeout
-      # + the whole-fast-pass repro shape) and #496 (AppearanceDebounce).
+      # Attaches to #494 (ControlModeInputHealthTests), #961 (GitManagerTimeout),
+      # #496 (AppearanceDebounce) and #962 (the whole-fast-pass catch-all).
+      # #503 is the archive of both #961's and #962's earlier reports.
       - name: Flake-ledger stress loop
         id: stress
         continue-on-error: true
@@ -136,7 +138,25 @@ jobs:
           mkdir -p "$STRESS_REPORT_DIR"
           bash scripts/nightly-flake-stress.sh \
             --iterations "${{ github.event.inputs.stress_iterations || '10' }}" \
-            --report-dir "$STRESS_REPORT_DIR" 2>&1 | tee "$STRESS_LOG"
+            --report-dir "$STRESS_REPORT_DIR" \
+            --xunit-dir "$XUNIT_DIR" 2>&1 | tee "$STRESS_LOG"
+
+      # The flake ledger (`scripts/flake-ledger.py`,
+      # docs/specs/2026-10-07-flake-autofix-design.md §4.1) reads this artifact:
+      # one failing `<testcase>` per failure, per iteration, which splits the
+      # whole-fast-pass arm's catch-all into one count per test. Each iteration
+      # writes two files, `<target>-<i>.xml` (XCTest) and
+      # `<target>-<i>-swift-testing.xml` (Swift Testing); the glob takes both.
+      # `ignore`, not `warn`: a build failure legitimately leaves the directory
+      # empty, and the ledger records nothing for it.
+      - name: Upload stress xUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-xunit
+          path: /tmp/nightly-xunit/*.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Report stress failures to the issue each target names
         if: steps.stress.outcome == 'failure'

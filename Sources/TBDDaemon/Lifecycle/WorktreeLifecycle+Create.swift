@@ -218,6 +218,13 @@ extension WorktreeLifecycle {
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
     ///
+    /// `rollBackOnFailure: true` (the default) deletes the row through
+    /// `rollBackFailedCreate`, so a first message parked in it is still saved
+    /// to `unsent-prompts/`; those callers (the legacy `createWorktree` and
+    /// fresh revive) discard the returned delta, so nothing surfaces the saved
+    /// file's path. `worktree.create` passes `false` and rolls back itself to
+    /// broadcast that path.
+    ///
     /// When a `preSession` hook resolves, only the hook's terminal is created
     /// here; the primary terminals are spawned by the returned
     /// `.preSessionPending` task once the hook completes (or times out).
@@ -228,7 +235,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -241,7 +248,12 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.worktreeHasNoRepo(worktreeID)
         }
         guard let repo = try await db.repos.get(id: rid) else {
-            try? await db.worktrees.delete(id: worktreeID)
+            // Same rollback as the failure path below, so a parked first
+            // message is saved here too; a caller that rolls back itself
+            // (`worktree.create`) finds the row still there to save from.
+            if rollBackOnFailure {
+                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+            }
             throw WorktreeLifecycleError.repoNotFound(rid)
         }
 
@@ -522,6 +534,7 @@ extension WorktreeLifecycle {
                         completionAction: .markActive,
                         overrideProfileID: overrideProfileID,
                         modelOverride: modelOverride,
+                        codexModelOverride: codexModelOverride,
                         primaryAgentPreference: primaryAgentPreference,
                         claudeSettingsOverlay: claudeSettingsOverlay,
                         carryover: carryover,
@@ -549,6 +562,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: nil,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover,
@@ -578,10 +592,79 @@ extension WorktreeLifecycle {
             return .ready
 
         } catch {
-            // On failure, delete the DB row
-            try? await db.worktrees.delete(id: worktreeID)
+            // On failure, delete the DB row — unless the caller rolls back
+            // itself, as `worktree.create` does to learn where the row's
+            // parked first message went (`rollBackFailedCreate`). Callers that
+            // keep the default (the legacy `createWorktree`, fresh revive)
+            // still get the message saved, but nothing surfaces its path.
+            if rollBackOnFailure {
+                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+            }
             throw error
         }
+    }
+
+    /// Delete the row of a creation that failed, saving any first message
+    /// parked in it first, and return the archive delta that reports the
+    /// failure.
+    ///
+    /// The app parks a first message against the row as soon as
+    /// `worktree.create` returns, which is before `git worktree add` runs. A
+    /// failure there deletes the row and its `pending_prompt` with it, so the
+    /// daemon — the only side that still has the text — writes it to
+    /// `~/tbd/repos/<repoID>/unsent-prompts/` (`UnsentPromptFile`) and names
+    /// the file in the delta. A blank or absent prompt writes nothing. A
+    /// failed write is logged, leaves the path nil and sets
+    /// `unsentPromptLost` so the app can say so: the row is deleted
+    /// either way, because a creation that failed must not linger as a
+    /// `.creating` row.
+    ///
+    /// `reposDir` and `date` are test seams; production resolves them from
+    /// `TBDConstants` (honoring `TBD_HOME`) and the lifecycle's date seam.
+    func rollBackFailedCreate(
+        worktreeID: UUID, reposDir: URL? = nil, date: Date? = nil
+    ) async -> WorktreeIDDelta {
+        var savedPath: String?
+        var lost = false
+        // Read and delete in one transaction, so a park racing this rollback
+        // either lands in the returned row or is refused for the missing one.
+        let deleted: Worktree?
+        do {
+            deleted = try await db.worktrees.deleteReturning(id: worktreeID)
+        } catch {
+            // Nothing was read, so a parked message cannot be ruled out: report
+            // it as possibly lost rather than let the delta imply nothing was.
+            logger.error("could not delete failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            deleted = nil
+            lost = true
+        }
+        // Blankness is judged on a trimmed copy; the file gets the text as
+        // parked, so a leading indent (a code block, say) survives.
+        if let row = deleted,
+           let text = row.pendingPrompt,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let repoID = row.repoID else {
+                // No repo means no `repos/<repoID>/` to save under.
+                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): the row has no repo")
+                return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptLost: true)
+            }
+            let base = reposDir ?? TBDConstants.reposDir
+            let directory = base
+                .appendingPathComponent(repoID.uuidString)
+                .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
+            do {
+                savedPath = try UnsentPromptFile.write(
+                    text: text, worktreeName: row.displayName,
+                    directory: directory, date: date ?? now())
+                logger.info("saved parked first message of failed create \(worktreeID, privacy: .public) to \(savedPath ?? "", privacy: .public)")
+            } catch {
+                lost = true
+                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return WorktreeIDDelta(
+            worktreeID: worktreeID, creationFailed: true,
+            unsentPromptPath: savedPath, unsentPromptLost: lost)
     }
 
     /// Creates an initial Notes tab and appends it to the tab order (last; the
@@ -1249,6 +1332,7 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID? = nil,
         modelOverride: String? = nil,
+        codexModelOverride: String? = nil,
         primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
@@ -1278,6 +1362,7 @@ extension WorktreeLifecycle {
                 preSessionTerminalID: preSessionTerminalID,
                 overrideProfileID: overrideProfileID,
                 modelOverride: modelOverride,
+                codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover,
@@ -1300,6 +1385,7 @@ extension WorktreeLifecycle {
         preSessionTerminalID: UUID?,
         overrideProfileID: UUID?,
         modelOverride: String?,
+        codexModelOverride: String?,
         primaryAgentPreference: PrimaryAgentPreference?,
         claudeSettingsOverlay: String?,
         carryover: ConversationCarryover?,
@@ -1392,7 +1478,16 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile? = nil
         if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo?.id, override: overrideProfileID)
+                // Restored or carried-over conversations belong to the account
+                // holding their transcripts, which nothing here records, so
+                // they keep the stable pre-balancing resolution. Fresh spawns
+                // balance.
+                resolvedProfile = try await resolver.resolve(
+                    repoID: repo?.id, override: overrideProfileID,
+                    balance: ModelProfileResolver.balancesWorktreeSpawn(
+                        restoringArchivedSessions: !archivedSessions.isEmpty,
+                        carryingOver: carryover != nil),
+                    worktreeID: worktreeID)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
@@ -1458,7 +1553,8 @@ extension WorktreeLifecycle {
             }
             primaryCommand = CodexSpawnCommandBuilder.build(
                 initialPrompt: effectivePrompt,
-                executablePath: codexLaunch.executablePath)
+                executablePath: codexLaunch.executablePath,
+                model: codexModelOverride)
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
@@ -1646,6 +1742,11 @@ extension WorktreeLifecycle {
             transport: transport,
             attachment: primaryAttachment,
             modelProxySupervisor: modelProxySupervisor)
+        // The primary row is in, so its live count now carries a balanced
+        // pick's load; hand the reservation back so it stops counting too.
+        // Archived-session restores below reuse the same resolution; the
+        // first row settles it once.
+        await modelProfileResolver?.settleReservation(resolvedProfile?.reservationID)
         // Recapture reads a tmux pane's screen, so it has nothing to read on a
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.
@@ -1662,6 +1763,9 @@ extension WorktreeLifecycle {
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
+        // Track the window IDs of created terminals to avoid reusing the
+        // bootstrap window ID if tmux restarts and hands it to a new window.
+        var createdTerminalWindowIDs: Set<String> = [primaryTerminal.tmuxWindowID]
 
         // The pane a parked prompt was waiting for now exists. This is the
         // whole of the spawn path's involvement: it passes no prompt, reads no
@@ -1753,6 +1857,7 @@ extension WorktreeLifecycle {
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+            createdTerminalWindowIDs.insert(setupTerminal.tmuxWindowID)
             if let setupMarkerPath, let setupHookPath {
                 // `remain-on-exit` is a tmux property and only tmux needs it:
                 // the auto-close wrapper lets the pane EXIT on hook success and
@@ -1861,7 +1966,7 @@ extension WorktreeLifecycle {
                 if !transport.isHolder {
                     try await ensureTmuxServerOnce()
                 }
-                _ = try await spawnTerminal(
+                let archivedTerminal = try await spawnTerminal(
                     id: plannedID,
                     worktreeID: worktreeID,
                     tmuxServer: tmuxServer,
@@ -1880,6 +1985,7 @@ extension WorktreeLifecycle {
                     attachment: nil,
                     modelProxySupervisor: modelProxySupervisor)
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
+                createdTerminalWindowIDs.insert(archivedTerminal.tmuxWindowID)
             }
         }
 
@@ -1893,8 +1999,12 @@ extension WorktreeLifecycle {
         try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: tabOrder)
         try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: plannedTerminalID1)
 
-        // Kill the untracked initial window that new-session created
-        if let windowID = initialWindowID {
+        // Kill the untracked initial window that new-session created, but skip
+        // if a restarted tmux server reused the window ID for one we just created
+        // (ABA scenario: the fresh window and the old ID are textually identical,
+        // so killing it would destroy a session we just spawned). Within one live
+        // tmux incarnation, window IDs are unique, so this is defense in depth.
+        if let windowID = initialWindowID, !createdTerminalWindowIDs.contains(windowID) {
             try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         }
 

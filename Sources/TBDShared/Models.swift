@@ -1061,6 +1061,11 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     /// Drag-and-drop display order (mirrors `Worktree.sortOrder`). Defaults to
     /// 0 so existing JSON/rows without this field still decode.
     public var sortOrder: Int
+    /// Per-profile opt-out from the balancing pool (design 2026-09-05 §4).
+    /// When true, this profile is never chosen by the launch policy or
+    /// suggested by the limit offer. Defaults to false so existing JSON/rows without this
+    /// field still decode as "in the pool" (the default state).
+    public var poolOptOut: Bool
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
@@ -1068,7 +1073,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
                 fallbackModels: [String]? = nil,
                 envOverrides: [String: String] = [:],
                 createdAt: Date = Date(), lastUsedAt: Date? = nil,
-                sortOrder: Int = 0) {
+                sortOrder: Int = 0, poolOptOut: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -1081,11 +1086,12 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.sortOrder = sortOrder
+        self.poolOptOut = poolOptOut
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
-        case envOverrides, createdAt, lastUsedAt, sortOrder
+        case envOverrides, createdAt, lastUsedAt, sortOrder, poolOptOut
     }
 
     public init(from decoder: Decoder) throws {
@@ -1107,6 +1113,9 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        // Absent means the sender knew nothing about the opt-out, which is the
+        // default state: the profile is in the pool unless it says otherwise.
+        poolOptOut = try c.decodeIfPresent(Bool.self, forKey: .poolOptOut) ?? false
     }
 }
 
@@ -1168,12 +1177,13 @@ public struct ModelProfileUsage: Codable, Sendable, Equatable {
 /// unknown `kind` values flow through untouched so new API buckets appear
 /// without a code change.
 ///
-/// Observed kinds (2026-07): `session` (5-hour window), `weekly_all`
-/// (weekly, all models), `weekly_scoped` (weekly, one model family —
-/// `modelDisplayName` carries the family label, e.g. "Fable").
+/// Kinds TBD keeps: `session` (5-hour window) and `weekly_all` (weekly, all
+/// models), plus any future kind. The API may also send a model-scoped weekly
+/// bucket; the daemon's usage parser drops it, because that model's usage
+/// counts toward the plan's all-models limits rather than a separate cap.
 public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
-    /// Bucket identifier as the API names it (`session`, `weekly_all`,
-    /// `weekly_scoped`, or a future kind).
+    /// Bucket identifier as the API names it (`session`, `weekly_all`, or a
+    /// future kind).
     public var kind: String
     /// Grouping label from the API (`session`, `weekly`). nil if absent.
     public var group: String?
@@ -1182,10 +1192,12 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// Severity label from the API (`normal`, `warning`, `critical`). nil if absent.
     public var severity: String?
     /// When this window resets. nil when the API sends null (e.g. an unused
-    /// scoped bucket).
+    /// window).
     public var resetsAt: Date?
-    /// For scoped buckets: `scope.model.display_name` (e.g. "Fable").
-    /// nil = bucket is not model-scoped.
+    /// The model a bucket is scoped to. Always nil on buckets the daemon
+    /// emits, since it drops model-scoped buckets; kept because the
+    /// `tbd profile list --json` capacity contract (schemaVersion 1) documents
+    /// the key, and removing a field requires a version bump there.
     public var modelDisplayName: String?
     /// The API's `is_active` flag (which limit is currently binding). nil if absent.
     public var isActive: Bool?
@@ -1318,16 +1330,22 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// `Token •••• <tail>` so two token profiles can be told apart, and that is
     /// all it is ever given.
     public let tokenTail: String?
+    /// Count of live Claude sessions on this profile (unparked, not hibernated).
+    /// Computed by the daemon at list time (never persisted). Non-nil only on
+    /// daemons that implement the load-balancing feature (design 2026-09-05);
+    /// nil on older daemons.
+    public let liveSessions: Int?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
                 loginIdentity: String? = nil, configDirPath: String? = nil,
                 usageSnapshot: ProfileUsageSnapshot? = nil,
-                tokenTail: String? = nil) {
+                tokenTail: String? = nil, liveSessions: Int? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
         self.usageSnapshot = usageSnapshot
         self.tokenTail = tokenTail
+        self.liveSessions = liveSessions
     }
 }
 
@@ -1586,26 +1604,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
-    /// The single opt-in for the live transcript's message composer
-    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Flag"): the
-    /// composer UI, the `terminal.completions` probe, attachment writes under
-    /// `~/tbd/attachments/`, and the OrphanGC leg that reclaims them.
-    ///
-    /// It ships OFF because the composer types into a live agent session and
-    /// writes files that outlive the request that made them. One flag rather
-    /// than four: a composer with completions off, or with attachments off,
-    /// would be a broken feature rather than a smaller one.
-    ///
-    /// A **config column** rather than an app default, because the GC leg lives
-    /// in the daemon and cannot read the app's `UserDefaults`.
-    ///
-    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `transcript_composer_enabled ?? Config.transcriptComposerEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var transcriptComposerEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1677,7 +1675,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// base URL is read once at start, so flipping this never reroutes a
     /// running session.
     ///
-    /// **Resolved, not stored**, like `transcriptComposerEnabled`: the backing
+    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `model_proxy_enabled ?? Config.modelProxyDefault`. NULL means "never
@@ -1710,6 +1708,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// two. `setModelProxyPort(_:)` overwrites it, which is what the
     /// address-in-use re-mint needs.
     public var modelProxyPort: Int?
+    /// Gate for profile balancing across multiple Claude accounts (design
+    /// 2026-09-05 §6). When enabled, new sessions land on the eligible profile
+    /// with the most room, adjusted for live session count.
+    ///
+    /// **Resolved, not stored**, like `gcRetainedTranscriptsEnabled`: the
+    /// backing column carries no SQL default and stays NULL until somebody
+    /// touches the toggle, so this property is
+    /// `profile_balancing_enabled ?? Config.profileBalancingEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var profileBalancingEnabled: Bool
+    /// Schedule-based PR polling. Read once at daemon start. Resolved as
+    /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
+    public var prPollScheduleEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1798,13 +1810,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// claim — is a change to this constant, with no forcing `UPDATE` migration
     /// and every explicit opt-out left alone.
     public static let gcRetainedTranscriptsEnabledDefault = false
-    /// The shipped default for `transcriptComposerEnabled`, and the single place
-    /// it lives. The composer ships off; graduation — after a soak in which no
-    /// message reached a session that was not running, no probe left a process or
-    /// a directory behind, and the GC leg never reclaimed a live worktree's
-    /// attachments — is a change to this constant, with no forcing `UPDATE`
-    /// migration and every explicit opt-out left alone.
-    public static let transcriptComposerEnabledDefault = false
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
@@ -1826,6 +1831,15 @@ public struct Config: Codable, Sendable, Equatable {
     /// trusted. Graduation is a change to this constant, with no forcing
     /// `UPDATE` migration and every explicit opt-out left alone.
     public static let transcriptStreamingDefault = false
+    /// The shipped default for `profileBalancingEnabled`, and the single place
+    /// it lives. Profile balancing ships off; graduation — after a soak in which
+    /// the picker's choices match what the person would have chosen — is a
+    /// change to this constant, with no forcing `UPDATE` migration and every
+    /// explicit opt-out left alone.
+    public static let profileBalancingEnabledDefault = false
+    /// The shipped default for `prPollScheduleEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant.
+    public static let prPollScheduleDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1864,11 +1878,12 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
-                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 modelProxyEnabled: Bool = Config.modelProxyDefault,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 modelProxyPort: Int? = nil,
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
+                prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1907,11 +1922,12 @@ public struct Config: Codable, Sendable, Equatable {
         self.ptyHolderEnabled = ptyHolderEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
-        self.transcriptComposerEnabled = transcriptComposerEnabled
         self.updateMode = updateMode
         self.modelProxyEnabled = modelProxyEnabled
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.modelProxyPort = modelProxyPort
+        self.profileBalancingEnabled = profileBalancingEnabled
+        self.prPollScheduleEnabled = prPollScheduleEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2018,12 +2034,6 @@ public struct Config: Codable, Sendable, Equatable {
         gcRetainedTranscriptsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcRetainedTranscriptsEnabled)
             ?? Config.gcRetainedTranscriptsEnabledDefault
-        // And once more, for the composer's gate: absent means the sender knew
-        // nothing about the flag, which is the NULL column's situation — follow
-        // the shipped default rather than hardcoding `false`.
-        transcriptComposerEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .transcriptComposerEnabled)
-            ?? Config.transcriptComposerEnabledDefault
         // Same shape for the update mode, with one addition: an unrecognised
         // NAME from a newer daemon (a fourth mode) is as unusable as an absent
         // key, so it resolves to the shipped default instead of failing the
@@ -2044,6 +2054,13 @@ public struct Config: Codable, Sendable, Equatable {
         // as an unminted column. Like `holderOwnerToken` there is no shipped
         // default to fall through to; see the property's note.
         modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
+        // Same tri-state for profile balancing: absent means the sender knew
+        // nothing about the flag, which is the NULL column's situation — follow
+        // the shipped default rather than hardcoding `false`.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
+        prPollScheduleEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
@@ -2791,8 +2808,8 @@ public struct TabState: Codable, Sendable, Equatable, Identifiable {
 // MARK: - Retained transcripts
 
 /// TBD's own record of one transcript a provider has retained in its own
-/// durable store (`docs/remote-provider-contract.md` § `retain <id>` /
-/// `import`).
+/// durable store (`docs/remote-provider-contract.md` § `transcript retain <id>` /
+/// `transcript import`).
 ///
 /// A key is opaque and provider-scoped, so `(provider, key)` is the identity.
 /// Everything else on the row exists to make a key findable again by a human:

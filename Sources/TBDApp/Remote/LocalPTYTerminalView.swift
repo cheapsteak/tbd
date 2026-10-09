@@ -35,6 +35,28 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// provider `attach` this never implies the remote session died — only
     /// that this local viewer process stopped.
     let onExit: (Int32?) -> Void
+    /// Called once, on the main actor, the moment the child has been spawned,
+    /// with the spawn instant — the attach pane uses it to date its child
+    /// against a later network change (`AppState.markRemoteAttachStarted`).
+    /// Fires only when a child actually exists: a spawn that fails reports
+    /// nothing, leaving the pane's start time nil, which the network-change
+    /// handler already reads as "no child of mine is running on the old path".
+    /// Optional, so the synthesized memberwise initializer defaults it to nil
+    /// and the remediation terminal — which has no use for it — is untouched.
+    var onStarted: ((Date) -> Void)?
+    /// Called with the terminal view when it is made, and again when it is
+    /// dismantled — the attach pane registers it as its selection's focus
+    /// target (`AppState.registerRemoteTerminalView`). Optional for the same
+    /// reason as `onStarted`.
+    var onViewMounted: ((TBDTerminalView) -> Void)?
+    var onViewDismantled: ((TBDTerminalView) -> Void)?
+    /// Replaces the spawn-time focus claim. The attach pane routes it through
+    /// `AppState.focusRemoteTerminalAfterSelectionChange`, because a pane can
+    /// spawn while its detail view keeps it transparent (the log fallback, a
+    /// detached or sign-in prompt), and an ungated claim there would send
+    /// typing to the remote session unseen. Nil — the remediation sheet, which
+    /// is always visible while it runs — claims unconditionally.
+    var onClaimFocus: (() -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -60,6 +82,10 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         tv.terminalDelegate = context.coordinator
         context.coordinator.terminalView = tv
         context.coordinator.onExit = onExit
+        context.coordinator.onStarted = onStarted
+        context.coordinator.onViewDismantled = onViewDismantled
+        context.coordinator.onClaimFocus = onClaimFocus
+        onViewMounted?(tv)
 
         // TBDTerminalView fires `onReady` exactly once, the first time it's
         // laid out with non-zero bounds — the same hook TerminalPanelView
@@ -76,6 +102,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: TBDTerminalView, context: Context) {}
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
+        coordinator.onViewDismantled?(nsView)
         coordinator.cleanup()
     }
 
@@ -84,6 +111,12 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
         weak var terminalView: TerminalView?
         var onExit: ((Int32?) -> Void)?
+        /// Mirrors `onExit`'s storage for the spawn side — see the
+        /// representable's `onStarted`.
+        var onStarted: ((Date) -> Void)?
+        var onViewDismantled: ((TBDTerminalView) -> Void)?
+        /// See the representable's `onClaimFocus`.
+        var onClaimFocus: (() -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,
@@ -129,6 +162,22 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // `dataReceived`. Cleared by `cleanup()` before `terminate()`.
             viewHolder.set(terminalView)
             process.startProcess(executable: executable, args: args, environment: envPairs, execName: nil)
+            // Reported from here (already `@MainActor`) rather than from the
+            // exit side, because the whole point is to date a child that may
+            // never exit: this is the instant it began running on whatever
+            // network path was in force.
+            //
+            // Guarded on the master fd, because `startProcess` returns `Void`
+            // and swallows its own failures — an `openpty` that fails or a
+            // spawn that throws leaves the session untouched and simply falls
+            // through. A non-negative `childfd` is the evidence that a child
+            // exists at all; it is the same member the winsize call below
+            // already trusts for that. Reporting a start time for a child that
+            // was never forked would hand the network-change handler a pane to
+            // "restart" that has nothing running in it.
+            if process.childfd >= 0 {
+                onStarted?(Date())
+            }
 
             let dims = terminalView.terminalDimensions
             let cols = dims.cols
@@ -138,6 +187,18 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
                 _ = ioctl(process.childfd, TIOCSWINSZ, &size)
             }
 
+            claimSpawnFocus(terminalView)
+        }
+
+        /// The claim `start` makes once its child is spawned. Separate from
+        /// `start` so `RemoteAttachFocusTests` can fire it without spawning a
+        /// child.
+        @MainActor
+        func claimSpawnFocus(_ terminalView: TerminalView) {
+            if let onClaimFocus {
+                onClaimFocus()
+                return
+            }
             DispatchQueue.main.async { [weak terminalView] in
                 terminalView?.window?.makeFirstResponder(terminalView)
             }

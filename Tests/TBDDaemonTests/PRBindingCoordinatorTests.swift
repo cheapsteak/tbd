@@ -672,4 +672,94 @@ struct PRBindingCoordinatorTests {
         let wt = try await fixture.newWorktree()
         #expect(await fixture.coordinator.healBranchMatch(worktreeID: wt, parsed: parsed) == false)
     }
+
+    // MARK: - Provider-named PRs
+
+    private let foreign = ParsedPRURL(
+        host: "github.com", owner: "acme", repo: "acme-web", number: 88,
+        url: "https://github.com/acme/acme-web/pull/88")
+
+    @Test("a provider-named PR in another repo binds")
+    func providerBindsForeignRepo() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: .provider)
+        guard case .bound(let bound) = outcome else { Issue.record("got \(outcome)"); return }
+        #expect(bound.source == .provider)
+        #expect(bound.repo == "acme-web")
+    }
+
+    /// A GitHub Enterprise URL a provider names is accepted by the contract's
+    /// parser and must bind: the host check, which would call it another host
+    /// (or defer on an undetermined forge), does not apply to `.provider`.
+    @Test("a provider-named PR on a GitHub Enterprise host binds, even with the forge undetermined")
+    func providerBindsEnterpriseHost() async throws {
+        let fixture = try await Fixture(gitLabHosts: nil)
+        let wt = try await fixture.newWorktree()
+        let enterprise = try #require(PRBindingExtractor.parsePRURL(
+            exactly: "https://ghe.acme.example/acme/acme-prod/pull/9"))
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: enterprise, source: .provider)
+        guard case .bound(let bound) = outcome else { Issue.record("got \(outcome)"); return }
+        #expect(bound.host == "ghe.acme.example")
+        #expect(bound.source == .provider)
+    }
+
+    @Test("provider binding does not need the worktree's repo to resolve")
+    func providerDoesNotDeferOnUnresolvedRepo() async throws {
+        let fixture = try await Fixture(repo: nil)
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .provider)
+        guard case .bound = outcome else { Issue.record("expected .bound, got \(outcome)"); return }
+    }
+
+    @Test("a tombstone refuses a provider bind; only a manual attach revives it")
+    func providerRefusedByTombstone() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: .provider)
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: foreign))
+        let asProvider = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: .provider)
+        guard case .tombstoned = asProvider else { Issue.record("expected .tombstoned, got \(asProvider)"); return }
+        let asBranch = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: .branch)
+        guard case .tombstoned = asBranch else { Issue.record("expected .tombstoned, got \(asBranch)"); return }
+        // A foreign tombstone is this worktree's own record, so the user's
+        // attach still revives it rather than being refused as another repo.
+        let asManual = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: .manual)
+        guard case .bound(let revived) = asManual else { Issue.record("expected .bound, got \(asManual)"); return }
+        #expect(!revived.detached)
+    }
+
+    @Test("provider and branch discovery of the same PR are one binding, first source wins")
+    func providerDedupesWithBranch() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .branch)
+        let second = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .provider)
+        guard case .alreadyBound = second else { Issue.record("expected .alreadyBound, got \(second)"); return }
+        let rows = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(rows.count == 1)
+        #expect(rows.first?.source == .branch)
+    }
+
+    @Test("non-provider sources still reject another repo")
+    func otherSourcesStillRejectForeign() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        for source in [PRBindingSource.hook, .branch, .manual] {
+            let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: foreign, source: source)
+            guard case .rejectedWrongRepo = outcome else {
+                Issue.record("\(source) should reject, got \(outcome)"); return
+            }
+        }
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    @Test("a provider binding survives a heal, which only removes branch bindings")
+    func providerSurvivesHeal() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .provider)
+        #expect(await fixture.coordinator.healBranchMatch(worktreeID: wt, parsed: parsed) == false)
+        #expect(try await fixture.store.list(worktreeID: wt).map(\.source) == [.provider])
+    }
 }

@@ -66,6 +66,12 @@ extension RPCRouter {
             return RPCResponse(
                 error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
                 code: RPCErrorCode.terminalSessionGone.rawValue)
+        case .paneUnreadable(let paneID, let server):
+            // The read failed; nothing is known about the session. Same honest
+            // answer as `terminal.wake`, and the same refusal to claim it is
+            // gone.
+            return RPCResponse(
+                error: RPCRouter.unreadablePaneWakeMessage(paneID: paneID, server: server))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:

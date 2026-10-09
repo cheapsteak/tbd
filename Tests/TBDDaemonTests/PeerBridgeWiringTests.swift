@@ -688,7 +688,7 @@ struct PeerBridgeWiringTests {
     // MARK: - The origin label
 
     /// The origin is the namespace every name TBD announces outward is prefixed
-    /// with, and the composed name is `<origin>:<display name> %<pane>` — so a
+    /// with, and the composed name is `<origin>:<display name> <terminal short id>` — so a
     /// colon or a space inside it would make that name ambiguous to read.
     @Test func theOriginLabelIsSanitisedAndStable() {
         #expect(PeerLinkOrigin.local(hostName: "workbench.local") == "workbench")

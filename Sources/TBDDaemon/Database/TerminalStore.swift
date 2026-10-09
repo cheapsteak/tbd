@@ -1396,10 +1396,28 @@ public struct TerminalStore: Sendable {
     /// by the caller is still current. A wake or replacement that wins first
     /// rejects this write atomically instead of leaving the row's profile out
     /// of sync with the process that was launched.
+    ///
+    /// `sessionID` names the conversation the row is to hold once it is
+    /// re-homed, and it travels in THIS statement rather than a write of its
+    /// own so the two cannot land separately. The in-place profile swap on a
+    /// holder row is what needs it: a blank session is spawned fresh under a
+    /// new id rather than resumed, and a second write that failed after the
+    /// re-home would leave the row on the destination account naming a
+    /// conversation whose transcript was never carried there — the "no
+    /// conversation found" the swap exists to avoid. It is the same
+    /// commitment `prepareProfileAgentRespawn` above makes for the tmux
+    /// transport. nil leaves both session columns exactly as they are, which
+    /// is what the cold swap and every resume pass.
+    ///
+    /// `transcriptPath` is honoured only alongside a `sessionID`: a transcript
+    /// file belongs to the conversation named beside it and never travels on
+    /// its own.
     func setParkedProfileID(
         id: UUID,
         expectedState: TerminalReplacementSnapshot,
-        profileID: UUID?
+        profileID: UUID?,
+        sessionID: String? = nil,
+        transcriptPath: String? = nil
     ) async throws -> Terminal? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -1410,6 +1428,17 @@ public struct TerminalStore: Sendable {
                 return nil
             }
             record.profile_id = profileID?.uuidString
+            if let sessionID {
+                record.claudeSessionID = sessionID
+                // No ordered SessionStart observation is available here, so a
+                // replacement identity must not inherit the prior Codex
+                // process's durable boundary — the same reason `updateSession`
+                // clears it.
+                record.codexTranscriptBoundaryOffset = nil
+                if let transcriptPath {
+                    record.transcriptPath = transcriptPath
+                }
+            }
             try record.update(db)
             return record.toModel()
         }
@@ -2046,11 +2075,17 @@ public struct TerminalStore: Sendable {
     /// hook. Returns whether the row actually changed.
     ///
     /// **Deliberately narrower than `setHibernated`.** That writer mints a new
-    /// session incarnation, cancels pending scheduled resumes and rewrites the
-    /// activity triple, because it describes a park TBD performed and a process
-    /// TBD is about to replace. A hook only *reports* that the process is gone:
-    /// nothing was replaced, nothing was interrupted, and the resume this row
-    /// already points at is still the right one. So exactly two columns move.
+    /// session incarnation and cancels pending scheduled resumes, because it
+    /// describes a park TBD performed and a process TBD is about to replace. A
+    /// hook only *reports* that the process is gone: nothing was replaced, and
+    /// the session id, incarnation, and resume this row already points at are
+    /// still the right ones — none of those move here.
+    ///
+    /// `activityState` DOES move, to `.idle`, alongside `hibernatedAt` and
+    /// `hibernateReason`: whatever it last reported (plausibly `.working`,
+    /// mid-turn) stopped being true the moment the process that was reporting it
+    /// left, and nothing else will ever retract a stale `.working` for a process
+    /// that no longer exists to finish that turn.
     ///
     /// It refuses on an already-parked row for the same reason the awaiting-input
     /// rail refuses an uninformative overwrite: `hibernateReason` is the record of
@@ -2093,6 +2128,17 @@ public struct TerminalStore: Sendable {
             }
             record.hibernatedAt = date
             record.hibernateReason = HibernateReason.exited.rawValue
+            // The process that was reporting `activityState` just left, so
+            // whatever it last reported (plausibly `.working`, mid-turn) is no
+            // longer true of anything: there is no process left to finish that
+            // turn. Written as the same provenance triple every other writer of
+            // this column uses (state + source + both timestamps together) so a
+            // later observation's ordering check compares against a source that
+            // actually explains the stored value.
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.hookEvent("SessionEnd"))
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             try record.update(db)
             return true
         }
@@ -2212,6 +2258,30 @@ public struct TerminalStore: Sendable {
             }
             record.keepWarm = keepWarm
             try record.update(db)
+        }
+    }
+
+    /// Count live Claude sessions per profile. Live = kind is 'claude', profile_id
+    /// is not NULL, and the session is not hibernated or suspended. Returns a map
+    /// of profile_id → count. UUIDs that fail to parse are skipped silently
+    /// (corrupted rows in the database; the count is conservative).
+    public func liveSessionCountsByProfile() async throws -> [UUID: Int] {
+        try await writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT profile_id, COUNT(*) as count FROM terminal
+                WHERE kind = ? AND profile_id IS NOT NULL
+                  AND hibernatedAt IS NULL AND suspendedAt IS NULL
+                GROUP BY profile_id
+                """, arguments: ["claude"])
+            var result: [UUID: Int] = [:]
+            for row in rows {
+                if let profileIDStr: String = row["profile_id"],
+                   let profileUUID = UUID(uuidString: profileIDStr),
+                   let count: Int = row["count"] {
+                    result[profileUUID] = count
+                }
+            }
+            return result
         }
     }
 }

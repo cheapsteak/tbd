@@ -131,8 +131,12 @@ extension WorktreeLifecycle {
             // deleted below just as a tmux row's are, so refusing here would
             // leak rather than protect, and `captureThenKillWindow` would
             // capture, kill and reap against empty coordinates while the holder
-            // and its job outlive the only record of their pids.
+            // and its job outlive the only record of their pids. Its Closed
+            // Terminals entry is written before the disposal releases the
+            // reader it is captured from.
             if terminal.transport == .holder {
+                await Self.recordHolderClosedTerminal(
+                    terminal, registry: holderRegistry, history: db.terminalHistory)
                 if let failure = await disposeHolder(for: terminal) {
                     archiveLogger.warning(
                         "archive left a holder running: \(failure, privacy: .public)")

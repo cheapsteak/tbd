@@ -4,23 +4,49 @@ import os
 private let codexImportLogger = Logger(
     subsystem: "com.tbd.daemon", category: "codex-session-import")
 
-enum CodexSessionImportError: LocalizedError, Equatable {
+// `RPCRouter.handle` renders a thrown error with `"\(error)"`, which uses
+// `CustomStringConvertible` and ignores `LocalizedError`. A LocalizedError-only
+// enum therefore reaches the user as `appServer("…")` instead of its authored
+// message, so every error type on this path conforms to both — matching
+// `WorktreeLifecycleError`.
+enum CodexSessionImportError: Error, CustomStringConvertible, LocalizedError,
+    Equatable {
     case appServer(String)
     case malformedResponse(String)
-    case processExited(Int32)
+    case processExited(status: Int32, stderr: String)
     case timedOut
 
-    var errorDescription: String? {
+    var description: String {
         switch self {
         case .appServer(let message):
             return "Codex could not import this session: \(message)"
         case .malformedResponse(let detail):
             return "Codex returned an invalid session-import response: \(detail)"
-        case .processExited(let status):
-            return "Codex app-server exited before the session import completed (status \(status))."
+        case .processExited(let status, let stderr):
+            let base = "Codex app-server exited before the session import completed (status \(status))."
+            let tail = Self.stderrTail(stderr)
+            return tail.isEmpty ? base : "\(base) Codex reported: \(tail)"
         case .timedOut:
             return "Codex did not finish importing the session before the deadline."
         }
+    }
+
+    var errorDescription: String? { description }
+
+    /// The last non-empty lines of the child's stderr, trimmed for display.
+    ///
+    /// A user staring at "RPC error: processExited(1)" learns nothing about
+    /// why Codex quit. The stderr tail carries the actual reason (a bad
+    /// working directory, a config error, an auth failure), so it is folded
+    /// into the message the app surfaces.
+    static func stderrTail(_ stderr: String, maxLength: Int = 500) -> String {
+        let lines = stderr
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let joined = lines.suffix(3).joined(separator: " ")
+        guard joined.count > maxLength else { return joined }
+        return String(joined.suffix(maxLength))
     }
 }
 
@@ -31,8 +57,8 @@ protocol CodexAppServerConnection: Sendable {
 }
 
 protocol CodexAppServerTransport: Sendable {
-    func connect(executablePath: String, codexHome: URL) async throws
-        -> any CodexAppServerConnection
+    func connect(executablePath: String, codexHome: URL, workingDirectory: URL)
+        async throws -> any CodexAppServerConnection
 }
 
 /// Imports one Claude transcript through Codex's native app-server protocol.
@@ -92,9 +118,17 @@ struct CodexSessionImporter: Sendable {
         cwd: String,
         title: String?
     ) async throws -> String {
+        // Run the child in the session's own worktree, never inheriting the
+        // daemon's process-wide cwd. A GUI- or handover-launched daemon's cwd
+        // is arbitrary and outlives the directory it started in — a worktree
+        // that later gets deleted leaves the daemon parked on a path that no
+        // longer resolves. `codex app-server` calls `getcwd()` at startup and
+        // exits 1 ("error loading default config … No such file or directory")
+        // when it fails, which surfaced as an unexplained `processExited(1)`.
         let connection = try await transport.connect(
             executablePath: executablePath,
-            codexHome: codexHome)
+            codexHome: codexHome,
+            workingDirectory: URL(fileURLWithPath: cwd, isDirectory: true))
         return try await withTaskCancellationHandler(operation: {
             defer { connection.close() }
 
@@ -288,51 +322,135 @@ struct CodexSessionImporter: Sendable {
 }
 
 struct ProcessCodexAppServerTransport: CodexAppServerTransport {
-    func connect(executablePath: String, codexHome: URL) async throws
-        -> any CodexAppServerConnection {
+    let clock: any Clock<Duration>
+
+    init(clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
+    }
+
+    func connect(executablePath: String, codexHome: URL, workingDirectory: URL)
+        async throws -> any CodexAppServerConnection {
         try ProcessCodexAppServerConnection.start(
             executablePath: executablePath,
-            codexHome: codexHome)
+            codexHome: codexHome,
+            workingDirectory: workingDirectory,
+            clock: clock)
     }
 }
 
-private actor CodexAppServerLineInbox {
+/// Ordered hand-off of app-server lines from the pipe's readability queue to
+/// the awaiting import task.
+///
+/// Lock-guarded rather than an actor on purpose. `yield` must be callable
+/// synchronously from `consume`, because one `availableData` chunk routinely
+/// carries several protocol lines — the import response, `…/import/progress`,
+/// and `…/import/completed` land within roughly 60 ms of each other. Handing
+/// each line to an actor through its own unstructured `Task` imposes no
+/// ordering between those tasks, so under load the `completed` notification
+/// can be delivered ahead of the id-2 response. `expectImportResponse` drops
+/// any line without id 2, so that reordering silently discards the only
+/// notification carrying the thread id and the import can then only time out.
+/// (Measured out of order in roughly 0.5% of 3-line batches under contention.)
+private final class CodexAppServerLineInbox: @unchecked Sendable {
+    private let lock = NSLock()
     private var lines: [Data] = []
     private var waiter: CheckedContinuation<Data, any Error>?
     private var terminalError: (any Error)?
 
     func yield(_ line: Data) {
+        lock.lock()
         if let waiter {
             self.waiter = nil
+            lock.unlock()
             waiter.resume(returning: line)
         } else {
             lines.append(line)
+            lock.unlock()
         }
     }
 
+    /// Keeps the first terminal error: process exit carries a status the
+    /// later `close()` cancellation would otherwise overwrite.
     func finish(_ error: any Error) {
-        terminalError = error
-        if let waiter {
-            self.waiter = nil
-            waiter.resume(throwing: error)
-        }
+        lock.lock()
+        if terminalError == nil { terminalError = error }
+        let waiter = self.waiter
+        self.waiter = nil
+        lock.unlock()
+        waiter?.resume(throwing: error)
     }
 
     func next() async throws -> Data {
-        if !lines.isEmpty { return lines.removeFirst() }
-        if let terminalError { throw terminalError }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiter = continuation
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            // Buffered lines drain before the terminal error, so a response
+            // already on the wire when the server exits is still read.
+            if !lines.isEmpty {
+                let line = lines.removeFirst()
+                lock.unlock()
+                continuation.resume(returning: line)
+            } else if let terminalError {
+                lock.unlock()
+                continuation.resume(throwing: terminalError)
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
         }
     }
 }
 
-private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
+final class ProcessCodexAppServerConnection: CodexAppServerConnection,
     @unchecked Sendable {
     private struct ReadState {
         var buffer = Data()
+        var stderr = Data()
         var closed = false
+        /// Set once the stderr pipe reports EOF: every byte the child wrote
+        /// has been captured.
+        var stderrDrained = false
+        /// Set by the termination handler. The exit is reported only once
+        /// stderr has also drained (or the drain grace has lapsed), because
+        /// the termination handler and the stderr readability handler are
+        /// independent GCD sources with no ordering between them.
+        var exitStatus: Int32?
+        /// Test observability: how many times the exit reached the inbox
+        /// (must never exceed one) and how many drain-grace timers the exit
+        /// path started (zero whenever stderr had already drained or the
+        /// connection was already closed).
+        var exitReports = 0
+        var graceTimersScheduled = 0
     }
+
+    /// The three things a finish attempt can find. Distinguishing "already
+    /// closed" from "not drained yet" is what keeps the exit path from
+    /// starting a grace timer after a successful import has closed the
+    /// connection.
+    private enum FinishAttempt {
+        case finished(status: Int32, stderr: String)
+        case alreadyClosed
+        case notReady
+    }
+
+    /// How long a reported exit waits for stderr to reach EOF.
+    ///
+    /// EOF normally follows the exit within milliseconds, so this bound only
+    /// matters when a grandchild inherited the write end and keeps it open.
+    /// One second is well past any ordinary pipe-delivery lag yet short
+    /// enough that the user does not notice the delay on an already-failed
+    /// import. Raising it catches stderr from a slower-flushing grandchild at
+    /// the cost of a slower error; lowering it risks reporting the exit
+    /// before the last line lands, which is the bug this ordering fixes.
+    static let stderrDrainGrace: Duration = .seconds(1)
+
+    /// How much of the child's stderr is kept for the exit error.
+    ///
+    /// The user sees only a short tail (`stderrTail`, 500 characters), so
+    /// 8 KiB leaves ample room for that tail to be whole lines while bounding
+    /// memory against a child that floods stderr. Raising it costs memory
+    /// per import for no visible gain; lowering it toward the display cap
+    /// risks cutting the last line mid-way.
+    static let stderrCaptureCap = 8 * 1024
 
     private let process: Process
     private let stdinPipe: Pipe
@@ -341,21 +459,28 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
     private let inbox = CodexAppServerLineInbox()
     private let readState = OSAllocatedUnfairLock(initialState: ReadState())
     private let writeLock = NSLock()
+    private let clock: any Clock<Duration>
 
     private init(
         process: Process,
         stdinPipe: Pipe,
         stdoutPipe: Pipe,
-        stderrPipe: Pipe
+        stderrPipe: Pipe,
+        clock: any Clock<Duration>
     ) {
+        self.clock = clock
         self.process = process
         self.stdinPipe = stdinPipe
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
     }
 
-    static func start(executablePath: String, codexHome: URL) throws
-        -> ProcessCodexAppServerConnection {
+    static func start(
+        executablePath: String,
+        codexHome: URL,
+        workingDirectory: URL,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) throws -> ProcessCodexAppServerConnection {
         let process = Process()
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -364,10 +489,14 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             process: process,
             stdinPipe: stdinPipe,
             stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe)
+            stderrPipe: stderrPipe,
+            clock: clock)
 
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = ["app-server", "--stdio"]
+        // Anchor the child in the session worktree rather than inheriting the
+        // daemon's (possibly deleted) cwd — see `performImport`.
+        process.currentDirectoryURL = workingDirectory
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -378,15 +507,23 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak connection] handle in
             connection?.consume(handle.availableData)
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak connection] handle in
             let data = handle.availableData
-            guard !data.isEmpty,
-                  let message = String(data: data, encoding: .utf8) else { return }
-            codexImportLogger.debug(
-                "Codex app-server stderr: \(message, privacy: .private)")
+            guard !data.isEmpty else {
+                // EOF. The handler runs serially on one source, so every
+                // earlier chunk has already been captured.
+                handle.readabilityHandler = nil
+                connection?.stderrDidDrain()
+                return
+            }
+            connection?.captureStderr(data)
+            if let message = String(data: data, encoding: .utf8) {
+                codexImportLogger.debug(
+                    "Codex app-server stderr: \(message, privacy: .private)")
+            }
         }
         process.terminationHandler = { [weak connection] process in
-            connection?.finish(status: process.terminationStatus)
+            connection?.processDidExit(status: process.terminationStatus)
         }
 
         do {
@@ -420,8 +557,22 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         try? stdinPipe.fileHandleForWriting.close()
-        Task { await inbox.finish(CancellationError()) }
+        inbox.finish(CancellationError())
         if process.isRunning { process.terminate() }
+    }
+
+    /// Accumulate the child's stderr, capped, so a nonzero exit can report why
+    /// Codex quit. Bounded to the last 8 KiB — a runaway child cannot grow this
+    /// without limit, and only the tail is shown to the user regardless.
+    private func captureStderr(_ data: Data) {
+        readState.withLock { state in
+            guard !state.closed else { return }
+            state.stderr.append(data)
+            let cap = Self.stderrCaptureCap
+            if state.stderr.count > cap {
+                state.stderr.removeSubrange(..<(state.stderr.count - cap))
+            }
+        }
     }
 
     private func consume(_ data: Data) {
@@ -437,18 +588,63 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             }
             return complete
         }
+        // Yield synchronously and in order. The readability handler is serial,
+        // so this preserves wire order end to end.
         for line in lines {
-            Task { await inbox.yield(line) }
+            inbox.yield(line)
         }
     }
 
-    private func finish(status: Int32) {
-        let wasClosed = readState.withLock { state -> Bool in
-            let previous = state.closed
-            state.closed = true
-            return previous
-        }
-        guard !wasClosed else { return }
-        Task { await inbox.finish(CodexSessionImportError.processExited(status)) }
+    private func stderrDidDrain() {
+        readState.withLock { $0.stderrDrained = true }
+        reportExit(attemptFinish(force: false))
     }
+
+    private func processDidExit(status: Int32) {
+        readState.withLock { $0.exitStatus = status }
+        switch attemptFinish(force: false) {
+        case .finished(let status, let stderr):
+            reportExit(.finished(status: status, stderr: stderr))
+        case .alreadyClosed:
+            // A successful import closed the connection first; nothing to do.
+            return
+        case .notReady:
+            // Stderr has not reached EOF yet. Wait a bounded grace for it,
+            // then report the exit with whatever was captured.
+            readState.withLock { $0.graceTimersScheduled += 1 }
+            let clock = self.clock
+            Task { [weak self] in
+                try? await clock.sleep(for: Self.stderrDrainGrace)
+                guard let self else { return }
+                self.reportExit(self.attemptFinish(force: true))
+            }
+        }
+    }
+
+    /// Claim the exit report once it has happened and stderr has drained (or
+    /// the drain grace lapsed). Snapshots stderr and closes in one critical
+    /// section, so exactly one caller ever gets `.finished`.
+    private func attemptFinish(force: Bool) -> FinishAttempt {
+        readState.withLock { state in
+            guard !state.closed else { return .alreadyClosed }
+            guard let status = state.exitStatus, state.stderrDrained || force else {
+                return .notReady
+            }
+            state.closed = true
+            state.exitReports += 1
+            let stderr = String(data: state.stderr, encoding: .utf8) ?? ""
+            return .finished(status: status, stderr: stderr)
+        }
+    }
+
+    private func reportExit(_ attempt: FinishAttempt) {
+        guard case .finished(let status, let stderr) = attempt else { return }
+        inbox.finish(CodexSessionImportError.processExited(status: status, stderr: stderr))
+    }
+
+    /// Test observability; see `ReadState.exitReports`.
+    var exitReportCount: Int { readState.withLock { $0.exitReports } }
+    var graceTimersScheduledCount: Int { readState.withLock { $0.graceTimersScheduled } }
+    var hasObservedExit: Bool { readState.withLock { $0.exitStatus != nil } }
+    var isStderrDrained: Bool { readState.withLock { $0.stderrDrained } }
 }

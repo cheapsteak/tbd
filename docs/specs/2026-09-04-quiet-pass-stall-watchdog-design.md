@@ -225,9 +225,9 @@ argv match and a stall through the fallback selection, six candidates against a
 cap of four, a pipeline that outlives the grace window, the sweep order with a
 mutation that reverses it, and two malformed invocations. Most of its runtime is
 the grace window itself, which the escalation case has to wait out to measure.
-It runs as the last step of the `test` job, on macOS because everything it
-drives is BSD, and with `!cancelled()` so a harness bug can never hide a pass's
-verdict.
+It runs as the last step of the `lint` job, on macOS because everything it
+drives is BSD, and off the `test` job's critical path because it builds nothing
+and most of its 90 seconds is deliberate waiting.
 
 Two fixture shapes in it are worth knowing, because both were arrived at the
 hard way. A sleeper standing in for a wedged test process must not be named

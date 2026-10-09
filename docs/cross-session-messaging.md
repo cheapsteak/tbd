@@ -25,9 +25,9 @@ someone out eventually.
 
 - **A worktree can hold several peers.** Every Claude session TBD spawns
   in a worktree takes that worktree's display name, so a worktree running
-  three Claudes contributes three peers answering to one name. The tmux
-  pane on each row is what tells them apart — see [Addressing a
-  peer](#addressing-a-peer).
+  three Claudes contributes three peers answering to one name. The
+  terminal behind each row is what tells them apart, and `tbd peer list`
+  names it — see [Addressing a peer](#addressing-a-peer).
 - **A peer lasts exactly as long as its process.** A session that exits
   stops being a peer at once and is gone from the next listing. Resuming
   or respawning that work produces a *new* peer — a new registry row and
@@ -128,24 +128,26 @@ acme-worker [455f3e]  ·  interactive  ·  busy  ·  tmux main:@388.%388  ·  st
 ```
 
 The fields are the session's name, a short `[ref]` unique to that live
-session, its kind, its status, its tmux server, window and pane, and how
-long ago it started. **The tool result does not carry a working
-directory** — the tmux pane is the field that ties a row to a specific
-terminal, and the one to reach for whenever the name is not enough. (The
-on-disk registry record described under [The peer
-registry](#the-peer-registry) does hold one; the tool result does not
-print it.)
+session, its kind, its status, its tmux server, window and pane when it
+has them, and how long ago it started. **The tool result does not carry a
+working directory or a TBD terminal id.** The on-disk registry record
+described under [The peer registry](#the-peer-registry) carries the
+session id and working directory, and `tbd peer list` joins those to the
+TBD worktree and terminal behind each row — that terminal, named by its
+id, is a row's identity whenever the name is not enough.
 
 What a human sees in the TUI is a separate surface with its own field
 set. Claude Code's documentation states that the `/list-agents`
 slash-command view shows each local session's working directory, so do
-not assume the two render the same fields. Everything below — the pane
-join especially — is written for the session-facing tool result.
+not assume the two render the same fields. Everything below is written
+for the session-facing tool result.
 
-The tmux field is there only for a session running inside tmux, which
-every TBD session is. A plain-terminal `claude` started outside tmux, and
-rows of other kinds (`cloud`, remote control), carry no tmux coordinates,
-and the pane matching described below does not reach them.
+The tmux field is a legacy coordinate, there only for a session running
+inside tmux. A TBD session on the tmux transport carries one; a TBD
+session on the pty-holder transport does not, and neither does a
+plain-terminal `claude` started outside tmux or a row of another kind
+(`cloud`, remote control). Never treat the pane as the way to identify a
+TBD row — it is absent for every holder-backed session.
 
 The row layout above, and the not-found refusal in
 [When a name is not reachable](#when-a-name-is-not-reachable), were read
@@ -180,9 +182,22 @@ sessions ordinary:
 - **Two worktrees, one name.** Display names are yours to choose and
   nothing stops you reusing one.
 
-The tmux pane in the row is how you tell which is which — it names one
-terminal exactly — and the `[ref]` is how you say which one you meant.
-Status narrows the field but does not identify a row on its own.
+The terminal behind a session is what tells them apart — `tbd peer list`
+names it by its id — and the `[ref]` is how you say which one you meant.
+Carrying one over to the other is the hard part, because a `ListAgents`
+row prints no terminal id. Among rows that share a name, a session on the
+tmux transport can still be matched by its pane, which `ListAgents` and
+`tbd terminal list` print, and `tbd peer list` prints for a row it joined
+to a TBD terminal. A holder-backed
+session prints no pane, so among same-named holder rows only status and
+start time are left, and they narrow the field without identifying a row.
+Rather than guess a ref there, ask the user. `tbd terminal send
+--terminal <id> --text "…" --submit` with the full terminal id — from `tbd peer list --json`
+or `tbd terminal list`; the eight-character prefix is not accepted —
+names the session exactly, but it types into that session's composer
+instead of delivering between turns, so it can answer a prompt or land
+in half-typed input. Use it only while `tbd peer list` shows that
+session `idle`.
 
 Pull a fresh listing rather than reusing one from earlier in a long
 conversation — refs belong to live sessions, and the pool changes as
@@ -206,24 +221,31 @@ worktree was renamed after it started still answers to its spawn-time
 name. Reading the refusal as a death notice — and giving up on a peer
 that is sitting there working — is the mistake to avoid.
 
-Find the row by its tmux pane instead of by its name. Every TBD-spawned
-row prints its pane as `tmux <server>:<window>.<pane>`, and TBD prints the
-same coordinates from its own side:
+Find the row by its terminal and worktree instead of by its name.
+`tbd peer list` lists every peer TBD can see, with the worktree, terminal
+or remote session behind it, whatever each row is called. It names a
+terminal by the first eight characters of its id, a prefix of the id TBD
+prints from its own side:
 
 ```sh
+tbd peer list                     # each peer's name, and the worktree and terminal behind it
 tbd worktree list --json          # worktree id, displayName, directory name, path
-tbd terminal list <worktree-id>   # WINDOW and PANE columns for that worktree
+tbd terminal list <worktree-id>   # every terminal row in that worktree, by id
 ```
 
-Join the two on the window and pane (`@388` / `%388` above): the row that
-matches is the lane you meant, whatever it happens to be called. Address
-it as `name [ref]` with the name the listing actually shows.
+The row whose terminal is the one you meant is the lane you meant, and
+its name is the one to address it by: look that name up in `ListAgents`
+and send to `name [ref]`. The terminal identifies a row on every
+transport, where a pane cannot: a holder-backed session has no tmux pane,
+and a shadow peer standing in for a session on another machine carries no
+local coordinates by design. A session on the tmux transport additionally
+shows its pane (`tmux <server>:<window>.<pane>` in `ListAgents`,
+`tmux %<pane>` in `tbd peer list`, the PANE column in `tbd terminal
+list`) — a legacy coordinate that still
+tells same-named tmux rows apart, as described under [Addressing a
+peer](#addressing-a-peer), but not an identity.
 
-`tbd peer list` does that join for you — every peer TBD can see, with the
-worktree, terminal or remote session behind it. It also reaches the rows
-the pane join cannot: a peer with no tmux coordinates has no pane to join
-on, and a shadow peer standing in for a session on another machine carries
-none by design. It prints no `[ref]`, because Claude Code mints one per
+`tbd peer list` prints no `[ref]`, because Claude Code mints one per
 record and never writes it to disk — that value comes from `ListAgents`
 and nowhere else.
 
@@ -333,10 +355,10 @@ reconstruction — send it through TBD's transport instead.
 
 Each live session publishes one small JSON file, `<pid>.json`, in the
 `sessions/` directory of its Claude config dir. A row holds the pid, the
-session id, the working directory, the tmux pane, the path of the
-session's message socket, the session's name and where that name came
-from, and a coarse status (`idle` / `busy` / `waiting` / `shell`) with a
-timestamp. **It holds no transcript content** — it is an address book,
+session id, the working directory, the tmux pane (for a session inside
+tmux), the path of the session's message socket, the session's name and
+where that name came from, and a coarse status (`idle` / `busy` /
+`waiting` / `shell`) with a timestamp. **It holds no transcript content** — it is an address book,
 not a log. The sockets themselves live at `/tmp/cc-socks/<pid>.sock` and
 are shared across the OS user.
 

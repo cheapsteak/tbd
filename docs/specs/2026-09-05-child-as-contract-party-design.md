@@ -135,8 +135,8 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   wrong row.
 - **`cursor: (row, column)`** – in viewport coordinates, so `lines[viewportStart
   + cursor.row]` is the cursor's line when that row survived trimming; plus
-  whether the cursor is visible. The login driver and the pending-input rail
-  both reason about where the cursor sits.
+  whether the cursor is visible. The pending-input rail reasons about where
+  the cursor sits.
 - **`size: (columns, rows)`** – the grid the lines were rendered from. A
   consumer that compares against the pty's own size can see a grid that
   disagrees with the child.
@@ -269,9 +269,11 @@ design builds is the pull the model has always required.
 Each consumer declares what it does with `.staleDaemon`, and the declaration
 is in the consumer, where a reviewer can see it:
 
-- **The input-path oracle** – proceeds on the stale modes and records the
-  source on the actuation row. This is the one place the design knowingly
-  acts on possibly-stale information, and it gets its own section below.
+- **The input-path oracle** – proceeds on the stale modes, trusting a stale
+  bracketed-paste "on" but not a stale "off" for an agent session, and
+  records the source on the actuation row. This is the one place the design
+  knowingly acts on possibly-stale information, and it gets its own section
+  below.
 - **The hibernation pending-input check** – fails closed, as the transport
   spec rules: a stale screen cannot prove the composer is empty. It fails
   closed on the other axis too, refusing a live `daemon` screen whose
@@ -350,17 +352,33 @@ records `modeSource: staleDaemon` with the age on the actuation row. This is
 the residue of the design: the one place it knowingly proceeds on
 information that may be wrong, and it should be read as one.
 
-What a stale-mode send can get wrong, exactly:
+A stale bracketed-paste reading is trusted in one direction only. A viewer
+ordinarily takes the pty within milliseconds of a spawn or a wake — field
+records show mode readings frozen about 19 ms after the holder spawned — which
+is before an agent TUI has finished starting and sent `DECSET 2004`. So the
+frozen emulator's commonest answer about an agent session is "off", observed,
+about a child that has been "on" ever since; composed bare, the body and its
+`\r` go out in one write and the TUI swallows the Enter. The oracle therefore
+treats a stale "off" as unknown and applies the unobserved rule below — wrap
+for an agent session, bare for a shell — while a stale "on" is obeyed for
+every child: the child was seen to ask for bracketing, children turn it off
+far less often than on, and of the two ways a stale "on" can be wrong, printed
+markers are the visible one. The actuation row records the reading's own flag
+(`modeBracketedPaste`) beside the decision made from it (`bracketedPaste`), so
+a send where the two differ is recognizable without reconstructing the rule.
+
+What a stale-mode send can still get wrong, exactly:
 
 - **Bracketed paste read as on when it is off** – the child receives
   `ESC[200~` and `ESC[201~` as bytes it never asked for. A program that does
   not understand them prints them, so the composer shows the markers around
   the text and the `\r` still submits whatever the program made of it. A
-  shell at its prompt executes a line that begins with a marker.
-- **Bracketed paste read as off when it is on** – the send goes as bare
-  bytes, and the receiver's burst heuristic can absorb the `\r`. This is the
-  defect the oracle exists to end, reappearing only on the stale path, and
-  only when the child changed its paste mode during the attach.
+  shell at its prompt executes a line that begins with a marker. Reached by a
+  stale "on" for a child that turned bracketing off during the attach, or by
+  a stale "off" for an agent session that really is off.
+- **Bracketed paste read as off when it is on, for a shell** – the send goes
+  as bare bytes. A shell's line editor submits bare input of any length, so
+  the `\r` still submits; the residue is a multi-line body run line by line.
 - **`applicationCursor` wrong in either direction** – a named arrow key
   arrives as the wrong sequence, as the previous section describes.
 
@@ -374,10 +392,11 @@ that does not answer is an app that is napping, wedged, or busy — and the
 transport spec already observes that those states correlate with exactly the
 moments supervision most wants to act. A refusal would make the daemon's
 rails fail closed at those moments, every time, which turns a rare mis-paste
-into a systematic stall of unattended work. Modes flip rarely — an agent TUI
-sets bracketed paste once at startup and leaves it — so the stale answer is
-usually the right one, and when it is not, the outcome is a visible
-mis-paste rather than a silent loss.
+into a systematic stall of unattended work. Modes flip rarely after startup —
+an agent TUI sets bracketed paste once and leaves it — so a stale answer
+frozen after startup is usually the right one, and the one frozen before it
+is the "off" the oracle declines to trust; when either is wrong, the outcome
+is a visible mis-paste rather than a silent loss.
 
 The recorded source is what makes this honest rather than merely optimistic.
 A row reading `dispatched, modeSource: staleDaemon (age 41 min)` tells a
@@ -396,7 +415,8 @@ the row, because of the two ways it can be wrong only one leaves a trace: read
 as off when it is on, the TUI's burst heuristic absorbs the `\r` and the
 message sits in the composer with nothing to say why; read as on when it is
 off, the child prints the markers, which somebody can see. Wrapping under
-uncertainty buys the visible failure over the silent one.
+uncertainty buys the visible failure over the silent one. A stale "off" is
+uncertainty of the same kind and takes the same rule.
 
 The wrap is scoped to those burst-heuristic children, and a re-adopted **shell**
 composes bare. A shell's line editor submits bare input of any length and has
@@ -404,7 +424,8 @@ no heuristic to fool, so a bare send never stalls there; wrapping one that
 never asked for brackets would only hand a `sudo` or `ssh` prompt markers to
 print, or a line made of them to run, in exchange for a stall that cannot
 happen. Uncertainty is a reason to wrap only where composing bare fails
-silently. An *observed* `false` is not uncertainty at all and composes bare for
+silently. A `false` observed by a live store — the daemon draining the pty,
+or a viewer that answered — is not uncertainty at all and composes bare for
 any child.
 
 ### What this does not change
@@ -418,7 +439,7 @@ any child.
   it does not make them the right source for agent *state*. "Is the agent
   stuck" belongs on hook and transcript state, as the rule already says. The
   screen contract serves the readers that legitimately need a screen — the
-  login driver, the pending-input check, a person running
+  pending-input check, a person running
   `tbd terminal output` — and the input composer, which needs modes and
   nothing else.
 
@@ -579,9 +600,11 @@ exists, under a query-time delivery rule that leaves nothing stale.
   not through tmux; a send that did not pass `--verify` arms nothing and is
   refused for nothing, whatever the sender declares itself to be.
 - **The stale-source policies.** The hibernation check refuses on
-  `staleDaemon`; the oracle proceeds, and the actuation row carries
-  `modeSource: staleDaemon` with an age, asserted on the row rather than on a
-  log line.
+  `staleDaemon`; the oracle proceeds, wrapping an agent send whose stale
+  reading says bracketed paste is off and obeying a stale "on", and the
+  actuation row carries `modeSource: staleDaemon` with an age and both
+  `modeBracketedPaste` and `bracketedPaste`, asserted on the row rather than
+  on a log line.
 - **Named keys.** `Escape Enter` produces the fixed bytes in every mode; an
   unknown key name is refused by name and writes nothing; keys are paced
   through `PacedKeySender` with the same interval the tmux arm uses.

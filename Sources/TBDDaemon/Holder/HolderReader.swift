@@ -601,6 +601,33 @@ actor HolderReader {
         emulator.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
     }
 
+    /// The session's final screen for Closed Terminals history — retained
+    /// scrollback plus viewport, colours intact, one `\n`-terminated line per
+    /// row — or nil when this reader is not the live store for it.
+    ///
+    /// **Nil unless draining**, decided on the same actor turn as the render so
+    /// nothing can suspend the reader between the check and the walk. A reader
+    /// suspended for an attach holds the screen as it stood when the viewer
+    /// arrived; presenting that as the session's final screen would be a
+    /// confident wrong answer, so it gives none. The final screen of a *viewed*
+    /// tab waits on the viewer-answered screen pull (issue #851).
+    ///
+    /// Not `snapshotPreamble`: that stream opens with a reset prelude that
+    /// erases the display and the scrollback, which is right for a viewer being
+    /// seeded and wrong for a file that revive `cat`s under its own banner. The
+    /// lines are the same cell walk, joined with `\n` as a tmux capture is, and
+    /// closed with an SGR reset so a revived shell's prompt does not inherit
+    /// the last line's colours. An empty screen answers "", which the history
+    /// store records as an entry with no capture.
+    func closedTerminalCapture(
+        maxScrollbackLines: Int = HolderReader.scrollbackLines
+    ) -> String? {
+        guard state == .draining else { return nil }
+        let styled = emulator.styledHistory(maxScrollbackLines: maxScrollbackLines)
+        guard !styled.isEmpty else { return "" }
+        return styled.replacingOccurrences(of: "\r\n", with: "\n") + "\u{1b}[0m\n"
+    }
+
     /// Feeds a departing viewer's handback preamble into this session's screen
     /// model — `snapshotPreamble` run backwards.
     ///
@@ -1521,6 +1548,21 @@ private final class HolderEmulator: @unchecked Sendable {
             defer { delegate.endCollectingReplies() }
             return TerminalSnapshotWriter.snapshot(
                 of: terminal, reply: reader, maxScrollbackLines: maxScrollbackLines)
+        }
+    }
+
+    /// The active buffer's retained scrollback plus viewport as styled lines —
+    /// `snapshotPreamble`'s history walk without anything around it.
+    ///
+    /// A pure read: no mode query is fed and no alt-screen toggle runs, so
+    /// nothing reaches the child and the model is left exactly as it was. On
+    /// an alt screen the active buffer has no scrollback of its own, so this is
+    /// the alt viewport alone — what `capture-pane` answers for a tmux pane in
+    /// the same state.
+    func styledHistory(maxScrollbackLines: Int) -> String {
+        terminal.terminalLock.withLock {
+            TerminalCellWalk.styledHistory(
+                of: terminal, maxScrollbackLines: maxScrollbackLines)
         }
     }
 

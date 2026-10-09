@@ -100,7 +100,6 @@ final class AppStateEmissionTracker {
         _ = state.selectedScratchSection
         _ = state.selectedRemoteProvider
         _ = state.selectedRemoteSession
-        _ = state.remoteSessionRequestedTab
         _ = state.canGoBack
         _ = state.canGoForward
         _ = state.archivedWorktrees
@@ -122,6 +121,7 @@ final class AppStateEmissionTracker {
         _ = state.isInitialStateLoaded
         _ = state.dockRatio
         _ = state.skipAccountPicker
+        _ = state.remoteTranscriptOpen
         _ = state.mainAreaSize
         _ = state.isConnected
         _ = state.layouts
@@ -137,6 +137,8 @@ final class AppStateEmissionTracker {
         _ = state.pendingWorktreeIDs
         _ = state.suspendingTerminalIDs
         _ = state.suspendingSnapshots
+        _ = state.switchingAccountTerminals
+        _ = state.terminalAttachEpochs
         _ = state.editingWorktreeID
         _ = state.isRenamingWorktree
         _ = state.prStatuses
@@ -144,6 +146,7 @@ final class AppStateEmissionTracker {
         _ = state.prBindings
         _ = state.prDetachedCounts
         _ = state.modelProfiles
+        _ = state.limitHits
         _ = state.defaultProfileID
         _ = state.codexUsage
         _ = state.isLoadingCodexUsage
@@ -153,6 +156,10 @@ final class AppStateEmissionTracker {
         _ = state.autoArchiveOnMergeDefault
         _ = state.autoHibernateOnMergeDefault
         _ = state.gcEnabled
+        _ = state.gcOrphanProcessesEnabled
+        _ = state.gcProfileDirsEnabled
+        _ = state.gcRetainedTranscriptsEnabled
+        _ = state.gcHangStacksEnabled
         _ = state.autoCreateNotesEnabled
         _ = state.nightwatchMode
         _ = state.autoHibernateEnabled
@@ -188,6 +195,7 @@ final class AppStateEmissionTracker {
         _ = state.revivingArchived
         _ = state.alertMessage
         _ = state.alertIsError
+        _ = state.alertRevealPath
         _ = state.tmuxExecutableResolution
         _ = state.savedTmuxExecutablePath
         _ = state.isTmuxLocationPromptPresented
@@ -216,7 +224,6 @@ final class AppStateEmissionTracker {
         "selectedScratchSection",
         "selectedRemoteProvider",
         "selectedRemoteSession",
-        "remoteSessionRequestedTab",
         "canGoBack",
         "canGoForward",
         "archivedWorktrees",
@@ -238,6 +245,7 @@ final class AppStateEmissionTracker {
         "isInitialStateLoaded",
         "dockRatio",
         "skipAccountPicker",
+        "remoteTranscriptOpen",
         "mainAreaSize",
         "isConnected",
         "layouts",
@@ -253,6 +261,8 @@ final class AppStateEmissionTracker {
         "pendingWorktreeIDs",
         "suspendingTerminalIDs",
         "suspendingSnapshots",
+        "switchingAccountTerminals",
+        "terminalAttachEpochs",
         "editingWorktreeID",
         "isRenamingWorktree",
         "prStatuses",
@@ -260,6 +270,7 @@ final class AppStateEmissionTracker {
         "prBindings",
         "prDetachedCounts",
         "modelProfiles",
+        "limitHits",
         "defaultProfileID",
         "codexUsage",
         "isLoadingCodexUsage",
@@ -269,6 +280,10 @@ final class AppStateEmissionTracker {
         "autoArchiveOnMergeDefault",
         "autoHibernateOnMergeDefault",
         "gcEnabled",
+        "gcOrphanProcessesEnabled",
+        "gcProfileDirsEnabled",
+        "gcRetainedTranscriptsEnabled",
+        "gcHangStacksEnabled",
         "autoCreateNotesEnabled",
         "nightwatchMode",
         "autoHibernateEnabled",
@@ -304,6 +319,7 @@ final class AppStateEmissionTracker {
         "revivingArchived",
         "alertMessage",
         "alertIsError",
+        "alertRevealPath",
         "tmuxExecutableResolution",
         "savedTmuxExecutablePath",
         "isTmuxLocationPromptPresented",

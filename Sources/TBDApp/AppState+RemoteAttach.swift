@@ -13,9 +13,12 @@ private let remoteAttachLogger = Logger(subsystem: "com.tbd.app", category: "rem
 /// they mutate (Swift's `private` access control is file-scoped, not
 /// type-scoped) — this file only computes read-only inputs/outputs.
 extension AppState {
-    /// Sessions eligible for auto-attach right now: present in the daemon's
-    /// mirror, not `gone`, not `dismissed`, whose provider declares the
-    /// `attach` capability, and whose provider is not `.needsAuth`.
+    /// Sessions eligible for a requested attachment: present in the daemon's
+    /// mirror, not `gone`, not exited, not `dismissed`, whose provider
+    /// declares the `attach` capability, and whose provider is not
+    /// `.needsAuth`. A session that exits while attached leaves this set, so
+    /// the pager tears its child down (exit callback suppressed) and no
+    /// reconnect path re-attaches it.
     ///
     /// The health check covers `.needsAuth` and NOTHING else, and the
     /// asymmetry is deliberate:
@@ -34,11 +37,11 @@ extension AppState {
     ///   particular is ordinary transport flake. Blocking on them would turn
     ///   one bad poll into "you can't open your sessions".
     ///
-    /// Reuses `RemoteSessionDetailGates.available` — the
-    /// exact same gate that decides whether the Attach TAB even renders — so
-    /// a provider without the capability, or a gone session, can never end up
-    /// attach-eligible here while simultaneously having no Attach tab to
-    /// show it in (the two must never disagree). The `dismissed` exclusion is
+    /// Reuses `RemoteSessionDetailGates.canAttach` — the
+    /// exact same gate that decides whether the detail pane shows the attach
+    /// terminal at all — so a provider without the capability, or a gone or
+    /// exited session, can never end up attach-eligible here while simultaneously
+    /// having no attach pane to show it in (the two must never disagree). The `dismissed` exclusion is
     /// separate: it mirrors `usableEntryIndex`'s navigation-staleness
     /// predicate (`AppState+Navigation.swift`), which excludes `dismissed`
     /// but keeps `gone`. Currently unreachable in practice — Dismiss is only
@@ -51,11 +54,33 @@ extension AppState {
             let provider = remoteProviders.first { $0.config.name == session.provider }
             guard provider?.health != .needsAuth else { return nil }
             let capabilities = provider?.describe?.capabilities ?? []
-            guard RemoteSessionDetailGates.available(capabilities: capabilities, gone: session.gone).contains(.attach) else {
+            guard RemoteSessionDetailGates.canAttach(
+                capabilities: capabilities, gone: session.gone, exited: session.payload.state == .exited)
+            else {
                 return nil
             }
             return RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)
         })
+    }
+
+    /// Whether selecting `selection` would show a live attached terminal in
+    /// its pane: the same predicate `attachedRemoteSelections` applies to the
+    /// selected session (attachment already requested, eligible, not
+    /// explicitly detached, not blocked on reconnect backoff). A plain
+    /// selection only browses, so a session with no attachment request
+    /// never attaches merely by being selected. The sidebar context menu
+    /// uses it to offer Send Text… exactly where the pane will carry a send
+    /// footer.
+    func remoteSessionAttachesWhenSelected(_ selection: RemoteSessionSelection, now: Date = Date()) -> Bool {
+        guard recentlyAttachedRemoteSessions.contains(selection) else { return false }
+        return RemoteAttachLifecycle.attachedSelections(
+            selected: selection,
+            recentlyViewed: [],
+            eligible: attachEligibleRemoteSelections,
+            explicitlyDetached: Set(explicitlyDetachedRemoteSessions.keys),
+            pendingReconnect: pendingReconnectBlockedSelections(now: now),
+            cap: 0
+        ).contains(selection)
     }
 
     /// Whether the app's OWN bookkeeping already says `selection`'s last
@@ -129,11 +154,16 @@ extension AppState {
 
     /// The remote-session selections that should have a live attach
     /// terminal at `now` — the testable core of `attachedRemoteSelections`.
-    /// Reflects the current selection, mirror, detach-flag, and
-    /// reconnect-backoff state for the given instant.
+    /// Protects the current selection only if the user already requested an
+    /// attachment. Browsing a new session must not add it to the mount set.
+    /// Existing connection intent retains eligibility, detach and reconnect
+    /// handling, including automatic recovery after a transport failure.
     func attachedRemoteSelections(now: Date) -> [RemoteSessionSelection] {
-        RemoteAttachLifecycle.attachedSelections(
-            selected: selectedRemoteSession,
+        let requestedSelection = selectedRemoteSession.flatMap { selection in
+            recentlyAttachedRemoteSessions.contains(selection) ? selection : nil
+        }
+        return RemoteAttachLifecycle.attachedSelections(
+            selected: requestedSelection,
             recentlyViewed: recentlyAttachedRemoteSessions,
             eligible: attachEligibleRemoteSelections,
             explicitlyDetached: Set(explicitlyDetachedRemoteSessions.keys),
@@ -165,17 +195,93 @@ extension AppState {
     /// Which selection the persistently-mounted remote-session detail host
     /// (`DetailSectionHostPager`'s `.remote` tab, via `RemoteSessionHostSlot`)
     /// should currently render its chrome for: the active selection when
-    /// one exists, otherwise the most-recently-viewed remote session — so
+    /// one exists, otherwise the most-recent attachment request — so
     /// the host still has SOME concrete session to describe while the user
     /// is elsewhere (`RemoteSessionDetailView.selection` is non-optional,
     /// and the host stays mounted, just hidden, across that excursion
     /// specifically so `RemoteAttachPager`'s live connections survive it).
-    /// `nil` only when no remote session has ever been selected this app
-    /// session. Which stale session an invisible host's chrome technically
+    /// `nil` when no remote session is selected and none has requested an
+    /// attachment. Which stale session an invisible host's chrome technically
     /// describes never matters for correctness — visibility is separately
     /// gated on `selectedRemoteSession` itself, not this value.
     var remoteSessionHostSelection: RemoteSessionSelection? {
         selectedRemoteSession ?? recentlyAttachedRemoteSessions.first
+    }
+
+    /// Re-attaches after a network path change or a wake from sleep — the
+    /// events that most often kill a transport whose `attach` child never
+    /// exits (#884). Design:
+    /// `docs/specs/2026-09-21-remote-attach-network-recovery-design.md`.
+    ///
+    /// The bug this exists for is invisible by construction: the contract
+    /// makes the child's exit the only viewer-side signal and forbids parsing
+    /// its bytes, so a child still running on a dead socket looks exactly
+    /// like an idle session, forever. Nothing here infers anything from
+    /// output; it acts on the external event instead.
+    ///
+    /// Three effects, in order:
+    ///
+    /// 1. **Restart the children that predate the change.** Every attached
+    ///    selection whose child has a recorded start time BEFORE `change.at`
+    ///    gets a fresh generation, which the pager turns into a kill and
+    ///    re-exec. A child with no recorded start has not spawned yet and
+    ///    will spawn on the new path; a child started at or after `change.at`
+    ///    is already on it. Both are skipped, so a burst costs no spawn it
+    ///    does not need. The session survives a restart untouched — its state
+    ///    lives on the provider, and `attach` is required to be targeted and
+    ///    idempotent — so the whole cost of an unnecessary one falls on the
+    ///    viewer, and it differs by whether the pane is on screen. A displayed
+    ///    pane repaints and loses its local scrollback. A pane that is NOT
+    ///    displayed — a warm background attach, or every remote pane while a
+    ///    local worktree is showing — drops its connection now and reconnects
+    ///    only when it is next shown: the replacement child spawns from
+    ///    `TBDTerminalView.onReady`, which fires from `layout()` the first
+    ///    time the view has non-zero bounds, and an `NSTabViewController`
+    ///    genuinely detaches an unselected tab's content view (`window ==
+    ///    nil`) — both in `RemoteAttachPager`, between remote panes, and in
+    ///    `DetailSectionHostPager`, across an excursion to a worktree. That is
+    ///    the mechanism the automatic re-admission path already runs on: a
+    ///    background selection readmitted when its backoff elapses also gets a
+    ///    fresh tab item that waits for layout before it spawns anything. The
+    ///    restart changes nothing about it. Each restart is a
+    ///    plain `reconnectRemoteSession`; see
+    ///    `restartRemoteAttachChildren(startedBefore:)` for why this automatic
+    ///    path drops a live child's leftover pending entry exactly as the
+    ///    manual Reconnect does, and why the recency order is restored after.
+    /// 2. **Expire stale backoff.** Every pending-reconnect entry still
+    ///    waiting whose failure PREDATES `change.at` has its deadline pulled
+    ///    back to it: a network change is exactly what makes an earlier
+    ///    transport failure stale, and a session that failed while the network
+    ///    was down would otherwise sit out up to 300 seconds after it came
+    ///    back. A failure that landed after the change keeps its cool-off —
+    ///    it already met the new path. `attempts` and the provider-health gate
+    ///    both survive untouched — see `expireRemoteReconnectBackoff(at:)`.
+    /// 3. **Re-evaluate now, with no timer and no RPC.**
+    ///    `attachedRemoteSelections` is computed on every read, so it re-runs
+    ///    only when some property that computation reads notifies its
+    ///    observers — and neither effect above is guaranteed to be one: a
+    ///    change that restarts nothing and expires nothing writes nothing.
+    ///    What guarantees the notification is the restore of
+    ///    `recentlyAttachedRemoteSessions` at the end of
+    ///    `restartRemoteAttachChildren(startedBefore:)`, which is
+    ///    unconditional and fires even when the order it writes back is
+    ///    identical — see the comment at that write for why it is neither
+    ///    guarded by an equality check nor written as a whole-property
+    ///    assignment. So `RemoteAttachPager` re-mounts on the next render
+    ///    rather than on the next ~60 s provider republish.
+    func handleNetworkChange(_ change: RemoteAttachNetworkChange) {
+        let restarted = restartRemoteAttachChildren(startedBefore: change.at)
+        let cleared = expireRemoteReconnectBackoff(at: change.at)
+
+        let triggers = change.triggers.map(\.rawValue).joined(separator: "+")
+        let previous = change.previous?.description ?? "none"
+        let current = change.current?.description ?? "none"
+        remoteAttachLogger.info(
+            """
+            network change (\(triggers, privacy: .public)): \(previous, privacy: .public) -> \
+            \(current, privacy: .public); restarted \(restarted, privacy: .public) attach(es), \
+            cleared backoff on \(cleared, privacy: .public)
+            """)
     }
 }
 

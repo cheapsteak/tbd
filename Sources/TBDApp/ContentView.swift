@@ -17,6 +17,10 @@ struct ContentView: View {
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.
     @Environment(\.colorScheme) private var colorScheme
+    /// The remote session whose toolbar Stop is awaiting confirmation. Holds
+    /// the selection itself, not a Bool, so the dialog stops the session it
+    /// was raised for even if the selection has moved on.
+    @State private var remoteStopConfirm: RemoteSessionSelection?
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -32,6 +36,14 @@ struct ContentView: View {
                 worktree: worktree,
                 repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
             )
+        } else if let selection = appState.selectedRemoteSession {
+            // A Remote-section row selects no worktree; name the session the
+            // way `WorktreeTitleView` names a local one. (An adopted lane's
+            // row IS a worktree selection and takes the branch above.)
+            Text(appState.remoteSessionDisplayName(for: selection))
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
@@ -273,6 +285,54 @@ struct ContentView: View {
                     }
                 }
 
+                // A selected remote session's actions, where a local
+                // session's live: plain buttons (no badges to flatten) on
+                // one fused capsule, like back/forward.
+                if let selection = appState.selectedRemoteSession {
+                    let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+                    let showsStop = appState.remoteSessionShowsStop(selection)
+                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                    if showsReconnect || showsStop || showsTranscriptToggle {
+                        ToolbarItemGroup(placement: .primaryAction) {
+                            if showsTranscriptToggle {
+                                // One preference for every remote session
+                                // (`remoteTranscriptOpen`), not per session.
+                                Button {
+                                    appState.toggleRemoteTranscriptOpen()
+                                } label: {
+                                    Image(systemName: appState.remoteTranscriptOpen
+                                          ? "text.bubble.fill" : "text.bubble")
+                                }
+                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                            }
+                            if showsReconnect {
+                                // Restarts the local `attach` child in place —
+                                // the way out of a pane whose transport died
+                                // without the child exiting, which nothing
+                                // else can detect.
+                                Button {
+                                    appState.reconnectRemoteSession(selection)
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .help("Reconnect — restart this session's attach connection")
+                            }
+                            if showsStop {
+                                Button {
+                                    remoteStopConfirm = selection
+                                } label: {
+                                    Image(systemName: "stop.circle")
+                                }
+                                .help("Stop this remote session")
+                            }
+                        }
+
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
+                    }
+                }
+
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         // Defer the toggle one run-loop tick and skip the explicit
@@ -294,6 +354,30 @@ struct ContentView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .overlay(alignment: .bottomTrailing) { ToastOverlay() }
+        .confirmationDialog(
+            "Stop \(remoteStopConfirm.map { appState.remoteSessionDisplayName(for: $0) } ?? "session")?",
+            isPresented: Binding(
+                get: { remoteStopConfirm != nil },
+                set: { if !$0 { remoteStopConfirm = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: remoteStopConfirm
+        ) { selection in
+            Button("Stop", role: .destructive) {
+                // Re-checked at confirm time: the session may have gone, or
+                // the inventory turned stale, while the dialog was open.
+                guard appState.remoteSessionShowsStop(selection) else { return }
+                Task { await appState.stopRemoteSession(selection) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This asks the provider to terminate the remote session.")
+        }
+        // Withdraws the dialog once Stop stops being offered for the session
+        // it was raised for, rather than leaving a confirm that can't act.
+        .onChange(of: remoteStopConfirm.map { appState.remoteSessionShowsStop($0) }) { _, stillOffered in
+            if stillOffered == false { remoteStopConfirm = nil }
+        }
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             overlayCoordinator.close()
             markSelectedWorktreesAsRead(newSelection)
@@ -354,6 +438,18 @@ struct ContentView: View {
                 set: { if !$0 { appState.alertMessage = nil } }
             )
         ) {
+            // Read once: every button below closes the alert, which clears
+            // the path, so each action must use this captured copy.
+            if let path = appState.alertRevealPath {
+                Button("Copy Path") {
+                    appState.pasteboardWriter(path)
+                    appState.alertMessage = nil
+                }
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                    appState.alertMessage = nil
+                }
+            }
             Button("OK") { appState.alertMessage = nil }
         } message: {
             Text(appState.alertMessage ?? "")
@@ -1044,12 +1140,9 @@ struct PRButtonLabel: View {
     /// outputs are `\\`, `\-` and `\|`), so a literal `"nil"` reason no longer
     /// reads as an absent one either.
     ///
-    /// `nonisolated` because it is a pure string transform and the other
-    /// once-materialized menu in the app — the status bar's `+N` overflow —
-    /// keys itself the same way from nonisolated
-    /// `PRBindingPresentation.menuRowsID`. `PRButtonLabel`'s `View` conformance
-    /// infers whole-type `@MainActor` isolation, which would otherwise put this
-    /// out of reach there and invite a second, subtly different copy.
+    /// `nonisolated` because it is a pure string transform with no actor of
+    /// its own; `PRButtonLabel`'s `View` conformance would otherwise infer
+    /// whole-type `@MainActor` isolation onto it.
     nonisolated static func escapedIDField(_ value: String?) -> String {
         guard let value else { return #"\0"# }
         return value
@@ -1214,7 +1307,7 @@ private struct FilePanelDivider: View {
         Color.clear
             .frame(width: 8)
             .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
-            .cursor(.resizeLeftRight)
+            .pointerStyle(.columnResize)
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in

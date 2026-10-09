@@ -438,6 +438,18 @@ struct ModelProxySpawner: Sendable {
         posix_spawn_file_actions_adddup2(&actions, logFD, 1)
         posix_spawn_file_actions_adddup2(&actions, logFD, 2)
         posix_spawn_file_actions_adddup2(&actions, lockSource, Self.lockDescriptorNumber)
+        // From `/`, never the daemon's inherited cwd, for the reason
+        // `HolderSpawner.holderWorkingDirectory` states: the proxy outlives
+        // the daemon at `ppid == 1`, and a cwd inside whichever worktree
+        // launched the daemon would have the orphan-process sweep read it as
+        // an escaped job of that worktree once it was archived.
+        // Checked for the same reason as the holder's: an unrecorded chdir
+        // would spawn the proxy in the daemon's cwd. Returns the error number.
+        let chdirStatus = posix_spawn_file_actions_addchdir_np(
+            &actions, HolderSpawner.holderWorkingDirectory)
+        guard chdirStatus == 0 else {
+            throw Error.launchFailed(errno: chdirStatus)
+        }
 
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)

@@ -3,18 +3,22 @@
 TBD is built from source. `tbd update` moves the whole installation — daemon,
 app and CLI — to the head of `main`, building out of place and handing the
 running daemon over to its successor without killing the sessions underneath
-it. This page is the operator's view: what the command does, what happens to
-live sessions while it runs, the three modes it can run in, and how to get back
-to the build you were on.
+it. It can instead install the build CI published for that commit, compiling
+only the app. This page is the operator's view: what the command does, what
+happens to live sessions while it runs, the three modes it can run in, where
+the binaries come from, and how to get back to the build you were on.
 
 The design behind it is
-[`docs/specs/2026-09-04-automatic-version-updates-design.md`](specs/2026-09-04-automatic-version-updates-design.md).
+[`docs/specs/2026-09-04-automatic-version-updates-design.md`](specs/2026-09-04-automatic-version-updates-design.md),
+and the release download is
+[`docs/specs/2026-09-23-release-pipeline-design.md`](specs/2026-09-23-release-pipeline-design.md).
 
 ## The short version
 
 ```bash
 tbd version                      # what is running, and whether main has moved
 tbd update                       # build the latest main and hand over
+tbd update --from-release        # install CI's verified build instead
 tbd config set update-mode check # get told when main moves; act by hand
 ```
 
@@ -40,15 +44,26 @@ these steps in order.
   running, the fetched script takes over with the same arguments. That is how
   the procedure updates itself, and an environment marker holds it to a single
   hop.
-- **Stamps the build identity.** `TBDBuildIdentity.json` lands in the build
-  directory before the compiler runs, recording the commit, the branch, the
-  build time, the clone's path, and whether the tree was dirty. Every binary
-  reads the sidecar beside it, which is how `tbd version` knows what is
-  running.
 - **Builds** the same products `scripts/restart.sh` builds — `TBDDaemon`,
-  `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
-  `scripts/swift-safe`, with the same shared module cache. A failed build
-  stops here and the running installation is untouched.
+  `TBDApp`, `TBDCLI`, `TBDHolder`, `TBDPeerHelper` and `TBDModelProxy` —
+  through `scripts/swift-safe`, with the same shared module cache. With the
+  update source at `release`, it downloads and verifies the published build
+  instead and compiles only `TBDApp`; see "Where the binaries come from". A failed build
+  stops here and the running installation, and the clone's own build
+  identity sidecar (below), are both untouched. The run's full compiler output
+  is kept in `~/tbd/updates/build.log`, overwritten by the next run; a failure
+  logs the first `error:` lines and that path. When `scripts/swift-safe` exits
+  75 the build never got the machine-wide build slot, so nothing was compiled,
+  and the log says so rather than calling it a failed build.
+- **Stamps the build identity**, once the build above actually succeeded.
+  `TBDBuildIdentity.json` lands in the build directory recording the commit,
+  the branch, the build time, the clone's path, and whether the tree was
+  dirty. Every binary reads the sidecar beside it, which is how `tbd version`
+  knows what is running. Stamping only after success matters because
+  `~/tbd/updates/src` is one long-lived clone every update reuses: a build
+  that failed here left old binaries in place, and had the sidecar been
+  written first, it would have named the commit that never actually built,
+  with nothing to correct it until the clone's next successful build.
 - **Assembles, signs and installs** `/Applications/TBD.app`, using the same
   code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
@@ -56,6 +71,15 @@ these steps in order.
   and stays there — it is what a failed handover puts back, and afterwards it
   is the quickest way to return to the build you were on.
 - **Hands the daemon over.** See below.
+- **Seeds the saved tmux fallback** on a manual run, with or without
+  `--no-app`; an `--auto` run skips this step. When
+  `~/tbd/tmux-executable-path` is missing or names no usable executable, the
+  update writes the tmux its shell finds on `PATH` there. A login relaunch
+  ignores the bundle's recorded `PATH`, and this file is how that launch still
+  finds a package-manager tmux. A valid saved path is never replaced. An
+  `--auto` run's `PATH` is the daemon's plus fixed Homebrew directories, so a
+  tmux it found would be a guess rather than your shell's choice. See
+  [the design](specs/2026-09-22-tmux-fallback-install-seeding-design.md).
 - **Restarts the app**, unless you pass `--no-app`. The app is a viewer;
   nothing in it holds a session.
 - **Wakes what the handover parked**, unless you pass `--no-wake`.
@@ -129,18 +153,91 @@ The run ends with a summary naming the previous commit, the new commit, how
 many commits it advanced, how many sessions the reconcile parked, how many were
 woken, and how many could not be.
 
+## Where the binaries come from
+
+By default `tbd update` compiles every product in the update clone. The
+release workflow (`.github/workflows/release.yml`) also publishes a release
+build for every commit on `main` whose tests passed: `TBDDaemon`, `TBDCLI`,
+`TBDHolder`, `TBDPeerHelper` and `TBDModelProxy`, with their resource bundles,
+in the `main-builds` prerelease on GitHub. With the update source set to
+`release`, `tbd update` installs that build and compiles only `TBDApp`, which
+cannot yet run from a build made on another machine.
+
+The update source is `build` or `release`. The first of these that is set
+decides it:
+
+- `--from-release` — this run only.
+- `TBD_UPDATE_SOURCE=release` in the environment.
+- `~/tbd/updates/update-source` containing `release` — every run, `auto`
+  included. Remove the file to go back.
+- The shipped default, `build`.
+
+A release install does this:
+
+- **Finds the newest published commit**, walking back up to ten commits along
+  `main` when the head's build is not published yet. When the running build is
+  already that commit or newer, it installs nothing.
+- **Verifies before it unpacks anything.** The archive must match its
+  published SHA-256. Its build-provenance attestation must verify with `gh
+  attestation verify`, which proves it was built by `release.yml` in this
+  repository. Every file must match the archive's manifest. An `--auto` run
+  that cannot check the attestation — no `gh`, or not signed in — refuses. A
+  manual run warns and continues on the checksum. A check that fails stops
+  the run in every mode, and nothing is built or installed in its place.
+- **Unpacks to `~/tbd/updates/prebuilt/<commit>/`**, builds `TBDApp` into it,
+  and points the update clone's `.build/release` at it. The handover, the
+  app's reboot respawn and the CLI link all look there, so everything after
+  this is the same as after a local build. The build identity records
+  `provenance: release` and the CI run it came from.
+- **Keeps two trees**: the one now running and the one it replaced, which is
+  what `~/tbd/updates/previous/TBD.app` pairs with. Every run reconciles
+  `~/tbd/updates/prebuilt/` at its start and on every exit, so a dry run or a
+  failed run keeps nothing it downloaded and older trees are deleted.
+
+When nothing is published, a manual run builds locally as it always has, and
+an `--auto` run logs it and waits for the next check. A machine that is not
+Apple silicon always builds locally. `--debug` always builds locally.
+
+While the standing source is `release`, the update writes
+`~/tbd/updates/check-ref`, and the daemon's check compares against the
+`main-builds` tag instead of `main`, so "update available" means a published
+build exists. `tbd update --check` writes it too.
+
 ## Useful flags
 
 - `--check` — report the comparison and stop. Changes nothing, creates no
   clone.
 - `--dry-run` — fetch and build, install nothing. The last step before the
-  running installation changes.
+  running installation changes. With the release source it downloads,
+  verifies and builds the app, then stops.
+- `--from-release` — install the published build for this run; see "Where
+  the binaries come from".
 - `--debug` — build the debug configuration instead of release.
 - `--no-app` — leave the running app alone; hand the daemon over anyway.
 - `--no-wake` — install and hand over, but wake nothing.
 - `--wake-only` — wake every recovery-parked session against the running
   daemon, and do nothing else.
 - `--remote <url>` — fetch from this URL instead of the resolved default.
+
+## Running it from inside another project's dev shell
+
+A terminal inside a nix/direnv (or similar) dev shell exports variables that
+point the compiler at that shell's own SDK — `SDKROOT`, `DEVELOPER_DIR`,
+`CPATH`, `LIBRARY_PATH`, the `NIX_CFLAGS_*`/`NIX_LDFLAGS*` family, and
+`IN_NIX_SHELL`. Left in place, they make a dependency fail to build with an
+error such as `'sqlite3.h' file not found`. `tbd update` (and `scripts/restart.sh`,
+around its build) clears them and says so in the log, for example
+`note: ignoring inherited compiler-environment variables for the build
+(SDKROOT, IN_NIX_SHELL)`. Your own shell is not touched.
+
+Left alone on purpose: `TBD_SWIFT_BIN`, `TOOLCHAINS`, and an `SDKROOT` or
+`DEVELOPER_DIR` that points into an installed Xcode or the Command Line Tools.
+That covers an Xcode under `/Applications`, the Command Line Tools, anything
+under the developer directory `xcode-select -p` reports (so an Xcode installed
+elsewhere counts once it is selected), and a symlink that resolves to any of
+those.
+`TBD_KEEP_BUILD_ENV=1` turns the clearing off entirely. `PATH` is not edited,
+so a dev shell that puts a different compiler first on it still wins.
 
 ## Going back to the previous build
 

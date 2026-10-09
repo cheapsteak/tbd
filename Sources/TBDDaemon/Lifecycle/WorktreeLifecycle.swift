@@ -94,6 +94,11 @@ public struct WorktreeLifecycle: Sendable {
     /// resolves for the gate above, at no extra subprocess cost. An actor
     /// reference for the same reason `conflictSweepCache` is one.
     public let branchTipTracker = BranchTipTracker()
+    /// Notices when a worktree's remote-tracking tip (`origin/<branch>`) moves,
+    /// from the same tips map, and makes its PR check due now. An actor
+    /// reference, so the copy `Daemon` wires and the copy the sweep runs on
+    /// share one watch.
+    public let remoteTipTracker = RemoteTipTracker()
     /// In-flight `preSession` runs, keyed by worktree ID. An actor reference,
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).
@@ -303,6 +308,24 @@ public struct WorktreeLifecycle: Sendable {
     /// never-throws capture (failures are logged inside `captureOnClose` and
     /// never block the teardown).
     func captureThenKillWindow(terminal: Terminal, server: String) async {
+        // Refuse to capture or kill a pane that belongs to a DIFFERENT
+        // terminal — see `TmuxManager.paneOwnership`. Shared by both
+        // callers of this function (explicit archive, and the vanished-
+        // worktree reconcile sweep), so guarding here covers both: a stale
+        // worktree's recorded coordinate colliding with a live sibling
+        // worktree's terminal (several worktrees of one repo share a tmux
+        // server) must not capture the stranger's screen into this row's
+        // Closed Terminals history, nor destroy their window.
+        let ownership = await tmux.paneOwnership(
+            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID)
+        guard ownership.permitsTeardown else {
+            logger.warning("""
+                captureThenKillWindow: leaving window \(terminal.tmuxWindowID, privacy: .public) \
+                untouched for terminal \(terminal.id, privacy: .public) — \
+                \(ownership.refusalDetail ?? "", privacy: .public)
+                """)
+            return
+        }
         await db.terminalHistory.captureOnClose(terminal: terminal) {
             try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
         }
@@ -328,9 +351,9 @@ public struct WorktreeLifecycle: Sendable {
     /// (`RowlessHolderCollector`). The holder inventory in
     /// `WorktreeLifecycle+Reconcile` does not help here: it judges rows that
     /// still exist, and `AgentReaper`'s holder leg reads the same rows.
-    /// Nothing is captured for Closed Terminals
-    /// either: a holder's screen lives in the daemon's own emulator, not in a
-    /// tmux pane, so there was never a capture to preserve.
+    /// It writes no Closed Terminals entry itself: the teardowns that keep
+    /// history call `recordHolderClosedTerminal` first, because the capture
+    /// reads the daemon's reader and this disposal releases it.
     func disposeHolder(for terminal: Terminal) async -> String? {
         await Self.disposeHolder(
             for: terminal, registry: holderRegistry, config: db.config,
@@ -370,5 +393,45 @@ public struct WorktreeLifecycle: Sendable {
                 + "no holder registry, so its holder and job were left running"
         }
         return await registry.abandon(terminal: terminal)
+    }
+
+    /// The holder half of `captureThenKillWindow`'s capture: write a holder
+    /// row's Closed Terminals entry. The one place every history-keeping holder
+    /// teardown goes through — `terminal.delete`, worktree archive, reconcile's
+    /// auto-archive, the hook-tab close, scratch archive, and the Watch Desk
+    /// close — and never the hard-delete paths (forget, recovery, scratch
+    /// delete), which wipe the worktree's history right after.
+    ///
+    /// **Must run before the holder is disposed**: the capture is read from the
+    /// daemon's reader, and disposal releases it. Never throws and never
+    /// blocks the teardown — a failed write is logged inside the store.
+    ///
+    /// Live versus suspended is the reader's own answer
+    /// (`HolderReader.closedTerminalCapture`), read from its drain state:
+    ///
+    /// - **Draining** — the daemon's emulator is the live store, so the entry
+    ///   carries its retained scrollback plus viewport.
+    /// - **Suspended** (a viewer holds the pty), mid-transition, released, or
+    ///   no registry — the entry is written without a capture. A screen frozen
+    ///   at attach time must never be presented as the final screen. The
+    ///   viewed-tab capture waits on the viewer-answered screen pull (#851).
+    ///
+    /// Either way the entry carries the row's Claude session id, which is all
+    /// `terminalHistory.revive` needs to resume a Claude tab.
+    static func recordHolderClosedTerminal(
+        _ terminal: Terminal, registry: HolderRegistry?, history: TerminalHistoryStore
+    ) async {
+        let reader = await registry?.reader(for: terminal.id)
+        await recordHolderClosedTerminal(terminal, reader: reader, history: history)
+    }
+
+    /// The same, given the reader directly — the seam the two branches are
+    /// tested through, since a registry publishes a reader only for a real
+    /// holder.
+    static func recordHolderClosedTerminal(
+        _ terminal: Terminal, reader: HolderReader?, history: TerminalHistoryStore
+    ) async {
+        let capture = await reader?.closedTerminalCapture()
+        await history.recordOnClose(terminal: terminal, capture: capture)
     }
 }

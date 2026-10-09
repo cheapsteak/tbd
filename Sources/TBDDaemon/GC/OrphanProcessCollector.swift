@@ -132,6 +132,30 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
     }
 }
 
+/// One holder-transport session row whose worktree is not archived, reduced to
+/// what `OrphanProcessCollector.liveHolderSessionPIDs` needs to spare it.
+public struct LiveHolderSession: Sendable, Equatable {
+    public var terminalID: UUID
+    public var holderPID: Int32?
+    public var childPID: Int32?
+    /// The job's identity anchor, spelled as every reader spells it:
+    /// `holderChildStartedAt ?? createdAt` (see `HolderChildRecord.createdAt`).
+    public var childStartedAt: Date
+
+    public init(terminalID: UUID, holderPID: Int32?, childPID: Int32?, childStartedAt: Date) {
+        self.terminalID = terminalID
+        self.holderPID = holderPID
+        self.childPID = childPID
+        self.childStartedAt = childStartedAt
+    }
+
+    public init(_ terminal: Terminal) {
+        self.init(
+            terminalID: terminal.id, holderPID: terminal.holderPID, childPID: terminal.childPID,
+            childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+    }
+}
+
 /// Reclaims processes that outlived the worktree they were rooted in — the
 /// named reconciler for that resource class
 /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
@@ -204,11 +228,14 @@ public struct OrphanProcessCollector: Sendable {
     ///   exclusion holds for every process the reap volley reaches and not only
     ///   for the root that entered it.
     /// - `pid > 1`, and neither `ourPID` nor one of its ancestors.
-    /// - not a `TBDDaemon` or `TBDApp` process. **Not hypothetical:** the
-    ///   daemon runs at `ppid == 1` with its cwd inside a TBD tree — when
-    ///   `scripts/restart.sh` is run from a worktree, that worktree — so
-    ///   archiving it would otherwise have the sweep SIGKILL the live daemon
-    ///   running the sweep.
+    /// - not a `TBDDaemon`, `TBDApp` or `TBDModelProxy` process. **Not
+    ///   hypothetical:** the daemon runs at `ppid == 1` with its cwd inside a
+    ///   TBD tree — when `scripts/restart.sh` is run from a worktree, that
+    ///   worktree — so archiving it would otherwise have the sweep SIGKILL the
+    ///   live daemon running the sweep. The model proxy has the same shape: it
+    ///   outlives the daemon at `ppid == 1` and is adopted by the next one, so
+    ///   a proxy spawned before `ModelProxySpawner` pinned its cwd to `/` keeps
+    ///   the launching worktree's cwd for as long as it is adopted.
     /// - its cwd is readable, and resolves under a TBD-managed root positively
     ///   known to be dead — an archived worktree (or its scratchpad), or a
     ///   `.deleting/<uuid>` queue entry. A directory nobody can attest is dead,
@@ -226,9 +253,11 @@ public struct OrphanProcessCollector: Sendable {
         roots: TBDProcessRoots,
         ourUID: uid_t,
         ourPID: Int32,
-        graceSeconds: Int
+        graceSeconds: Int,
+        exempt: Set<Int32> = []
     ) -> [OrphanProcessCandidate] {
-        let protected = protectedPIDs(processes: processes, ourPID: ourPID, ourUID: ourUID)
+        let protected = protectedPIDs(
+            processes: processes, ourPID: ourPID, ourUID: ourUID, exempt: exempt)
         // How stale the cwd map is by the time this snapshot was read. Never
         // negative, so a clock that went backwards cannot weaken the gate.
         let cwdAge = max(0, now().timeIntervalSince(cwdsCapturedAt))
@@ -333,7 +362,7 @@ public struct OrphanProcessCollector: Sendable {
         return elapsed >= Double(graceSeconds)
     }
 
-    /// `ourPID`, its ancestors, every `TBDDaemon`/`TBDApp` process in the
+    /// `ourPID`, its ancestors, every `isTBDBinary` process in the
     /// snapshot, and every process owned by a uid other than `ourUID`. Never
     /// signalled, and never descended into when computing a descendant closure.
     ///
@@ -351,13 +380,18 @@ public struct OrphanProcessCollector: Sendable {
     /// instead. The grandchild is not lost to the reconciler either: when its
     /// foreign parent exits, it reparents to launchd and the next sweep sees it
     /// as an orphan root of its own.
+    ///
+    /// `exempt` is protected the same way — the caller's list of processes it
+    /// can attest belong to something live, today `liveHolderSessionPIDs`.
     func protectedPIDs(
-        processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t
+        processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t,
+        exempt: Set<Int32> = []
     ) -> Set<Int32> {
         var byPID: [Int32: ProcessSnapshotEntry] = [:]
         for entry in processes { byPID[entry.pid] = entry }
 
         var protected: Set<Int32> = [0, 1, ourPID]
+        protected.formUnion(exempt)
         // Walk our own ancestry. Bounded by `protected` growing on every step,
         // so a cyclic (corrupt) snapshot terminates instead of hanging a sweep.
         var cursor = ourPID
@@ -374,8 +408,15 @@ public struct OrphanProcessCollector: Sendable {
         return protected
     }
 
-    /// True when the executable this process is running is `TBDDaemon` or
-    /// `TBDApp`.
+    /// True when the executable this process is running is `TBDDaemon`,
+    /// `TBDApp` or `TBDModelProxy` — the TBD binaries whose lifecycles are
+    /// owned elsewhere (the proxy's by `ModelProxySupervisor`'s adoption and
+    /// retirement).
+    ///
+    /// `TBDHolder` is deliberately NOT here. A holder whose session row is gone
+    /// is a genuine orphan this sweep must still be able to reach; a holder
+    /// serving a live session is spared per session, by
+    /// `liveHolderSessionPIDs`, instead of every holder by name.
     ///
     /// `ps -o command=` prints argv space-joined and unquoted, so where argv[0]
     /// ends is genuinely ambiguous: a home directory named `Jane Roe` yields
@@ -387,18 +428,112 @@ public struct OrphanProcessCollector: Sendable {
     /// process's ancestry.
     ///
     /// So every whitespace-delimited token is checked, and any one of them
-    /// having basename `TBDDaemon`/`TBDApp` protects the process.
+    /// having one of those basenames protects the process.
     /// That over-matches — a stray argument spelled `.../TBDApp` protects its
     /// process too — and over-matching is the keep-favoring direction, which is
     /// the one this whole sweep takes. Matching stays on the **basename**, so a
     /// path that merely contains the name (every TBD worktree does) is still
     /// not mistaken for the binary.
+    static let protectedBinaryBasenames: Set<String> = ["TBDDaemon", "TBDApp", "TBDModelProxy"]
+
     static func isTBDBinary(_ command: String) -> Bool {
         for token in command.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
             let basename = token.split(separator: "/").last.map(String.init) ?? String(token)
-            if basename == "TBDDaemon" || basename == "TBDApp" { return true }
+            if Self.protectedBinaryBasenames.contains(basename) { return true }
         }
         return false
+    }
+
+    // MARK: - Live holder sessions
+
+    /// The pids of every `TBDHolder`, and every job one forked, that belongs to
+    /// a holder-transport session whose worktree is not archived. The caller
+    /// passes the result as `exempt`, so none of them is ever signalled or
+    /// descended into.
+    ///
+    /// **Why cwd is not enough here.** A holder outlives the daemon at
+    /// `ppid == 1`, which is exactly the shape this sweep hunts, and a holder
+    /// spawned before `HolderSpawner` pinned its cwd to `/` carries the cwd of
+    /// whichever worktree launched the daemon. Archive that worktree and every
+    /// such holder — serving sessions in other, live worktrees — reads as an
+    /// escaped job of a dead one. Measured: one sweep killed six holders and
+    /// their jobs this way, and their terminal rows went on naming holders that
+    /// no longer existed.
+    ///
+    /// Identity runs through `ProcessIdentityCheck`, the check
+    /// `AgentReaper.decideHolderChild` uses, with the **opposite** policy:
+    /// that leg decides whether to signal, so only `.same` kills; this one
+    /// decides whether to *spare*, so only an answer that positively says the
+    /// pid now names somebody else — gone, started at another time, or running
+    /// another executable — withholds the exemption. An unreadable start time
+    /// or command line protects.
+    ///
+    /// - A **holder** is identified by its snapshot command line naming the
+    ///   session (`--session <terminal id>`), which is unique by construction —
+    ///   the creation lock admits one holder per session — and does not depend
+    ///   on a start time no row records. Every holder in the snapshot is
+    ///   tested, so one is spared even when its row's `holderPID` is stale or
+    ///   not yet written, and it costs no `ps` of its own. The one case the
+    ///   scan cannot decide is a recorded `holderPID` whose snapshot command
+    ///   is empty — unreadable — and that keeps, as uncertainty does here.
+    /// - A **job** is identified as `AgentReaper` identifies it: started within
+    ///   `AgentReaper.defaultHolderIdentityWindow` of the row's anchor, and
+    ///   presenting an executable a holder's job could have.
+    public func liveHolderSessionPIDs(
+        _ sessions: [LiveHolderSession], processes: [ProcessSnapshotEntry]
+    ) -> Set<Int32> {
+        guard !sessions.isEmpty else { return [] }
+        let sessionIDs = Set(sessions.map(\.terminalID))
+        var exempt: Set<Int32> = []
+        for entry in processes {
+            if let id = Self.holderSessionID(entry.command), sessionIDs.contains(id) {
+                exempt.insert(entry.pid)
+            }
+        }
+        let commandByPID = Dictionary(
+            processes.map { ($0.pid, $0.command) }, uniquingKeysWith: { first, _ in first })
+        for session in sessions {
+            // The scan above already decided every holder whose command line
+            // could be read; only an unreadable one is left to the row.
+            if let holderPID = session.holderPID, holderPID > 1,
+               let command = commandByPID[holderPID],
+               command.trimmingCharacters(in: .whitespaces).isEmpty {
+                exempt.insert(holderPID)
+            }
+            if let childPID = session.childPID, childPID > 1,
+               !Self.refutesIdentity(ProcessIdentityCheck.verify(
+                   pid: childPID,
+                   startedWithin: AgentReaper.defaultHolderIdentityWindow,
+                   of: session.childStartedAt,
+                   executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+                   signaller: signaller)) {
+                exempt.insert(childPID)
+            }
+        }
+        return exempt
+    }
+
+    /// True only for the answers that say the pid names a different process —
+    /// or none. Everything uncertain is not a refutation.
+    static func refutesIdentity(_ verdict: ProcessIdentityVerdict) -> Bool {
+        switch verdict {
+        case .notRunning, .startTimeMismatch, .foreignExecutable: return true
+        case .same, .startTimeUnreadable, .commandUnreadable: return false
+        }
+    }
+
+    /// The session a `TBDHolder` command line serves, or nil when the command
+    /// is not a holder's. Matched on any token's basename, for the reason
+    /// `isTBDBinary` gives: `ps` prints argv unquoted, so a path with a space
+    /// in it splits.
+    static func holderSessionID(_ command: String) -> UUID? {
+        let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        let isHolder = tokens.contains { token in
+            (token.split(separator: "/").last.map(String.init) ?? String(token)) == "TBDHolder"
+        }
+        guard isHolder, let flag = tokens.firstIndex(of: "--session"),
+              tokens.index(after: flag) < tokens.endIndex else { return nil }
+        return UUID(uuidString: String(tokens[tokens.index(after: flag)]))
     }
 
     // MARK: - Identity across time
@@ -689,7 +824,7 @@ public struct OrphanProcessCollector: Sendable {
         case .timedOut:
             logger.error("gc: ps timed out after 60s")
             return nil
-        case .completed(let status, let stdout, _):
+        case .completed(let status, let stdout, _), .signaled(let status, let stdout, _):
             guard status == 0 else {
                 logger.error("""
                 gc: ps exited \(status, privacy: .public) — treating the process snapshot as unavailable

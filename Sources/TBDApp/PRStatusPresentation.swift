@@ -11,6 +11,12 @@ import TBDShared
 /// (fact, now) precisely so both render sites compose the same words from the
 /// same inputs and cannot drift.
 enum PRFreshness {
+    /// How young a reading is while `checkedLabel` calls it "checked just
+    /// now". A surface that stays quiet about a fresh reading's age keys its
+    /// silence to this same window, so it is silent exactly while the label
+    /// would have said "just now".
+    static let justNowWindow: TimeInterval = 5 * 60
+
     /// Age buckets, coarsening as they grow.
     ///
     /// Deliberately not per-second or per-minute. The toolbar's split button is
@@ -23,7 +29,7 @@ enum PRFreshness {
         guard let observedAt else { return "last checked at an unknown time" }
         let seconds = Int(max(0, now.timeIntervalSince(observedAt)))
         switch seconds {
-        case ..<300:
+        case ..<Int(justNowWindow):
             return "checked just now"
         case ..<3600:
             // Floored to a 5-minute step, so the string is stable between steps.
@@ -81,6 +87,7 @@ struct PRStatusPresentation: Equatable {
         case pending
         case nonMergeable
         case draft
+        case closed
         case mergeable
         case merged
     }
@@ -114,6 +121,7 @@ struct PRStatusPresentation: Equatable {
             )
         case .nonMergeable:     return .red
         case .draft:            return .secondary
+        case .closed:           return .gray
         case .mergeable:
             // Light: muted forest #3D7D40.
             // Dark:  GitHub success.fg #3FB950.
@@ -138,6 +146,7 @@ struct PRStatusPresentation: Equatable {
             }
         case .nonMergeable:     return .systemRed
         case .draft:            return .secondaryLabelColor
+        case .closed:           return .systemGray
         case .mergeable:
             return NSColor(name: nil) { appearance in
                 appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -179,7 +188,7 @@ struct PRStatusPresentation: Equatable {
         case .merged:
             return PRStatusPresentation(glyph: .asset("git-merge"), colorSemantic: .merged)
         case .closed:
-            return PRStatusPresentation(glyph: .asset("git-pull-request-closed"), colorSemantic: .nonMergeable)
+            return PRStatusPresentation(glyph: .asset("git-pull-request-closed"), colorSemantic: .closed)
         }
     }
 

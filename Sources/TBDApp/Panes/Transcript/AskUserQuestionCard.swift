@@ -14,6 +14,9 @@ struct AskUserQuestionCard: View {
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
+    /// The transcript file to read a full body from when there is no
+    /// terminal — see `TranscriptFullBodySource`.
+    var detailPath: String? = nil
     /// When true the card renders at a STABLE height that never changes after
     /// first layout: question bubbles are always-expanded and non-collapsible,
     /// and the async `fetchFull`/`fetchFullInput` truncation footers are
@@ -80,6 +83,10 @@ struct AskUserQuestionCard: View {
         return match.freeformAnswer ?? raw
     }
 
+    var fullBodySource: TranscriptFullBodySource? {
+        TranscriptFullBodySource.resolve(terminalID: terminalID, detailPath: detailPath)
+    }
+
     var body: some View {
         let parsedInput = decodeInput()
         let parsedAnswers = resultText.map(AskUserQuestionParser.parseAnswers) ?? []
@@ -132,13 +139,13 @@ struct AskUserQuestionCard: View {
             // message, so they're suppressed — the card shows content as
             // available at build time and never changes height. (#129)
             if !staticHeight {
-                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                if let cap = inputTruncatedTo, fullInputJSON == nil, fullBodySource != nil {
                     TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
                         Task { await fetchFullInput() }
                     }
                     .padding(.horizontal, 12)
                 }
-                if let r = result, let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
+                if let r = result, let cap = r.truncatedTo, fullResultText == nil, fullBodySource != nil {
                     TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
                         Task { await fetchFull() }
                     }
@@ -194,18 +201,14 @@ struct AskUserQuestionCard: View {
     }
 
     private func fetchFull() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
-            await MainActor.run { fullResultText = r.text }
+        if let r = await fullBodySource?.fetch(itemID: id, appState: appState) {
+            fullResultText = r.text
         }
     }
 
     private func fetchFullInput() async {
-        guard let terminalID else { return }
-        let path = appState.transcriptPath(forTerminal: terminalID)
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input", path: path) {
-            await MainActor.run { fullInputJSON = r.text }
+        if let r = await fullBodySource?.fetch(itemID: "\(id)#input", appState: appState) {
+            fullInputJSON = r.text
         }
     }
 }

@@ -130,16 +130,15 @@ tmux's environment plumbing.
 ### Typing into a session
 
 - **`send-keys -l`** (literal text) — `sendKeysCommand` (`:487-489`). Path:
-  **default**. Two callers: the rate-limit auto-continue rail
-  (`LimitResumeActuator.swift:424`) and the auto-`/login` pump
-  (`RPCRouter+TerminalHandlers.swift:535`).
+  **default**. One caller: the rate-limit auto-continue rail
+  (`LimitResumeActuator.swift:424`).
 - **`send-keys`** (key names) — `sendKeyCommand` (`:492-494`). Path: **default**.
   Callers: the auto-continue rail's Escape/Enter bracket
   (`LimitResumeActuator.swift:422, 426`), the graceful pane interrupt used before
   parking (`HibernationCoordinator.swift:1162-1166` and the twin at
   `RPCRouter+TerminalHandlers.swift:2103-2108`), the trailing Enter after a
   `terminal.send` paste (`:2392, 2405`) and after a verified re-delivery
-  (`:2554`), the login pump's Enter (`:536`), and the supervision desk's nudge
+  (`:2554`), and the supervision desk's nudge
   and wrap-up Enters (`DeskSessionManager.swift:565, 702`).
 - **`send-keys … Enter`** (command form) — `sendCommandArgs` (`:727-729`), one
   caller: typing `/exit` when parking a Claude session politely
@@ -165,19 +164,15 @@ Four capture shapes exist. Under the "No TUI screen-scraping" rule, only two of
 them classify what they read, and both are named exceptions.
 
 - **`capture-pane -p`** — `capturePaneCommand` (`:526-528`). Path: **default**.
-  Two callers, and they are on opposite sides of the rule. `handleTerminalOutput`
-  (`:1324-1344`) passes the text through verbatim as the result of the
-  `terminal.output` RPC, which is what `tbd terminal output` prints — sanctioned
-  pass-through. The auto-`/login` pump (`:531`) feeds it to
-  `LoginSessionCoordinator.classifyPane` (`:94`), which reads the rendered TUI to
-  decide when Claude is ready for `/login` — **sanctioned scraper #1**, exempted
-  in `.swiftlint.yml:327` because no machine interface exists before login.
+  One caller: `handleTerminalOutput` (`:1324-1344`) passes the text through
+  verbatim as the result of the `terminal.output` RPC, which is what
+  `tbd terminal output` prints — sanctioned pass-through.
 - **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:531-533`). Path:
   **default**. One caller: `performHibernate`
   (`HibernationCoordinator.swift:375`), which uses it twice over. The capture is
   stored as the parked pane's display snapshot (verbatim), *and* it is fed to
-  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #2**,
-  exempted at `.swiftlint.yml:329`, the rail that refuses to park a session with
+  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #1**,
+  exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
   unsent text in its composer. The `-e` is load-bearing: dimness is the only
   thing distinguishing a ghost suggestion from typed input.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
@@ -188,7 +183,7 @@ them classify what they read, and both are named exceptions.
   `terminal.delete` (`RPCRouter+TerminalHandlers.swift:735`).
 - **The supervision tick's own capture** — `NightwatchSkillContent.swift:954`
   runs `capture-pane -p -e` per fleet pane and regex-classifies the result.
-  **Sanctioned scraper #3**, exempted at `.swiftlint.yml:332` with an explicit
+  **Sanctioned scraper #2**, exempted at `.swiftlint.yml:337` with an explicit
   debt marker. Path: **default** (it shells out directly; control mode is
   irrelevant to it).
 
@@ -284,18 +279,18 @@ was written for.
   live pane owned by an unrelated session — which would then have been pasted a
   judge prompt plus Enter.
 - **Cross-session identification, outside TBD's own code.** TBD prints each
-  terminal's tmux server, window and pane (`TerminalCommands.swift:61-62,
-  114-115`), and the shipped skill content instructs an agent to recover a
-  session whose display name has drifted by joining Claude's own peer-registry
-  rows to TBD's rows on the tmux window and pane
-  (`TBDSkillContent.swift:111, 122-123`; `docs/cross-session-messaging.md:169-178`).
-  The pane is described there as "the field that ties a row to a specific
-  directory" (`:93`).
+  terminal's tmux window and pane (`TerminalCommands.swift:121-130`), and
+  Claude Code's `ListAgents` prints the same coordinate for a session inside
+  tmux. The shipped skill content identifies a peer by its TBD terminal id
+  through `tbd peer list`, and uses the pane only as a legacy coordinate that
+  tells same-named tmux-transport rows apart in `ListAgents`
+  (`TBDSkillContent.swift:135-156`; `docs/cross-session-messaging.md`,
+  "Addressing a peer").
 
-The last of those is the widest claim and the least enforced: it is a documented
-convention taught to agents, not a code path, so nothing breaks loudly if the
-coordinate stops being printed — sessions simply become harder to identify. That
-distinction is worth keeping.
+The last of those is the least enforced: it is a documented convention taught to
+agents, not a code path, so nothing breaks loudly if the coordinate stops being
+printed — same-named sessions simply become harder to tell apart in `ListAgents`.
+That distinction is worth keeping.
 
 ### Sizing
 
@@ -407,7 +402,7 @@ What is **exclusively** supervision's:
 - **The tick script's own `capture-pane -p -e`** (`NightwatchSkillContent.swift:954`)
   and the regex classifier it feeds. This is the only tmux invocation in the tree
   that exists solely to babysit the fleet, it is the only one that lives outside
-  every seam, and it is one of the three sanctioned screen-scrapers. It goes when
+  every seam, and it is one of the two sanctioned screen-scrapers. It goes when
   the tick script goes.
 - **The desk's unattended paste-plus-Enter rail** — the *shape*, not the
   primitives. `nudgeDeskSession` and `postShiftWrapUp` paste and then send Enter
@@ -518,7 +513,7 @@ usually told.
   to keep the pty alive between views.
 - **Every actuation into a session.** `send-keys` and `paste-buffer` are how the
   daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging,
-  the rate-limit auto-continue, the auto-`/login` pump, the polite `/exit` before
+  the rate-limit auto-continue, the polite `/exit` before
   parking, and every supervision nudge lose their transport. There is no second
   path.
 - **Bracketed-paste correctness.** tmux is the sole wrapping authority
@@ -705,12 +700,12 @@ Stated so nobody reads more confidence into the above than it earns.
   What would settle it: check whether the retry arm alone reaches confirmation
   on a pane that never emits, which is testable today by suppressing the
   `dataReceived` call.
-- **How widely the peer-registry pane join is actually used** cannot be
-  established from this repository. It is documented instruction to agents
-  (`TBDSkillContent.swift:122-123`), not a code path, so its usage lives in
-  agent transcripts. What would settle it: sample real sessions for the join, or
-  accept that it is a convention whose cost of loss is friction rather than
-  breakage.
+- **How widely agents still match `ListAgents` rows by tmux pane** cannot be
+  established from this repository. The skill mentions the pane only as a
+  tiebreak between same-named tmux-transport rows, not a code path, so its usage
+  lives in agent transcripts. What would settle it: sample real sessions for the
+  match, or accept that it is a convention whose cost of loss is friction rather
+  than breakage.
 - **Whether the emulator-owns-the-pty design can preserve interrupt detection**
   depends entirely on whether the candidate engine exposes an outgoing-input
   hook. That is an engine-API question, not a tmux question, and this document

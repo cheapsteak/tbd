@@ -420,7 +420,7 @@ struct HookTabTransportGateTests {
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "")
+            terminalID: terminal.id, windowID: "", paneID: "")
 
         #expect(
             captureCalls.count == 0,
@@ -430,8 +430,14 @@ struct HookTabTransportGateTests {
             "a holder hook tab was killed through tmux: \(recorder.snapshot())")
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
         #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
-        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty,
-                "a holder hook tab was written to Closed Terminals")
+        // Written through the holder helper, not tmux: an entry, and — with no
+        // registry, so no live reader — no capture file.
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.map(\.id) == [terminal.id],
+                "a holder hook tab's close wrote no Closed Terminals entry")
+        #expect(entries.first?.label == TerminalLabel.preSession)
+        #expect(!FileManager.default.fileExists(atPath: fx.db.terminalHistory.contentPath(
+            worktreeID: fx.worktree.id, terminalID: terminal.id)))
     }
 
     /// A holder hook tab whose recorded child pid now belongs to somebody else
@@ -476,7 +482,7 @@ struct HookTabTransportGateTests {
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "")
+            terminalID: terminal.id, windowID: "", paneID: "")
 
         #expect(signaller.killed.isEmpty, "a recycled pid was force-killed by the hook teardown")
         #expect(signaller.terminated.isEmpty, "a recycled pid was signalled by the hook teardown")
@@ -521,7 +527,7 @@ struct HookTabTransportGateTests {
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "")
+            terminalID: terminal.id, windowID: "", paneID: "")
 
         #expect(signaller.killed == [Self.jobPID])
         #expect(captureCalls.count == 0)
@@ -548,7 +554,7 @@ struct HookTabTransportGateTests {
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "@hook")
+            terminalID: terminal.id, windowID: "@hook", paneID: "%hook")
 
         #expect(captureCalls.count == 1)
         #expect(recorder.snapshot().contains {
