@@ -139,19 +139,13 @@ struct WorktreeProfilePickerRowShapeTests {
                                                                  snapshot: nil))
     }
 
-    @Test func claudeRowShowsSkeleton_tokenProfileAwaitingFirstProbe_shimmers() {
-        // A token profile with no reading is probed on the next cadence tick:
-        // the five-minute floor has no `fetchedAt` to hold it back.
-        #expect(WorktreeProfilePickerView.claudeRowShowsSkeleton(kind: .oauthToken,
-                                                                 usageNote: nil,
-                                                                 snapshot: nil))
-    }
-
-    @Test func claudeRowShowsSkeleton_neverForNonClaudeKinds() {
-        #expect(!WorktreeProfilePickerView.claudeRowShowsSkeleton(kind: .apiKey,
-                                                                  usageNote: nil,
-                                                                  snapshot: nil))
-        #expect(!WorktreeProfilePickerView.claudeRowShowsSkeleton(kind: .bedrock,
+    @Test func claudeRowShowsSkeleton_tokenProfileAwaitingFirstProbe_doesNot() {
+        // Widening the row gate made this branch reachable for the first time.
+        // A token profile is on the 90-second cadence only while balancing is
+        // on — otherwise it probes after a session goes idle — so a skeleton
+        // could promise numbers that may not arrive until someone finishes a
+        // turn on it, or ever.
+        #expect(!WorktreeProfilePickerView.claudeRowShowsSkeleton(kind: .oauthToken,
                                                                   usageNote: nil,
                                                                   snapshot: nil))
     }

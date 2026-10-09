@@ -423,12 +423,16 @@ struct TokenProfileUsageFetcherTests {
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
 
-        guard case .ok(let buckets, let organizationID) = status else {
-            Issue.record("expected .ok, got \(status)"); return
+        guard case .limitReached(let buckets, let organizationID, let retryAfter) = status else {
+            Issue.record("expected .limitReached, got \(status)"); return
         }
         #expect(organizationID == "org_acme")
+        #expect(retryAfter == 3601)
+        #expect(status.kind == .ok)
+        #expect(status.failureReason == nil)
         let session = buckets.first { $0.kind == "session" }
-        #expect((session?.percent ?? 0) >= 100)
+        // 1.02 utilization reads as exactly full, not 102%.
+        #expect(session?.percent == 100)
         #expect(session?.resetsAt == Date(timeIntervalSince1970: 1_788_000_000))
         #expect(buckets.first { $0.kind == "weekly_all" }?.percent == 31)
     }

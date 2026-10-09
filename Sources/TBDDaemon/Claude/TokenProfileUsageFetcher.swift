@@ -36,12 +36,13 @@ public enum TokenUsageHeaderParser {
     /// A refused window — `-status` neither `allowed` nor `allowed_warning`,
     /// so severity `critical` — is read as full whatever its utilization says:
     /// it is refusing requests, and the picker must not see headroom there.
-    /// Nil unless at least one window is full, because a 429 that names no
-    /// full window is not a usage reading anyone should route on; the caller
-    /// keeps it a `.rateLimited` failure instead.
+    /// A full window reads exactly 100%, never the 102% a utilization past 1
+    /// would render. Nil unless at least one window is full, because a 429
+    /// that names no full window is not a usage reading anyone should route
+    /// on; the caller keeps it a `.rateLimited` failure instead.
     public static func limitReachedBuckets(from headers: [String: String]) -> [ClaudeUsageLimitBucket]? {
         let read = buckets(from: headers).map { bucket -> ClaudeUsageLimitBucket in
-            guard bucket.severity == "critical", bucket.percent < 100 else { return bucket }
+            guard bucket.severity == "critical" || bucket.percent >= 100 else { return bucket }
             var full = bucket
             full.percent = 100
             return full
@@ -267,19 +268,22 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
             // a reading, not a failed one: recorded as such, the account shows
             // as full, freshly read, instead of keeping the pre-limit numbers
             // it had before it filled up and going stale while it is full.
+            //
+            // No body slice on either branch, and deliberately: the
+            // structured answer (`Retry-After`, or its absence) is the whole
+            // of what a caller can act on. Nothing the body adds would change
+            // the wait.
             let headers = Self.headerFields(of: http)
-            if let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers) {
-                tokenProbeLogger.debug(
-                    "token usage probe refused at the usage limit: \(buckets.count, privacy: .public) buckets")
-                return .ok(buckets, organizationID: Self.organizationID(in: headers))
-            }
-            // No body slice here, and deliberately: `.rateLimited` already
-            // carries the structured answer (`Retry-After`, or its absence),
-            // which is the whole of what a caller can act on. Nothing the body
-            // adds would change the wait.
             let retryAfter = http
                 .value(forHTTPHeaderField: "Retry-After")
                 .flatMap(TimeInterval.init)
+            if let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers) {
+                tokenProbeLogger.debug(
+                    "token usage probe refused at the usage limit: \(buckets.count, privacy: .public) buckets")
+                return .limitReached(
+                    buckets, organizationID: Self.organizationID(in: headers),
+                    retryAfter: retryAfter)
+            }
             return .rateLimited(retryAfter: retryAfter)
         default:
             // A 4xx outside `retryableClientErrorCodes` is a defect in the

@@ -212,13 +212,22 @@ reaches its limit the probe itself is refused with a **429**, and that response
 carries the same `anthropic-ratelimit-unified-*` headers a 200 does. It is the
 most current reading there is: the account is full, now. So a 429 whose headers
 name at least one full window — utilization at or past 1, or a window whose
-`-status` is a rejected state — is recorded as a successful reading, with any
-refused window read as 100% whatever its utilization rounds to. Recording it as
-a failure instead would keep the account's last pre-limit numbers on screen and
-let the reading go stale for exactly as long as the account stays full, which is
-when routing new work away from it matters most. A 429 that names no full window
-is not the usage limit speaking; it stays a `.rateLimited` failure on the timed
-schedule (see "Polling" below).
+`-status` is a rejected state — is recorded as a successful reading (the fetch
+status `.limitReached`, snapshot status `ok`), with every full or refused window
+read as exactly 100%. Recording it as a failure instead would keep the
+account's last pre-limit numbers on screen and let the reading go stale for
+exactly as long as the account stays full, which is when routing new work away
+from it matters most. A 429 that names no full window is not the usage limit
+speaking; it stays a `.rateLimited` failure on the timed schedule (see
+"Polling" below).
+
+The next read of a full account waits for its `Retry-After` — usually the time
+until the window resets — but no longer than ten minutes
+(`limitReachedRecheck`). Waiting the full `Retry-After` would let the reading go
+stale while the account is still full; probing at the five-minute floor would
+send a refused request every five minutes for nothing. Ten minutes, plus the
+jitter and a tick, stays inside the 15-minute staleness window, so a full
+account stays visibly full and balancing skips it as full rather than as stale.
 
 ### A new fetcher, not a new snapshot type
 
@@ -297,7 +306,7 @@ credential was rejected and the user must supply a new one — and the UI alread
 knows `profile.kind`, so it words the affordance as "Replace token…" instead of
 "Open login session". A 401 or 403 from the probe records `.needsLogin`.
 
-## Polling: a five-minute cadence, plus turn ends
+## Polling: turn ends, plus a five-minute cadence while balancing is on
 
 Unlike the read-only usage endpoint, the probe is a real billed API request. At
 `OAuthProfileUsagePoller`'s 90-second cadence a single token profile would issue
@@ -321,17 +330,21 @@ in the meantime.
 
 So:
 
-- **Token profiles are on the cadence sweep, at most once per five minutes.**
-  The sweep visits every supported profile; for a token profile the freshness
-  window it applies is never shorter than `tokenProfileFloor` (300 seconds),
-  whatever the caller asked for. The 90-second tick therefore probes a token
-  profile every fourth tick — fewer than 300 billed requests a day, about 2,000
+- **While account balancing is on, token profiles in its pool are on the
+  cadence sweep, at most once per five minutes.** For a token profile the
+  freshness window a sweep applies is never shorter than `tokenProfileFloor`
+  (300 seconds), whatever the caller asked for, so the 90-second tick probes
+  one every fourth tick — fewer than 300 billed requests a day, about 2,000
   input tokens — which keeps the reading well inside the 15-minute staleness
-  threshold balancing and the UI apply to this kind.
+  threshold balancing and the UI apply to this kind. The cadence leg is paid
+  for only where something routes on the reading: with balancing off, or for
+  a profile opted out of the pool, a token profile issues no probe without a
+  turn end, a credential change, or the row's manual refresh. The poller reads
+  the balancing flag once per full sweep.
 - **A `working → idle` transition on a terminal whose `profileID` names a token
   profile also schedules a refresh** — the moment a turn completed and
   utilization actually moved — so a busy profile's numbers land right after the
-  work instead of at the next cadence probe.
+  work instead of at the next cadence probe, balancing or not.
 - **That refresh is `sweep(only: profileID, skipFresherThan: 300)`.** The
   five-minute floor is the same freshness parameter the cadence leg is held to,
   so a burst of turns and a cadence tick together still collapse into at most
@@ -345,8 +358,8 @@ So:
   probe is usually the time until the account's window resets, often hours,
   and honoring it in full would freeze the profile's reading for all of that
   time; the jitter keeps profiles that failed together from retrying together.
-  The schedule is per profile, so one profile's 429 never delays another's
-  reading. A *rejected
+  The total, jitter included, never passes the cap. The schedule is per
+  profile, so one profile's 429 never delays another's reading. A *rejected
   token* (401/403, recorded as `.needsLogin`) instead **holds** the profile:
   no automatic retry at all, on any cadence, however long anyone waits. Every
   token probe is a billed request and one against a revoked or expired token
@@ -445,10 +458,10 @@ So:
   It releases the hold only: the freshness floor and any timed backoff still
   apply, and if the token is still dead the probe re-arms the hold. The
   unnamed sweeps — the cadence tick, picker-open, `tbd profile list
-  --refresh` — visit a held token profile and release nothing.
+  --refresh` — release nothing, whether or not they visit the profile.
 
-Every token profile issues at most one probe per five minutes, idle or busy,
-and a held one issues none.
+Every token profile issues at most one probe per five minutes, and a held one
+issues none. With balancing off an idle token profile issues none at all.
 
 The five-minute floor is a `TimeInterval` constant on the poller beside
 `refreshFreshness`, and every age comparison uses the poller's injected date
@@ -576,7 +589,8 @@ expire — so this is the only way to recover a profile whose token has aged out
   the row probes too, for a user who believes the token has come good.
 - **Probe refused at the usage limit (429 naming a full window)** — recorded as
   a fresh reading with that window at 100%, so the row shows the account full
-  and balancing skips it as full rather than as stale.
+  and balancing skips it as full rather than as stale; read again after its
+  `Retry-After`, or ten minutes, whichever is sooner.
 - **Probe rate-limited otherwise (429)** — the timed backoff, `Retry-After`
   capped at 15 minutes and jittered, which elapses on its own; the profile is
   not held, because waiting is exactly what resolves it. Bars keep showing
@@ -610,16 +624,20 @@ Both branches of every conditional this adds, per the repo's branching rule.
 - **Polling** — a `working → idle` transition on a token profile's terminal
   schedules exactly one probe; a second transition inside five minutes schedules
   none; one after five minutes schedules one. A transition on a `.oauth`
-  profile's terminal schedules none. The cadence sweep probes a token profile
-  once, skips it on the ticks inside the floor while still reading the signed-in
-  profile beside it on every tick, and probes it again on the first tick past
-  the floor; eight hours of ticks with no session activity keep its reading
-  inside the 15-minute staleness threshold throughout. The cadence sweep never
-  probes a held token, however much time passes.
+  profile's terminal schedules none. With balancing off the cadence sweep never
+  probes a token profile; with it on, it probes a pool member once, skips it on
+  the ticks inside the floor while still reading the signed-in profile beside
+  it on every tick, and probes it again on the first tick past the floor, and
+  eight hours of ticks with no session activity keep its reading inside the
+  15-minute staleness threshold throughout. An opted-out token profile is
+  never cadence-probed, and the cadence sweep never probes a held token,
+  however much time passes.
 - **The 429 reading** — a 429 whose headers carry a full or refused window maps
-  to a successful reading with that window at 100%; one whose windows all have
-  room stays `.rateLimited` with its `Retry-After`. A `Retry-After` is jittered
-  on top of the server's value and capped at 15 minutes.
+  to `.limitReached` with that window at exactly 100%, commits as a fresh
+  reading, and holds the next probe for `limitReachedRecheck`; one whose windows
+  all have room stays `.rateLimited` with its `Retry-After`. A `Retry-After` is
+  jittered on top of the server's value, and the total is capped at 15
+  minutes.
 - **Credential-change probe** — creation probes once, carrying the new token;
   rotation probes once, and the assertion is that the probe carried the
   *replacement* credential rather than the one it replaced. Each gate is
@@ -693,6 +711,11 @@ use the existing date seam.
   but a busy profile's numbers would then trail its own work by up to five
   minutes for no saving: the floor already bounds the two triggers together to
   one probe per five minutes.
+- **A timer whether or not balancing is on.** It would keep every token
+  profile's bars fresh in Settings, but at a billed request every five minutes
+  per profile for installs where nothing routes on the reading. Fresh bars
+  alone are what the turn-end probe and the row's manual refresh already
+  provide.
 
 ## Open questions
 
