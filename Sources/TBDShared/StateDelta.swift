@@ -15,6 +15,10 @@ public enum StateDelta: Codable, Sendable {
     case repoHiddenChanged(RepoHiddenDelta)
     case repoExpandedChanged(RepoExpandedDelta)
     case terminalCreated(TerminalDelta)
+    /// An in-place provider replacement committed for an existing terminal.
+    /// Carries the complete row because a creation delta intentionally omits
+    /// provider, session, transcript, profile, and process-incarnation fields.
+    case terminalReplaced(Terminal)
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
     case terminalPinChanged(TerminalPinDelta)
