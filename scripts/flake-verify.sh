@@ -268,8 +268,8 @@ cmd_apply_candidate() {
   if [[ ${#planted[@]} -gt 0 ]]; then
     # Exit 3: the candidate's own failure, not the harness's. The paths go to
     # stdout, one per line, for the verdict's protected list.
-    printf '%s\n' "${planted[@]}"
-    echo "flake-verify: the candidate commits files under a build directory, which the verifier never applies: ${planted[*]}" >&2
+    printf '%s\n' "${planted[@]}"  # non-empty: inside the length check
+    echo "flake-verify: the candidate commits files under a build directory, which the verifier never applies: ${planted[*]}" >&2  # non-empty: inside the length check
     exit 3
   fi
   git reset -q --hard "$tip" || die "cannot reset to the candidate"
@@ -463,7 +463,7 @@ cmd_end_session_processes() {
     still_alive "$entry" && survivors+=("${entry%%$'\t'*}")
   done <<< "$all"
   if [[ "${#survivors[@]}" -gt 0 ]]; then
-    echo "flake-verify: ${#survivors[@]} session process(es) survived SIGKILL: ${survivors[*]}; nothing is verified with one alive" >&2
+    echo "flake-verify: ${#survivors[@]} session process(es) survived SIGKILL: ${survivors[*]}; nothing is verified with one alive" >&2  # non-empty: inside the length check
     return 5
   fi
   return 0

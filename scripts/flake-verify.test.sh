@@ -690,7 +690,9 @@ test_a_candidate_writing_into_the_build_directory_is_refused() {
   assert_contains "and saying why" "$(cat "$d/err")" "under a build directory"
   assert_eq "the warm build is untouched" "warm" "$(cat "$d/verify/.build/debug/TBDPackageTests")"
   assert_eq "and the tree is still the base" "$base" "$(git -C "$d/verify" rev-parse HEAD)"
-  mutant="$(mutant_of 's/^BUILD_DIR_PATTERNS=\(.*\)$/BUILD_DIR_PATTERNS=()/' "$VERIFY")"
+  # A pattern that matches nothing, not an empty list: bash 3.2 reads an empty
+  # array's "${a[@]}" under `set -u` as unbound, and the mutant would die.
+  mutant="$(mutant_of 's/^BUILD_DIR_PATTERNS=\(.*\)$/BUILD_DIR_PATTERNS=(none)/' "$VERIFY")"
   cp "$d/vs/test.sh" "$d/vs/swift-safe" "$d/vs/remote-verify.sh" "$d/vs/tbd-home-fingerprint.sh" "$mutant/"
   rc=0; (cd "$d/verify" && bash "$mutant/flake-verify.sh" apply-candidate --bundle "$d/c.bundle" --base "$base" > /dev/null 2>&1) || rc=$?
   assert_eq "mutation: without the check it overwrites the build" "0 planted" "$rc $(cat "$d/verify/.build/debug/TBDPackageTests")"
