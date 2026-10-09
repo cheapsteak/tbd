@@ -29,7 +29,8 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 ///
 /// For OAuth profiles, `.claude.json` is pre-populated with only:
 ///   - `hasCompletedOnboarding: true` (no `customApiKeyResponses`, since the
-///     user will `/login` into this isolated config dir).
+///     user will `/login` into this isolated config dir). An existing file
+///     that lacks the key gets it added, every other key kept.
 public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
     let hostBaseDirectory: URL
@@ -630,8 +631,9 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
     /// Ensure the per-profile claude config dir exists for an OAuth profile,
     /// and write a minimal `.claude.json` with only `hasCompletedOnboarding: true`
-    /// if the file does not already exist. If the file already exists, leave it
-    /// untouched.
+    /// if the file does not already exist. An existing file keeps every key it
+    /// has; the one change is adding `hasCompletedOnboarding: true` when the
+    /// key is absent (see `addOnboardingFlagIfMissing(at:profileID:)`).
     ///
     /// OAuth profiles do not need a pre-approved API key, so no
     /// `customApiKeyResponses` is written. The user will `/login` once into
@@ -656,9 +658,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         let claudeJSONPath = dir.appendingPathComponent(".claude.json")
 
         try await ClaudeConfigDirSerializer.shared.run(configDir: dir.path) {
-            // If `.claude.json` already exists, leave it untouched.
             if FileManager.default.fileExists(atPath: claudeJSONPath.path) {
-                logger.debug("claude config dir exists at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public); skipping .claude.json")
+                Self.addOnboardingFlagIfMissing(at: claudeJSONPath, profileID: profileID)
             } else {
                 let payload: [String: Any] = [
                     "hasCompletedOnboarding": true,
@@ -675,6 +676,36 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
         logger.debug("ensured claude config dir at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public)")
         return dir
+    }
+
+    /// Add `hasCompletedOnboarding: true` to an existing `.claude.json` that
+    /// lacks the key, keeping every other key.
+    ///
+    /// Something other than this manager can create the file first — any
+    /// Claude Code process run with this `CLAUDE_CONFIG_DIR` before TBD's first
+    /// spawn writes `numStartups` and friends without the flag. The first
+    /// interactive session on the profile then stops at Claude Code's
+    /// first-run screens (the theme picker), a stall no hook can see, and a
+    /// balanced spawn can land a session there unattended. A file that already
+    /// carries the key, either way, is not rewritten, so this writes at most
+    /// once per directory and never overrides Claude Code's own answer. A file
+    /// that cannot be read or parsed is left untouched, as `ClaudeTrustSeeder`
+    /// does. Called inside the directory's `ClaudeConfigDirSerializer` lane.
+    static func addOnboardingFlagIfMissing(at claudeJSONPath: URL, profileID: UUID) {
+        guard let data = try? Data(contentsOf: claudeJSONPath),
+              var parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            logger.warning("unreadable .claude.json for oauth profile \(profileID, privacy: .public); leaving it untouched")
+            return
+        }
+        guard parsed["hasCompletedOnboarding"] == nil else { return }
+        parsed["hasCompletedOnboarding"] = true
+        do {
+            let updated = try JSONSerialization.data(withJSONObject: parsed, options: [.prettyPrinted, .sortedKeys])
+            try updated.write(to: claudeJSONPath, options: [.atomic])
+            logger.info("added hasCompletedOnboarding to an existing .claude.json for oauth profile \(profileID, privacy: .public)")
+        } catch {
+            logger.warning("could not add hasCompletedOnboarding for oauth profile \(profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Read the login identity for a profile from its isolated config dir:
