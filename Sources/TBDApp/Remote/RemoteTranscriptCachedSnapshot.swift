@@ -12,14 +12,17 @@ extension RemoteTranscriptSyncSnapshot {
     /// `transcript.jsonl` — nothing to show, and the pane keeps its full
     /// loading state.
     ///
-    /// `generation`, `head` and `hasEarlier` come from `state.json` beside it
-    /// (`hasEarlier` is whether it records a `before` cursor), and are 0, 0
-    /// and false when that file is missing or unreadable. Either way the first
-    /// sync's answer is authoritative: a different generation makes
+    /// `generation` and `head` come from `state.json` beside it, and are 0
+    /// when that file is missing or unreadable. Either way the first sync's
+    /// generation is authoritative: a different one makes
     /// `RemoteTranscriptTail` drop what it read here and re-read from the
-    /// start, the same path a provider reset takes, and its `hasEarlier`
-    /// replaces the seed's. `caughtUp` is false — only a sync can say that —
-    /// and no sync has published, so `refreshToken` stays 0.
+    /// start, the same path a provider reset takes. `caughtUp` and
+    /// `hasEarlier` are false — only a sync can say either. A `before` cursor
+    /// on disk is deliberately not read as `hasEarlier`: with
+    /// `remote_transcript_live_sync_enabled` off the daemon refuses
+    /// `remote.transcriptLoadEarlier`, so a seed taken from disk could show a
+    /// failed load in a pane the flag should leave unchanged. No sync has
+    /// published, so `refreshToken` stays 0.
     static func cached(
         for selection: RemoteSessionSelection,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -33,17 +36,15 @@ extension RemoteTranscriptSyncSnapshot {
         var snapshot = RemoteTranscriptSyncSnapshot(
             path: transcript.path, generation: state?.generation ?? 0, caughtUp: false)
         snapshot.head = state?.head ?? 0
-        snapshot.hasEarlier = state?.before != nil
         return snapshot
     }
 
     /// Only the fields the pane needs; the daemon owns the rest of the file.
-    /// `head` and `before` are absent from a `state.json` written before
-    /// earlier-history loading existed.
+    /// `head` is absent from a `state.json` written before earlier-history
+    /// loading existed.
     private struct CachedState: Decodable {
         let generation: Int
         let head: Int?
-        let before: String?
     }
 
     private static func cachedState(at url: URL) -> CachedState? {
