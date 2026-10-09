@@ -389,7 +389,8 @@ test_the_target_change_fields_are_written_only_when_set() {
 import sys; sys.path.insert(0, sys.argv[1])
 import flake_lib as fl
 a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
-body = fl.render_attempts([a], "cheapsteak/tbd").replace('"outcome": "no-diff"', '"outcome": "no-diff", "from_a_later_writer": 1')
+body = fl.render_attempts([a], "cheapsteak/tbd").replace('"outcome":"no-diff"', '"outcome":"no-diff","from_a_later_writer":1')
+assert "from_a_later_writer" in body
 print(len(fl.parse_attempts(body, fl.BOT_LOGIN, "Bot") or []))
 PY
 )"
@@ -473,6 +474,54 @@ PY
   publish "$d" > /dev/null
   assert_contains "its own comment is edited" "$(logged "$d")" "-X PATCH repos/$REPO/issues/comments/555"
   assert_eq "one entry for run 4242, now pr-opened" "4242 pr-opened" "$(recorded "$d" all | jq -r '"\(.run_id) \(.outcome)"')"
+}
+
+unreadable_attempts() { # D newer|corrupt -> a comments file holding one bot attempt comment, 555
+  local d="$1" f="$1/comments.jsonl"
+  python3 - "$HERE" "$2" > "$f" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+old = fl.Attempt(run_id=1111, started_at="2026-10-01T06:00:00Z", main_sha="a" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([old], "cheapsteak/tbd")
+if sys.argv[2] == "newer":
+    body = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
+    assert body.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in body
+else:
+    body = body.split("<!-- flakefix-attempts-state")[0] + "<!-- flakefix-attempts-state\n{edited by hand\nflakefix-attempts-state -->"
+print(json.dumps({"id": 555, "body": body, "user": {"login": fl.BOT_LOGIN, "type": "Bot"}}))
+PY
+  printf '%s' "$f"
+}
+
+test_an_attempt_record_in_a_newer_schema_refuses_to_publish() {
+  local d mutant
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  assert_eq "exit 2" "2" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$(logged "$d")" "pr create"
+  assert_eq "nothing written" "" "$(grep -E -- '-X (POST|PATCH)' "$d/log")"
+  assert_contains "naming the comment, its version and the version read" "$(cat "$d/out")" \
+    "#10 comment 555: the bot's attempt comment declares schema version 2, newer than the versions this code reads (1)"
+  assert_contains "and that it refused" "$(cat "$d/out")" "refusing to publish"
+  # A no-diff outcome posts its notes before recording: refused before that too.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  echo no-diff > "$d/attempt/outcome"; rm -f "$d/attempt/candidate.bundle"
+  assert_eq "no-diff: exit 2" "2" "$(publish "$d")"
+  assert_eq "no-diff: nothing written" "" "$(grep -E -- '-X (POST|PATCH)' "$d/log")"
+  # A corrupt one at the current version is refused the same way, up front.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" corrupt)"
+  assert_eq "corrupt: exit 2" "2" "$(publish "$d")"
+  assert_eq "corrupt: nothing pushed" "none" "$(remote_head "$d")"
+  assert_contains "corrupt: said so" "$(cat "$d/out")" "the bot's own attempt comment 555 does not parse"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  mutant="$(mutant_of 's/^  if ! py check-attempts --repo "\$REPO" --issue "\$ISSUE"; then$/  if false; then/' "$PR_SH")"
+  publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: without the up-front read the candidate is pushed first" "$(remote_head "$d")" "none"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  mutant="$(mutant_of 's/startswith\(fl.ATTEMPTS_SENTINEL_PREFIX\)/startswith(fl.ATTEMPTS_SENTINEL)/' "$PR_PY")"
+  assert_eq "mutation: matching only the v1 sentinel publishes" "0" "$(publish "$d" "$mutant")"
+  assert_contains "mutation: and records in a second comment beside the newer one" "$(logged "$d")" "-X POST repos/$REPO/issues/10/comments"
 }
 
 test_an_attempt_comment_by_another_author_is_not_edited() {

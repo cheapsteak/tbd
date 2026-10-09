@@ -130,6 +130,35 @@ test_an_unreadable_attempt_record_blocks_the_test() {
   assert_eq "mutation: without the check it is picked every night" "rc=0 #10" "$(picked "$w" "$mutant")"
 }
 
+# An attempt comment as a writer of schema version 2 would stamp it.
+NEWER_ATTEMPTS="$(python3 - "$HERE" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([a], "cheapsteak/tbd")
+newer = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
+assert newer.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in newer
+print(newer)
+PY
+)"
+
+test_an_attempt_record_in_a_newer_schema_refuses_the_pick() {
+  local w out mutant comments
+  comments="$(jq -nc --arg b "$NEWER_ATTEMPTS" --arg bot "$BOT" '[[$bot, "Bot", $b]]')"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"comments\": $comments}"
+  issue "$w" "{\"number\": 11, \"test\": \"$OTHER\", $TWO}"
+  out="$(pick "$w")"
+  assert_eq "the whole pick refuses, not just that issue" "rc=2 none" "$(head -1 <<< "$out")"
+  assert_contains "naming the comment, its version and the version read" "$out" \
+    "refused: #10 comment 1010: the bot's attempt comment declares schema version 2, newer than the versions this code reads (1)"
+  assert_eq "a dispatch refuses too" "rc=2 none" "$(picked "$w" "$HERE" --issue 10)"
+  mutant="$(mutant_of 's/^    unreadable = \[v for v in declared_versions\(body, prefix, begin, end\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/' "$HERE/flake_lib.py")"
+  assert_eq "mutation: read as corrupt, the other issue is picked" "rc=0 #11" "$(picked "$w" "$mutant")"
+  mutant="$(mutant_of 's/^    except \(Refused, fl.UnsupportedSchema\) as error:$/    except Refused as error:/' "$PICK")"
+  assert_eq "mutation: uncaught, it is a crash, not a refusal" "rc=1 none" "$(picked "$w" "$mutant")"
+}
+
 test_the_watchlist_is_never_picked() {
   local w mutant; w="$(world)"
   # Even mislabelled `flaky` and holding a qualifying ledger comment.

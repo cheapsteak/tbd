@@ -264,6 +264,14 @@ cmd_open() {
   local issue; issue="$(jq -r .issue "$PICK/target.json")"
   [[ "$issue" =~ ^[0-9]+$ ]] || die "target.json names no issue"
   ISSUE="$issue"
+  # The attempt record is read before anything is pushed or posted: one in a
+  # schema this code does not read, or one that does not parse, would be
+  # misread or overwritten by the record at the end, so publishing stops here
+  # with nothing written – recording the refusal would hit the same comment.
+  if ! py check-attempts --repo "$REPO" --issue "$ISSUE"; then
+    RECORDING=1
+    die "refusing to publish: #$ISSUE's attempt record cannot be read (above)"
+  fi
   local branch="$BRANCH_PREFIX$ISSUE" remote="${FLAKE_PR_REMOTE:-https://github.com/$REPO.git}"
   # The run link every post carries is rebuilt from the pick, uploaded before
   # any session ran, never read from the session-reachable candidate.

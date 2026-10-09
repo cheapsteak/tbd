@@ -335,7 +335,10 @@ under the same 60,000 it keeps a ledger comment under:
   recorded meanwhile, while what the skip loses is at most one place's history
   per test, below the threshold by definition. If a human repairs the comment,
   the next read finds a test in two comments and merges them, as for a run
-  that died midway (above).
+  that died midway (above). The skip is for a corrupt comment only: a bot
+  comment declaring a schema version this code does not read stops the run
+  unwritten (below), because skipping it would skip every comment that
+  version wrote.
 
 **Aging out.** An entry whose newest failure is 30 days old leaves the
 watchlist (`WATCHLIST_AGE_OUT_DAYS` in `scripts/flake_lib.py`), and the
@@ -413,6 +416,39 @@ equals the login; the readers without a token – the picker, in the read-only
 comment with a sentinel and any other author is ignored, and the `ledger`
 job's summary lists it so a human can see the attempt. Any number of such
 forgeries changes nothing the bot reads.
+
+**Every comment declares its schema version, and a version the reader does
+not know stops it.** Every writer stamps the current version
+(`SCHEMA` in `scripts/flake_lib.py`) twice: in the sentinel (the `v1` of
+`<!-- flake-ledger v1 -->`, `<!-- flakefix-attempts v1 -->` and
+`<!-- flake-watchlist v1 -->`) and as the JSON block's `schema` key. One version
+covers all three kinds of comment. Readers find a comment by the sentinel's
+prefix (`<!-- flake-ledger v`, and so on), whatever version follows, so a
+comment another version wrote is never invisible to them. A comment from the
+bot that declares, in either place, a version outside the set this code reads
+(`READABLE_SCHEMAS`) is not treated as corrupt, because reading it as corrupt
+would read it as empty. A schema bump, or a rollback to code older than the
+comments it finds, would make every bot comment unreadable at once: the
+watchlist would read as empty, so every sub-threshold test would restart its
+history, and an attempt record read as missing would let the picker choose a
+test it has already tried. So every reader stops instead: the ledger exits
+non-zero before any write, the picker refuses to pick, and `publish` refuses
+before it pushes or posts (§8), each naming the comment, the version it
+declares, and the versions the code reads. Only a comment the bot wrote can
+stop a run this way; a forgery is ignored before its version is read. An older
+version stays in the readable set for as long as the readers can read it,
+migrating it as they load it. Within one version a writer may add a key: an
+attempt reader drops a key it does not know, and the ledger and watchlist
+readers ignore an unknown top-level key, so an additive field needs no bump. A
+change an older reader would misread – a key renamed, retyped, or given a new
+meaning, or a new key inside a failure record, which the reader does not
+accept – takes a new version. A comment the bot wrote whose
+declared version is readable or absent, but whose JSON block does not parse
+or does not hold state of that version, is corrupt – most likely a hand edit –
+and is handled per comment: a watchlist comment is skipped (above), and an
+issue holding a corrupt ledger or attempt comment is left untouched by the
+ledger, never picked, and refused by `publish`, while every other test goes
+on.
 
 The issues – each test's own and the watchlist – are the ledger's only durable
 store, because the artifacts it reads expire. Their retention differs, and each sets a read window:
@@ -1450,6 +1486,18 @@ Transitions, each owned by the PR driver:
   write issues, and the `ledger` job's token can only read them.
 - **The picker cannot read the ledger.** No attempt that night. The `fix` job
   ends red without starting a session.
+- **A bot comment declares a schema version this code does not read** – a
+  later writer's, or an older one after a rollback (§4.4). The ledger exits
+  non-zero before any write, the picker refuses, and `publish` refuses before
+  it pushes, posts, or records, each naming the comment, its version, and the
+  versions the code reads. The job going red is the signal; a human deploys
+  code that reads that version, or adds the migration. Every reader stops
+  rather than skipping the one comment, because a version change reaches every
+  bot comment at once, and skipping them all would read the watchlist and the
+  attempt records as empty. `publish` reads the attempt comment before it
+  pushes, and a bot attempt comment that does not parse stops it there too:
+  the record `publish` ends with cannot be written over such a comment, so a
+  push or a PR made first would be an attempt nobody recorded.
 - **The build fails before the session starts.** No attempt; the job ends red.
   `main` is expected to build, so this is a CI problem, not a flake.
 - **The session fails** – it errors, times out, or exhausts its turns, or
@@ -1785,6 +1833,16 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   have held starting a fresh entry in a readable or new comment and a test
   with an issue still recorded there; a watchlist whose label was removed, found by title and
   relabelled; and a watched test title-searched only when it may qualify.
+  Schema versions: a watchlist comment, a ledger comment, and an attempt
+  comment each declaring a newer version – in the sentinel, in the JSON
+  block, or both – each stopping the run before any write, naming the
+  comment, its version, and the versions read, and found by `fetch` though
+  its sentinel is not this code's; a watchlist comment at the current version
+  whose block holds no state, and one whose block declares no version, each
+  still skipped and listed; a key added at the current version to each kind
+  of comment, still read; every writer stamping the current version in the
+  sentinel and the block; and an older version read while it is listed and
+  stopping the reader once it is not.
 - **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
@@ -1801,7 +1859,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   flaky list, which names another open `flaky` issue's test with its number
   and leaves out the target, the watchlist, a closed issue, and a test only a
   forged ledger names, and says "None." when empty; an earlier attempt's
-  rename, named in the brief; and the refusal
+  rename, named in the brief; an attempt comment in a newer schema version,
+  which refuses the whole pick, though another test is eligible, and a
+  dispatch of its issue; and the refusal
   to start with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
   failure and with none; baseline classification of a target failure, a
@@ -1899,7 +1959,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   stress verdict recorded; a weak-evidence rename, whose status keeps the
   weak-evidence clause; an entry with no change, which writes neither
   change field, and an attempt comment holding a key its reader does not
-  know, which still parses; a rename whose stress failed, still labelled, and
+  know, which still parses; an attempt comment in a newer schema version, and
+  one that does not parse, each refusing `publish` before any push, post, or
+  record, the first naming its version; a rename whose stress failed, still labelled, and
   a plain failure, not; and a PR carrying `flakefix-needs-human`, never
   promoted under either trigger with every other condition met. The
   workflow: both sessions on the model the layout step names, never through

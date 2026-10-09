@@ -1397,6 +1397,193 @@ test_an_unreadable_watchlist_comment_is_skipped_and_left_for_a_human() {
   assert_eq "mutation: without skipping it the whole run fails" "2" "$rc"
 }
 
+# ----------------------------------------------------------------------------
+# schema versions (spec §4.4, §8): a newer state format stops the run; a
+# corrupt comment does not
+# ----------------------------------------------------------------------------
+
+# bump IN OUT [SENTINEL_V] [JSON_V]: IN as a writer of another schema version
+# would stamp it – the sentinel's version and the JSON block's `schema`.
+bump() {
+  sed -E "1s/ v1 -->\$/ v${3:-2} -->/; s/\"schema\":1([,}])/\"schema\":${4:-2}\\1/" "$1" > "$2"
+  if cmp -s "$1" "$2" && [[ "${3:-2}${4:-2}" != 11 ]]; then echo "FAIL - bump changed nothing in $1"; FAIL=1; fi
+}
+
+# The schema check's one line, and a mutation that turns it off.
+NO_SCHEMA_CHECK='s/^    unreadable = \[v for v in declared_versions\(body, prefix, begin, end\) if v not in READABLE_SCHEMAS\]$/    unreadable = []/'
+
+# watch_world DIR BODY: stub_world plus a bot watchlist, #900, whose one
+# comment, 901, is BODY.
+watch_world() {
+  stub_world "$1" "$(jq -n --arg body "$(cat "$2")" --arg bot "$BOT" '[
+    {match: "issues\\?labels=flake-watchlist", out: (({number: 900, title: "Flake watchlist", state: "open", labels: [{name: "flake-watchlist"}], created_at: "2026-10-01T00:00:00Z", user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/900/comments\\?per_page", out: (({id: 901, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+}
+
+# issue_world DIR BODY: stub_world plus HOLDER's open issue, #970, whose one
+# comment, 95, is BODY.
+issue_world() {
+  stub_world "$1" "$(jq -n --arg body "$(cat "$2")" --arg bot "$BOT" --arg t "Flaky test: $HOLDER" '[
+    {match: "issues\\?labels=flaky", out: (({number: 970, title: $t, state: "open", labels: [{name: "flaky"}]} | tojson) + "\n")},
+    {match: "issues/970/comments\\?per_page", out: (({id: 95, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+}
+
+# write_run DIR [LEDGER] -> "rc=<n>" then the run's output; DIR/log has its calls.
+write_run() {
+  local rc=0 out
+  out="$(FLAKE_WRITE_TOKEN=app-token LEDGER_UNDER_TEST="${2:-$LEDGER}" ledger_run "$1" --write)" || rc=$?
+  printf 'rc=%s\n%s\n' "$rc" "$out"
+}
+
+test_a_watchlist_comment_in_a_newer_schema_stops_the_run_unwritten() {
+  local entry newer d out v mutant
+  entry="$(mktmpd)/watch.md"; newer="$(mktmpd)/newer.md"
+  build watchlist-body "$entry" "[{\"test_id\": \"TBDSharedTests.Quiet/f()\", \"failures\": [$OLD_NIGHT]}]"
+  # Control: the same comment at this code's version is read and written.
+  d="$(mktmpd)"; watch_world "$d" "$entry"
+  assert_eq "at the current version the run goes on" "rc=0" "$(write_run "$d" | head -1)"
+  assert_contains "and writes" "$(writes_in "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/comments/901"
+  for v in "2 2" "2 1" "1 2"; do
+    # shellcheck disable=SC2086 # two words on purpose: sentinel and JSON versions
+    bump "$entry" "$newer" $v
+    d="$(mktmpd)"; watch_world "$d" "$newer"
+    out="$(write_run "$d")"
+    assert_eq "sentinel/JSON at v$v: the run fails closed" "rc=2" "$(head -1 <<< "$out")"
+    assert_eq "sentinel/JSON at v$v: nothing written" "" "$(writes_in "$d/log")"
+    assert_contains "sentinel/JSON at v$v: names the comment, its version and the version read" "$out" \
+      "#900 comment 901: the bot's watchlist comment declares schema version 2, newer than the versions this code reads (1)"
+  done
+  bump "$entry" "$newer"
+  d="$(mktmpd)"; watch_world "$d" "$newer"
+  mutant="$(mutant_of "$NO_SCHEMA_CHECK" "$LIB")"
+  out="$(write_run "$d" "$mutant/flake-ledger.py")"
+  assert_eq "mutation: without the check it is skipped as corrupt and the run goes on" "rc=0" "$(head -1 <<< "$out")"
+  assert_contains "mutation: writing a fresh watchlist comment beside it" "$(writes_in "$d/log")" "-X POST repos/cheapsteak/tbd/issues/900/comments"
+  d="$(mktmpd)"; watch_world "$d" "$newer"
+  mutant="$(mutant_of 's/\(fl.WATCHLIST_SENTINEL_PREFIX,\)/(fl.WATCHLIST_SENTINEL,)/' "$LEDGER")"
+  assert_eq "mutation: fetching by the v1 sentinel never sees the v2 comment" "rc=0" "$(write_run "$d" "$mutant/flake-ledger.py" | head -1)"
+}
+
+test_a_ledger_or_attempt_comment_in_a_newer_schema_stops_the_run_unwritten() {
+  local body newer attempts w d out rc mutant
+  body="$(mktmpd)/ledger.md"; newer="$(mktmpd)/newer.md"
+  build ledger-body "$body" "{\"test_id\": \"$HOLDER\", \"failures\": [$OLD_NIGHT]}"
+  bump "$body" "$newer"
+  w="$(newwork)"
+  erased_run "$w" 1012 sidebar
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "95|$BOT|Bot|$newer"
+  rc=0; out="$(analyze "$w" 2>&1)" || rc=$?
+  assert_eq "a newer ledger comment: analyze fails closed" "2" "$rc"
+  assert_contains "naming it" "$out" "#970 comment 95: the bot's ledger comment declares schema version 2"
+  mutant="$(mutant_of "$NO_SCHEMA_CHECK" "$LIB")"
+  rc=0; analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the check it is read as corrupt and the run goes on" "0" "$rc"
+  # The attempt comment, beside a readable ledger comment.
+  attempts="$(mktmpd)/attempts.md"
+  python3 - "$HERE" "$attempts" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+from pathlib import Path
+a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
+Path(sys.argv[2]).write_text(fl.render_attempts([a], "cheapsteak/tbd").replace('"schema":1', '"schema":2').replace(" v1 -->", " v2 -->", 1))
+PY
+  w="$(newwork)"
+  erased_run "$w" 1012 sidebar
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky --comment "95|$BOT|Bot|$body" --comment "96|$BOT|Bot|$attempts"
+  rc=0; out="$(analyze "$w" 2>&1)" || rc=$?
+  assert_eq "a newer attempt comment: analyze fails closed" "2" "$rc"
+  assert_contains "naming it" "$out" "#970 comment 96: the bot's attempt comment declares schema version 2"
+  # Through `run`, which must fetch it under its v2 sentinel to see it at all.
+  d="$(mktmpd)"; issue_world "$d" "$newer"
+  out="$(write_run "$d")"
+  assert_eq "run: fails closed" "rc=2" "$(head -1 <<< "$out")"
+  assert_eq "run: nothing written" "" "$(writes_in "$d/log")"
+  d="$(mktmpd)"; issue_world "$d" "$newer"
+  mutant="$(mutant_of 's/\(fl.SENTINEL_PREFIX, fl.ATTEMPTS_SENTINEL_PREFIX\)/(fl.SENTINEL, fl.ATTEMPTS_SENTINEL)/' "$LEDGER")"
+  out="$(write_run "$d" "$mutant/flake-ledger.py")"
+  assert_eq "mutation: fetching by the v1 sentinels never sees it, and the run goes on" "rc=0" "$(head -1 <<< "$out")"
+  assert_contains "mutation: writing a second ledger comment beside it" "$(writes_in "$d/log")" "-X POST repos/cheapsteak/tbd/issues/970/comments"
+}
+
+test_a_corrupt_watchlist_comment_at_a_known_version_is_still_skipped() {
+  local w out rc corrupt bare mutant
+  corrupt="$(mktmpd)/corrupt.md"; bare="$(mktmpd)/bare.md"
+  # It parses, at schema 1, but its tests are not a list.
+  printf '%s\nhand-edited\n<!-- flake-watchlist-state\n{"schema":1,"tests":"oops"}\nflake-watchlist-state -->\n' '<!-- flake-watchlist v1 -->' > "$corrupt"
+  # And one whose block declares no schema at all.
+  printf '%s\nhand-edited\n<!-- flake-watchlist-state\n{"tests":[]}\nflake-watchlist-state -->\n' '<!-- flake-watchlist v1 -->' > "$bare"
+  w="$(newwork)"
+  erased_run "$w" 3011 sidebar
+  build watchlist "$w" --number 900 --comment "901|$BOT|Bot|$corrupt" --comment "902|$BOT|Bot|$bare"
+  rc=0; out="$(analyze "$w")" || rc=$?
+  assert_eq "the run goes on" "0" "$rc"
+  assert_contains "the first is listed" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 901"
+  assert_contains "and the second" "$(jq -r '.notes.unreadable[]' <<< "$out")" "#900 comment 902"
+  assert_eq "neither is written; the entry goes to a new comment" "0" "$(jq '[.watchlist.writes[].comment_id | select(. != null)] | length' <<< "$out")"
+  mutant="$(mutant_of 's/ if v not in READABLE_SCHEMAS\]$/]/' "$LIB")"
+  rc=0; analyze "$w" "$mutant" > /dev/null 2>&1 || rc=$?
+  assert_eq "mutation: failing closed on every declared version stops the run" "2" "$rc"
+}
+
+test_an_additive_key_at_the_current_version_is_still_read() {
+  local script out mutant
+  script="$STATE_PRELUDE"'
+s = m.State("t/x()", failures=[F("1", "night:2026-10-01")])
+ledger = m.render_comment(s, "r/r").replace("{\"episode\"", "{\"added_later\":1,\"episode\"", 1)
+watch = m.render_watchlist([s], "r/r").replace("{\"schema\"", "{\"added_later\":1,\"schema\"", 1)
+a = m.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b"*40, episode=0, outcome="no-diff")
+att = m.render_attempts([a], "r/r").replace("\"outcome\":\"no-diff\"", "\"outcome\":\"no-diff\",\"added_later\":1")
+assert "added_later" in ledger and "added_later" in watch and "added_later" in att
+print(m.parse_comment(ledger, m.BOT_LOGIN, "Bot") == s)
+print(m.parse_watchlist(watch, m.BOT_LOGIN, "Bot") == [s])
+print(m.parse_attempts(att, m.BOT_LOGIN, "Bot") == [a])
+'
+  out="$(py <<< "$script")"
+  assert_eq "a ledger, watchlist and attempt comment each read with an unknown key" "True
+True
+True" "$out"
+  mutant="$(mutant_of 's/ if k in known\}/}/' "$LIB")"
+  assert_eq "mutation: refusing an unknown attempt key" "False" "$(py "$mutant" <<< "$script" | sed -n 3p)"
+}
+
+test_a_version_is_read_only_when_listed_and_writers_stamp_the_current_one() {
+  local script out mutant
+  script="$STATE_PRELUDE"'
+s = m.State("t/x()", failures=[F("1", "night:2026-10-01")])
+a = m.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b"*40, episode=0, outcome="no-diff")
+kinds = [
+    ("ledger", m.render_comment(s, "r/r"), m.SENTINEL_PREFIX, m.STATE_BEGIN, m.STATE_END, m.parse_comment),
+    ("watchlist", m.render_watchlist([s], "r/r"), m.WATCHLIST_SENTINEL_PREFIX, m.WATCHLIST_BEGIN, m.WATCHLIST_END, m.parse_watchlist),
+    ("attempt", m.render_attempts([a], "r/r"), m.ATTEMPTS_SENTINEL_PREFIX, m.ATTEMPTS_BEGIN, m.ATTEMPTS_END, m.parse_attempts),
+]
+for name, body, prefix, begin, end, parse in kinds:
+    print(name, m.declared_versions(body, prefix, begin, end) == [m.SCHEMA, m.SCHEMA])
+# An older version this code still reads, and one it no longer does.
+for name, body, prefix, begin, end, parse in kinds:
+    m.READABLE_SCHEMAS = frozenset({1, 2})
+    old = parse(body, m.BOT_LOGIN, "Bot") is not None
+    m.READABLE_SCHEMAS = frozenset({2})
+    try:
+        parse(body, m.BOT_LOGIN, "Bot")
+        gone = "read"
+    except m.UnsupportedSchema as error:
+        gone = "not one of" in str(error)
+    m.READABLE_SCHEMAS = frozenset({1})
+    print(name, old, gone)
+'
+  out="$(py <<< "$script")"
+  assert_eq "every writer stamps SCHEMA in its sentinel and its block" "ledger True
+watchlist True
+attempt True" "$(head -3 <<< "$out")"
+  assert_eq "an older listed version reads; an unlisted one stops the reader" "ledger True True
+watchlist True True
+attempt True True" "$(tail -3 <<< "$out")"
+  mutant="$(mutant_of 's/^    payload = \{"schema": SCHEMA, "attempts": \[$/    payload = {"schema": SCHEMA + 1, "attempts": [/' "$LIB")"
+  assert_eq "mutation: an attempt writer stamping another version" "attempt False" "$(py "$mutant" <<< "$script" | sed -n 3p)"
+  mutant="$(mutant_of 's/^WATCHLIST_SENTINEL = .*$/WATCHLIST_SENTINEL = "<!-- flake-watchlist v0 -->"/' "$LIB")"
+  assert_eq "mutation: a watchlist sentinel spelling another version" "watchlist False" "$(py "$mutant" <<< "$script" 2>/dev/null | sed -n 2p)"
+}
+
 # aging_work [NOW] -> a work dir whose watchlist holds five tests: Old (last
 # failed 2026-09-01), Recent (2026-09-20), Folded (counts only, latest
 # 2026-09-20), HOLDER (2026-09-01, failing again on a branch this week), and
