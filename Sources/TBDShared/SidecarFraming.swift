@@ -107,9 +107,11 @@ public struct SidecarScreenRequest: Codable, Sendable, Equatable {
     public let terminalID: UUID
     public let requestID: UUID
     /// How many lines of scrollback-plus-viewport to project, already clamped.
-    /// Zero means a modes-only reading: the projection's own `maxLines <= 0`
-    /// arm yields no lines, so the app walks nothing and the reply is a few
-    /// hundred bytes.
+    /// Zero means a modes-only reading: `TerminalScreenProjection.project`
+    /// returns before it walks the buffer, so the app reads a handful of
+    /// properties and the reply is a few hundred bytes. The saving is the walk,
+    /// not the bytes — the oracle asks this before composing every message to
+    /// an attached session.
     public let lines: Int
     /// Whether the reply should also carry a styled capture — SGR intact — for
     /// Closed Terminals history. A typed screen structurally cannot carry one,

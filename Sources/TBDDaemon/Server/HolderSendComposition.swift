@@ -67,10 +67,11 @@ enum HolderSendComposition {
     ///
     /// **A live observed flag is obeyed either way.** When the answering store
     /// is live — the daemon draining the pty, or a viewer that answered the
-    /// pull — and has watched the child since birth, `modes.bracketedPaste` is
-    /// a fact about the child as it stands, so `unobservedShouldWrap` does not
-    /// enter into it: an observed `true` wraps and an observed `false` composes
-    /// bare, whatever the child is running.
+    /// pull, which `HolderScreenResolver` produces by asking that viewer for a
+    /// modes-only reading over the fd sidecar — and has watched the child since
+    /// birth, `modes.bracketedPaste` is a fact about the child as it stands, so
+    /// `unobservedShouldWrap` does not enter into it: an observed `true` wraps
+    /// and an observed `false` composes bare, whatever the child is running.
     ///
     /// **A stale `false` is not evidence, and falls back to the guess.** A
     /// `staleDaemon` reading is the daemon's emulator as of the moment a viewer

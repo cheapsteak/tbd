@@ -250,6 +250,69 @@ import struct TBDShared.TerminalScreen
             .modes.alternateScreen)
     }
 
+    // MARK: - The modes-only path does no per-row work
+
+    /// The input path's oracle asks with `maxLines: 0` before composing every
+    /// message to a session a viewer holds, and the viewer answers on its main
+    /// actor under the terminal lock inside a 150 ms bound. So "no lines" has
+    /// to mean **no walk**, not a smaller reply: a `rowText` call per retained
+    /// row, thousands of them, could exceed that bound and drop the send back
+    /// onto the frozen modes — the exact failure the pull exists to remove.
+    ///
+    /// Counted rather than inferred, because equality cannot show which branch
+    /// ran: the same values come out whether the guard sits above the loop or
+    /// below it. SwiftTerm's row accessors are `public` rather than `open`, so
+    /// they cannot be intercepted by a subclass; `project`'s defaulted
+    /// `onRowAccess` is the seam instead. Move the guard back below the loop
+    /// and this fails.
+    @Test("a modes-only projection touches no rows at all")
+    func modesOnlyProjectionTouchesNoRows() {
+        let deep = Fixture(feeding: (1...400).map { "line \($0)" }.joined(separator: "\r\n"))
+
+        var accesses = 0
+        let projected = TerminalScreenProjection.project(
+            deep.terminal, maxLines: 0, onRowAccess: { accesses += 1 })
+
+        #expect(accesses == 0, "a modes-only projection walked \(accesses) rows")
+        #expect(projected.lines.isEmpty)
+    }
+
+    /// The counter's other half, so the test above cannot pass because the seam
+    /// is simply never called. A depth that does ask for lines must walk, and
+    /// it walks the whole retained buffer — the tail cut happens after the
+    /// enumeration, because there is no public line count to cut against.
+    @Test("a projection that asks for lines does walk, and the counter sees it")
+    func projectionWithLinesWalksTheBuffer() {
+        let deep = Fixture(feeding: (1...400).map { "line \($0)" }.joined(separator: "\r\n"))
+
+        var accesses = 0
+        let projected = TerminalScreenProjection.project(
+            deep.terminal, maxLines: 5, onRowAccess: { accesses += 1 })
+
+        #expect(accesses > 5, "the walk enumerates the buffer, not just the requested tail")
+        #expect(projected.lines.count == 5)
+    }
+
+    /// And the correctness half: the early return is not a second answer. The
+    /// full-walk reference at depth `0` agrees with it on every field, over
+    /// every fixture — including the deep one, where the two paths have the
+    /// most room to disagree about `viewportStart`.
+    @Test("the modes-only path agrees with the full walk at depth zero")
+    func modesOnlyPathAgreesWithTheFullWalk() {
+        for fixture in [
+            Fixture(feeding: "\u{1b}[?2004h\u{1b}[?1hfirst\r\nsecond"),
+            Fixture(feeding: (1...400).map { "line \($0)" }.joined(separator: "\r\n")),
+            Fixture(feeding: ""),
+        ] {
+            let shared = TerminalScreenProjection.project(fixture.terminal, maxLines: 0)
+            #expect(shared == Reference.project(fixture.terminal, maxLines: 0))
+            // The algebra the early return relies on, stated: with no lines the
+            // tail cut drops every row, so the offset is `-rows` whatever the
+            // buffer holds.
+            #expect(shared.viewportStart == -fixture.terminal.rows)
+        }
+    }
+
     // MARK: - The viewport-only render
 
     /// `renderScreen` went through the lift too, and its trim and character

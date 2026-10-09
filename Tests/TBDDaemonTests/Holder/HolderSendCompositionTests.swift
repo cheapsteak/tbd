@@ -348,6 +348,69 @@ import Testing
         }
     }
 
+    // MARK: - A viewer's reading, all the way to the bytes
+
+    /// The two halves of the viewer path joined: a reading the pull produced
+    /// decides the wrap, and the wrap decides the bytes.
+    ///
+    /// Tested end to end because the halves are otherwise only tested apart —
+    /// `observedModeIsObeyed` pins the decision and `wrapsAndSubmits` pins the
+    /// bytes, and neither says that a `.viewer` reading reaches the right ones.
+    /// Asserted on the whole `Data`: a substring check would pass on a message
+    /// whose submitting `\r` sat *inside* the paste, which is the defect this
+    /// whole composition exists to prevent.
+    @Test("an observed viewer 'on' wraps, with the Enter after the end marker")
+    func viewerObservedOnWrapsToTheRightBytes() {
+        let reading = Self.reading(bracketedPaste: true, modesObserved: true, source: .viewer)
+        let wrap = HolderSendComposition.bracketedPaste(
+            for: reading, unobservedShouldWrap: true)
+        let composed = HolderSendComposition.compose(
+            body: "a brief", submit: true, bracketedPaste: wrap)
+
+        #expect(composed == Self.expected(body: "a brief", wrapped: true, submit: true))
+        #expect(composed.last == 0x0d)
+        #expect(composed.dropLast().suffix(Self.end.count) == Self.end)
+    }
+
+    /// The discriminating half, and the reason the pull is worth having: a
+    /// viewer that *is* watching the child and reports bracketing **off**
+    /// composes bare for an agent session — the unobserved guess must not leak
+    /// into the viewer path.
+    ///
+    /// `unobservedShouldWrap: true` is passed deliberately, which is what an
+    /// agent session passes. A composition that reached for the guess whenever
+    /// the flag was set would wrap here and this would fail on whole bytes.
+    @Test("an observed viewer 'off' composes bare for an agent session")
+    func viewerObservedOffComposesBareForAnAgentSession() {
+        let reading = Self.reading(bracketedPaste: false, modesObserved: true, source: .viewer)
+        let wrap = HolderSendComposition.bracketedPaste(
+            for: reading, unobservedShouldWrap: true)
+        let composed = HolderSendComposition.compose(
+            body: "a brief", submit: true, bracketedPaste: wrap)
+
+        #expect(!wrap, "a live viewer's observed 'off' is evidence, not a guess to override")
+        #expect(composed == Self.expected(body: "a brief", wrapped: false, submit: true))
+        #expect(Self.occurrences(of: Self.start, in: composed) == 0)
+        #expect(Self.occurrences(of: Self.end, in: composed) == 0)
+    }
+
+    /// Beside it, the same "off" from the *frozen* emulator, which does wrap
+    /// for an agent session. The pair is what shows the decision turns on
+    /// `source` rather than on `bracketedPaste` alone — two readings that
+    /// differ in nothing else compose different bytes.
+    @Test("the same 'off' from a frozen emulator wraps, where the viewer's does not")
+    func staleOffAndViewerOffComposeDifferently() {
+        let viewer = HolderSendComposition.bracketedPaste(
+            for: Self.reading(bracketedPaste: false, modesObserved: true, source: .viewer),
+            unobservedShouldWrap: true)
+        let stale = HolderSendComposition.bracketedPaste(
+            for: Self.reading(bracketedPaste: false, modesObserved: true, source: .staleDaemon),
+            unobservedShouldWrap: true)
+
+        #expect(!viewer)
+        #expect(stale)
+    }
+
     /// The field defect. A viewer takes the pty milliseconds after a spawn, so
     /// the frozen emulator's `bracketedPaste: false` predates the agent TUI
     /// turning bracketing on — yet it is `modesObserved: true`, because that

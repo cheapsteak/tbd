@@ -14,6 +14,10 @@ struct HolderDaemonStore: Sendable {
     /// stamps `source` itself**, from its own drain state, which is the only
     /// place it can be read honestly.
     let screen: @Sendable (Int) async throws -> TerminalScreen
+    /// The reader's own modes, provenance and age, with no line walk — and the
+    /// same honest `source`. A whole screen would be the same answer at the
+    /// price of walking the retained scrollback on every message composed.
+    let modeReading: @Sendable () async -> TerminalModeReading
     /// Whether this reader's emulator was built with its child, so its mode
     /// flags and its grid are observations rather than a fresh terminal's
     /// defaults over a blank screen. A `nonisolated let` on the reader, so
@@ -142,6 +146,63 @@ struct HolderScreenResolver: Sendable {
             // draining again, and calling that stale would make the
             // hibernation rail refuse a park it could safely take.
             return try await store.screen(maxLines)
+        }
+    }
+
+    /// The child's modes for `terminalID`, from whichever store is live — what
+    /// the input path composes against.
+    ///
+    /// The same three-way decision `screen` takes, asked of the same ledger,
+    /// with two differences that both come from this being a *send*'s question
+    /// rather than a read's:
+    ///
+    /// - **It asks for no lines, and that is a real saving rather than a
+    ///   smaller reply.** `lines: 0` makes `TerminalScreenProjection.project`
+    ///   return before it walks the buffer, so the answering viewer reads a
+    ///   handful of properties instead of calling `rowText` once per retained
+    ///   row — on its main actor, under the terminal lock, inside the bound
+    ///   below. A walk there could exceed the bound on a deep scrollback and
+    ///   drop the send onto the frozen modes, which is the failure this whole
+    ///   path exists to remove.
+    /// - **It waits `sendPathScreenPullBound`, not `screenPullBound`.** A read
+    ///   has nobody waiting on it and a send does; `HolderInputTiming` argues
+    ///   the asymmetry, and the bound travels with the request rather than
+    ///   belonging to the puller, so one pull serves every caller.
+    ///
+    /// - Returns: nil when the daemon publishes no reader. **A nil answer makes
+    ///   the caller proceed, never refuse** — the composition step's job is to
+    ///   record what it composed against, and the courier is what decides
+    ///   whether delivery is possible, fail-open.
+    func modeReading(terminalID: UUID) async -> TerminalModeReading? {
+        guard let store = await daemonStore(terminalID) else { return nil }
+        guard case .viewer = await ptyReader(terminalID) else {
+            return await store.modeReading()
+        }
+        guard let pull else { return await store.modeReading() }
+
+        let answer = await pull.pull(
+            terminalID: terminalID,
+            lines: 0,
+            retainedScrollbackLines: retainedScrollbackLines,
+            wantStyledCapture: false,
+            bound: HolderInputTiming.sendPathScreenPullBound)
+        switch answer {
+        case .answered(let payload, _):
+            return TerminalModeReading(
+                modes: payload.modes,
+                // From the reader, not the reply — see the type's doc. This is
+                // the field `HolderSendComposition` keys its whole decision on,
+                // so taking it from the wrong place would make a re-adopted
+                // session's defaults read as the child's own flags.
+                modesObserved: store.observedChildFromStart,
+                source: .viewer,
+                ageMilliseconds: max(0, payload.ageMilliseconds))
+        case .refused, .undeliverable, .timedOut:
+            // The honest re-read, for `screen`'s reason. Ordinarily
+            // `.staleDaemon`, which is the branch the stale-modes rule was
+            // written for: proceed on the frozen modes, trust a stale "on",
+            // treat a stale "off" as not known.
+            return await store.modeReading()
         }
     }
 

@@ -1026,6 +1026,7 @@ public final class Daemon: Sendable {
                     guard let reader = await registry.reader(for: terminalID) else { return nil }
                     return HolderDaemonStore(
                         screen: { maxLines in try await reader.screen(maxLines: maxLines) },
+                        modeReading: { await reader.modeReading() },
                         // A `nonisolated let` on the reader, read here rather
                         // than taken from the viewer's reply: a viewer's
                         // emulator was seeded by this reader's attach preamble
