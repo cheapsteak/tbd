@@ -578,9 +578,14 @@ Among eligible tests the picker takes the one with the most failures, then the
 most recent failure, then the lowest issue number. It writes a brief for the
 session: the test ID, file and line, the issue number, the current episode's
 occurrences with run links, the failure signatures, and every prior attempt
-with its outcome. A merged PR is listed as a prior fix that did not hold, with
+with its outcome, including a rename or retirement of the target it made
+(§6.4). A merged PR is listed as a prior fix that did not hold, with
 its link and the session notes its attempt entry recorded, so the session
-starts from what was already tried. The brief is built only from the ledger's
+starts from what was already tried. The brief ends with the **flaky list**:
+the test ID and issue number of every other open `flaky` issue whose ledger
+comment the bot wrote, the watchlist excluded. It is what a session checks a
+coverage claim against (§6.1): a test on it is no coverage another test can
+lean on. The brief is built only from the ledger's
 structured data, read only from the bot's own comments (§4.4). No human-written
 text reaches it: not issue comments, not the issue body or title, not PR
 bodies, and not a sentinel comment someone else posted, because anyone can
@@ -616,6 +621,55 @@ The job then starts `claude-code-action` in the session tree with the brief and
 the rules below. The session runs on the macOS runner itself, so it can build,
 run the test through `scripts/test.sh --filter`, and stress it while it
 diagnoses.
+
+**Both sessions run on Opus** (`--model claude-opus-5-5`), not the action's
+default model. A fix here is judged on whether it keeps the test testing what
+it was written to test, and the evidence is that the default model can miss
+that: PR #1018 (run 37928079031), on the default model in about three
+minutes and 16 and 13 turns, fixed #989 by swapping the clock a
+`ClockTestSupportTests` self-test drives from `TestClock` to
+`EventDrivenTestClock`, so the self-test of `TestClock` stopped testing
+`TestClock`, and it claimed a sibling still covered the behaviour without
+noticing that the sibling was itself flaky (#990). The model is named once,
+as an output of the step that lays the attempt out, and both sessions read it
+from there: a step output taken before session 1 is one no session can
+rewrite, where an `env` value could be changed by session 1 through
+`$GITHUB_ENV` before session 2's inputs are read.
+
+**Every session leaves a transcript.** Both session steps set
+`show_full_output: true`, so the session's messages and tool results go to
+the step log. The runner masks only registered secrets there –
+`CLAUDE_CODE_OAUTH_TOKEN`, the job token, and the runtime tokens it issues –
+and the action's own documentation warns that full output can expose any
+other secret a tool prints. The session's environment holds no other secret
+(§6.1's credential list), so this is accepted for the reasoning it makes
+visible. The action also
+writes the whole session to `claude-execution-output.json` in `$RUNNER_TEMP`
+when the session ends and names it in its `execution_file` output; an
+artifact is not masked the way a log is, so a step after each session, run
+whatever the attempt's outcome once that session's End step has ended its
+processes, and in the recorded environment (§6.4), copies
+that file and only that file – at the action's own path, a regular file, never
+a symlink – into `flakefix-transcripts/session-<i>.json`, with every
+credential-shaped string redacted: Anthropic keys and OAuth tokens
+(`sk-ant-…`), GitHub tokens of every prefix (`ghs_…`, `github_pat_…`), and
+JWTs such as the Actions runtime token. Before anything else, even with no
+file to keep, it removes from the transcript directory anything that is not a
+regular file and redacts every file in it again, so a symlink or an
+unredacted file session 2 left there is not uploaded; the upload leaves out
+hidden files. It runs main's verifier copy, checked
+against its fingerprint first, and removes the original, so session 2's
+transcript can never be session 1's left behind. A transcript that cannot be
+kept says why in the job summary and never fails the job; one whose session
+ended in an aborted End step is not kept at all. The upload runs only when
+the Keep step after the last session that ran succeeded, having cleaned the
+directory, so nothing a session left there unexamined is uploaded. The `fix` job
+uploads the directory as the `flakefix-transcripts` artifact. A transcript
+holds repository content and this repository's CI output, and the repository
+is public, so nothing in it is private beyond the credentials redacted. A
+session that times out leaves no file – the action writes it when the session
+ends – and its log is then the only record. The transcript is for a human
+reading why a fix took the shape it did; nothing in the bot reads it back.
 
 **The session holds no repository write credential**, by these mechanisms
 rather than by instruction:
@@ -692,6 +746,33 @@ restates them here because they are the review criteria for every bot PR:
 - **Run tests through `scripts/test.sh`**, never bare `swift test`.
 - **Assertion hygiene** – assert contracts, not incidents; no wall-clock
   freshness windows; timeouts report observed state.
+
+Three more rules keep a fix from making a test pass by no longer testing what
+it was written to test. They are review criteria too, and the prompt states
+them:
+
+- **A test of test infrastructure tests that infrastructure.** When the
+  target belongs to a suite that tests a test helper – a `*SelfTests` suite,
+  `ClockTestSupportTests`, a test of a clock, a poller, or a fixture – the
+  helper is the code under test, and the fix must keep exercising it. Swapping
+  the thing under test for a different helper turns the test green while the
+  helper it existed for goes untested.
+- **A coverage claim names its test.** Notes that say something remains
+  covered elsewhere must name that test, in the xunit form, and say it was
+  checked against the brief's flaky list (§5). A test on that list is not
+  coverage anything can lean on.
+- **A name says what the test checks.** A fix that makes the test check
+  something its name no longer describes renames it, which is preferred over
+  keeping a misleading name; moving or retiring the test follows the same
+  rule. The session declares it in its notes, on a line of its own –
+  `RENAMED: <old test ID> -> <new test ID>` or `RETIRED: <old test ID> —
+  <reason>` – and the verifier and the PR treat it as §6.4 and §7 say. PR
+  #1018 is the evidence that an honest rename needs a way through: its first
+  try renamed the test to describe what it now checked, every iteration then
+  failed on the target's absence from the xunit output, and the second try
+  restored the old name on a test that no longer checked what that name said.
+  A verifier that fails every absent target teaches a session to hide a
+  rename.
 
 ### 6.2 Stress scope
 
@@ -865,7 +946,8 @@ of these hold, at that scope:
 - every iteration completed – a wedged or truncated iteration, or one below its
   floor, fails the run;
 - every iteration's xunit output shows the target test executed and passed – a
-  deleted, renamed, or disabled test cannot pass by running nothing;
+  deleted, renamed, or disabled test cannot pass by running nothing, and a
+  declared rename or retirement (below) is never a pass either;
 - every iteration's retry-metrics ledger is present and readable, and shows the
   target never needed a retry, by the rule below.
 
@@ -903,6 +985,60 @@ it:
 Records for other tests are ignored, except that they prove the wiring
 reached the test process: at pass scope 1a, `FlakyQuarantineSelfTests`
 always writes one.
+
+**A renamed, moved, or retired target.** A fix may rightly rename the target
+so its name says what it now checks, move it to another suite, or retire it
+(§6.1). The target is then absent from the xunit output, and absence alone
+cannot tell an honest rename from a candidate that silently broke discovery
+or deleted the test. So the verifier honors a change to the target only when
+both of these hold, checked after the candidate is applied and before the
+stress run:
+
+- **The session declared it.** Its notes hold a line for the target,
+  `RENAMED: <old test ID> -> <new test ID>` or `RETIRED: <old test ID> —
+  <reason>`, the IDs in the xunit form; a bullet and backticks around an ID
+  are allowed. Lines for other tests are ignored. The last line for the
+  target counts: both tries write one notes file, so try 1's declaration is
+  still there when try 2 writes its own. The notes are read without
+  following a symlink and without blocking on anything but a regular file.
+- **The diff bears it out.** Read from `git diff -U0` of the candidate under
+  `Tests/`, with each revision's type declarations from `git grep`. The old
+  side: the diff takes the old test's function declaration out of a file
+  that declared its innermost suite on the base – a same-named function in
+  another suite's file, or a commented-out line, proves nothing – or, for a
+  rename that keeps the function's name, the old suite is declared nowhere in
+  its module afterwards (a renamed suite). Removing a suite extension while
+  the function stays is never enough. The new side, for a rename: the new
+  function's declaration goes into a file that declares the new suite
+  afterwards, or the renamed suite is declared in a file that held the old
+  one. A retirement needs the old side's function removal. Two suites in one
+  file with a same-named function are told apart by no part of this; a human
+  reading the draft is the backstop there, as for everything a rename or
+  retirement leaves.
+
+What follows:
+
+- **A rename** is stressed under the new ID, with the same scope and the
+  adaptive `N` the baseline planned for the old one, and with the retry check
+  keyed to whether the candidate quarantines the new ID. At pass scope the
+  old ID still chooses the pass, the one `N` was sized for; the iterations
+  are judged on the new ID, so a test moved out of that pass is absent and
+  fails. The verdict is
+  judged on the new ID exactly as on the old: absent, failing, or retried, it
+  fails, and a second try may follow. Clean, the candidate is **not eligible
+  for ready** rather than passing: a human must judge whether the renamed test
+  still covers what the old one did.
+- **A retirement** stress-runs nothing, and the verdict claims no stress
+  result: it is not eligible for ready, with no iterations, no `N`, and no
+  false-pass probability. The PR's own `test.yml` run is the only build check
+  it gets.
+- **An undeclared absence, or a declaration the diff does not bear out,**
+  changes nothing: the old ID is stressed, is absent, and fails the verdict.
+  The failing lines a second try reads say how to declare a change, or why the
+  declaration was not honored.
+
+The change, when honored, is part of `verdict.json`, which the packaging step
+sums (below), so `publish` reads it from the artifact it checks.
 
 At pass scope the verdict is about the target test. Another test failing in the
 same iteration does not fail the candidate: a pass of thousands of tests under
@@ -1113,7 +1249,14 @@ Transitions, each owned by the PR driver:
   it, the stress result (iterations, failures, core count, spinner count, and
   `load1m` as observed), any other tests that failed at pass scope, and the
   §6.5 limit in one sentence. For weak evidence the numbers lead the body and
-  the PR gets the `flakefix-weak-evidence` label (§6.5). The driver then
+  the PR gets the `flakefix-weak-evidence` label (§6.5). A candidate that
+  renamed or retired its target (§6.4) gets the `flakefix-needs-human` label,
+  created if missing and put on before the status is set, whatever its stress
+  result, and its body leads with "The target test was renamed; a human must
+  judge whether coverage is preserved." (or "retired"), naming the new ID, or
+  the session's reason for a retirement, sanitized like the notes; a
+  retirement's body carries no numbers line, since nothing was stressed. The
+  driver then
   records the attempt in the attempt comment (§4.4). The push happens once per
   attempt, after
   verification, so the PR's CI runs once on the final candidate rather than
@@ -1168,7 +1311,11 @@ Transitions, each owned by the PR driver:
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
   `failure`, whatever its stress result, with a status description naming the
-  files, and its PR body says a human must judge the change. Either way the
+  files, and its PR body says a human must judge the change. So does a
+  candidate that renamed or retired its target, with a description saying
+  which – "target test renamed; no failure observed in N runs under its new
+  ID", or "target test retired; nothing was stress-run" – and a failed stress
+  run under the new ID gets the ordinary failure description. Either way the
   draft stays open for a human to read, finish, or close.
 - **Promote.** Promotion needs two facts that arrive in either order: the
   PR's own `test.yml` run passing, and the bot's `flakefix/stress` status. The
@@ -1201,7 +1348,9 @@ Transitions, each owned by the PR driver:
   `test.yml` runs on that SHA, on its branch and from this repository, has
   completed with `success`; the SHA carries `flakefix/stress` = `success`
   (the newest such status the bot set on it); and the SHA is still the PR's
-  head. Under the Test trigger, the run that started `promote` enters that
+  head; and the PR does not carry `flakefix-needs-human`, which only a
+  renamed or retired target puts on it (§6.4), so such a PR is never readied
+  by the bot, whatever statuses it gathers. Under the Test trigger, the run that started `promote` enters that
   list as its own event describes it, because the runs listing may not yet
   show it completed; a newer run in the listing, such as a re-run still
   going, still decides. A human push to the branch moves the head to an unverified SHA, so
@@ -1236,6 +1385,20 @@ Transitions, each owned by the PR driver:
   PR's state (§4.4). A recurrence on a commit containing the fix reopens the
   issue and makes the test eligible again; a PR closed unmerged makes it
   ineligible until it fails again (§5).
+
+  **A merged rename or retirement** closes the old ID's issue like any fix,
+  and the attempt entry records the change – `target_change` `renamed` with
+  `renamed_to`, or `retired` – so the issue's attempt comment and every later
+  brief name it. The ledger keys every issue by test ID, and nothing in it
+  is confused by the change: the old ID can no longer fail on a commit
+  holding the fix, so its issue is never reopened as a recurrence, and a
+  failure of the old ID on a commit without the fix is `pre-fix` as usual. A
+  renamed test that flakes again is a new test to the ledger: it starts on
+  the watchlist and earns its own issue at the threshold, rather than
+  reopening the old one, so a recurrence after a rename takes two places to
+  surface where it would otherwise take one. When the renamed test still
+  carries the old test's `.flaky(issue: N)` trait, N already holds the old
+  ID's ledger, so the new ID gets its own issue linking N (§4.4).
 
 ## 8. Failure handling
 
@@ -1381,11 +1544,18 @@ The account allows five concurrent macOS jobs, shared by every workflow.
     measured);
   - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
     seconds is 8.3);
-  - two sessions, capped at 60 minutes each – 120 minutes;
+  - two sessions, capped at 60 minutes each – 120 minutes. The cap holds on
+    Opus (§6.1) without change: Opus takes longer per turn than the default
+    model, but the one measured session, PR #1018's on the default model,
+    used about 3 minutes and 16 turns, so even several times slower per turn
+    is far inside 60 minutes. A session that would run longer – the turn
+    limit is 300 – is ended by the step's timeout and fails as §8 says;
+    it does not move the budget;
   - checkouts, ending the session's processes, the verification tree's
-    digest before and after each session (§6.4), the bundle, the artifact
-    upload, and API calls – 20 minutes (not measured on CI; one digest of a
-    4.4 GB `.build` took 3.5 seconds on a development machine).
+    digest before and after each session (§6.4), the bundle, keeping the
+    transcripts, the artifact uploads, and API calls – 20 minutes (not
+    measured on CI; one digest of a 4.4 GB `.build` took 3.5 seconds on a
+    development machine).
 
   That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
   verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
@@ -1418,8 +1588,9 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   once per attempt and so at most once a night.
 - **The `ledger`, `publish`, and `promote` jobs** run on ubuntu and cost no
   macOS slot.
-- **Model usage** is one attempt a night, at most two sessions, authenticated
-  with the existing `CLAUDE_CODE_OAUTH_TOKEN` that the review workflow uses.
+- **Model usage** is one attempt a night, at most two sessions, on Opus,
+  authenticated with the existing `CLAUDE_CODE_OAUTH_TOKEN` that the review
+  workflow uses.
 
 ## 10. Rollout
 
@@ -1502,13 +1673,20 @@ names who reclaims its orphans:
   ever failed (§4.4). A bot comment that does not parse is left in place for a
   human, never deleted; it stays one comment.
 
-Four more things the bot creates need no reclaimer, each for a stated reason:
+Five more things the bot creates need no reclaimer, each for a stated reason:
 
 - **The `flakefix-candidate` artifact** is uploaded with `retention-days: 7`.
   `publish` consumes it within minutes; the week is for a human reading a
   failed attempt. GitHub deletes it on expiry.
-- **Labels** – `flaky`, `flake-watchlist`, `flakefix-skip`, and
-  `flakefix-weak-evidence` – are a fixed set of four names, created once if missing and reused after. Their
+- **The `flakefix-transcripts` artifact** (§6.1) is uploaded with
+  `retention-days: 14`: nothing in the bot reads it, and the two weeks are
+  for a human reviewing a PR or a failed attempt after the fact, which can
+  take longer than the candidate's week. GitHub deletes it on expiry. The
+  `claude-execution-output.json` each session leaves in `$RUNNER_TEMP` is
+  removed when it is kept, and the runner itself is discarded with the job.
+- **Labels** – `flaky`, `flake-watchlist`, `flakefix-skip`,
+  `flakefix-weak-evidence`, and `flakefix-needs-human` – are a fixed set of
+  five names, created once if missing and reused after. Their
   number cannot grow with use, so nothing accumulates.
 - **Commit statuses** (`flakefix/stress`) are one per pushed SHA per attempt,
   immutable metadata on that commit with no separate lifetime. They are
@@ -1619,7 +1797,11 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   `flake-watchlist` label, no ledger comment, a ledger comment from a login other than the bot's, an unparsable
   JSON block, an open bot PR); a closed issue, never picked whatever its
   failures; a brief built from fixtures that also hold human comments and
-  forged sentinel comments, none of whose text appears in it; and the refusal
+  forged sentinel comments, none of whose text appears in it; the brief's
+  flaky list, which names another open `flaky` issue's test with its number
+  and leaves out the target, the watchlist, a closed issue, and a test only a
+  forged ledger names, and says "None." when empty; an earlier attempt's
+  rename, named in the brief; and the refusal
   to start with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
   failure and with none; baseline classification of a target failure, a
@@ -1648,7 +1830,36 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   non-ASCII byte, a non-ASCII name outside every glob, and a protected name in
   another case, each flagged; a candidate that force-adds a file under
   `.build/`, refused before the warm build is touched and judged a failure
-  with that reason; and a non-ASCII name elsewhere, which is applied.
+  with that reason; and a non-ASCII name elsewhere, which is applied. A
+  renamed or retired target, over throwaway repositories: a declared rename
+  the diff bears out, stressed under the new ID; a renamed suite, which is a
+  rename; a declared rename that keeps the old test beside the new one, not
+  honored and saying why; a rename with no declaration, which changes
+  nothing; a declared retirement that removes the function, which stresses
+  nothing; one that removes only a suite extension and keeps the function,
+  not honored; a retirement whose only removal is a same-named function in
+  another suite's file, or a commented-out line, not honored; a move into
+  another suite's file, renamed or keeping its name, honored; a rename that
+  only drops a suite extension while the target stays, not honored; a
+  second try's declaration after the first's, which counts; a declaration
+  for another test, and a new ID not in the xunit form, neither honored; a
+  rename at pass scope stressed through the old ID's pass; and a notes file
+  that is a symlink, missing, or a FIFO, which declares nothing, the FIFO
+  without blocking. A `target-change`
+  that failed and left an empty change file still gets its harness-error
+  verdict. The judge with a
+  change: a clean rename under its new ID, not eligible for ready, and the
+  same iterations without the change failing on the absent old ID; a rename
+  whose new ID never ran, failed; a retirement, not eligible, claiming no
+  iterations, `N`, or result; an absent target with no honored change,
+  failed, its failing lines saying how to declare one or why a declaration
+  was not honored; and a change file naming another test, malformed. The
+  transcript keeper: a kept transcript with an OAuth token, a GitHub token,
+  and a JWT each redacted, the count reported, and the original removed; a
+  path other than the action's own, a symlink at the action's path, and no
+  file at all, each keeping nothing; and a planted symlink in the transcript
+  directory, removed, and an unredacted file there redacted again, even when
+  there is no execution file to keep.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier
@@ -1680,6 +1891,25 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that
   touched a protected file, which records `failure` and names the files.
+  A candidate that renamed its target: a draft whose status is `failure`
+  saying so, labelled `flakefix-needs-human` before the status is set, whose
+  body leads with the coverage note and names the new ID, recorded with the
+  rename beside its stress verdict; one that retired its target: the same
+  label and note, the session's reason defused, no numbers line, and no
+  stress verdict recorded; a weak-evidence rename, whose status keeps the
+  weak-evidence clause; an entry with no change, which writes neither
+  change field, and an attempt comment holding a key its reader does not
+  know, which still parses; a rename whose stress failed, still labelled, and
+  a plain failure, not; and a PR carrying `flakefix-needs-human`, never
+  promoted under either trigger with every other condition met. The
+  workflow: both sessions on the model the layout step names, never through
+  `env`; both with `show_full_output: true`; a Keep step after each End
+  session step that checks the verifier copy's fingerprint and keeps only
+  the action's execution file; the `flakefix-transcripts` upload for 14 days;
+  each Stress step stressing the ID `target-change` names, and each Judge
+  step reading it. The session prompt states the three rules of §6.1 that
+  keep a test testing what it tests, in the declaration format the verifier
+  parses.
   Replay at publish, against a pre-receive hook that refuses a branch
   whose workflow files differ from `main`'s, as GitHub does: `main` moving
   without a workflow change, which pushes the candidate as it is; `main`'s

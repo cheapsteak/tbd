@@ -339,6 +339,37 @@ test_the_brief_never_contains_human_comment_text() {
   assert_contains "with run links" "$brief" "https://github.com/$REPO/actions/runs/1000/attempts/1"
 }
 
+# The flaky list a coverage claim is checked against (§5, §6.1): every other
+# open `flaky` issue's test ID, from the bot's own ledger state alone.
+test_the_brief_lists_the_other_open_flaky_tests() {
+  local w brief mutant; w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO}"
+  issue "$w" "{\"number\": 11, \"test\": \"TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspended()\", $ONE}"
+  issue "$w" "{\"number\": 12, \"test\": \"TBDDaemonTests.WatchedTests/onTheWatchlist()\", \"labels\": [\"flaky\", \"flake-watchlist\"], $ONE}"
+  issue "$w" "{\"number\": 13, \"test\": \"TBDDaemonTests.ClosedTests/closedOne()\", \"state\": \"CLOSED\", $ONE}"
+  issue "$w" "{\"number\": 14, \"test\": \"TBDDaemonTests.ForgedTests/forgedOne()\", \"ledger_author\": [\"mallory\", \"User\"], $ONE}"
+  assert_eq "picked" "rc=0 #10" "$(picked "$w" "$HERE" --issue 10)"
+  brief="$(cat "$w/out/brief.md")"
+  assert_contains "another open flaky test is listed with its issue" "$brief" '- `TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspended()` (#11)'
+  assert_lacks "not the target itself" "$(sed -n '/## Tests on the flaky list/,$p' <<< "$brief")" "HolderLockTests"
+  assert_lacks "not the watchlist" "$brief" "onTheWatchlist"
+  assert_lacks "not a closed issue" "$brief" "closedOne"
+  assert_lacks "not a test only a forged ledger names" "$brief" "forgedOne"
+  mutant="$(mutant_of 's/^    listed = flaky_list\(views or \{\}, view.number\)$/    listed = []/' "$PICK")"
+  picked "$w" "$mutant" --issue 10 > /dev/null
+  assert_lacks "mutation: without the list it is not there" "$(cat "$w/out/brief.md")" "advanceWhenSuspended"
+  w="$(world)"; issue "$w" "{\"number\": 10, $TWO}"
+  picked "$w" > /dev/null
+  assert_contains "an empty list says so" "$(sed -n '/## Tests on the flaky list/,$p' "$w/out/brief.md")" "None."
+}
+
+test_the_brief_names_an_earlier_attempts_rename() {
+  local w; w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"prs\": [{\"number\": 77, \"outcome\": \"closed-unmerged\", \"merge_sha\": null, \"episode\": 0}], \"attempts\": [$(attempt pr-opened 2026-09-30T06:00:00Z '"pr": 77, "verdict": "pass", "target_change": "renamed", "renamed_to": "TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()"')]}"
+  assert_eq "picked" "rc=0 #10" "$(picked "$w")"
+  assert_contains "the attempt says it renamed the target" "$(cat "$w/out/brief.md")" 'renamed the target to `TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()`'
+}
+
 test_a_forged_state_comment_is_not_read() {
   local w; w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"ledger_author\": [\"github-actions[bot]\", \"Bot\"]}"
