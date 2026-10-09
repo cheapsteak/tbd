@@ -102,14 +102,22 @@ tbd terminal send --terminal <id> --text "..." [--submit]
 tbd terminal output <id> [--lines N]
 ```
 
-**A session someone has open answers from a frozen screen.** While a viewer
-holds a session's pty, `tbd terminal output` still answers: with the daemon's
-emulator as it stood when that viewer attached, and it announces that
-on stderr. Stdout stays exactly the screen text, so a reader that captures only
-stdout cannot tell a live screen from one that stopped updating hours ago. Read
-the stderr note, or pass `--json` and check `screen.source` (`daemon` is the
-live store, `staleDaemon` the at-attach one) and `screen.ageMilliseconds`,
-before acting on what you read.
+**Three stores can answer, and the answer says which one did.** `tbd terminal
+output` always answers, including for a session somebody has open, but what it
+answers from differs — so stdout alone cannot tell a live screen from one that
+stopped updating hours ago. Stdout is exactly the screen text; the provenance
+goes to stderr, or to `screen.source` and `screen.ageMilliseconds` under
+`--json`. Read one of those before acting on what you see.
+
+- `daemon` — the daemon is reading that session's pty and this is its live
+  emulator. The ordinary case for a session nobody has open.
+- `viewer` — somebody has the session open, and this is the screen on their
+  display, pulled from the app. It is live, and that is the whole caveat worth
+  knowing: a person is at that keyboard, so what you read may be half-typed and
+  is about to change for reasons you cannot see.
+- `staleDaemon` — somebody has the session open and their app did not answer in
+  time, so this is the daemon's emulator as it stood when they attached.
+  `screen.ageMilliseconds` says how long ago that was.
 
 `screen` is there only for sessions on the pty-holder transport. A tmux-backed
 session answers with `output` alone, so a missing `screen` key means a tmux

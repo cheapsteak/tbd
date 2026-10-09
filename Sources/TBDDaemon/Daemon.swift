@@ -1013,6 +1013,28 @@ public final class Daemon: Sendable {
                 })
         }
 
+        // Which store answers a machine read, decided in one place. The census
+        // ledger (`ptyReader`) is the routing fact and the reader is the
+        // daemon's own store; the pull reaches a viewer's. Built from the
+        // registry, so it exists exactly when a holder session can.
+        let holderScreenResolver: HolderScreenResolver? = holderRegistry.map { registry in
+            HolderScreenResolver(
+                ptyReader: { terminalID in
+                    await registry.ptyReader(for: terminalID)
+                },
+                daemonStore: { terminalID in
+                    guard let reader = await registry.reader(for: terminalID) else { return nil }
+                    return HolderDaemonStore(
+                        screen: { maxLines in try await reader.screen(maxLines: maxLines) },
+                        // A `nonisolated let` on the reader, read here rather
+                        // than taken from the viewer's reply: a viewer's
+                        // emulator was seeded by this reader's attach preamble
+                        // and can carry no provenance the reader lacked.
+                        observedChildFromStart: reader.observedChildFromStart)
+                },
+                pull: holderScreenPull)
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1184,6 +1206,7 @@ public final class Daemon: Sendable {
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
         rpcRouter.holderInjectionCourier = holderInjectionCourier
+        rpcRouter.holderScreenResolver = holderScreenResolver
         // One supervisor across the router, the lifecycle and the coordinator,
         // for the registry's reason: two would each try to own one home's
         // `proxy.lock`, and `daemon.capabilities` would report a proxy no

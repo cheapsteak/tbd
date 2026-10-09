@@ -358,6 +358,10 @@ extension HibernationCoordinator {
                 return false
             }
         }
+        // The reader directly, never `HolderScreenResolver` — for
+        // `holderScreen`'s reason, and more sharply here: this runs for every
+        // idle holder row on every sweep, and a pull per row would spend the
+        // bound to learn something the refusal above does not distinguish.
         guard let reader = await registry.reader(for: terminalID) else { return true }
         let source = await reader.modeReading().source
         return Self.holderRefusal(
@@ -370,6 +374,15 @@ extension HibernationCoordinator {
     /// a real holder, a real pty and a real attach; otherwise the registry's
     /// own reader, which is the single source the design names. Both throw only
     /// what `TerminalScreen`'s construction refuses.
+    ///
+    /// **This reads the reader directly and must not be routed through
+    /// `HolderScreenResolver`**, even though routing every screen read through
+    /// one resolver is the obvious tidy-up. `HolderScreenEvidence.refusal`
+    /// answers `.viewerHoldsPty` for `.staleDaemon` and `.viewer` alike — the
+    /// rail refuses either way, because a live screen somebody is sitting at
+    /// the keyboard of cannot prove the composer is empty — so a pull could not
+    /// change the outcome. It would only put the pull's bound in front of every
+    /// idle-sweep row, for an answer this rail discards.
     private func holderScreen(
         terminalID: UUID, registry: HolderRegistry
     ) async throws -> TerminalScreen? {
