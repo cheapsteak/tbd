@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Detects cross-build skew between this app and the connected daemon.
 ///
@@ -29,16 +30,25 @@ enum DaemonBuildSkew {
     ///   that built this app (the app itself runs from /Applications, not
     ///   from that worktree), so neither is skew.
     ///
+    /// Before any path is compared, the two build stamps are: when both name
+    /// the same clean commit from the same source worktree, it is the same
+    /// build wherever the daemon binary sits (see `isSameStampedBuild`).
+    ///
     /// `resolvePath` is an injection seam so tests can exercise both branches
     /// with fabricated paths; production uses `defaultResolvePath`.
     static func warningMessage(
         daemonExecutablePath: String?,
         appSiblingDaemonPath: String?,
         sourceWorktreePath: String?,
+        appIdentity: BuildIdentity? = nil,
+        daemonIdentity: BuildIdentity? = nil,
         resolvePath: (String) -> String = defaultResolvePath
     ) -> String? {
         guard let daemonPath = daemonExecutablePath, !daemonPath.isEmpty else {
             // Older daemon that predates the field — can't tell, stay quiet.
+            return nil
+        }
+        if isSameStampedBuild(app: appIdentity, daemon: daemonIdentity, resolvePath: resolvePath) {
             return nil
         }
         var candidates: [String] = []
@@ -57,6 +67,34 @@ enum DaemonBuildSkew {
         }
         return "Daemon is from a different build: \(daemonPath). "
             + "Run scripts/restart.sh from the worktree you're working in."
+    }
+
+    /// Whether the app and the daemon are provably one build: both identities
+    /// read from a build stamp (not a possibly-stale worktree HEAD), neither
+    /// dirty, the same commit, and the same source worktree.
+    ///
+    /// The path comparison alone misfires while `scripts/update.sh` installs a
+    /// release download. The daemon runs from `<clone>/.build/release`, a link
+    /// into `~/tbd/updates/prebuilt/<commit>/`, and the update hands that link
+    /// back to SwiftPM while it compiles `TBDApp` (removed, then pointed at
+    /// SwiftPM's own directory) for as long as the compile waits for the
+    /// shared build slot. In that window the expected path no longer resolves
+    /// to the running daemon, so a matched pair read as skew. The stamps do not
+    /// move with the link. A different worktree, a different commit, or a
+    /// dirty tree still falls through to the path check.
+    static func isSameStampedBuild(
+        app: BuildIdentity?,
+        daemon: BuildIdentity?,
+        resolvePath: (String) -> String = defaultResolvePath
+    ) -> Bool {
+        guard let app, let daemon,
+              app.origin == .stamp, daemon.origin == .stamp,
+              !app.dirty, !daemon.dirty,
+              app.commit == daemon.commit,
+              let appWorktree = app.sourceWorktree, !appWorktree.isEmpty,
+              let daemonWorktree = daemon.sourceWorktree, !daemonWorktree.isEmpty
+        else { return false }
+        return resolvePath(appWorktree) == resolvePath(daemonWorktree)
     }
 
     /// Resolve symlinks and standardize so equivalent spellings of the same
