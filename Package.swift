@@ -106,10 +106,18 @@ let package = Package(
         // Pure encode/decode of a terminal screen to and from a wire
         // representation — no daemon or app state, only a SwiftTerm
         // `Attribute` in and a `String` out (SGREncoder). The pty-holder
-        // design's snapshot preamble.
+        // design's snapshot preamble, and the one cell walk behind every typed
+        // screen (`TerminalScreenProjection`) — which is why `TBDShared` is
+        // here: the projection fills `TerminalScreen`'s own `Size` and
+        // `ChildModes` and renders against its `isDisallowed` whitelist, rather
+        // than keeping a third copy of a rule that must not drift. Acyclic by
+        // construction: `TBDShared` has no dependencies at all.
         .target(
             name: "TBDTerminalSerialization",
-            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]
+            dependencies: [
+                "TBDShared",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]
         ),
         // One-shot CLI that renders the default (no-ribbon) icon and writes
         // a multi-rep .icns file. Run `swift run IconBaker Resources/AppIcon.icns`

@@ -94,9 +94,9 @@ not a work list; each has its own fix and owner.
 - **1,595 `U+0000` cells across five of nine sessions** in one `terminal.output`
   sweep: a differential painter positions past cells it is not changing, and
   the render projected those cells literally. Fixed in the render
-  (`Sources/TBDDaemon/Holder/HolderReader.swift:1255-1285` now projects a
-  never-written cell as a space), and no consumer had noticed, because every
-  consumer matches on text and a NUL displays as nothing.
+  (`TerminalScreenProjection.rowText` now projects a never-written cell as a
+  space), and no consumer had noticed, because every consumer matches on text
+  and a NUL displays as nothing.
 - **A machine read of any session a person has open returns an error that
   says the session is gone.** `holderTerminalOutput` (`:1911-1936` in the
   handlers file) requires `reader(for:)`; the attach acknowledgement stops that
@@ -240,12 +240,13 @@ design builds is the pull the model has always required.
   directions — a peer built before the case existed skips the frame and logs
   it (`SidecarFraming.swift:19-24`) — so an old app simply never answers and
   the bound below covers it. The app answers from its live SwiftTerm through
-  the same cell walk the handback preamble already uses
-  (`Sources/TBDTerminalSerialization/TerminalCellWalk.swift`, driven by
-  `TerminalSnapshotWriter` in the same module, which the handback invokes at
-  `Sources/TBDApp/Terminal/TerminalPanelView.swift:1204-1208`), so the two
-  stores project identically by construction. The answer is
-  `source: .viewer`.
+  the same projection the daemon's own emulator renders with
+  (`TerminalScreenProjection`, in the module both processes already link for
+  the handback preamble's styled walk — `TerminalCellWalk`, driven by
+  `TerminalSnapshotWriter`), so the two stores project identically **by
+  construction**: one cell walk, one character whitelist, one trailing-blank
+  trim, one `viewportStart` derivation, and no second implementation that
+  could be fixed alone. The answer is `source: .viewer`.
 
   The `requestID` is a UUID minted per request and unique for the request's
   lifetime, and the reply carries the session id beside it, because the
@@ -254,6 +255,49 @@ design builds is the pull the model has always required.
   reconnect discards every request outstanding on the old connection, and a
   reply arriving with a stale connection generation is dropped with the
   late-reply accounting above, never matched by id alone.
+
+  **The depth is the daemon's, whoever answers.** A viewer's SwiftTerm can
+  retain far more scrollback than the daemon's emulator keeps, so a request
+  caps the reader's requested depth at the daemon's own retained depth
+  (`HolderReader.scrollbackLines`) before it goes out, and the styled capture
+  below is bounded the same way. `--lines N` therefore means one thing
+  regardless of which store answered and regardless of whether anybody happens
+  to have the session open. The alternative — forward the depth verbatim and
+  let an attached session answer more deeply — is more history for that one
+  reader and a contract that varies by observer, which is the property this
+  whole section exists to remove. The cap is enforced where the request is
+  built rather than asked of each call site.
+
+  **Cursor visibility is the one fact a viewer answer cannot promise.**
+  `DECTCEM` is readable from no public SwiftTerm property. The daemon's
+  emulator learns it by implementing `showCursor`/`hideCursor` on its own
+  delegate; the app's view *is* SwiftTerm's `TerminalView`, which implements
+  that protocol itself and forwards neither call onward, and the only other
+  route — a `DECRQM 25` probe — is forbidden against a live parser for the
+  reason stated above. So a viewer answer reports the mode default and flags
+  the value as a default rather than an observation — a provenance flag of the
+  kind `modesObserved` carries for an emulator reporting a fresh terminal's
+  modes, stated on the viewer's own answer beside the value it qualifies, and
+  **not** by lowering `modesObserved` itself: a viewer's SwiftTerm genuinely
+  tracks the three child modes, and saying otherwise would send every send
+  composed against a viewer answer back to the unobserved guess. Nothing is
+  lost by it: the only consumer that reads a screen's cursor
+  is the hibernation pending-input rail, and that rail refuses a `.viewer`
+  screen outright. Forking SwiftTerm to intercept the two calls is rejected —
+  a fork commit is a standing maintenance cost for a field no consumer reads,
+  and a producer that can one day observe it changes one line rather than the
+  wire.
+
+  **Closed Terminals' final screen rides the same reply, as an optional styled
+  capture.** A typed screen structurally cannot carry one: its whitelist
+  forbids ESC, and the history file wants colours intact. So a request may ask
+  for a styled capture alongside the screen, produced by the same cell walk
+  the daemon's own `closedTerminalCapture` uses and taken in the same
+  observation as the lines. The rejected alternative is to have the app hand
+  back a preamble-shaped snapshot and the daemon ingest it before capturing —
+  which reuses more existing code and makes a *read* write to the daemon's
+  emulator as a side effect, the one thing the two-store model forbids, since
+  a feed into that emulator must happen with nothing else feeding it.
 - **Viewer holds the pty and does not answer** – the pull is bounded on an
   injected clock. On expiry the daemon answers from the emulator it suspended
   at attach, `source: .staleDaemon`, `age` per the one rule above. The

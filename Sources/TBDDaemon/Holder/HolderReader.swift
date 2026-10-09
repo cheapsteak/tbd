@@ -1391,14 +1391,12 @@ private final class HolderEmulator: @unchecked Sendable {
         }
     }
 
+    /// The viewport as text, through the same projection `screen` uses — so
+    /// the diagnostic render and the typed screen cannot disagree about what a
+    /// cell projects to or where the trailing blanks stop.
     func renderScreen() -> String {
         terminal.terminalLock.withLock {
-            var lines: [String] = []
-            lines.reserveCapacity(terminal.rows)
-            for row in 0..<terminal.rows {
-                lines.append(terminal.getLine(row: row).map(Self.rowText) ?? "")
-            }
-            return Self.joined(lines)
+            TerminalScreenProjection.viewportLines(of: terminal).joined(separator: "\n")
         }
     }
 
@@ -1411,14 +1409,18 @@ private final class HolderEmulator: @unchecked Sendable {
     /// change beside lines from before it, which is exactly the pairing the
     /// input path must not compose against.
     ///
-    /// The line walk enumerates from `totalLinesTrimmed`, the absolute index of
-    /// the oldest line still held, until `getScrollInvariantLine` returns nil —
-    /// because there is no public line count and `Buffer.lines` is internal.
-    /// It is the only whole-buffer walk in this type: the string-returning twin
-    /// that answered `terminal.output` before the screen contract is gone, so a
-    /// change to the projection cannot land in one walk and miss the other.
+    /// **The walk itself is not here.** Lines, `viewportStart`, the cursor's
+    /// position, the size and the three modes come from
+    /// `TerminalScreenProjection`, the one projection both stores share, so a
+    /// viewer's answer to a screen pull and this emulator's answer differ in
+    /// nothing but the facts below — which is the screen contract's "the two
+    /// stores project identically by construction", held structurally rather
+    /// than by two implementations agreeing. What stays here is everything a
+    /// grid cannot tell: which store answered, how stale it is, whether it
+    /// watched the child from birth, whether the cursor is visible, and the
+    /// construction that enforces the whitelist.
     ///
-    /// **Nothing here feeds the terminal**, which is why the cursor's
+    /// **Nothing in the projection feeds the terminal**, which is why the cursor's
     /// visibility is read from a flag the delegate keeps rather than probed
     /// with a `DECRQM` 25 query. `Terminal.cursorHidden` is not public, but
     /// SwiftTerm calls `showCursor`/`hideCursor` on its delegate every time the
@@ -1438,43 +1440,18 @@ private final class HolderEmulator: @unchecked Sendable {
     /// emulator must not make a stale screen look fresh.
     func screen(maxLines: Int, source: TerminalScreen.Source) throws -> TerminalScreen {
         try terminal.terminalLock.withLock {
-            var enumerated: [String] = []
-            var row = terminal.buffer.totalLinesTrimmed
-            while let line = terminal.getScrollInvariantLine(row: row) {
-                enumerated.append(Self.rowText(line))
-                row += 1
-            }
-            let enumeratedCount = enumerated.count
-
-            var lines = enumerated
-            if maxLines <= 0 {
-                lines = []
-            } else if lines.count > maxLines {
-                lines.removeFirst(lines.count - maxLines)
-            }
-            let droppedFromFront = enumeratedCount - lines.count
-            while let last = lines.last, last.isEmpty { lines.removeLast() }
-
-            // SwiftTerm's line list is always `yBase + rows` long, so the
-            // viewport is its tail — but `yBase` is not public, so the index of
-            // the viewport's first row is derived from the length instead. The
-            // tail cut then shifts it, which is why `droppedFromFront` comes
-            // off it: the result is an index into `lines`, not into the buffer.
-            // It can land outside `lines` in both directions, which the type's
-            // own documentation states and callers must bounds check.
-            let viewportStart = enumeratedCount - terminal.rows - droppedFromFront
-
+            let projected = TerminalScreenProjection.project(terminal, maxLines: maxLines)
             let cursor = TerminalScreen.Cursor(
-                row: terminal.buffer.y,
-                column: terminal.buffer.x,
+                row: projected.cursorRow,
+                column: projected.cursorColumn,
                 visible: delegate.cursorVisible)
 
             return try TerminalScreen(
-                lines: lines,
-                viewportStart: viewportStart,
+                lines: projected.lines,
+                viewportStart: projected.viewportStart,
                 cursor: cursor,
-                size: TerminalScreen.Size(columns: terminal.cols, rows: terminal.rows),
-                modes: currentModes(),
+                size: projected.size,
+                modes: projected.modes,
                 modesObserved: observedChildFromStart,
                 contentObserved: observedChildFromStart,
                 source: source,
@@ -1486,22 +1463,10 @@ private final class HolderEmulator: @unchecked Sendable {
     func modeReading(source: TerminalScreen.Source) -> TerminalModeReading {
         terminal.terminalLock.withLock {
             TerminalModeReading(
-                modes: currentModes(), modesObserved: observedChildFromStart, source: source,
+                modes: TerminalScreenProjection.modes(of: terminal),
+                modesObserved: observedChildFromStart, source: source,
                 ageMilliseconds: ageMilliseconds())
         }
-    }
-
-    /// The three child modes, all readable from public properties.
-    ///
-    /// `TerminalModeCapture` reads these same three the same way, and its
-    /// comment records why 1049 in particular must come from the property:
-    /// `cmdDecRqm`'s switch does not carry it, so a `DECRQM` query answers
-    /// "unknown". Caller holds `terminalLock`.
-    private func currentModes() -> TerminalScreen.ChildModes {
-        TerminalScreen.ChildModes(
-            bracketedPaste: terminal.bracketedPasteMode,
-            applicationCursor: terminal.applicationCursor,
-            alternateScreen: terminal.isCurrentBufferAlternate)
     }
 
     /// How long ago this emulator last consumed a byte, in milliseconds, never
@@ -1575,68 +1540,6 @@ private final class HolderEmulator: @unchecked Sendable {
     /// The grid's dimensions, read under the same lock as everything else here.
     var size: (columns: Int, rows: Int) {
         terminal.terminalLock.withLock { (terminal.cols, terminal.rows) }
-    }
-
-    /// One row of the grid as text, the way a reader of `terminal.output`
-    /// needs it: **a cell nobody ever wrote projects as a space, never as
-    /// `U+0000`.**
-    ///
-    /// A never-written or erased cell holds `CharData.Null`, whose code is 0,
-    /// and `translateToString`'s default path renders that literally. The
-    /// result looks right and is not: a TUI paints differentially, positioning
-    /// the cursor past the cells it is leaving alone rather than overwriting
-    /// them with blanks, so the skipped cells become invisible NULs scattered
-    /// through the line — and which cells get skipped changes with every
-    /// repaint, so the holes appear to move. Every consumer of this string
-    /// matches on text (fleet supervision, the pending-input rail, the login
-    /// driver), and a NUL is a missing character nothing displays. `tmux
-    /// capture-pane`, which this replaces for machine reads, returns spaces;
-    /// so does the app-side serializer in `TerminalCellWalk`.
-    ///
-    /// `skipNullCellsFollowingWide` is the other half and not optional: the
-    /// trailing cell of a two-column glyph carries code 0 as well, and padding
-    /// *it* to a space would put a stray blank after every CJK character and
-    /// every emoji. Trimming is unaffected — `trimRight` is computed from
-    /// `getTrimmedLength()` before the projection runs, so a row nobody wrote
-    /// still renders empty rather than as a row of spaces.
-    ///
-    /// **`U+0000` is not the only cell a screen line may not hold.** SwiftTerm's
-    /// printable-run inserter takes every byte from `0x20` through `0x7f`
-    /// without consulting a width, so a `printf '\x7f'` leaves a `DEL` in a cell
-    /// — legal for a child to emit, and refused by `TerminalScreen`'s
-    /// whitelist. Mapping only the NUL would therefore let one such byte break
-    /// *every* later read of that session until the line left the scrollback: a
-    /// session-wide outage caused by the session's own output.
-    ///
-    /// `DEL` is the only one reachable today — a C1 control is dropped before
-    /// insertion, because non-ASCII goes through a width table and nothing of
-    /// width zero is inserted. The projection is written against
-    /// `TerminalScreen.isDisallowed` anyway, rather than against the list of
-    /// scalars currently known to get through: the render and the whitelist
-    /// cannot disagree if they read the same predicate, and a width table that
-    /// changes its mind cannot reopen the outage. `U+FFFD` rather than a space
-    /// for these, because unlike a never-written cell something *was* written
-    /// and a reader should see that something is there.
-    private static func rowText(_ line: BufferLine) -> String {
-        line.translateToString(
-            trimRight: true,
-            skipNullCellsFollowingWide: true,
-            characterProvider: { cell in
-                let character = cell.getCharacter()
-                if character == Character(Unicode.Scalar(0)) { return " " }
-                guard character.unicodeScalars.contains(where: TerminalScreen.isDisallowed) else {
-                    return character
-                }
-                return "\u{FFFD}"
-            })
-    }
-
-    /// Trailing blank lines are dropped — a screen is 24 rows whether or not
-    /// the job filled them, and rendering 20 empty ones helps nobody.
-    private static func joined(_ lines: [String]) -> String {
-        var lines = lines
-        while let last = lines.last, last.isEmpty { lines.removeLast() }
-        return lines.joined(separator: "\n")
     }
 }
 

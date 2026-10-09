@@ -461,9 +461,17 @@ actor FDVendingServer {
                         } else {
                             logger.debug("sidecar: injection ack with no handler, dropping")
                         }
-                    case .fdVend, .injection:
-                        // The app must never send fd vends or injections —
-                        // both directions are daemon → app only.
+                    case .screenReply:
+                        // The screen pull's daemon half is not wired here yet,
+                        // and nothing in this build sends a request — so a
+                        // reply can only be a stray from a newer app. Logged
+                        // and dropped, which is what an unrecognized type byte
+                        // already does.
+                        logger.error("sidecar: screen reply with no handler installed, dropping")
+                    case .fdVend, .injection, .screenRequest:
+                        // The app must never send fd vends, injections or
+                        // screen requests — all three directions are
+                        // daemon → app only.
                         logger.error("sidecar: received \(frame.type, privacy: .public) frame from app (protocol violation), dropping")
                     }
                 }
