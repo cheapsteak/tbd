@@ -1777,6 +1777,12 @@ final class AppState {
     var transcriptStreamingEnabled: Bool {
         daemonCapabilities?.transcriptStreamingEnabled ?? false
     }
+    /// Whether question and permission prompts can be answered from the
+    /// transcript, as the daemon reports it. False until capabilities have
+    /// been fetched, so a card never offers an answer the daemon would refuse.
+    var transcriptPromptAnswerEnabled: Bool {
+        daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
+    }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
     /// settings seams below.
@@ -1928,6 +1934,10 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
+    /// How `setTranscriptPromptAnswerEnabled` persists the transcript
+    /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

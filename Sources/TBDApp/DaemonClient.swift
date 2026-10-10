@@ -1188,6 +1188,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the transcript prompt-answer gate (default OFF, soaking). New
+    /// sessions pick up the hooks.
+    func setTranscriptPromptAnswer(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
+            params: ConfigSetTranscriptPromptAnswerEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
