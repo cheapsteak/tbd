@@ -1758,6 +1758,24 @@ final class AppState {
     /// result reaches the transcript or a bounded timeout passes. Shared by
     /// the local and remote transcript panes; itself `@Observable`.
     @ObservationIgnored let promptCardRetention = PromptCardRetention()
+    /// Sends prompt-card answers and keeps each card's draft and delivery
+    /// state by prompt id. Itself `@Observable`. Lazy because its senders
+    /// capture `self`; settable so tests install fake senders.
+    @ObservationIgnored lazy var promptAnswers = PromptAnswerController(
+        local: { [daemonClient] terminalID, promptID, answer in
+            try await daemonClient.promptAnswer(
+                terminalID: terminalID, promptID: promptID, answer: answer)
+        },
+        remote: { [daemonClient] provider, sessionID, promptID, answer in
+            try await daemonClient.remoteAnswer(
+                provider: provider, sessionID: sessionID, promptID: promptID, answer: answer)
+        },
+        onDelivered: { [weak self] prompt, summary in
+            self?.promptCardRetention.markAnswered(prompt, summary: summary)
+        },
+        onRemoteDelivered: { [weak self] selection in
+            self?.requestRemoteTranscriptSync(selection)
+        })
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app

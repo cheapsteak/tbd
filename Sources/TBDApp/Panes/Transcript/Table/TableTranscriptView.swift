@@ -1003,6 +1003,9 @@ struct TableTranscriptView: NSViewRepresentable {
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is
                 // a one-line chrome activity row.
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .permission {
+                    return permissionCardEstimate(prompt)
+                }
                 if name == "AskUserQuestion" { return askUserQuestionEstimate(inputJSON: inputJSON) }
                 return activityRowHeight(style: .chrome)
             }
@@ -1060,6 +1063,18 @@ struct TableTranscriptView: NSViewRepresentable {
         /// construction rather than by review.
         private struct AskCardInput: Decodable {
             let questions: [AskUserQuestionCard.Question]
+        }
+
+        /// Estimated height of an unrealized permission prompt card: its fixed
+        /// preview and footer, the title, and one line per suggestion. The
+        /// realized card measures exactly and corrects.
+        static func permissionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            let chrome: CGFloat = 8 + 16 + 20 + 18
+            var height = chrome + PermissionPromptCard.previewHeight + PermissionPromptCard.footerHeight
+            if prompt.hasSuggestions {
+                height += 14 + 16 * CGFloat(prompt.suggestionLines.count)
+            }
+            return height
         }
 
         static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {

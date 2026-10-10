@@ -1401,6 +1401,35 @@ actor DaemonClient {
         ).outcome
     }
 
+    /// Answer a remote session's pending prompt (`remote.answer`). Returns the
+    /// outcome; `.unknown` means the answer may have arrived — never resubmit
+    /// it automatically. Refusals (flag off, no `answer` capability, an answer
+    /// that does not fit the prompt) throw.
+    func remoteAnswer(
+        provider: String, sessionID: String, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.remoteAnswer,
+            params: RemoteAnswerParams(
+                provider: provider, sessionID: sessionID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
+    }
+
+    /// Answer a local terminal's pending prompt (`prompt.answer`). Returns once
+    /// the hook acknowledged delivery, or `already_resolved`. A hook that is
+    /// reconnecting, the flag being off, and an answer that does not fit the
+    /// prompt all throw.
+    func promptAnswer(
+        terminalID: UUID, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.promptAnswer,
+            params: PromptAnswerParams(terminalID: terminalID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
+    }
+
     /// Fetch recent log lines for a remote session. `lines` nil == provider default.
     func remoteLog(provider: String, sessionID: String, lines: Int? = nil) async throws -> RemoteLogResult {
         try await callAsync(

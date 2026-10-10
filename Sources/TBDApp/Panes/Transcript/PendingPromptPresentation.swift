@@ -74,6 +74,11 @@ struct PendingPromptPresentation: Hashable, Sendable {
     /// Whether the card's controls are live: answerable and still open.
     var acceptsAnswer: Bool { answerability.isAnswerable && phase.isOpen }
 
+    /// Whether the row renders as a prompt card (`PermissionPromptCard`, or
+    /// `AskUserQuestionCard` in pending mode). A read-only prompt with no note
+    /// — the flag is off — renders exactly as today's row instead.
+    var rendersAsPromptCard: Bool { answerability != .readOnly(note: nil) }
+
     /// The tool name an appended row carries when a remote provider omitted it.
     static let unnamedQuestionTool = "AskUserQuestion"
     static let unnamedPermissionTool = "Permission"

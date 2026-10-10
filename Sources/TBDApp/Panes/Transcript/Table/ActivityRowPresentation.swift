@@ -116,6 +116,9 @@ enum ActivityRowFormatter {
 
     @MainActor
     static func presentation(for node: TranscriptRenderNode) -> ActivityRowPresentation? {
+        // A row with an answerable (or noted read-only) prompt behind it is a
+        // hosted prompt card, not a one-line activity row.
+        if node.pendingPrompt?.rendersAsPromptCard == true { return nil }
         switch node.kind {
         case .chatBubble:
             return nil

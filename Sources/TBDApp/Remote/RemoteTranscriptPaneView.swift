@@ -125,6 +125,7 @@ struct RemoteTranscriptPaneView: View {
         }
         .onChange(of: merged(items).settled, initial: true) { _, settled in
             appState.promptCardRetention.settle(settled)
+            appState.promptAnswers.forget(settled)
         }
     }
 
