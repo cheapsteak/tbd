@@ -138,8 +138,9 @@ worktrees Claude Code itself removed before TBD ever swept them. That residue is
 
 Every non-Bedrock model profile gets an isolated Claude config directory at
 `~/tbd/profiles/<uuid>/`, created lazily — on session spawn, when the profile's
-`CLAUDE_CONFIG_DIR` is resolved, and on OAuth login prep
-(`modelProfile.prepareConfigDir`, called before `tbd profile login`). Exactly one
+`CLAUDE_CONFIG_DIR` is resolved; on OAuth login prep
+(`modelProfile.prepareConfigDir`, called before `tbd profile login`); and before
+`tbd profile exec` runs a command (`modelProfile.execEnvironment`). Exactly one
 `model_profiles` row points at it, and it is the *only* pointer: nothing on disk records
 which profile a directory belongs to beyond the UUID in its name.
 

@@ -166,32 +166,15 @@ enum ClaudeSpawnCommandBuilder {
             profileConfigDir: profileConfigDir
         )
         let routingKeys = Set(env.keys)
-        if profileKind != .bedrock {
-            // Inject the profile's stored secret under the env var its kind
-            // uses. Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
-            // parsing), so we don't need shell-escape allowlists here.
-            // Storage-time validation rejects newlines / NULL bytes that would
-            // break tmux's single-line arg parsing.
-            // NEVER a routing key — secrets must not be inlined into the
-            // command string (visible in `ps` for the pane's lifetime), which
-            // is why they are assigned HERE and not in `routingEnv`.
-            if let secret = profileSecret, let kind = profileKind {
-                switch kind {
-                case .apiKey:
-                    env["ANTHROPIC_API_KEY"] = secret
-                case .oauthToken:
-                    env["CLAUDE_CODE_OAUTH_TOKEN"] = secret
-                case .oauth, .bedrock:
-                    // `.oauth` authenticates by a `/login` credential inside
-                    // its isolated CLAUDE_CONFIG_DIR, so a secret that somehow
-                    // reached us for one (a stale `<uuid>.token` file, say) is
-                    // ignored rather than injected — injecting it would
-                    // silently outrank the dir's own credential. `.bedrock`
-                    // never reaches this branch.
-                    break
-                }
-            }
-        }
+        // The profile's stored secret, under the env var its kind uses.
+        // Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
+        // parsing), so we don't need shell-escape allowlists here.
+        // Storage-time validation rejects newlines / NULL bytes that would
+        // break tmux's single-line arg parsing.
+        // NEVER a routing key — secrets must not be inlined into the
+        // command string (visible in `ps` for the pane's lifetime), which
+        // is why they are assigned HERE and not in `routingEnv`.
+        env.merge(credentialEnv(profileSecret: profileSecret, profileKind: profileKind)) { _, secret in secret }
         // Suppress oh-my-zsh's interactive "Would you like to update?" prompt.
         // It fires from .zshrc and would block the claude command until the
         // user answers — but an agent tab runs a command, not an interactive
@@ -246,7 +229,7 @@ enum ClaudeSpawnCommandBuilder {
     /// These are exactly the keys `build` re-exports inline into the command
     /// string (`inlineExports`), and they are safe there precisely because none
     /// of them is a credential: `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`
-    /// are assigned by `build` itself and never returned here, so nothing this
+    /// come from `credentialEnv` and are never returned here, so nothing this
     /// function produces can leak a secret into `ps`.
     ///
     /// The one qualification is `ANTHROPIC_BASE_URL` on a proxied session,
@@ -292,6 +275,70 @@ enum ClaudeSpawnCommandBuilder {
                 env["CLAUDE_CONFIG_DIR"] = configDir
             }
         }
+        return env
+    }
+
+    /// The credential a session on the profile authenticates with: its stored
+    /// secret under the env var its kind uses. Empty for a kind that carries
+    /// no TBD-stored secret, and when the secret is missing.
+    ///
+    /// Shared by `build` and `execEnvironment`, so a spawned session and a
+    /// `tbd profile exec` child cannot disagree about which variable carries
+    /// which kind's credential.
+    static func credentialEnv(profileSecret: String?, profileKind: CredentialKind?) -> [String: String] {
+        guard let secret = profileSecret, let kind = profileKind else { return [:] }
+        switch kind {
+        case .apiKey:
+            return ["ANTHROPIC_API_KEY": secret]
+        case .oauthToken:
+            return ["CLAUDE_CODE_OAUTH_TOKEN": secret]
+        case .oauth, .bedrock:
+            // `.oauth` authenticates by a `/login` credential inside its
+            // isolated CLAUDE_CONFIG_DIR, so a secret that somehow reached us
+            // for one (a stale `<uuid>.token` file, say) is ignored rather
+            // than injected — injecting it would silently outrank the dir's
+            // own credential. `.bedrock` authenticates through the AWS SDK
+            // credential chain and has no secret of ours to inject.
+            return [:]
+        }
+    }
+
+    /// The environment `tbd profile exec` gives its child: what a spawned
+    /// session gets from its profile, and nothing a session gets from its
+    /// terminal.
+    ///
+    /// The profile's routing keys and credential are layered **on top of** the
+    /// merged env overrides, the order
+    /// `ModelProxyRouteAttachment.Outcome.launchEnvironment(mergingBuilder:)`
+    /// gives a session, so an override can never clobber the account the
+    /// profile names.
+    ///
+    /// What `build` adds beyond that is left out, because it belongs to a
+    /// terminal rather than to a profile: `DISABLE_AUTO_UPDATE` exists to keep
+    /// an interactive rc file from prompting, and the `ClaudeEnvRegistry`
+    /// settings tune the interactive UI. A headless child has neither. A
+    /// session's model-proxy route is left out too: it is attached to one
+    /// terminal on the holder transport, and an exec child is not a terminal.
+    static func execEnvironment(
+        profileSecret: String?,
+        profileKind: CredentialKind?,
+        profileBaseURL: String? = nil,
+        profileModel: String? = nil,
+        profileAwsRegion: String? = nil,
+        profileAwsProfile: String? = nil,
+        profileConfigDir: String? = nil,
+        envOverrides: [String: String] = [:]
+    ) -> [String: String] {
+        var env = envOverrides
+        let profileEnv = routingEnv(
+            profileKind: profileKind,
+            profileBaseURL: profileBaseURL,
+            profileModel: profileModel,
+            profileAwsRegion: profileAwsRegion,
+            profileAwsProfile: profileAwsProfile,
+            profileConfigDir: profileConfigDir
+        ).merging(credentialEnv(profileSecret: profileSecret, profileKind: profileKind)) { _, secret in secret }
+        env.merge(profileEnv) { _, fromProfile in fromProfile }
         return env
     }
 

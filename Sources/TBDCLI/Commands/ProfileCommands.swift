@@ -15,6 +15,7 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileList.self,
             ProfileSetDefault.self,
             ProfileLogin.self,
+            ProfileExec.self,
             ProfileBalancing.self,
             ProfilePool.self,
             ProfileRename.self,
@@ -285,9 +286,21 @@ func findExecutable(named name: String, searchPath: String? = nil) -> String? {
     return nil
 }
 
+/// `execve` refused to run `executablePath`; `code` is its `errno`.
+struct ExecFailure: LocalizedError, CustomStringConvertible {
+    let executablePath: String
+    let code: Int32
+
+    var description: String {
+        "Failed to exec \(executablePath): \(String(cString: strerror(code)))"
+    }
+
+    var errorDescription: String? { description }
+}
+
 /// Replace the current process image with `executablePath` via `execve`,
 /// handing the controlling TTY over cleanly (no wrapper process lingers).
-/// Only returns by throwing, when exec itself fails.
+/// Only returns by throwing `ExecFailure`, when exec itself fails.
 func execReplacingCurrentProcess(
     executablePath: String,
     arguments: [String],
@@ -301,10 +314,10 @@ func execReplacingCurrentProcess(
     envp.append(nil)
     execve(executablePath, argv, envp)
     // execve only returns on failure — clean up and surface errno.
-    let reason = String(cString: strerror(errno))
+    let code = errno
     for pointer in argv { free(pointer) }
     for pointer in envp { free(pointer) }
-    throw CLIError.invalidArgument("Failed to exec \(executablePath): \(reason)")
+    throw ExecFailure(executablePath: executablePath, code: code)
 }
 
 // MARK: - profile list
@@ -533,6 +546,132 @@ struct ProfileLogin: AsyncParsableCommand {
             arguments: [],
             environment: env
         )
+    }
+}
+
+// MARK: - profile exec
+
+/// Exit statuses `tbd profile exec` returns when the command never ran. Once it
+/// runs, the command replaces this process and its own status is the one the
+/// caller sees. These are the values `env(1)`, `nice(1)` and `timeout(1)` use,
+/// so a caller can tell TBD's failure from the command's.
+enum ProfileExecStatus {
+    /// TBD could not run the command: the daemon is unreachable, the profile
+    /// is unknown, or it has no credential.
+    static let failed: Int32 = 125
+    /// The command was found but could not be executed.
+    static let notExecutable: Int32 = 126
+    /// The command was not found.
+    static let notFound: Int32 = 127
+
+    /// The status for an `execve` that failed with `code`.
+    static func forExecFailure(_ code: Int32) -> Int32 {
+        code == ENOENT || code == ENOTDIR ? notFound : notExecutable
+    }
+}
+
+/// The search path `execvp(3)` falls back to when the environment has no
+/// `PATH`.
+let profileExecDefaultSearchPath = "/usr/bin:/bin"
+
+/// The path to exec for `command`, the way a shell finds it: as given when it
+/// contains a slash, else the first executable match on `searchPath` (or on
+/// `profileExecDefaultSearchPath` when the child has no `PATH`). nil when
+/// nothing matches.
+func profileExecExecutablePath(_ command: String, searchPath: String?) -> String? {
+    if command.contains("/") { return command }
+    return findExecutable(named: command, searchPath: searchPath ?? profileExecDefaultSearchPath)
+}
+
+/// The one-line reason `tbd profile exec` prints when it fails before running
+/// the command. Daemon refusals arrive as `CLIError.rpcError`, whose own
+/// description adds an `Error:` prefix that would read twice after the
+/// command's name.
+func profileExecFailureMessage(_ error: Error) -> String {
+    switch error {
+    case CLIError.rpcError(let message), CLIError.invalidArgument(let message):
+        return "tbd profile exec: \(message)\n"
+    default:
+        return "tbd profile exec: \(error)\n"
+    }
+}
+
+struct ProfileExec: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "exec",
+        abstract: "Run a command under a profile's account, with the credentials a session on it gets",
+        discussion: """
+            Runs the command after `--` with what a Claude session spawned on \
+            the profile gets from it: the profile's CLAUDE_CONFIG_DIR, its \
+            stored setup token or API key, its endpoint and model, and the \
+            global and profile env overrides. Everything else is inherited \
+            from this process, except the variables that choose Claude's \
+            credential, provider, endpoint or model (CLAUDE_CODE_OAUTH_TOKEN, \
+            ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR and others; see \
+            docs/profile-exec.md), which are cleared first so this process's \
+            own account does not carry over.
+
+            The command replaces this process, so its output, signals and exit \
+            status are its own. When the command never runs, the exit status \
+            is 125 if TBD could not prepare it (daemon unreachable, unknown \
+            profile, no stored credential), 126 if it could not be executed, \
+            and 127 if it was not found. Nothing this prints contains a \
+            credential.
+
+            Example: tbd profile exec work -- claude -p "summarize the diff"
+            """
+    )
+
+    @Argument(help: "Profile name or UUID")
+    var name: String
+
+    @Argument(parsing: .postTerminator, help: "The command to run and its arguments, after --")
+    var command: [String] = []
+
+    func validate() throws {
+        guard !command.isEmpty else {
+            throw ValidationError(
+                "Give the command to run after --, e.g. tbd profile exec \(name) -- claude -p \"…\"")
+        }
+    }
+
+    mutating func run() async throws {
+        let profileEnvironment: ModelProfileExecEnvironmentResult
+        do {
+            let client = SocketClient()
+            let list = try client.call(
+                method: RPCMethod.modelProfileList,
+                resultType: ModelProfileListResult.self
+            )
+            let entry = try resolveProfile(named: name, in: list.profiles)
+            profileEnvironment = try client.call(
+                method: RPCMethod.modelProfileExecEnvironment,
+                params: ModelProfileExecEnvironmentParams(id: entry.profile.id),
+                resultType: ModelProfileExecEnvironmentResult.self
+            )
+        } catch {
+            FileHandle.standardError.write(Data(profileExecFailureMessage(error).utf8))
+            throw ExitCode(ProfileExecStatus.failed)
+        }
+
+        let environment = ProfileExecEnvironment.compose(
+            inherited: ProcessInfo.processInfo.environment,
+            profile: profileEnvironment.environment
+        )
+        guard let executable = profileExecExecutablePath(command[0], searchPath: environment["PATH"]) else {
+            FileHandle.standardError.write(Data("tbd profile exec: \(command[0]): command not found\n".utf8))
+            throw ExitCode(ProfileExecStatus.notFound)
+        }
+        do {
+            try execReplacingCurrentProcess(
+                executablePath: executable,
+                arguments: Array(command.dropFirst()),
+                environment: environment
+            )
+        } catch let failure as ExecFailure {
+            FileHandle.standardError.write(Data("tbd profile exec: \(failure)\n".utf8))
+            throw ExitCode(ProfileExecStatus.forExecFailure(failure.code))
+        }
     }
 }
 
