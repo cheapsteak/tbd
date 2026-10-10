@@ -116,7 +116,9 @@ The answer payload, for both paths:
 existing `AskUserQuestion` pre and post hooks stay as they are.
 - **`PreToolUse`, no matcher: `tbd prompt note`.** It records
   `{terminal, session, tool_use_id, tool_name, input hash}` with the daemon
-  and returns at once. It never prints a decision.
+  and returns at once. It never prints a decision. Every tool call sends one
+  under a 3-second hook timeout, and the note only touches in-memory state,
+  so `prompt.note` bypasses the RPC concurrency limiter.
 - **`PostToolUse` and `PostToolUseFailure`, no matcher: `tbd prompt note`.**
   These tell the daemon that a tool call finished, which resolves any prompt
   still open for its `tool_use_id`. They carry the input hash too, so they

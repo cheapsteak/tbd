@@ -435,9 +435,14 @@ extension SocketServer {
     ///   of slow RPCs would turn a delivered answer into a false "answered
     ///   elsewhere". It does no subprocess work, which is all the limiter
     ///   bounds.
+    /// - `prompt.note` is sent by the `PreToolUse` / `PostToolUse` hooks of
+    ///   every tool call, under a 3-second hook timeout. It only records or
+    ///   resolves in-memory state — no subprocess work — and a note queued
+    ///   behind slow RPCs would miss its pairing or its close.
     static func bypassesConcurrencyLimiter(method: String?) -> Bool {
         guard let method else { return false }
-        return [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck].contains(method)
+        return [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck,
+                RPCMethod.promptNote].contains(method)
     }
 }
 

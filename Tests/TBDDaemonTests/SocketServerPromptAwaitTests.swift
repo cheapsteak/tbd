@@ -114,13 +114,15 @@ struct SocketServerPromptAwaitTests {
 
     /// `prompt.ack` must never queue behind slow RPCs: `prompt.answer` reads
     /// an ack later than 5 s as `already_resolved`, turning a delivered
-    /// answer into a false "answered elsewhere". Ordinary methods, including
-    /// the other prompt RPCs, stay limited.
+    /// answer into a false "answered elsewhere"; nor may `prompt.note`, which
+    /// every tool call's hooks send under a 3-second timeout. Ordinary
+    /// methods, including the other prompt RPCs, stay limited.
     @Test func limiterBypassClassification() {
-        for method in [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck] {
+        for method in [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck,
+                       RPCMethod.promptNote] {
             #expect(SocketServer.bypassesConcurrencyLimiter(method: method), "\(method)")
         }
-        for method in [RPCMethod.promptAnswer, RPCMethod.promptRegister, RPCMethod.promptNote, "worktree.list"] {
+        for method in [RPCMethod.promptAnswer, RPCMethod.promptRegister, "worktree.list"] {
             #expect(!SocketServer.bypassesConcurrencyLimiter(method: method), "\(method)")
         }
         #expect(!SocketServer.bypassesConcurrencyLimiter(method: nil))
