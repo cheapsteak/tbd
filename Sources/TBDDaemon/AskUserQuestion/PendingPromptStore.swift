@@ -59,7 +59,10 @@ public actor PendingPromptStore {
     }
 
     public enum RegisterOutcome: Sendable, Equatable {
-        case registered(promptID: String)
+        /// `toolUseID` is the pairing the prompt holds, so the hook can hand
+        /// it back as `knownToolUseID` if it has to register again after a
+        /// daemon restart.
+        case registered(promptID: String, toolUseID: String?)
     }
 
     public enum AnswerOutcome: Sendable, Equatable {
@@ -248,7 +251,10 @@ public actor PendingPromptStore {
     ///   the note attaches to it at once (the note lost the race to the
     ///   register).
     /// - `post`: the tool call finished, so the terminal answered: any prompt
-    ///   still open for that `tool_use_id` resolves `.toolFinished`.
+    ///   still open for that `tool_use_id` resolves `.toolFinished`. So does
+    ///   the session's open prompt when it is unpaired (no `tool_use_id`, as
+    ///   after a daemon restart) and shows the same tool and input hash —
+    ///   otherwise nothing would close it until its hook went away.
     @discardableResult
     func note(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
               toolUseID: String, toolName: String, inputHash: String?) -> Set<UUID> {
@@ -286,6 +292,15 @@ public actor PendingPromptStore {
             var changed: Set<UUID> = []
             for (id, record) in promptRecords where record.payload.toolUseID == toolUseID {
                 if let terminal = resolve(id, .toolFinished) { changed.insert(terminal) }
+            }
+            if let inputHash,
+               let openID = openPromptBySession[sessionID],
+               let record = promptRecords[openID],
+               record.payload.toolUseID == nil,
+               record.payload.toolName == toolName,
+               record.inputHash == inputHash,
+               let terminal = resolve(openID, .toolFinished) {
+                changed.insert(terminal)
             }
             return changed
         }
@@ -327,7 +342,7 @@ public actor PendingPromptStore {
             bumpRevision(existing.terminalID)
             changed.insert(existing.terminalID)
             Self.log.debug("prompt re-registered id=\(knownID, privacy: .public)")
-            return (.registered(promptID: knownID), changed)
+            return (.registered(promptID: knownID, toolUseID: existing.payload.toolUseID), changed)
         }
 
         let isReRegister = params.knownPromptID != nil
@@ -367,7 +382,7 @@ public actor PendingPromptStore {
         changed.insert(params.terminalID)
         Self.log.debug(
             "prompt registered id=\(id, privacy: .public) kind=\(kind.rawValue, privacy: .public) paired=\(toolUseID != nil, privacy: .public)")
-        return (.registered(promptID: id), changed)
+        return (.registered(promptID: id, toolUseID: toolUseID), changed)
     }
 
     /// The newest note in the session for `toolName`, preferring one whose

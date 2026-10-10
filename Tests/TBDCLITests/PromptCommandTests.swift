@@ -166,6 +166,22 @@ struct PromptWaiterTests {
         #expect(clock.sleeps.count == 1)
     }
 
+    @Test func reRegisterCarriesThePairedToolUseID() async {
+        let token = UUID()
+        let t = FakePromptTransport(
+            register: [.success(.registered(promptID: "p1", toolUseID: "toolu_1")),
+                       .success(.registered(promptID: "p1"))],
+            await: [.failure(Boom()),
+                    .success(PromptAwaitReply(result: .answered(hookOutput: "{}"), deliveryToken: token))])
+        let out = Output()
+        await waiter(t, out).run(terminalID: terminalID, request: request)
+        #expect(t.registers.count == 2)
+        #expect(t.registers[0].knownToolUseID == nil)
+        #expect(t.registers[1].knownPromptID == "p1")
+        #expect(t.registers[1].knownToolUseID == "toolu_1",
+                "a restarted daemon has no note left, so the hook must hand the pairing back")
+    }
+
     @Test func givesUpSilentlyWhenTheDaemonStaysDown() async {
         let t = FakePromptTransport(
             register: [.success(.registered(promptID: "p1"))], await: [.failure(Boom())])
@@ -241,7 +257,8 @@ struct PromptHookPayloadParserTests {
         for name in ["PostToolUse", "PostToolUseFailure"] {
             let post = try event(name)
             #expect(post.phase == .post)
-            #expect(post.inputHash == nil)
+            #expect(post.inputHash == pre.inputHash,
+                    "a post carries the input hash so it can close an unpaired prompt")
         }
         #expect(try event(nil, fallback: .post).phase == .post)
         // The payload's own event wins over the flag.

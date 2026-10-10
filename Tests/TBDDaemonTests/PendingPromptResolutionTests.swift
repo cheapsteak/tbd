@@ -31,12 +31,12 @@ struct PendingPromptResolutionTests {
 
     private func params(
         terminal: UUID, session: String, tool: String = "Bash", input: String = PendingPromptResolutionTests.bashInput,
-        suggestions: String? = nil, knownPromptID: String? = nil
+        suggestions: String? = nil, knownPromptID: String? = nil, knownToolUseID: String? = nil
     ) -> PromptRegisterParams {
         PromptRegisterParams(
             terminalID: terminal, sessionID: session, toolName: tool, toolInputJSON: input,
             suggestionsJSON: suggestions, inputHash: PromptInputHash.of(toolInputJSON: input),
-            knownPromptID: knownPromptID)
+            knownPromptID: knownPromptID, knownToolUseID: knownToolUseID)
     }
 
     private func preNote(
@@ -53,7 +53,7 @@ struct PendingPromptResolutionTests {
     ) async -> (id: String, changed: Set<UUID>) {
         let result = await store.register(params)
         switch result.outcome {
-        case .registered(let id): return (id, result.changed)
+        case .registered(let id, _): return (id, result.changed)
         }
     }
 
@@ -192,6 +192,60 @@ struct PendingPromptResolutionTests {
         #expect(id == "prompt-before-restart")
         #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
         #expect(await store.isLateNoteWindowOpen(promptID: id) == false)
+    }
+
+    @Test func registerReplyCarriesThePairing() async {
+        let store = makeStore()
+        let terminal = UUID()
+        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
+        let result = await store.register(params(terminal: terminal, session: "s1"))
+        let id: String
+        let toolUseID: String?
+        switch result.outcome {
+        case .registered(let promptID, let pairedToolUseID):
+            id = promptID
+            toolUseID = pairedToolUseID
+        }
+        #expect(toolUseID == "toolu_1", "the hook needs the pairing to hand back after a restart")
+
+        // A fresh store stands in for the restarted daemon: the hook's
+        // re-register hands the pairing back and the prompt keeps it.
+        let restarted = makeStore()
+        let again = await restarted.register(params(
+            terminal: terminal, session: "s1", knownPromptID: id, knownToolUseID: toolUseID))
+        #expect(again.outcome == .registered(promptID: id, toolUseID: "toolu_1"))
+        #expect(await payload(restarted, terminal: terminal, id: id)?.toolUseID == "toolu_1")
+    }
+
+    @Test func postNoteClosesAnUnpairedPromptByInputHash() async {
+        let store = makeStore()
+        let terminal = UUID()
+        let (id, _) = await register(store, params(
+            terminal: terminal, session: "s1", knownPromptID: "prompt-before-restart"))
+        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
+        let waiter = await attachWaiter(store, id: id)
+
+        let changed = await store.note(
+            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_unknown",
+            toolName: "Bash", inputHash: PromptInputHash.of(toolInputJSON: Self.bashInput))
+
+        #expect(changed == [terminal])
+        #expect(await waiter.value == .resolvedElsewhere)
+        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+    }
+
+    @Test func postNoteForAnotherInputLeavesAnUnpairedPromptOpen() async {
+        let store = makeStore()
+        let terminal = UUID()
+        let (id, _) = await register(store, params(
+            terminal: terminal, session: "s1", knownPromptID: "prompt-before-restart"))
+
+        let changed = await store.note(
+            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_other",
+            toolName: "Bash", inputHash: PromptInputHash.of(toolInputJSON: Self.otherBashInput))
+
+        #expect(changed.isEmpty)
+        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
     }
 
     // MARK: Answering

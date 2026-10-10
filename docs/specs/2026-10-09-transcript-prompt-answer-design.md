@@ -119,7 +119,9 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
   and returns at once. It never prints a decision.
 - **`PostToolUse` and `PostToolUseFailure`, no matcher: `tbd prompt note`.**
   These tell the daemon that a tool call finished, which resolves any prompt
-  still open for its `tool_use_id`. This is how the daemon learns that the
+  still open for its `tool_use_id`. They carry the input hash too, so they
+  also resolve the session's open prompt when it has no `tool_use_id` and
+  shows the same tool and input. This is how the daemon learns that the
   terminal won with Yes, because that answer leaves the waiting hook running.
   - These signals come after the tool finishes, not when you answer. So after
     a Yes in the terminal, the card still looks pending while the tool runs.
@@ -136,10 +138,11 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
      - If the hash doesn't match, it falls back to the latest note.
      - A note that arrives up to 5 seconds after its register still pairs.
      - An unpaired prompt gets a fresh UUID id instead.
-     - A restarted daemon has lost its notes. So a prompt that registers
-       again after a daemon restart keeps its id but loses its
-       `tool_use_id`, and its card moves to the fallback row described under
-       "Placement".
+     - The reply names the `tool_use_id` the prompt was paired with. A
+       restarted daemon has lost its notes, so the hook sends its id and that
+       `tool_use_id` back when it registers again, and the prompt keeps both.
+       A prompt that was never paired stays unpaired, and its card stays on
+       the fallback row described under "Placement".
   2. While the flag is off, `prompt.register` answers `disabled`, and the
      hook exits silently. Sessions that started while the flag was on still
      carry the hooks until they restart.
@@ -174,8 +177,8 @@ A prompt resolves on the first of these:
   - If no hook is attached at that moment, for example while a daemon restart
     is still reconnecting it, the RPC returns a retryable error. The card
     offers Retry.
-- **`PostToolUse` or `PostToolUseFailure` for its `tool_use_id`.** The
-  terminal won. The existing `AskUserQuestion` post hook also covers
+- **`PostToolUse` or `PostToolUseFailure` for its `tool_use_id`**, or, for
+  an unpaired prompt, for the same tool and input hash. The terminal won. The existing `AskUserQuestion` post hook also covers
   questions.
 - **A new `prompt.register` in the same session.** A session has one open
   dialog at a time, so the old one is over.

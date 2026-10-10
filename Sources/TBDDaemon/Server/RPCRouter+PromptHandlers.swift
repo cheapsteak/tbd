@@ -75,8 +75,8 @@ extension RPCRouter {
         let (outcome, changed) = await pendingQuestions.register(p)
         await broadcastPendingPrompts(terminals: changed)
         switch outcome {
-        case .registered(let promptID):
-            return try RPCResponse(result: PromptRegisterResult.registered(promptID: promptID))
+        case .registered(let promptID, let toolUseID):
+            return try RPCResponse(result: PromptRegisterResult.registered(promptID: promptID, toolUseID: toolUseID))
         }
     }
 

@@ -142,7 +142,8 @@ enum PromptHookPayloadParser {
         let toolUseID: String
         let toolName: String
         let phase: PromptNotePhase
-        /// Set on `pre` only.
+        /// `PromptInputHash` of `tool_input`, on `pre` and `post` alike: a
+        /// `post` closes an unpaired prompt by it.
         let inputHash: String?
     }
 
@@ -185,7 +186,7 @@ enum PromptHookPayloadParser {
         case "PostToolUse", "PostToolUseFailure": phase = .post
         default: phase = fallbackPhase
         }
-        let hash = phase == .pre ? PromptInputHash.of(toolInput: obj["tool_input"] ?? [String: Any]()) : nil
+        let hash = PromptInputHash.of(toolInput: obj["tool_input"] ?? [String: Any]())
         return ToolEvent(sessionID: sessionID, toolUseID: toolUseID, toolName: toolName,
                          phase: phase, inputHash: hash)
     }
@@ -210,6 +211,7 @@ struct PromptWaiter {
             return
         }
         var promptID: String?
+        var toolUseID: String?
         var interval = reconnectInitialInterval
         var spent = Duration.zero
         while true {
@@ -217,12 +219,14 @@ struct PromptWaiter {
                 let registered = try transport.register(PromptRegisterParams(
                     terminalID: terminalID, sessionID: request.sessionID, toolName: request.toolName,
                     toolInputJSON: request.toolInputJSON, suggestionsJSON: request.suggestionsJSON,
-                    inputHash: request.inputHash, knownPromptID: promptID))
+                    inputHash: request.inputHash, knownPromptID: promptID, knownToolUseID: toolUseID))
                 switch registered {
                 case .disabled:
                     return
-                case .registered(let id):
+                case .registered(let id, let pairedToolUseID):
                     promptID = id
+                    // Keep a pairing already learned if a later reply lacks it.
+                    toolUseID = pairedToolUseID ?? toolUseID
                 }
                 let reply = try transport.awaitResolution(PromptAwaitParams(promptID: promptID ?? ""))
                 switch reply.result {

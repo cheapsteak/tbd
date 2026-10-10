@@ -89,7 +89,7 @@ struct RPCRouterPromptHandlerTests {
     private func registeredPromptID(_ f: Fixture, session: String = "s1") async throws -> String {
         _ = try await note(f, session: session)
         let result = try await register(f, session: session)
-        guard case .registered(let id) = result else {
+        guard case .registered(let id, _) = result else {
             Issue.record("expected a registered prompt, got \(result)")
             return ""
         }
@@ -144,7 +144,7 @@ struct RPCRouterPromptHandlerTests {
         #expect(try await note(f).success)
         // Turn the flag on afterwards: a note that had been kept would pair.
         try await f.db.config.setTranscriptPromptAnswerEnabled(true)
-        guard case .registered(let id) = try await register(f) else {
+        guard case .registered(let id, _) = try await register(f) else {
             Issue.record("register refused with the flag on")
             return
         }
@@ -155,7 +155,7 @@ struct RPCRouterPromptHandlerTests {
     @Test func noteIsKeptWhileFlagOn() async throws {
         let f = try await makeFixture(flagOn: true)
         #expect(try await note(f, toolUseID: "toolu_kept").success)
-        guard case .registered(let id) = try await register(f) else {
+        guard case .registered(let id, _) = try await register(f) else {
             Issue.record("register refused with the flag on")
             return
         }
@@ -190,7 +190,7 @@ struct RPCRouterPromptHandlerTests {
             return true
         }
         let result = try await register(f)
-        guard case .registered(let id) = result else {
+        guard case .registered(let id, _) = result else {
             Issue.record("expected registered, got \(result)")
             return
         }

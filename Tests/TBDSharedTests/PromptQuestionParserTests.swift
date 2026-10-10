@@ -88,10 +88,18 @@ struct PromptRPCWireTests {
     }
 
     @Test func registerResultRoundTrips() throws {
-        for result in [PromptRegisterResult.registered(promptID: "p-1"), .disabled] {
+        for result in [PromptRegisterResult.registered(promptID: "p-1"),
+                       .registered(promptID: "p-2", toolUseID: "toolu_1"), .disabled] {
             let decoded = try JSONDecoder().decode(PromptRegisterResult.self, from: JSONEncoder().encode(result))
             #expect(decoded == result)
         }
+    }
+
+    /// An older daemon's reply carries no `toolUseID`; it must still decode.
+    @Test func registerResultWithoutToolUseIDDecodes() throws {
+        let decoded = try JSONDecoder().decode(
+            PromptRegisterResult.self, from: Data(#"{"registered":{"promptID":"p-1"}}"#.utf8))
+        #expect(decoded == .registered(promptID: "p-1", toolUseID: nil))
     }
 
     @Test func awaitResultRoundTrips() throws {

@@ -4869,7 +4869,9 @@ public struct PromptNoteParams: Codable, Sendable {
     public let phase: PromptNotePhase
     public let toolUseID: String
     public let toolName: String
-    /// `PromptInputHash` of `tool_input`; nil on `post`.
+    /// `PromptInputHash` of `tool_input`. On `post` it lets the daemon close
+    /// an unpaired prompt showing the same call; nil when the payload had no
+    /// `tool_input`.
     public let inputHash: String?
     public init(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
                 toolUseID: String, toolName: String, inputHash: String?) {
@@ -4911,8 +4913,12 @@ public struct PromptRegisterParams: Codable, Sendable {
 
 /// Result of `prompt.register`.
 public enum PromptRegisterResult: Codable, Sendable, Equatable {
-    /// `{"registered":{"promptID":"…"}}`.
-    case registered(promptID: String)
+    /// `{"registered":{"promptID":"…","toolUseID":"…"}}`. `toolUseID` is the
+    /// tool call the daemon paired the prompt with, absent while unpaired;
+    /// the hook sends it back as `knownToolUseID` when it registers again
+    /// after a reconnect, so a restarted daemon keeps the pairing. A reply
+    /// without it (an older daemon) decodes with `toolUseID` nil.
+    case registered(promptID: String, toolUseID: String? = nil)
     /// The flag is off: the hook exits silently at once and the terminal
     /// stays in charge.
     case disabled

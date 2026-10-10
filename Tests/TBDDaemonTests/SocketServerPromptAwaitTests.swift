@@ -68,7 +68,7 @@ struct SocketServerPromptAwaitTests {
             toolInputJSON: Self.bashInput, suggestionsJSON: nil,
             inputHash: PromptInputHash.of(toolInputJSON: Self.bashInput))
         let response = await h.router.handle(try RPCRequest(method: RPCMethod.promptRegister, params: params))
-        guard case .registered(let id) = try response.decodeResult(PromptRegisterResult.self) else {
+        guard case .registered(let id, _) = try response.decodeResult(PromptRegisterResult.self) else {
             throw HarnessError.notRegistered
         }
         return id
