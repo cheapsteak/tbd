@@ -221,6 +221,80 @@ struct CheckoutTemplateStoreTests {
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link) == "nowhere")
     }
 
+    /// A repo whose clones never read clean would otherwise pay a full
+    /// template rebuild plus a full worktree write on every create. After
+    /// `notCleanLimit` in a row the store stops building its template.
+    @Test func repeatedNotCleanClonesStopTheTemplate() async throws {
+        let f = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        guard volumeCanClone(f.root) else { return }
+        let store = CheckoutTemplateStore(reposDir: f.reposDir)
+        let paths = store.paths(repoID: f.repoID)
+
+        for attempt in 1...CheckoutTemplateStore.notCleanLimit {
+            await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.older)
+            #expect(CheckoutTemplateStore.readCommit(paths.commitFile) == f.older, "no template at attempt \(attempt)")
+            try write("stray\n", to: paths.tree.appendingPathComponent("stray.txt"))
+            let outcome = try await store.addWorktree(
+                git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+                worktreePath: f.worktreePath("dirty-\(attempt)"), branch: "tbd/dirty-\(attempt)",
+                baseBranch: f.newer)
+            #expect(outcome == .materialized(reason: CheckoutTemplateStore.CloneError.notClean.description))
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: paths.root.path), "the template outlived the give-up")
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.older)
+        #expect(!FileManager.default.fileExists(atPath: paths.root.path), "a refresh rebuilt a given-up template")
+        let path = f.worktreePath("after")
+        let outcome = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: path, branch: "tbd/after", baseBranch: f.newer)
+        #expect(outcome == .materialized(reason: "no template"))
+        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+    }
+
+    // MARK: - Old git
+
+    /// Without `git hook run` the store cannot run `post-checkout` itself, so
+    /// a flagged create must be exactly the plain `git worktree add` — hook
+    /// included — and no template is built.
+    @Test func gitWithoutHookRunTakesThePlainAdd() async throws {
+        let f = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let log = f.root.appendingPathComponent("hook.log")
+        try installHook(in: f.repo, body: "echo \"$1 $2 $3\" >> '\(log.path)'")
+        let store = CheckoutTemplateStore(reposDir: f.reposDir, hookRunSupported: false)
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.older)
+        #expect(!FileManager.default.fileExists(atPath: store.paths(repoID: f.repoID).root.path))
+
+        let path = f.worktreePath("oldgit")
+        let outcome = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: path, branch: "tbd/oldgit", baseBranch: f.newer)
+
+        #expect(outcome == .materialized(reason: "git older than 2.36"))
+        let wt = URL(fileURLWithPath: path)
+        #expect(try git(["rev-parse", "HEAD"], at: wt) == f.newer)
+        #expect(try git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(lines == ["\(String(repeating: "0", count: 40)) \(f.newer) 1"])
+    }
+
+    @Test(arguments: [
+        ("git version 2.39.5 (Apple Git-154)", true),
+        ("git version 2.36.0", true),
+        ("git version 2.52.0\n", true),
+        ("git version 3.0.0", true),
+        ("git version 2.35.8", false),
+        ("git version 1.9.5.msysgit.1", false),
+        ("git version 2.36.0.rc1", true),
+        ("not git at all", false),
+        ("", false),
+    ])
+    func gitVersionGate(output: String, supported: Bool) {
+        #expect(GitManager.versionSupportsHookRun(output) == supported)
+    }
+
     // MARK: - Template refresh
 
     @Test func refreshRewritesOnlyChangedPaths() async throws {

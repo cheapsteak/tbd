@@ -580,7 +580,7 @@ public struct GitManager: Sendable {
     /// branch checkout. The null SHA is as long as `newHead`, so a SHA-256
     /// repository gets 64 zeros. A missing hook is success; a failing hook
     /// throws, as it makes `git worktree add` exit non-zero. Needs git 2.36 or
-    /// newer.
+    /// newer: callers check `supportsHookRun()` first.
     public func runPostCheckoutHook(worktreePath: String, newHead: String) async throws {
         _ = try await run(
             arguments: [
@@ -588,6 +588,24 @@ public struct GitManager: Sendable {
                 String(repeating: "0", count: newHead.count), newHead, "1",
             ],
             at: worktreePath)
+    }
+
+    /// Whether this git has `git hook run` (2.36 or newer), which
+    /// `runPostCheckoutHook` needs. False when the version cannot be read, so
+    /// an unknown git takes the plain `worktreeAdd` path.
+    public func supportsHookRun() async -> Bool {
+        guard let output = try? await run(arguments: ["--version"], at: "/") else { return false }
+        return Self.versionSupportsHookRun(output)
+    }
+
+    /// Parses `git --version` output (`git version 2.39.5 (Apple Git-154)`)
+    /// and reports whether it is 2.36 or newer.
+    static func versionSupportsHookRun(_ output: String) -> Bool {
+        let words = output.split(whereSeparator: \.isWhitespace)
+        guard words.count >= 3, words[0] == "git", words[1] == "version" else { return false }
+        let parts = words[2].split(separator: ".").map { part in Int(part.prefix(while: \.isNumber)) }
+        guard parts.count >= 2, let major = parts[0], let minor = parts[1] else { return false }
+        return (major, minor) >= (2, 36)
     }
 
     /// Whether `git status --porcelain --ignored` reports nothing at all: no
