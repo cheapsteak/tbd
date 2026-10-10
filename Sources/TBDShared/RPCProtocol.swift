@@ -3715,7 +3715,7 @@ public struct ConfigSetPromptAnswerParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `modelProfile.setPoolOptOut' — the per-profile opt-out from the
+/// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
     public var id: UUID
