@@ -171,6 +171,18 @@ struct RPCRouterPromptHandlerTests {
         #expect(await isOpen(f, id) == false, "the terminal answered; the prompt is over")
     }
 
+    /// Turning the flag off must not strand a prompt registered while it was
+    /// on: its hook is still parked, and the terminal's answer (a post note)
+    /// is what resolves it.
+    @Test func postNoteResolvesAnOpenPromptAfterTheFlagIsTurnedOff() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = try await registeredPromptID(f)
+        try await f.db.config.setTranscriptPromptAnswerEnabled(false)
+        #expect(await isOpen(f, id))
+        #expect(try await note(f, phase: .post).success)
+        #expect(await isOpen(f, id) == false, "a post note while the flag is off left the prompt open")
+    }
+
     // MARK: prompt.register
 
     @Test func registerIsDisabledWhileFlagOff() async throws {

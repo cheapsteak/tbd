@@ -40,12 +40,19 @@ extension RPCRouter {
     // MARK: - prompt.note
 
     /// Records a `PreToolUse` note, or applies a `PostToolUse` /
-    /// `PostToolUseFailure` one. Never a decision. A no-op while the flag is
-    /// off: sessions that started while it was on still carry the hook until
-    /// they restart, and nothing they report is wanted.
+    /// `PostToolUseFailure` one. Never a decision.
+    ///
+    /// While the flag is off a `.pre` note is dropped: sessions that started
+    /// while it was on still carry the hook until they restart, and no new
+    /// prompt will register to pair with it. A `.post` note is applied
+    /// regardless, because prompts registered before the flag was turned off
+    /// are still open, their hooks still parked, and a post is how the
+    /// terminal's answer resolves them.
     func handlePromptNote(_ paramsData: Data) async throws -> RPCResponse {
         let p = try decoder.decode(PromptNoteParams.self, from: paramsData)
-        guard try await promptAnswerEnabled() else { return .ok() }
+        if p.phase == .pre {
+            guard try await promptAnswerEnabled() else { return .ok() }
+        }
         let changed = await pendingQuestions.note(
             terminalID: p.terminalID, sessionID: p.sessionID, phase: p.phase,
             toolUseID: p.toolUseID, toolName: p.toolName, inputHash: p.inputHash)

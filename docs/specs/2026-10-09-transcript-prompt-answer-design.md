@@ -152,7 +152,10 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
        the fallback row described under "Placement".
   2. While the flag is off, `prompt.register` answers `disabled`, and the
      hook exits silently. Sessions that started while the flag was on still
-     carry the hooks until they restart.
+     carry the hooks until they restart. A `PreToolUse` note is dropped while
+     the flag is off, but a `PostToolUse` note is still applied, so a prompt
+     registered before the flag was turned off still resolves when the
+     terminal answers it rather than staying open with its hook parked.
   3. It then holds `prompt.await(id)`, a long-poll RPC on the daemon socket.
      - Like `state.subscribe`, the call bypasses the RPC concurrency limiter,
        so many waiting sessions can't block the daemon.
