@@ -269,6 +269,8 @@ public actor OrphanGC {
         // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
         // `ReapRecord`.
         var unsentPromptsReaped = 0
+        // Same reasoning again: a checkout template produces no `ReapRecord`.
+        var checkoutTemplatesReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -278,7 +280,10 @@ public actor OrphanGC {
             return .init(planned: ["lsof unavailable - sweep skipped"], reaped: 0)
         }
 
-        let repos = (try? await db.repos.list()) ?? []
+        // nil when the read failed: the template leg must tell that apart
+        // from a successful read that found no repos.
+        let reposRead = try? await db.repos.list()
+        let repos = reposRead ?? []
         for repo in repos {
             let candidates = await agentCollector.candidates(repoPath: repo.path)
             for candidate in candidates {
@@ -377,6 +382,11 @@ public actor OrphanGC {
 
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
+        reclaimCheckoutTemplates(
+            config: config, repos: reposRead, dryRun: dryRun,
+            planned: &planned, reaped: &checkoutTemplatesReaped
+        )
+
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
         )
@@ -388,7 +398,67 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+        return .init(
+            planned: planned,
+            reaped: reaped + hangStacksReaped + unsentPromptsReaped + checkoutTemplatesReaped)
+    }
+
+    // MARK: - Checkout templates
+
+    /// Reclaims `~/tbd/repos/<repoID>/checkout-template/` — the named
+    /// reconciler for the template `CheckoutTemplateStore` keeps per repo —
+    /// when no repo row has that ID, or for every repo while
+    /// `clone_checkout_enabled` is off, so turning the feature off returns the
+    /// space within one sweep.
+    ///
+    /// Under `gcEnabled` alone, with no flag of its own: a template is a cache
+    /// TBD wrote and rebuilds on demand, holding nothing a person made. A
+    /// removal that races a create costs that create a full checkout, never
+    /// correctness — the create falls back whenever its clone is incomplete.
+    ///
+    /// `repos` is nil when the sweep could not read the repo list. A failed
+    /// read never counts as "this repo is gone"; a successful empty list does,
+    /// so removing the last repo still returns its template's space.
+    ///
+    /// No `ReapRecord`: there is no worktree to key one by.
+    private func reclaimCheckoutTemplates(
+        config: Config, repos: [Repo]?, dryRun: Bool,
+        planned: inout [String], reaped: inout Int
+    ) {
+        let fm = FileManager.default
+        guard let repoDirs = try? fm.contentsOfDirectory(atPath: unsentPromptsReposBase.path) else {
+            return
+        }
+        let liveRepoIDs = repos.map { Set($0.map(\.id.uuidString)) }
+        for repoDir in repoDirs.sorted() where !repoDir.hasPrefix(".") {
+            let template = unsentPromptsReposBase
+                .appendingPathComponent(repoDir)
+                .appendingPathComponent(TBDConstants.checkoutTemplateDirName)
+            guard fm.fileExists(atPath: template.path) else { continue }
+            let reason: String
+            if let liveRepoIDs, !liveRepoIDs.contains(repoDir) {
+                reason = "repo-removed"
+            } else if !config.cloneCheckoutEnabled {
+                reason = "clone-checkout-off"
+            } else {
+                continue
+            }
+            planned.append("REAP checkout-template \(reason) \(template.path)")
+            // The outer `gcEnabled || dryRun` guard means every line below
+            // runs only with gcEnabled == true.
+            guard !dryRun else { continue }
+            do {
+                try fm.removeItem(at: template)
+                reaped += 1
+                logger.info("gc: reclaimed checkout template \(template.path, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(template.path)")
+                logger.warning("""
+                gc: could not remove \(template.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
     }
 
     // MARK: - Unsent first messages

@@ -525,6 +525,141 @@ public struct GitManager: Sendable {
         )
     }
 
+    // MARK: - Clone-backed checkout primitives
+    //
+    // The steps `CheckoutTemplateStore` composes into a worktree create that
+    // writes only the files differing from a template checkout. Design:
+    // docs/specs/2026-10-09-clone-backed-worktree-checkout-design.md.
+
+    /// `worktreeAdd` without the checkout: registers the worktree and creates
+    /// its branch, HEAD and `.git` file, but leaves the directory otherwise
+    /// empty and the index unwritten. Same flags as `worktreeAdd` plus
+    /// `--no-checkout`, so a refusal (branch taken, base unresolvable) reads
+    /// the same to `classifyWorktreeAddFailure`. Git runs no `post-checkout`
+    /// hook for a `--no-checkout` add; `runPostCheckoutHook` does that once the
+    /// tree is populated.
+    public func worktreeAddNoCheckout(
+        repoPath: String, worktreePath: String, branch: String, baseBranch: String
+    ) async throws {
+        _ = try await run(
+            arguments: ["worktree", "add", "--no-checkout", "--no-track", worktreePath, "-b", branch, baseBranch],
+            at: repoPath)
+    }
+
+    /// Replaces the worktree's index with `treeish`, writing no files. The
+    /// entries carry no stat data, so every one reads as unverified until
+    /// `refreshIndex` hashes it.
+    public func readTree(worktreePath: String, treeish: String) async throws {
+        _ = try await run(arguments: ["read-tree", treeish], at: worktreePath)
+    }
+
+    /// `update-index -q --refresh`: hashes every index entry whose stat data
+    /// does not match its file and records the stat data of those that match.
+    /// Exit 1 means some entries differ from their files, which is the
+    /// expected answer when the files came from an older commit, so it is not
+    /// an error here.
+    public func refreshIndex(worktreePath: String) async throws {
+        do {
+            _ = try await run(arguments: ["update-index", "-q", "--refresh"], at: worktreePath)
+        } catch let error as GitError where error.exitCode == 1 {
+            return
+        }
+    }
+
+    /// `reset --hard` to HEAD with parallel checkout. After `refreshIndex`,
+    /// this is a two-way merge from the index's commit to HEAD: it rewrites,
+    /// creates and deletes only the paths that differ, and leaves every file
+    /// whose stat data the refresh recorded untouched.
+    public func resetHardToHead(worktreePath: String) async throws {
+        _ = try await run(
+            arguments: ["-c", "checkout.workers=0", "reset", "-q", "--hard"], at: worktreePath)
+    }
+
+    /// Runs the repository's `post-checkout` hook with the arguments
+    /// `git worktree add` gives it: the null SHA, the new HEAD, and `1` for a
+    /// branch checkout. The null SHA is as long as `newHead`, so a SHA-256
+    /// repository gets 64 zeros. A missing hook is success; a failing hook
+    /// throws, as it makes `git worktree add` exit non-zero. Needs git 2.36 or
+    /// newer: callers check `supportsHookRun()` first.
+    public func runPostCheckoutHook(worktreePath: String, newHead: String) async throws {
+        _ = try await run(
+            arguments: [
+                "hook", "run", "--ignore-missing", "post-checkout", "--",
+                String(repeating: "0", count: newHead.count), newHead, "1",
+            ],
+            at: worktreePath)
+    }
+
+    /// Whether this git has `git hook run` (2.36 or newer), which
+    /// `runPostCheckoutHook` needs. False when the version cannot be read, so
+    /// an unknown git takes the plain `worktreeAdd` path.
+    public func supportsHookRun() async -> Bool {
+        guard let output = try? await run(arguments: ["--version"], at: "/") else { return false }
+        return Self.versionSupportsHookRun(output)
+    }
+
+    /// Parses `git --version` output (`git version 2.39.5 (Apple Git-154)`)
+    /// and reports whether it is 2.36 or newer.
+    static func versionSupportsHookRun(_ output: String) -> Bool {
+        let words = output.split(whereSeparator: \.isWhitespace)
+        guard words.count >= 3, words[0] == "git", words[1] == "version" else { return false }
+        let parts = words[2].split(separator: ".").map { part in Int(part.prefix(while: \.isNumber)) }
+        guard parts.count >= 2, let major = parts[0], let minor = parts[1] else { return false }
+        return (major, minor) >= (2, 36)
+    }
+
+    /// Whether `git status --porcelain --ignored` reports nothing at all: no
+    /// staged, modified, deleted, untracked or ignored path. Only meaningful
+    /// before anything has run in the worktree, which is when it is asked.
+    public func isStatusEmpty(worktreePath: String) async throws -> Bool {
+        let output = try await run(arguments: ["status", "--porcelain", "--ignored"], at: worktreePath)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The repository's common git directory, absolute.
+    public func commonGitDir(repoPath: String) async throws -> String {
+        try await run(
+            arguments: ["rev-parse", "--path-format=absolute", "--git-common-dir"], at: repoPath
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Ceiling for writing a template from scratch: a full checkout of the
+    /// repository, which for a large tree with smudge filters can outlast the
+    /// two minutes that bound every other git call.
+    static let templateBuildTimeout: Duration = .seconds(600)
+
+    /// Moves a template checkout — a plain directory of tracked files with its
+    /// own index file and no `.git` — to `commit`. With `fromScratch`, the
+    /// index is discarded and every file is written; otherwise the index is
+    /// refreshed and a one-way merge rewrites only the paths that changed.
+    /// Runs against the repository's object store through `--git-dir`, so the
+    /// template never appears in `git worktree list`. Filters run as they do
+    /// for any checkout; hooks do not.
+    public func checkoutTemplate(
+        commonGitDir: String, treePath: String, indexPath: String, commit: String,
+        fromScratch: Bool
+    ) async throws {
+        let base = ["--git-dir=\(commonGitDir)", "--work-tree=\(treePath)", "-c", "core.bare=false"]
+        let env = ["GIT_INDEX_FILE": indexPath]
+        if fromScratch {
+            _ = try await run(
+                arguments: base + ["read-tree", "--reset", "-u", commit], at: treePath,
+                timeout: Self.templateBuildTimeout, extraEnvironment: env)
+            return
+        }
+        do {
+            _ = try await run(
+                arguments: base + ["update-index", "-q", "--refresh"], at: treePath,
+                extraEnvironment: env)
+        } catch let error as GitError where error.exitCode == 1 {
+            // Some template file no longer matches its entry. The merge below
+            // refuses to overwrite it, which sends the caller to a rebuild.
+        }
+        _ = try await run(
+            arguments: base + ["read-tree", "-m", "-u", commit], at: treePath,
+            extraEnvironment: env)
+    }
+
     /// Returns the HEAD SHA of a worktree directory.
     public func headSHA(worktreePath: String) async throws -> String {
         let output = try await run(arguments: ["rev-parse", "HEAD"], at: worktreePath)
@@ -951,8 +1086,12 @@ public struct GitManager: Sendable {
     /// a slow binary (`/bin/sleep`) deterministically — real git has no reliable
     /// cross-environment hang to exercise the kill path (a post-checkout hook did
     /// not fire on CI). Production callers never pass `executable`.
+    ///
+    /// `extraEnvironment` is merged over `gitEnvironment()`; only the template
+    /// checkout uses it, to point `GIT_INDEX_FILE` at the template's index.
     private func run(arguments: [String], at directory: String,
                      timeout: Duration? = nil,
+                     extraEnvironment: [String: String] = [:],
                      executable: String = "/usr/bin/git") async throws -> String {
         let resolvedTimeout = timeout ?? subprocessTimeout
         let commandDescription = "git " + arguments.joined(separator: " ")
@@ -966,7 +1105,7 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
-            environment: Self.gitEnvironment(),
+            environment: Self.gitEnvironment().merging(extraEnvironment) { _, extra in extra },
             timeout: resolvedTimeout,
             clock: clock
         ) {

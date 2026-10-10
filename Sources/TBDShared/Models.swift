@@ -1723,6 +1723,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
+    /// Clone-backed worktree checkout: populate a fresh worktree by APFS-cloning
+    /// a per-repo template checkout instead of writing every tracked file.
+    /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
+    /// Read on every create, so a change takes effect at the next one.
+    public var cloneCheckoutEnabled: Bool = Config.cloneCheckoutDefault
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1848,6 +1853,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
+    /// The shipped default for `cloneCheckoutEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant.
+    public static let cloneCheckoutDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -2069,6 +2077,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        cloneCheckoutEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(

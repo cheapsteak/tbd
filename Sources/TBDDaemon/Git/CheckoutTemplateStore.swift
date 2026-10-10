@@ -1,0 +1,390 @@
+import Darwin
+import Foundation
+import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "cloneCheckout")
+
+/// Clone-backed worktree checkout: a fresh worktree whose unchanged files share
+/// disk blocks with a per-repo template checkout instead of each holding its
+/// own copy.
+///
+/// `git worktree add` writes every tracked file, and on APFS those bytes are
+/// shared with nothing — a large repository pays its full checkout size per
+/// worktree. This store keeps one template per repo (the tracked files of one
+/// commit, under `~/tbd/repos/<repoID>/checkout-template/`) and builds a
+/// worktree in five steps:
+///
+/// 1. `git worktree add --no-checkout` — branch, HEAD and `.git` file, no files.
+/// 2. `clonefile(2)` each top-level entry of the template into the worktree.
+/// 3. `read-tree <template commit>` then `update-index --refresh`, which hashes
+///    the cloned files (reads only) and records their stat data.
+/// 4. `reset --hard` to HEAD: git rewrites, creates and deletes only the paths
+///    that differ between the template's commit and the new base.
+/// 5. `post-checkout`, with the arguments `git worktree add` would have used.
+///
+/// Every step after the first falls back to an ordinary checkout of the same
+/// worktree: the directory is emptied (keeping `.git`) and `reset --hard`
+/// writes every file. A clone that does not leave `git status` empty takes the
+/// same fallback, so a torn or stale template costs time, never correctness.
+/// The fallback is the only thing a non-APFS volume ever sees. A git older
+/// than 2.36 has no `git hook run` for step 5, so there the create is the
+/// plain `git worktree add` and no template is built.
+///
+/// The template follows the bases worktrees are created from: after each
+/// create, `refresh(…)` moves it to the new worktree's HEAD, writing only what
+/// changed. Clones and refreshes of one repo exclude each other without
+/// waiting — a create that finds a refresh running materializes normally, and
+/// a refresh that finds a clone running is skipped until the next create.
+///
+/// Orphans: `OrphanGC.reclaimCheckoutTemplates` removes a template whose repo
+/// row is gone, or every template while `clone_checkout_enabled` is off.
+///
+/// Design: docs/specs/2026-10-09-clone-backed-worktree-checkout-design.md.
+public actor CheckoutTemplateStore {
+
+    /// How a create populated its worktree.
+    public enum Outcome: Equatable, Sendable {
+        /// Cloned from the template at `templateCommit`; git wrote only the
+        /// paths that differ from it.
+        case cloned(templateCommit: String)
+        /// Every file written by git, as `git worktree add` would.
+        case materialized(reason: String)
+    }
+
+    struct TemplatePaths: Sendable {
+        let root: URL
+        let tree: URL
+        let index: URL
+        let commitFile: URL
+    }
+
+    enum CloneError: Error, LocalizedError, CustomStringConvertible {
+        case cloneFailed(entry: String, code: Int32)
+        case notClean
+
+        var errorDescription: String? { description }
+
+        var description: String {
+            switch self {
+            case let .cloneFailed(entry, code):
+                return "clonefile failed for \(entry): \(String(cString: strerror(code)))"
+            case .notClean:
+                return "git status was not empty after the clone"
+            }
+        }
+    }
+
+    /// Fixed override of `~/tbd/repos` for tests; nil resolves
+    /// `TBDConstants.reposDir` (which honors `TBD_HOME`) at each use.
+    private let reposDir: URL?
+
+    /// Clones in flight per repo. A refresh never starts while this is non-zero.
+    private var activeClones: [UUID: Int] = [:]
+    /// Repos whose template is being written. A clone never starts during one.
+    private var refreshing: Set<UUID> = []
+    /// Repos the store has given up on until the daemon restarts: `clonefile`
+    /// reported the volume cannot clone (`ENOTSUP`), the template and worktree
+    /// are on different volumes (`EXDEV`), or `notCleanLimit` clones in a row
+    /// failed the clean-status check. Neither clones nor refreshes are
+    /// attempted for them.
+    private var unsupported: Set<UUID> = []
+    /// Clones in a row, per repo, that did not leave `git status` empty.
+    /// Reset by a clean clone; at `notCleanLimit` the repo joins `unsupported`.
+    private var notCleanStreak: [UUID: Int] = [:]
+    /// Whether this machine's git has `git hook run`. Probed on first use.
+    private var hookRunSupported: Bool?
+
+    /// How many clones in a row may fail the clean-status check before the
+    /// store stops building a template for the repo. One stray file is a torn
+    /// template, which the rebuild after it fixes. The same failure on every
+    /// rebuild is a repo whose own checkout never reads clean (line endings,
+    /// a filter that does not round-trip), and each further attempt would
+    /// cost a full template write plus a full worktree write.
+    static let notCleanLimit = 3
+
+    /// The daemon's instance. Resolves `~/tbd/repos` per use, so it honors
+    /// `TBD_HOME` set by the test fence.
+    public static let shared = CheckoutTemplateStore()
+
+    /// `hookRunSupported` pre-answers the git version probe; tests use it to
+    /// take the old-git branch on a machine with a current git.
+    public init(reposDir: URL? = nil, hookRunSupported: Bool? = nil) {
+        self.reposDir = reposDir
+        self.hookRunSupported = hookRunSupported
+    }
+
+    nonisolated func paths(repoID: UUID) -> TemplatePaths {
+        let root: URL
+        if let reposDir {
+            root = reposDir
+                .appendingPathComponent(repoID.uuidString)
+                .appendingPathComponent(TBDConstants.checkoutTemplateDirName, isDirectory: true)
+        } else {
+            root = TBDConstants.checkoutTemplateDir(
+                repoID: repoID, environment: ProcessInfo.processInfo.environment)
+        }
+        return TemplatePaths(
+            root: root,
+            tree: root.appendingPathComponent("tree", isDirectory: true),
+            index: root.appendingPathComponent("index"),
+            commitFile: root.appendingPathComponent("commit"))
+    }
+
+    // MARK: - Create
+
+    /// Creates a worktree on a new branch from `baseBranch`, populated from the
+    /// template where possible. Throws only when `git worktree add
+    /// --no-checkout` itself fails, when the fallback checkout fails, when
+    /// the `post-checkout` hook fails, or when the calling task is cancelled
+    /// — the failures a plain `worktreeAdd` would also have reported, so the
+    /// caller's cleanup applies unchanged.
+    public nonisolated func addWorktree(
+        git: GitManager, repoID: UUID, repoPath: String,
+        worktreePath: String, branch: String, baseBranch: String
+    ) async throws -> Outcome {
+        guard await canRunHooks(git: git) else {
+            // The clone path runs `post-checkout` itself through `git hook
+            // run`, which this git lacks. The plain add runs the hook.
+            try await git.worktreeAdd(
+                repoPath: repoPath, worktreePath: worktreePath, branch: branch, baseBranch: baseBranch)
+            return .materialized(reason: "git older than 2.36")
+        }
+        try await git.worktreeAddNoCheckout(
+            repoPath: repoPath, worktreePath: worktreePath, branch: branch, baseBranch: baseBranch)
+
+        let outcome: Outcome
+        do {
+            outcome = try await populateFromTemplate(
+                git: git, repoID: repoID, worktreePath: worktreePath)
+        } catch {
+            // A cancelled create stops here rather than starting a full
+            // write that the cancellation would cut short in turn. A git
+            // timeout still falls back: the full write has its own bound.
+            if error is CancellationError || Task.isCancelled { throw error }
+            logger.info("""
+            clone checkout fell back for \(worktreePath, privacy: .public): \
+            \(String(describing: error), privacy: .public)
+            """)
+            try Self.emptyWorktree(worktreePath)
+            // An index of HEAD with no stat data: `reset --hard` then writes
+            // every file, exactly as an ordinary checkout would.
+            try await git.readTree(worktreePath: worktreePath, treeish: "HEAD")
+            try await git.resetHardToHead(worktreePath: worktreePath)
+            outcome = .materialized(reason: String(describing: error))
+        }
+
+        let head = try await git.headSHA(worktreePath: worktreePath)
+        try await git.runPostCheckoutHook(worktreePath: worktreePath, newHead: head)
+        return outcome
+    }
+
+    private nonisolated func populateFromTemplate(
+        git: GitManager, repoID: UUID, worktreePath: String
+    ) async throws -> Outcome {
+        guard let template = await beginClone(repoID: repoID) else {
+            return try await materializeWithoutTemplate(git: git, worktreePath: worktreePath)
+        }
+        do {
+            try Self.cloneTree(from: template.tree, into: worktreePath)
+        } catch CloneError.cloneFailed(let entry, let code) where code == ENOTSUP || code == EXDEV {
+            await endClone(repoID: repoID, unsupported: true)
+            throw CloneError.cloneFailed(entry: entry, code: code)
+        } catch {
+            await endClone(repoID: repoID, unsupported: false)
+            throw error
+        }
+        await endClone(repoID: repoID, unsupported: false)
+
+        try await git.readTree(worktreePath: worktreePath, treeish: template.commit)
+        try await git.refreshIndex(worktreePath: worktreePath)
+        try await git.resetHardToHead(worktreePath: worktreePath)
+        guard try await git.isStatusEmpty(worktreePath: worktreePath) else {
+            // The template holds something its commit does not track. The
+            // fast refresh path would carry it forward forever, so drop the
+            // commit file and the next refresh rebuilds from scratch — or,
+            // after `notCleanLimit` in a row, drop the template for good.
+            await recordNotClean(repoID: repoID)
+            throw CloneError.notClean
+        }
+        await recordClean(repoID: repoID)
+        return .cloned(templateCommit: template.commit)
+    }
+
+    /// No usable template: an ordinary checkout into the empty worktree.
+    private nonisolated func materializeWithoutTemplate(
+        git: GitManager, worktreePath: String
+    ) async throws -> Outcome {
+        try await git.readTree(worktreePath: worktreePath, treeish: "HEAD")
+        try await git.resetHardToHead(worktreePath: worktreePath)
+        return .materialized(reason: "no template")
+    }
+
+    private func beginClone(repoID: UUID) -> (tree: String, commit: String)? {
+        guard !refreshing.contains(repoID), !unsupported.contains(repoID) else { return nil }
+        let paths = self.paths(repoID: repoID)
+        guard let commit = Self.readCommit(paths.commitFile),
+              FileManager.default.fileExists(atPath: paths.tree.path)
+        else { return nil }
+        activeClones[repoID, default: 0] += 1
+        return (paths.tree.path, commit)
+    }
+
+    private func endClone(repoID: UUID, unsupported isUnsupported: Bool) {
+        let remaining = (activeClones[repoID] ?? 1) - 1
+        activeClones[repoID] = remaining > 0 ? remaining : nil
+        if isUnsupported {
+            giveUp(repoID: repoID, reason: "volume cannot clone")
+        }
+    }
+
+    /// Stops cloning and refreshing for the repo until the daemon restarts.
+    private func giveUp(repoID: UUID, reason: String) {
+        unsupported.insert(repoID)
+        // A template nothing will clone from is a full checkout of waste.
+        try? FileManager.default.removeItem(at: paths(repoID: repoID).root)
+        logger.info("clone checkout: \(reason, privacy: .public) for repo \(repoID.uuidString, privacy: .public)")
+    }
+
+    private func recordNotClean(repoID: UUID) {
+        let streak = (notCleanStreak[repoID] ?? 0) + 1
+        notCleanStreak[repoID] = streak
+        if streak >= Self.notCleanLimit {
+            giveUp(repoID: repoID, reason: "\(streak) clones in a row were not clean")
+        } else {
+            invalidate(repoID: repoID)
+        }
+    }
+
+    private func recordClean(repoID: UUID) {
+        notCleanStreak[repoID] = nil
+    }
+
+    private func canRunHooks(git: GitManager) async -> Bool {
+        if let hookRunSupported { return hookRunSupported }
+        let supported = await git.supportsHookRun()
+        if !supported, hookRunSupported == nil {
+            logger.info("clone checkout: git has no `git hook run` (needs 2.36); creates use plain worktree add")
+        }
+        hookRunSupported = supported
+        return supported
+    }
+
+    /// Makes the repo's template read as absent until a refresh rebuilds it.
+    private func invalidate(repoID: UUID) {
+        guard !refreshing.contains(repoID) else { return }
+        try? FileManager.default.removeItem(at: paths(repoID: repoID).commitFile)
+        logger.info("clone checkout: template invalidated for repo \(repoID.uuidString, privacy: .public)")
+    }
+
+    // MARK: - Template refresh
+
+    /// Moves the repo's template to `commit`, building it if absent. A no-op
+    /// when the template is already there, when a clone or another refresh of
+    /// the repo is in flight, or when the repo's volume cannot clone. Never
+    /// throws: a failed refresh leaves no template, and creates materialize
+    /// normally until a later refresh succeeds.
+    public func refresh(git: GitManager, repoID: UUID, repoPath: String, toCommit commit: String) async {
+        // Creates never clone on such a git, so a template would be waste.
+        guard await canRunHooks(git: git),
+              !unsupported.contains(repoID),
+              !refreshing.contains(repoID),
+              (activeClones[repoID] ?? 0) == 0
+        else { return }
+        let paths = self.paths(repoID: repoID)
+        guard Self.readCommit(paths.commitFile) != commit else { return }
+        refreshing.insert(repoID)
+        do {
+            try await Self.writeTemplate(git: git, paths: paths, repoPath: repoPath, commit: commit)
+        } catch CloneError.cloneFailed(_, let code) where code == ENOTSUP {
+            unsupported.insert(repoID)
+            logger.info("clone checkout: volume cannot clone for repo \(repoID.uuidString, privacy: .public)")
+        } catch {
+            logger.warning("""
+            clone checkout: template refresh failed for repo \(repoID.uuidString, privacy: .public): \
+            \(String(describing: error), privacy: .public)
+            """)
+        }
+        refreshing.remove(repoID)
+        // The store gave up on the repo while this refresh was writing.
+        if unsupported.contains(repoID) {
+            try? FileManager.default.removeItem(at: paths.root)
+        }
+    }
+
+    private static func writeTemplate(
+        git: GitManager, paths: TemplatePaths, repoPath: String, commit: String
+    ) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+        // A template on a volume that cannot clone would cost a full checkout
+        // and save nothing.
+        let canClone = (try? paths.root.resourceValues(forKeys: [.volumeSupportsFileCloningKey]))?
+            .volumeSupportsFileCloning
+        guard canClone == true else {
+            try? fm.removeItem(at: paths.root)
+            throw CloneError.cloneFailed(entry: paths.root.path, code: ENOTSUP)
+        }
+        let previous = readCommit(paths.commitFile)
+        // Removed first, so a crash mid-write leaves a template that reads as
+        // absent and is rebuilt, never one that names the wrong commit.
+        try? fm.removeItem(at: paths.commitFile)
+        let common = try await git.commonGitDir(repoPath: repoPath)
+
+        var advanced = false
+        if previous != nil, fm.fileExists(atPath: paths.tree.path), fm.fileExists(atPath: paths.index.path) {
+            do {
+                try await git.checkoutTemplate(
+                    commonGitDir: common, treePath: paths.tree.path, indexPath: paths.index.path,
+                    commit: commit, fromScratch: false)
+                advanced = true
+            } catch {
+                logger.info("clone checkout: rebuilding template: \(String(describing: error), privacy: .public)")
+            }
+        }
+        if !advanced {
+            try? fm.removeItem(at: paths.tree)
+            try? fm.removeItem(at: paths.index)
+            try fm.createDirectory(at: paths.tree, withIntermediateDirectories: true)
+            try await git.checkoutTemplate(
+                commonGitDir: common, treePath: paths.tree.path, indexPath: paths.index.path,
+                commit: commit, fromScratch: true)
+        }
+        try Data((commit + "\n").utf8).write(to: paths.commitFile, options: .atomic)
+    }
+
+    // MARK: - Filesystem
+
+    static func readCommit(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        return text
+    }
+
+    /// Clones each top-level entry of `source` into `destination`, which must
+    /// already exist and hold nothing but `.git`. `clonefile(2)` clones a
+    /// directory hierarchy in one call, sharing every file's data blocks.
+    static func cloneTree(from source: String, into destination: String) throws {
+        let names = try FileManager.default.contentsOfDirectory(atPath: source)
+        for name in names.sorted() where name != ".git" {
+            let from = (source as NSString).appendingPathComponent(name)
+            let to = (destination as NSString).appendingPathComponent(name)
+            // CLONE_NOFOLLOW: a tracked symlink is cloned as the link, not
+            // as whatever it points at.
+            guard clonefile(from, to, UInt32(CLONE_NOFOLLOW)) == 0 else {
+                throw CloneError.cloneFailed(entry: name, code: errno)
+            }
+        }
+    }
+
+    /// Removes everything in a worktree except its `.git` file.
+    static func emptyWorktree(_ path: String) throws {
+        let fm = FileManager.default
+        for name in try fm.contentsOfDirectory(atPath: path) where name != ".git" {
+            try fm.removeItem(atPath: (path as NSString).appendingPathComponent(name))
+        }
+    }
+}

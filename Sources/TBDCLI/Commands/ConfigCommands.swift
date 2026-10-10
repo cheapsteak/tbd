@@ -24,6 +24,7 @@ struct ConfigGet: AsyncParsableCommand {
             "auto-hibernate-on-merge: \(config.autoHibernateOnMergeDefault ? "on" : "off")",
             "update-mode: \(config.updateMode.rawValue)",
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
+            "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
 
@@ -50,17 +51,18 @@ struct ConfigSet: AsyncParsableCommand {
     /// express one key's vocabulary.
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
+        "clone-checkout",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        update-mode)
+        clone-checkout, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults and pr-poll-schedule; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule and clone-checkout; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -81,6 +83,13 @@ struct ConfigSet: AsyncParsableCommand {
             return "Set pr-poll-schedule to off. TBD checks every worktree's pull request "
                 + "every 30 seconds while the app is in front, and every 5 minutes otherwise. "
                 + "Takes effect now."
+        case ("clone-checkout", .on):
+            return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
+                + "checkout where the volume supports it, so unchanged files share disk blocks. "
+                + "Takes effect at the next worktree."
+        case ("clone-checkout", .off):
+            return "Set clone-checkout to off. New worktrees write every tracked file with "
+                + "git worktree add. Takes effect at the next worktree."
         default:
             return "Set \(key) default to \(value.rawValue)."
         }
@@ -144,6 +153,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetPRPollScheduleEnabled,
                 params: ConfigSetPRPollScheduleEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "clone-checkout":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetCloneCheckoutEnabled,
+                params: ConfigSetCloneCheckoutEnabledParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)
