@@ -1754,6 +1754,10 @@ final class AppState {
     /// Last `TerminalPendingPromptsDelta.revision` applied per terminal, for
     /// the same out-of-order reason as `pendingQuestionRevisions`.
     @ObservationIgnored var pendingPromptRevisions: [UUID: UInt64] = [:]
+    /// Prompt cards held on screen after their dialog closed, until the tool
+    /// result reaches the transcript or a bounded timeout passes. Shared by
+    /// the local and remote transcript panes; itself `@Observable`.
+    @ObservationIgnored let promptCardRetention = PromptCardRetention()
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app

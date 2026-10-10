@@ -47,11 +47,32 @@ struct RemoteTranscriptPaneView: View {
     @State private var scrollToBottomToken = 0
     @State private var activityGroupExpansion: [String: Bool] = [:]
     @State private var activityToggleToken = 0
+    /// Stable `createdAt` for a remote prompt card; see `PromptFirstSeenDates`.
+    @State private var promptFirstSeen = PromptFirstSeenDates()
 
     private var storeKey: String { RemoteTranscriptTail.storeKey(selection) }
 
     private var items: [TranscriptItem] {
         appState.sessionTranscripts[storeKey] ?? []
+    }
+
+    private var promptTarget: PromptAnswerTarget {
+        .remote(provider: selection.provider, sessionID: selection.sessionID)
+    }
+
+    /// The session's open dialog as a card: its effective pending prompt,
+    /// while the provider reports `waiting_input`.
+    private var livePrompts: [PendingPromptPresentation] {
+        PendingPromptMerge.livePrompts(
+            appState: appState, selection: selection, firstSeen: promptFirstSeen)
+    }
+
+    /// `items` with the prompt cards merged in. View-time only: the tail's
+    /// `read()` stays the one writer of `sessionTranscripts[storeKey]`.
+    private func merged(_ items: [TranscriptItem]) -> PendingPromptMerge.Merged {
+        PendingPromptMerge.apply(
+            items: items,
+            prompts: appState.promptCardRetention.cards(live: livePrompts, for: promptTarget))
     }
 
     /// Everything that should cause a re-read. `.task(id:)` restarts on any
@@ -96,6 +117,14 @@ struct RemoteTranscriptPaneView: View {
         .onDisappear {
             release(storeKey)
             overlayCoordinator.close()
+        }
+        // Prompt-card bookkeeping, outside any body evaluation; see
+        // `PromptCardRetention`.
+        .onChange(of: livePrompts, initial: true) { _, live in
+            appState.promptCardRetention.observe(live: live, for: promptTarget)
+        }
+        .onChange(of: merged(items).settled, initial: true) { _, settled in
+            appState.promptCardRetention.settle(settled)
         }
     }
 
@@ -153,9 +182,11 @@ struct RemoteTranscriptPaneView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+            let withCards = merged(items)
             let presentation = TranscriptPresentation.build(
-                items: items,
+                items: withCards.items,
                 expansionOverrides: activityGroupExpansion,
+                pendingPrompts: withCards.prompts,
                 memo: presentationMemo
             )
             TableTranscriptView(

@@ -129,7 +129,19 @@ struct TableTranscriptPaneView: View {
     }
 
     private var displayedMessages: [TranscriptItem] {
-        messages
+        mergedTranscript.items
+    }
+
+    /// The transcript with this terminal's prompt cards merged in — open
+    /// dialogs from the daemon's mirror plus cards `PromptCardRetention` still
+    /// holds. View-time only: `appState.sessionTranscripts` stays the unmerged
+    /// list the publish path wrote, so an appended card never enters it.
+    private var mergedTranscript: PendingPromptMerge.Merged {
+        PendingPromptMerge.local(items: messages, appState: appState, terminalID: terminalID)
+    }
+
+    private var livePrompts: [PendingPromptPresentation] {
+        PendingPromptMerge.livePrompts(appState: appState, terminalID: terminalID)
     }
 
     var body: some View {
@@ -154,6 +166,15 @@ struct TableTranscriptPaneView: View {
         }
         .onChange(of: currentSessionID) { _, _ in
             activityGroupExpansion.removeAll()
+        }
+        // Prompt-card bookkeeping, outside any body evaluation: a dialog that
+        // closes is held until its tool result lands (the merge's `settled`)
+        // or the retention timeout passes.
+        .onChange(of: livePrompts, initial: true) { _, live in
+            appState.promptCardRetention.observe(live: live, for: .local(terminalID: terminalID))
+        }
+        .onChange(of: mergedTranscript.settled, initial: true) { _, settled in
+            appState.promptCardRetention.settle(settled)
         }
         .onDisappear {
             clearWatchdogContext()
@@ -231,9 +252,11 @@ struct TableTranscriptPaneView: View {
 
     @ViewBuilder
     private var tableTranscript: some View {
+        let merged = mergedTranscript
         let presentation = TranscriptPresentation.build(
-            items: displayedMessages,
+            items: merged.items,
             expansionOverrides: activityGroupExpansion,
+            pendingPrompts: merged.prompts,
             memo: presentationMemo
         )
         // Read once per body evaluation, from the same helper the resolver
