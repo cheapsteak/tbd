@@ -298,6 +298,40 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         #expect(Self.sends(invoker).isEmpty)
     }
 
+    /// With the flag on and `answer` declared, the prompt can be answered from
+    /// its transcript card, so the refusal points there instead.
+    @Test func sendRefusalPointsAtTheCardWhenAnswerable() async throws {
+        try await enableSend()
+        try await db.config.setTranscriptPromptAnswerEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit, RemoteCapability.answer]),
+            listing(agentState: .waitingInput),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let response = try await send(router(m))
+        #expect(response.error == RPCRouter.sendMessageWaitingInputAnswerOnCardRefusal)
+        #expect(response.error?.contains("on the card in the transcript") == true)
+        #expect(Self.sends(invoker).isEmpty)
+    }
+
+    /// Either half missing — the flag off, or `answer` undeclared — keeps the
+    /// refusal pointing at the terminal.
+    @Test(arguments: [(false, true), (true, false)])
+    func sendRefusalPointsAtTheTerminalUnlessAnswerable(flagOn: Bool, declared: Bool) async throws {
+        try await enableSend()
+        try await db.config.setTranscriptPromptAnswerEnabled(flagOn)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit] + (declared ? [RemoteCapability.answer] : [])),
+            listing(agentState: .waitingInput),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let response = try await send(router(m))
+        #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal)
+        #expect(Self.sends(invoker).isEmpty)
+    }
+
     @Test(arguments: [
         (RemoteProcessState.exited, RemoteAgentState.exited),
         (RemoteProcessState.exited, RemoteAgentState.idle),

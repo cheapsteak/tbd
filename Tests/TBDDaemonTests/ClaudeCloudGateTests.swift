@@ -57,9 +57,9 @@ struct ClaudeCloudGateTests: ~Copyable {
     /// gate runs after each handler decodes, so a method whose required field
     /// is missing here would refuse for the wrong reason and quietly stop
     /// testing the gate. `jsonl` / `key` / `saveLocally` are the exchange
-    /// verbs' share of that.
-    private let cloudParams = #"{"provider": "claude-cloud", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1, "jsonl": "{}", "key": "k", "saveLocally": false}"#
-    private let otherParams = #"{"provider": "fake", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1, "jsonl": "{}", "key": "k", "saveLocally": false}"#
+    /// verbs' share of that, and `promptID` / `answer` are `remote.answer`'s.
+    private let cloudParams = #"{"provider": "claude-cloud", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1, "jsonl": "{}", "key": "k", "saveLocally": false, "promptID": "p", "answer": {"kind": "permission", "decision": "allow"}}"#
+    private let otherParams = #"{"provider": "fake", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1, "jsonl": "{}", "key": "k", "saveLocally": false, "promptID": "p", "answer": {"kind": "permission", "decision": "allow"}}"#
 
     /// Drawn from `RPCMethod.providerNamedRemoteMethods` — the production
     /// list of every `remote.*` verb addressed by a provider — rather than

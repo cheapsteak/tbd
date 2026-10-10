@@ -393,8 +393,8 @@ public enum RPCMethod {
     public static let remoteSendMessage = "remote.sendMessage"
     /// Answers a remote session's pending prompt through the provider's
     /// `answer <session_id> <prompt_id>` verb, the answer payload on stdin.
-    /// Refused unless the provider declares `answer`. Joins
-    /// `providerNamedRemoteMethods` in the commit that adds its handler.
+    /// Refused unless the provider declares `answer`, or while
+    /// `config.transcriptPromptAnswerEnabled` is off.
     public static let remoteAnswer = "remote.answer"
     /// Lists the receipts TBD holds. Deliberately absent from
     /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
@@ -437,7 +437,7 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
-        remoteTranscriptSync, remoteSendMessage,
+        remoteTranscriptSync, remoteSendMessage, remoteAnswer,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"

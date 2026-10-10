@@ -1015,6 +1015,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteTranscriptSync(request.paramsData)
             case RPCMethod.remoteSendMessage:
                 return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
+            case RPCMethod.remoteAnswer:
+                return try await handleRemoteAnswer(request.paramsData, actor: request.actor)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:
