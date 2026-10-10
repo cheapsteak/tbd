@@ -394,13 +394,21 @@ public actor PendingPromptStore {
         return (.registered(promptID: id, toolUseID: toolUseID), changed)
     }
 
-    /// The newest note in the session for `toolName`, preferring one whose
-    /// input hash matches, removed so no second register can take it.
+    /// The note in the session that this register pairs with, removed so no
+    /// second register can take it: the newest one for `toolName` whose input
+    /// hash matches, else the session's only note for `toolName`. With no
+    /// hash match and several notes for the tool, recency cannot say which
+    /// call the dialog belongs to, so the prompt stays unpaired rather than
+    /// bind to the wrong tool call.
     private func takeNote(scope: SessionKey, toolName: String, inputHash: String) -> String? {
         guard var list = notes[scope] else { return nil }
-        guard let index = list.lastIndex(where: { $0.toolName == toolName && $0.inputHash == inputHash })
-            ?? list.lastIndex(where: { $0.toolName == toolName }) else {
-            return nil
+        let index: Int
+        if let matched = list.lastIndex(where: { $0.toolName == toolName && $0.inputHash == inputHash }) {
+            index = matched
+        } else {
+            let candidates = list.indices.filter { list[$0].toolName == toolName }
+            guard candidates.count == 1, let only = candidates.first else { return nil }
+            index = only
         }
         let note = list.remove(at: index)
         notes[scope] = list.isEmpty ? nil : list

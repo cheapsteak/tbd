@@ -142,7 +142,9 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
      session id (`--resume` without `--fork-session`).
      - It matches the tool input's hash first, so two calls to the same tool
        in one message pair correctly.
-     - If the hash doesn't match, it falls back to the latest note.
+     - If no hash matches, it falls back to the session's note for that tool
+       only when there is exactly one. With several, recency can't say which
+       call the dialog shows, so the prompt stays unpaired.
      - A note that arrives up to 5 seconds after its register still pairs.
      - An unpaired prompt gets a fresh UUID id instead.
      - The reply names the `tool_use_id` the prompt was paired with. A

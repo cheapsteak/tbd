@@ -78,25 +78,43 @@ struct PendingPromptResolutionTests {
 
     // MARK: Pairing
 
-    @Test func registerPairsWithLatestNoteForSessionAndTool() async {
+    /// No note carries this input, but the session has exactly one note for
+    /// the tool, so the register pairs with it — never with a newer note of
+    /// another tool.
+    @Test func registerFallsBackToTheOnlyNoteForTheTool() async {
         let store = makeStore()
         let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_old",
+        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_bash",
                           input: Self.otherBashInput)
         _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_read",
                           tool: "Read", input: #"{"file_path":"/tmp/x"}"#)
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_new",
-                          input: #"{"command":"pwd"}"#)
 
-        // No note carries this input, so the newest Bash note wins — never
-        // the newer note of another tool.
         let (id, changed) = await register(store, params(
             terminal: terminal, session: "s1", input: #"{"command":"whoami"}"#))
 
         #expect(changed == [terminal])
         let prompt = await payload(store, terminal: terminal, id: id)
-        #expect(prompt?.toolUseID == "toolu_new")
+        #expect(prompt?.toolUseID == "toolu_bash")
         #expect(prompt?.kind == .permission)
+    }
+
+    /// No note carries this input and two notes share the tool: recency
+    /// cannot say which call the dialog shows, so the prompt stays unpaired
+    /// and both notes stay for registers that do match.
+    @Test func registerWithTwoSameToolNotesAndNoHashMatchStaysUnpaired() async {
+        let store = makeStore()
+        let terminal = UUID()
+        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_old",
+                          input: Self.otherBashInput)
+        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_new",
+                          input: #"{"command":"pwd"}"#)
+
+        let (id, _) = await register(store, params(
+            terminal: terminal, session: "s1", input: #"{"command":"whoami"}"#))
+        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
+
+        let matched = await register(store, params(terminal: terminal, session: "s1", input: Self.otherBashInput))
+        #expect(await payload(store, terminal: terminal, id: matched.id)?.toolUseID == "toolu_old")
     }
 
     @Test func pairsOnInputHashBeforeRecency() async {
