@@ -1170,6 +1170,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the Program Status Protocol gate (default OFF, soaking). Applies
+    /// to Claude sessions started after the change.
+    func setProgramStatus(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetProgramStatusEnabled,
+            params: ConfigSetProgramStatusEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.

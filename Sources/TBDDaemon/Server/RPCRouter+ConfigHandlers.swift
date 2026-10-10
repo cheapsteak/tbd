@@ -563,4 +563,19 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the Program Status Protocol gate (default OFF, soaking) — whether
+    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
+    /// accepts its status reports. Applies to Claude processes started after
+    /// the change. The column is written on every call, because writing either
+    /// value is the explicit gesture that lifts it out of NULL forever after.
+    /// Design: docs/specs/2026-10-10-program-status-protocol-design.md.
+    func handleConfigSetProgramStatusEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetProgramStatusEnabledParams.self, from: paramsData)
+        try await db.config.setProgramStatusEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

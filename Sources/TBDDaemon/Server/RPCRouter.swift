@@ -930,6 +930,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
+            case RPCMethod.configSetProgramStatusEnabled:
+                return try await handleConfigSetProgramStatusEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1098,6 +1100,7 @@ public final class RPCRouter: Sendable {
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
+        result.programStatusEnabled = config.programStatusEnabled
         return try RPCResponse(result: result)
     }
 

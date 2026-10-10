@@ -967,6 +967,21 @@ extension AppState {
         }
     }
 
+    // MARK: - Program Status Protocol
+
+    /// Persist the Program Status Protocol gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. Applies to
+    /// Claude sessions started after the change.
+    func setProgramStatusEnabled(_ enabled: Bool) async {
+        do {
+            try await programStatusFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set program status: \(error, privacy: .public)")
+            showAlert("Failed to set Claude session status: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a profile's pool opt-out, then reload profiles.
     func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
         do {

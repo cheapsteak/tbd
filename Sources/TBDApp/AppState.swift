@@ -1912,6 +1912,10 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
+    /// How `setProgramStatusEnabled` persists the Program Status Protocol gate
+    /// — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var programStatusFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setProgramStatus(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

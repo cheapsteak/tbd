@@ -1722,6 +1722,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
+    /// Program Status Protocol (OSC 7501) on pty-holder sessions: whether TBD
+    /// answers Claude Code's probe and accepts its status reports. Resolved as
+    /// `program_status_enabled ?? Config.programStatusEnabledDefault`.
+    public var programStatusEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1840,6 +1844,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
+    /// The shipped default for `programStatusEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant.
+    public static let programStatusEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1884,6 +1891,7 @@ public struct Config: Codable, Sendable, Equatable {
                 modelProxyPort: Int? = nil,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
+                programStatusEnabled: Bool = Config.programStatusEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1928,6 +1936,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.modelProxyPort = modelProxyPort
         self.profileBalancingEnabled = profileBalancingEnabled
         self.prPollScheduleEnabled = prPollScheduleEnabled
+        self.programStatusEnabled = programStatusEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2061,6 +2070,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        programStatusEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

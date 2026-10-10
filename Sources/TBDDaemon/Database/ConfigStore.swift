@@ -171,6 +171,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` means "never chose". Resolve it through
     /// `Config.prPollScheduleDefault`, never through `?? false`.
     var pr_poll_schedule_enabled: Bool?
+    /// Program Status Protocol (OSC 7501) gate. **Genuinely tri-state**: the
+    /// `20261010043448_config_program_status` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.programStatusEnabledDefault`, never through `?? false`.
+    var program_status_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -243,6 +248,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   the same way rather than to a hardcoded `.off`.
     /// - Parameter profileBalancingDefault: same shape again, for
     ///   `profile_balancing_enabled` — the launch policy's soak gate.
+    /// - Parameter programStatusDefault: same shape again, for
+    ///   `program_status_enabled` — the Program Status Protocol's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -259,7 +266,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault,
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
-        prPollScheduleDefault: Bool = Config.prPollScheduleDefault
+        prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
+        programStatusDefault: Bool = Config.programStatusEnabledDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -362,6 +370,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
+        // Program Status Protocol gate — NOT `?? false`. Assigned after
+        // construction, like the proxy fields above, to keep the initializer
+        // call inside the type-checker's budget.
+        config.programStatusEnabled = program_status_enabled ?? programStatusDefault
         return config
     }
 }
@@ -860,6 +872,18 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the Program Status Protocol (OSC 7501) gate. Written on every
+    /// call, so either value is the explicit gesture that lifts the column out
+    /// of NULL.
+    public func setProgramStatusEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET program_status_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

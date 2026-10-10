@@ -318,6 +318,12 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
+    /// The Program Status Protocol gate (`program_status_enabled`): whether
+    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
+    /// accepts its status reports. Applies to Claude processes started after
+    /// the change. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -3599,6 +3605,14 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProgramStatusEnabled` — the gate for the Program
+/// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
+/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
+public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
 /// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
 public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
@@ -3984,6 +3998,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `modelProxyEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
+    /// Whether the Program Status Protocol is on (`program_status_enabled`).
+    /// Default OFF while it soaks. Resolved through
+    /// `Config.programStatusEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4113,6 +4134,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        // New field for the Program Status Protocol gate. A daemon that does
+        // not send it does not speak the protocol, so fall through to the
+        // shipped default.
+        programStatusEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
     }
 }
 
