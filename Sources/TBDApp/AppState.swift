@@ -2818,12 +2818,7 @@ final class AppState {
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
-        // A new subscription is a new ordering domain. The daemon's
-        // `PendingPromptStore` is memory-only, so a restarted daemon counts
-        // from zero again; keeping the old high-water marks would make the app
-        // drop every delta it then sends.
-        pendingQuestionRevisions.removeAll()
-        pendingPromptRevisions.removeAll()
+        resetDeltaOrdering()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2834,6 +2829,15 @@ final class AppState {
             // Subscription disconnected — nil out so poll loop restarts it
             await MainActor.run { self.subscriptionTask = nil }
         }
+    }
+
+    /// Forgets the revision high-water marks, because a new subscription is a
+    /// new ordering domain. The daemon's `PendingPromptStore` is memory-only,
+    /// so a restarted daemon counts from zero again; keeping the old marks
+    /// would make the app drop every delta it then sends.
+    func resetDeltaOrdering() {
+        pendingQuestionRevisions.removeAll()
+        pendingPromptRevisions.removeAll()
     }
 
     func stopSubscription() {

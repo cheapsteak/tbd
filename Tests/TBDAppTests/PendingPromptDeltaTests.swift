@@ -96,16 +96,19 @@ struct PendingPromptDeltaTests {
         }
     }
 
-    @Test("startSubscription clears the prompt revisions")
-    func startSubscriptionClearsRevisions() {
+    /// The reset `startSubscription` runs, called directly: starting a real
+    /// subscription would dial the daemon socket.
+    @Test("a new subscription's ordering reset clears the prompt revisions")
+    func resetDeltaOrderingClearsRevisions() {
         withAppState { state in
             let terminalID = UUID()
             state.handleDelta(delta(terminalID, prompts: ["p1"], revision: 5))
             #expect(state.pendingPromptRevisions[terminalID] == 5)
-            state.startSubscription()
-            state.stopSubscription()
+            state.resetDeltaOrdering()
             #expect(state.pendingPromptRevisions.isEmpty,
                     "a restarted daemon counts from zero; a kept high-water mark drops its deltas")
+            state.handleDelta(delta(terminalID, prompts: ["p2"], revision: 1))
+            #expect(state.pendingPrompts[terminalID]?.map(\.id) == ["p2"])
         }
     }
 
