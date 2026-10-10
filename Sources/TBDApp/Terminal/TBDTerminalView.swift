@@ -1,6 +1,11 @@
 import AppKit
 import Combine
 import SwiftTerm
+// Scoped, not a whole-module import: `TBDShared.Terminal` (the DB row model)
+// would collide with `SwiftTerm.Terminal`.
+import class TBDShared.ProgramStatusGate
+import enum TBDShared.ProgramStatusParser
+import enum TBDShared.ProgramStatusProtocol
 import os
 
 private let terminalViewLogger = Logger(subsystem: "com.tbd.app", category: "terminalRenderer")
@@ -65,6 +70,25 @@ class TBDTerminalView: TerminalView {
     /// re-attach and tmux must stay the bracketing authority while attached.
     var onControlModePaste: ((Data) -> Bool)?
 
+    /// Whether this view answers the Program Status Protocol (OSC 7501) probe
+    /// and forwards its reports. Written on main by `TerminalPanelRepresentable`
+    /// (on only for a holder-transport Claude session with
+    /// `program_status_enabled` on); read on SwiftTerm's parse thread inside
+    /// the synchronous OSC handler, hence a lock-guarded box rather than a
+    /// plain `Bool`. Off by default, so a tmux panel never answers.
+    let programStatusGate = ProgramStatusGate()
+
+    /// Raised while `suspendOscObservation()` is in force — that is, while a
+    /// snapshot preamble is being replayed. The probe handler runs on the parse
+    /// thread and cannot see the coordinator's `isIngestingSnapshot`, so the
+    /// replay state it must honour is mirrored here, in a lock it can read.
+    private let oscReplayMute = OscReplayMute()
+
+    /// Receives each OSC 7501 report (the raw data after `7501;`) read off
+    /// live output, on main, with the time it was observed. Never called for
+    /// a probe, for replayed snapshot bytes, or while `programStatusGate` is off.
+    var onProgramStatusReport: (([UInt8], Date) -> Void)?
+
     init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
         self.appearanceSettings = appearance
         super.init(frame: frame, font: font)
@@ -82,6 +106,9 @@ class TBDTerminalView: TerminalView {
         // Replace the pre-2.0 `notify` override with the token-scoped OSC
         // observer (see installNotificationObserver).
         installNotificationObserver()
+
+        // Answer the OSC 7501 probe synchronously, inside the parse.
+        installProgramStatusProbeAnswerer()
 
         // Reapply on any AppearanceSettings change. `objectWillChange` fires
         // *before* the property mutation lands on the published value, so we
@@ -1058,8 +1085,24 @@ class TBDTerminalView: TerminalView {
     /// without preempting SwiftTerm's built-in handling — unlike
     /// `registerOscHandler`, whose user handlers preempt built-ins.
     private func installNotificationObserver() {
+        let gate = programStatusGate
         oscObservation = withTerminal { terminal in
             terminal.observeOscEvents { [weak self] event in
+                // Program Status Protocol reports ride this observer rather than
+                // the synchronous handler so `suspendOscObservation()` keeps a
+                // replayed report out exactly as it keeps a replayed OSC 777 out.
+                // The probe is answered by the handler and never forwarded.
+                if event.code == ProgramStatusProtocol.oscCode {
+                    guard gate.isEnabled,
+                          !ProgramStatusParser.isProbe(event.payload) else { return }
+                    let payload = event.payload
+                    let observedAt = Date()
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.onProgramStatusReport?(payload, observedAt)
+                    }
+                    return
+                }
                 guard event.code == 777 else { return }
                 guard let (title, body) = Self.parseNotifyPayload(event.payload) else { return }
                 // Delivered on the observer's private serial queue — hop to
@@ -1083,7 +1126,14 @@ class TBDTerminalView: TerminalView {
         let cancelled = oscObservation
         oscObservation = nil
         cancelled?.cancel()
-        return OscObservationSuspension { [weak self] in self?.installNotificationObserver() }
+        // The OSC 7501 probe handler is not an observation and cannot be
+        // cancelled; it reads this instead, so a replayed probe is not answered.
+        let mute = oscReplayMute
+        mute.raise()
+        return OscObservationSuspension { [weak self] in
+            mute.lower()
+            self?.installNotificationObserver()
+        }
     }
 
     /// Restores the OSC observation `suspendOscObservation()` took away.
@@ -1106,4 +1156,59 @@ class TBDTerminalView: TerminalView {
         return (parts[1], parts[2...].joined(separator: ";"))
     }
 
+    // MARK: - Program Status Protocol (OSC 7501)
+
+    /// Registers the synchronous OSC 7501 handler that answers the `?` probe.
+    ///
+    /// The reply has to be written while SwiftTerm parses the probe: Claude
+    /// Code sends the probe ahead of its DA1 query and settles the protocol off
+    /// when DA1's reply arrives with no 7501 reply before it. SwiftTerm answers
+    /// DA1 inside the same parse, so an observer-driven reply would land after
+    /// it; a registered handler replies in parse order. The reply then travels
+    /// `MacTerminalView.send` → `onMain` → the coordinator's
+    /// `send(source:data:)`, FIFO ahead of the DA1 reply.
+    ///
+    /// Registered for the view's whole life; `programStatusGate` decides
+    /// whether it does anything, and while it is off (every tmux panel) a 7501
+    /// sequence is dropped exactly as SwiftTerm drops an unhandled OSC. Reports
+    /// are not handled here — they ride the OSC observer, which snapshot replay
+    /// suspends.
+    private func installProgramStatusProbeAnswerer() {
+        let gate = programStatusGate
+        let mute = oscReplayMute
+        withTerminal { terminal in
+            Self.registerProgramStatusProbeAnswerer(on: terminal, gate: gate, mute: mute)
+        }
+    }
+
+    /// The handler itself, built in a `nonisolated` context on purpose: it runs
+    /// on SwiftTerm's parse thread with `terminalLock` held, so it must not
+    /// inherit this view's main-actor isolation, and it captures only the two
+    /// Sendable boxes and a weak `Terminal` — never the view. The weak capture
+    /// is the one sanctioned exception to `withTerminal`'s "never store the
+    /// `Terminal`" rule: the handler is owned by that same `Terminal`'s parser
+    /// and runs only inside its parse, under the lock already held.
+    nonisolated private static func registerProgramStatusProbeAnswerer(
+        on terminal: SwiftTerm.Terminal, gate: ProgramStatusGate, mute: OscReplayMute
+    ) {
+        terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak terminal] data in
+            guard gate.isEnabled, !mute.isRaised, ProgramStatusParser.isProbe(data) else { return }
+            terminal?.sendResponse(text: ProgramStatusProtocol.probeReply)
+        }
+    }
+}
+
+/// The snapshot-replay state `TBDTerminalView`'s OSC 7501 probe handler checks.
+/// A depth rather than a Bool, matching the coordinator's
+/// `snapshotIngestDepth`, so overlapping suspensions cannot lower it out from
+/// under each other. Raised and lowered on main, read on SwiftTerm's parse
+/// thread.
+final class OscReplayMute: Sendable {
+    private let depth = OSAllocatedUnfairLock<Int>(initialState: 0)
+
+    var isRaised: Bool { depth.withLock { $0 > 0 } }
+
+    func raise() { depth.withLock { $0 += 1 } }
+
+    func lower() { depth.withLock { $0 = max($0 - 1, 0) } }
 }

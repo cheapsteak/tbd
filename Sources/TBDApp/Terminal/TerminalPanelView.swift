@@ -417,6 +417,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onCloseTab = {
             appState.closeFocusedTab()
         }
+        // Program Status Protocol (OSC 7501): on only for a holder-transport
+        // Claude session with the flag on, so a tmux panel never answers the
+        // probe. Re-evaluated in `updateNSView`.
+        tv.programStatusGate.set(appState.answersProgramStatusProbe(terminalID: terminalID))
+        let programStatusAppState = appState
+        let programStatusTerminalID = terminalID
+        tv.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in
+            programStatusAppState?.forwardProgramStatusReport(
+                terminalID: programStatusTerminalID, payload: payload, observedAt: observedAt)
+        }
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
@@ -523,6 +533,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .flatMap { $0 }
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
+        nsView.programStatusGate.set(appState.answersProgramStatusProbe(terminalID: terminalID))
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         // Re-assigned here as well as in `makeNSView`: the closure captures the

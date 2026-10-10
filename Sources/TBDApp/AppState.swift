@@ -1916,6 +1916,16 @@ final class AppState {
     /// — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var programStatusFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setProgramStatus(enabled: enabled) }
+    /// Carries OSC 7501 reports an attached panel read off a holder pty to the
+    /// daemon, one at a time and in order — see `forwardProgramStatusReport`.
+    /// Replaceable for the same reason as `controlModeSetter`, so a test can
+    /// record what would have been sent without a daemon.
+    @ObservationIgnored lazy var programStatusForwarder: ProgramStatusForwarder =
+        ProgramStatusForwarder(send: { [daemonClient] params in
+            try? await daemonClient.terminalProgramStatusReport(
+                terminalID: params.terminalID, incarnationID: params.incarnationID,
+                payload: params.payload, observedAt: params.observedAt)
+        })
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
