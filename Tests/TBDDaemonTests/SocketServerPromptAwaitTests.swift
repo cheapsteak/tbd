@@ -41,6 +41,8 @@ struct SocketServerPromptAwaitTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             pendingQuestions: store,
+            recordedAppIdentity: { SendHarness.AuthenticatedApp.identity },
+            processSignaller: SendHarness.AuthenticatedApp.Signaller(),
             actuationLog: makeTestActuationLog())
         try await db.config.setTranscriptPromptAnswerEnabled(true)
         let repo = try await db.repos.create(
@@ -170,7 +172,9 @@ struct SocketServerPromptAwaitTests {
                 terminalID: h.terminalID, promptID: id,
                 answer: .permission(decision: .deny, message: "not now")),
             actor: .app)
-        let answering = Task { await router.handle(answerRequest) }
+        let answering = Task {
+            await router.handle(answerRequest, connection: SendHarness.AuthenticatedApp.connection)
+        }
 
         let raw = await gateHoldingTask { client.receiveLine() }.value
         let response = try JSONDecoder().decode(RPCResponse.self, from: Data(try #require(raw).utf8))

@@ -26,6 +26,9 @@ extension RPCRouter {
     /// - when remote backends or the cloud gate are off, as every
     ///   provider-named verb is;
     /// - while `config.transcriptPromptAnswerEnabled` is off;
+    /// - unless the connection is the TBD app's own
+    ///   (`promptAnswerPeerRefusal`), so HTTP and other socket peers are
+    ///   refused;
     /// - unless the provider declares `answer` — a caller MUST NOT invoke an
     ///   undeclared verb;
     /// - when the provider's snapshot is stale;
@@ -49,7 +52,9 @@ extension RPCRouter {
     ///
     /// The daemon does not refresh the transcript afterwards; the app asks for
     /// that with `remote.transcriptSync`, as the composer does after a send.
-    func handleRemoteAnswer(_ paramsData: Data, actor: ActuationActor? = nil) async throws -> RPCResponse {
+    func handleRemoteAnswer(
+        _ paramsData: Data, actor: ActuationActor? = nil, connection: RPCConnectionContext?
+    ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
@@ -57,6 +62,10 @@ extension RPCRouter {
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         guard try await db.config.get().transcriptPromptAnswerEnabled else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
+        }
+        if let refusal = await promptAnswerPeerRefusal(
+            connection: connection, method: RPCMethod.remoteAnswer) {
+            return refusal
         }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.answer) else {

@@ -25,6 +25,30 @@ extension RPCRouter {
         "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)"
     static let promptHookDetachedRefusal = "the prompt's hook is reconnecting; try again"
     static let promptAwaitSocketOnlyRefusal = "prompt.await is served only on the daemon socket"
+    static let promptAnswerNotFromAppRefusal = "prompts are answered only from the TBD app"
+
+    /// Nil when this connection is the TBD app's own, otherwise the refusal to
+    /// return.
+    ///
+    /// `prompt.answer` and `remote.answer` decide a permission prompt in a
+    /// person's name, so they take the same authority `terminal.send`'s
+    /// envelope suppression does, through the same check: the kernel-named
+    /// peer pid must be the recorded app identity, re-verified
+    /// (`authenticatesEnvelopeSuppression`). A nil context — every non-socket
+    /// caller, including the HTTP transport — is refused, as is any other
+    /// process on the socket.
+    func promptAnswerPeerRefusal(
+        connection: RPCConnectionContext?, method: String
+    ) async -> RPCResponse? {
+        switch await authenticatesEnvelopeSuppression(connection: connection) {
+        case .authenticated:
+            return nil
+        case .refused(let reason):
+            promptLog.debug(
+                "\(method, privacy: .public) refused: \(reason, privacy: .public)")
+            return RPCResponse(error: Self.promptAnswerNotFromAppRefusal)
+        }
+    }
 
     private func promptAnswerEnabled() async throws -> Bool {
         try await db.config.get().transcriptPromptAnswerEnabled
@@ -169,13 +193,20 @@ extension RPCRouter {
     /// - `already_resolved` – the prompt was gone, answered, or the hook never
     ///   acknowledged it within the store's ack timeout.
     ///
-    /// Errors: the flag is off (`promptAnswerDisabledRefusal`), no hook is
-    /// attached right now (`promptHookDetachedRefusal`, retryable), or the
-    /// answer does not fit the prompt (`invalid_params: …`).
-    func handlePromptAnswer(_ paramsData: Data, actor: ActuationActor?) async throws -> RPCResponse {
+    /// Errors: the flag is off (`promptAnswerDisabledRefusal`), the caller is
+    /// not the TBD app (`promptAnswerNotFromAppRefusal`), no hook is attached
+    /// right now (`promptHookDetachedRefusal`, retryable), or the answer does
+    /// not fit the prompt (`invalid_params: …`).
+    func handlePromptAnswer(
+        _ paramsData: Data, actor: ActuationActor?, connection: RPCConnectionContext?
+    ) async throws -> RPCResponse {
         let p = try decoder.decode(PromptAnswerParams.self, from: paramsData)
         guard try await promptAnswerEnabled() else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
+        }
+        if let refusal = await promptAnswerPeerRefusal(
+            connection: connection, method: RPCMethod.promptAnswer) {
+            return refusal
         }
         let terminal = try? await db.terminals.get(id: p.terminalID)
         let target = ActuationTarget(

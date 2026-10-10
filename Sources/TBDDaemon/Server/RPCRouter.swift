@@ -695,8 +695,8 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                // The ONE case that is handed the connection, because it is the
-                // one that makes an authorization decision on it.
+                // Handed the connection because it makes an authorization
+                // decision on it, as `prompt.answer` and `remote.answer` do.
                 return try await handleTerminalSend(
                     request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.terminalCompletions:
@@ -806,7 +806,8 @@ public final class RPCRouter: Sendable {
             case RPCMethod.promptRegister:
                 return try await handlePromptRegister(request.paramsData)
             case RPCMethod.promptAnswer:
-                return try await handlePromptAnswer(request.paramsData, actor: request.actor)
+                return try await handlePromptAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.promptAck:
                 return try await handlePromptAck(request.paramsData)
             case RPCMethod.promptAwait:
@@ -1016,7 +1017,8 @@ public final class RPCRouter: Sendable {
             case RPCMethod.remoteSendMessage:
                 return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
             case RPCMethod.remoteAnswer:
-                return try await handleRemoteAnswer(request.paramsData, actor: request.actor)
+                return try await handleRemoteAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:

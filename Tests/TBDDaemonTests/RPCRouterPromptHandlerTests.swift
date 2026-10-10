@@ -44,6 +44,8 @@ struct RPCRouterPromptHandlerTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             pendingQuestions: store,
+            recordedAppIdentity: { SendHarness.AuthenticatedApp.identity },
+            processSignaller: SendHarness.AuthenticatedApp.Signaller(),
             actuationLog: ActuationLog(path: logPath))
         if flagOn {
             try await db.config.setTranscriptPromptAnswerEnabled(true)
@@ -96,13 +98,16 @@ struct RPCRouterPromptHandlerTests {
         return id
     }
 
+    /// Answers as the TBD app unless `connection` says otherwise.
     private func answer(
         _ f: Fixture, promptID: String,
-        _ answer: PromptAnswer = .permission(decision: .allow, message: nil)
+        _ answer: PromptAnswer = .permission(decision: .allow, message: nil),
+        connection: RPCConnectionContext? = SendHarness.AuthenticatedApp.connection
     ) async throws -> RPCResponse {
         let params = PromptAnswerParams(terminalID: f.terminalID, promptID: promptID, answer: answer)
         return await f.router.handle(
-            try RPCRequest(method: RPCMethod.promptAnswer, params: params, actor: .app))
+            try RPCRequest(method: RPCMethod.promptAnswer, params: params, actor: .app),
+            connection: connection)
     }
 
     private func ack(_ f: Fixture, token: UUID, delivered: Bool) async throws -> RPCResponse {
@@ -337,8 +342,41 @@ struct RPCRouterPromptHandlerTests {
         let f = try await makeFixture(flagOn: true)
         let params = PromptAnswerParams(
             terminalID: UUID(), promptID: "nope", answer: .permission(decision: .allow, message: nil))
-        let response = await f.router.handle(try RPCRequest(method: RPCMethod.promptAnswer, params: params))
+        let response = await f.router.handle(
+            try RPCRequest(method: RPCMethod.promptAnswer, params: params),
+            connection: SendHarness.AuthenticatedApp.connection)
         #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
+    }
+
+    // MARK: prompt.answer — only the TBD app may answer
+
+    /// Another process on the socket — an agent in some other session — is
+    /// refused, even declaring itself the app, and the prompt stays open.
+    @Test func answerFromAnotherSocketPeerIsRefused() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = try await registeredPromptID(f)
+        let response = try await answer(f, promptID: id, connection: RPCConnectionContext(peerPID: 4321))
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.promptAnswerNotFromAppRefusal)
+        #expect(await isOpen(f, id))
+    }
+
+    /// No connection context — every non-socket caller — and the HTTP
+    /// transport's entry point, `handleRaw` without a connection, are refused.
+    @Test func answerWithoutAConnectionIsRefused() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = try await registeredPromptID(f)
+        let response = try await answer(f, promptID: id, connection: nil)
+        #expect(response.error == RPCRouter.promptAnswerNotFromAppRefusal)
+
+        let request = try RPCRequest(
+            method: RPCMethod.promptAnswer,
+            params: PromptAnswerParams(
+                terminalID: f.terminalID, promptID: id, answer: .permission(decision: .allow, message: nil)),
+            actor: .app)
+        let raw = await f.router.handleRaw(try JSONEncoder().encode(request))
+        #expect(raw.error == RPCRouter.promptAnswerNotFromAppRefusal)
+        #expect(await isOpen(f, id))
     }
 
     // MARK: prompt.await

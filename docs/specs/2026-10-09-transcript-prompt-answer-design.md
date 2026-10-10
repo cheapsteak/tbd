@@ -182,7 +182,11 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
 id, each with its waiting `prompt.await` continuation.
 
 A prompt resolves on the first of these:
-- **`prompt.answer` from the app.** The store hands the payload to the
+- **`prompt.answer` from the app.** Only the TBD app may answer: the
+  daemon accepts the RPC only on a socket connection whose kernel-reported
+  peer is the recorded app identity, the check `terminal.send` uses for
+  envelope suppression, so another session's process and the HTTP transport
+  are refused. The store hands the payload to the
   waiting hook, and the RPC returns once the hook acknowledges it. If no
   acknowledgement arrives within 5 seconds, the RPC answers
   `already_resolved`. The acknowledgement (`prompt.ack`) bypasses the RPC
@@ -280,7 +284,8 @@ described above.
   already drops `pending_question`. A stale snapshot can't claim that a
   dialog is still open.
 - **New RPC `remote.answer`.** It follows `handleRemoteSendMessage`:
-  1. It checks the remote gates and the new flag.
+  1. It checks the remote gates and the new flag, and accepts the call only
+     from the TBD app's own socket connection, as `prompt.answer` does.
   2. It checks the declared `answer` capability. If the capability is
      missing, it returns the standard missing-capability refusal.
   3. It runs inside the per-session `RemoteSendMessageSerializer`, so an

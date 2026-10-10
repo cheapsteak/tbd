@@ -59,6 +59,8 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
             startTime: Date(),
             subscriptions: subs,
             remoteManager: manager,
+            recordedAppIdentity: { SendHarness.AuthenticatedApp.identity },
+            processSignaller: SendHarness.AuthenticatedApp.Signaller(),
             actuationLog: ActuationLog(path: logPath),
             remoteTranscriptEnvironment: ["TBD_HOME": home.path])
     }
@@ -70,12 +72,16 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
 
     private static let allowAnswer = PromptAnswer.permission(decision: .allow, message: nil)
 
+    /// Answers as the TBD app unless `connection` says otherwise.
     private func answer(
-        _ r: RPCRouter, promptID: String = "p-1", _ answer: PromptAnswer = RPCRouterRemoteAnswerTests.allowAnswer
+        _ r: RPCRouter, promptID: String = "p-1", _ answer: PromptAnswer = RPCRouterRemoteAnswerTests.allowAnswer,
+        connection: RPCConnectionContext? = SendHarness.AuthenticatedApp.connection
     ) async throws -> RPCResponse {
-        await r.handle(try RPCRequest(
-            method: RPCMethod.remoteAnswer,
-            params: RemoteAnswerParams(provider: "agentbox", sessionID: "s-1", promptID: promptID, answer: answer)))
+        await r.handle(
+            try RPCRequest(
+                method: RPCMethod.remoteAnswer,
+                params: RemoteAnswerParams(provider: "agentbox", sessionID: "s-1", promptID: promptID, answer: answer)),
+            connection: connection)
     }
 
     /// A `list` answer naming session `s-1` blocked on permission prompt `p-1`.
@@ -145,6 +151,29 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         await poll(m)
         let response = try await answer(router(m))
         #expect(response.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
+    }
+
+    /// Only the TBD app may answer: another socket peer, a missing connection
+    /// context, and the HTTP transport's `handleRaw` are all refused before
+    /// the provider is asked or an actuation is recorded.
+    @Test func refusedUnlessTheConnectionIsTheApp() async throws {
+        try await enable()
+        let (invoker, r) = await primed([])
+
+        let otherPeer = try await answer(r, connection: RPCConnectionContext(peerPID: 4321))
+        #expect(otherPeer.error == RPCRouter.promptAnswerNotFromAppRefusal)
+        let noContext = try await answer(r, connection: nil)
+        #expect(noContext.error == RPCRouter.promptAnswerNotFromAppRefusal)
+        let request = try RPCRequest(
+            method: RPCMethod.remoteAnswer,
+            params: RemoteAnswerParams(
+                provider: "agentbox", sessionID: "s-1", promptID: "p-1", answer: Self.allowAnswer),
+            actor: .app)
+        let http = await r.handleRaw(try JSONEncoder().encode(request))
+        #expect(http.error == RPCRouter.promptAnswerNotFromAppRefusal)
+
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -386,7 +415,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         let sendRequest = try RPCRequest(
             method: RPCMethod.remoteSendMessage,
             params: RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "next"))
-        async let first = r.handle(answerRequest)
+        async let first = r.handle(answerRequest, connection: SendHarness.AuthenticatedApp.connection)
         let firstEntered = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await trace.events == ["in:answer"]
         }
