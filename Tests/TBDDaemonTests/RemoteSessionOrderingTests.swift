@@ -259,4 +259,32 @@ struct RemoteSessionOrderingTests {
         #expect(kept.agentState == .working)
         #expect(kept.pendingQuestion == nil)
     }
+
+    @Test("the merge helper keeps the mirrored pending prompt with the mirrored agent state")
+    func mergedPayloadKeepsThePendingPromptWithTheAxis() throws {
+        let prompt = RemotePendingPrompt(id: "p-1", kind: .permission, toolName: "Bash")
+        let blocked = RemoteSessionPayload(
+            id: "a", state: .running, agentState: .waitingInput,
+            agentStateAt: later, pendingPrompt: prompt)
+        let storedPayload = String(data: try JSONEncoder().encode(blocked), encoding: .utf8) ?? "{}"
+
+        // Out of order: the stored prompt rides with the stored agent axis.
+        let merged = RemoteSessionStore.withFreshestAgentAxis(
+            incoming: payload("a", agent: .working, at: earlier),
+            storedPayload: storedPayload, provider: "p", now: now)
+        #expect(merged.pendingPrompt == prompt)
+
+        // In order: the incoming payload is taken as it is.
+        let taken = RemoteSessionStore.withFreshestAgentAxis(
+            incoming: RemoteSessionPayload(
+                id: "a", state: .running, agentState: .working, agentStateAt: later),
+            storedPayload: String(
+                data: try JSONEncoder().encode(
+                    RemoteSessionPayload(
+                        id: "a", state: .running, agentState: .waitingInput,
+                        agentStateAt: earlier, pendingPrompt: prompt)),
+                encoding: .utf8) ?? "{}",
+            provider: "p", now: now)
+        #expect(taken.pendingPrompt == nil)
+    }
 }
