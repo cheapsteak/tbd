@@ -320,8 +320,10 @@ public actor PendingPromptStore {
     ///   supersedes it: a session shows one dialog at a time. The scope is
     ///   the session in this terminal, so a second terminal resumed into the
     ///   same session id never supersedes the first's dialog.
-    /// - A register naming an id this store still holds (the hook reconnected)
-    ///   refreshes that record and keeps it open.
+    /// - A register naming an id this store still holds for the same terminal
+    ///   and session (the hook reconnected) refreshes that record and keeps it
+    ///   open. A held id from another terminal or session is not this hook's
+    ///   prompt: the register gets a fresh id and never touches that record.
     /// - Otherwise the prompt pairs with a note from the same session,
     ///   terminal and tool: the newest with an equal input hash, else the newest. An
     ///   unpaired prompt gets a fresh UUID and a `nil` `tool_use_id`, and may
@@ -338,7 +340,8 @@ public actor PendingPromptStore {
 
         let kind: PendingPromptKind = params.toolName == "AskUserQuestion" ? .question : .permission
 
-        if let knownID = params.knownPromptID, var existing = promptRecords[knownID] {
+        if let knownID = params.knownPromptID, var existing = promptRecords[knownID],
+           existing.terminalID == params.terminalID, existing.sessionID == params.sessionID {
             existing.payload = PendingPromptPayload(
                 id: knownID, kind: kind,
                 toolUseID: existing.payload.toolUseID ?? params.knownToolUseID,
@@ -359,7 +362,9 @@ public actor PendingPromptStore {
             ?? (isReRegister ? nil : takeNote(scope: scope,
                                               toolName: params.toolName,
                                               inputHash: params.inputHash))
-        let id = params.knownPromptID ?? UUID().uuidString
+        // A known id the store already holds reaches here only when it belongs
+        // to another terminal or session; reusing it would overwrite that record.
+        let id = params.knownPromptID.flatMap { promptRecords[$0] == nil ? $0 : nil } ?? UUID().uuidString
         let stamp = now()
         let generation = UUID()
         let opensLateWindow = toolUseID == nil && !isReRegister

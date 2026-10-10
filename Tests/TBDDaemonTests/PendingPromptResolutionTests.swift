@@ -539,6 +539,31 @@ struct PendingPromptResolutionTests {
         #expect(await store.snapshot(forTerminal: terminal).revision > before)
     }
 
+    @Test func reRegisterWithAnotherTerminalsIDIsAFreshRegister() async {
+        let store = makeStore()
+        let owner = UUID()
+        let stranger = UUID()
+        let (id, _) = await register(store, params(terminal: owner, session: "s1"))
+        let waiter = await attachWaiter(store, id: id)
+        let before = await store.snapshot(forTerminal: owner).revision
+
+        let foreign = await register(store, params(
+            terminal: stranger, session: "s1", input: Self.otherBashInput, knownPromptID: id))
+
+        #expect(foreign.id != id, "another terminal's prompt id is not this hook's to reclaim")
+        #expect(foreign.changed == [stranger])
+        let ownerPrompts = await store.prompts(forTerminal: owner)
+        #expect(ownerPrompts.map(\.id) == [id])
+        #expect(ownerPrompts.first?.toolInputJSON == Self.bashInput, "the original prompt is not refreshed")
+        #expect(await store.snapshot(forTerminal: owner).revision == before)
+        #expect(await store.terminalID(ofPrompt: id) == owner)
+        #expect(await store.isWaiterAttached(promptID: id), "the original waiter stays attached")
+        #expect(await store.prompts(forTerminal: stranger).map(\.id) == [foreign.id])
+
+        await store.resolveAll()
+        #expect(await waiter.value == .resolvedElsewhere)
+    }
+
     @Test func closedWaiterResolvesWithHookClosed() async {
         let store = makeStore()
         let terminal = UUID()
