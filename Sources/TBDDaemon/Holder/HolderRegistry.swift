@@ -2223,6 +2223,12 @@ actor HolderRegistry {
 
         statuses[terminalID] = status
         await release(terminalID: terminalID)
+        // A SIGKILLed Claude sends no `state=clear`, so the session's end is
+        // the only signal its Program Status entries are over (spec
+        // "Liveness").
+        if let programStatus {
+            await programStatus.drop(terminalID: terminalID, reason: .childExited)
+        }
         Self.logger.info(
             """
             released the reader for session \(terminalID.uuidString, privacy: .public): its \

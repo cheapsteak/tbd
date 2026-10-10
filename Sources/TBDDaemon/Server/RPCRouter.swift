@@ -516,7 +516,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
-            actuationLog: actuationLog
+            actuationLog: actuationLog, programStatus: resolvedProgramStatus
         )
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the

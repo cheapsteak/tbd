@@ -249,7 +249,18 @@ public actor ProgramStatusStore {
 
     /// Drop every entry for a terminal (spec "Liveness"). Publishes a
     /// retraction when anything was held.
-    public func drop(terminalID: UUID, reason: DropReason) {
+    ///
+    /// - Parameter observedBefore: when set, the entries are dropped only if
+    ///   the newest report for the terminal was observed before this instant.
+    ///   A wake drops what the session held before it was parked, but its drop
+    ///   runs after the replacement session is live and may already have
+    ///   reported; a report observed after the cutoff belongs to that session
+    ///   and is kept. Nil drops unconditionally.
+    public func drop(terminalID: UUID, reason: DropReason, observedBefore: Date? = nil) {
+        if let cutoff = observedBefore, let current = held[terminalID],
+            current.lastObservedAt >= cutoff {
+            return
+        }
         guard let removed = held.removeValue(forKey: terminalID) else { return }
         programStatusLog.debug(
             "drop terminal=\(terminalID.uuidString, privacy: .public) reason=\(reason.rawValue, privacy: .public)")

@@ -5773,7 +5773,16 @@ extension RPCRouter {
     /// was actually committed, and `keepWarm`/`suspendedSnapshot` come from the
     /// row for the same reason. A row that vanished between the write and the
     /// read has nothing to publish about.
+    ///
+    /// An exit-stamp park or un-park also drops the terminal's Program Status
+    /// entries, exactly as `HibernationCoordinator.broadcastHibernation` does
+    /// for every other park and wake (spec "Liveness"): unconditionally on a
+    /// park, and on an un-park only what was observed before it, so a report
+    /// from the session the un-park makes live is kept.
     private func broadcastExitStampChange(terminalID: UUID, parked: Bool) async {
+        let cutoff: Date? = parked ? nil : programStatus.now()
+        await programStatus.drop(
+            terminalID: terminalID, reason: parked ? .parked : .woke, observedBefore: cutoff)
         guard let row = try? await db.terminals.get(id: terminalID) else { return }
         subscriptions.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: row.id,

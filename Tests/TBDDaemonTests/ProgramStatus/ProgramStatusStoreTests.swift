@@ -290,6 +290,27 @@ import TestSupport
         #expect(h.publishedSnapshots.count == count)
     }
 
+    /// A wake's drop names a cutoff: what was observed before it goes, and a
+    /// report the woken session made at or after it stays.
+    @Test func dropWithCutoffKeepsReportsObservedAtOrAfterIt() async throws {
+        let h = Harness()
+        let terminal = holderClaude()
+        h.add(terminal)
+        _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 5))
+
+        let count = h.publishedSnapshots.count
+        await h.store.drop(
+            terminalID: terminal.id, reason: .woke, observedBefore: t0.addingTimeInterval(5))
+        #expect(await h.store.snapshot(for: terminal.id)?.main?.state == .working)
+        #expect(h.publishedSnapshots.count == count)
+
+        await h.store.drop(
+            terminalID: terminal.id, reason: .woke, observedBefore: t0.addingTimeInterval(6))
+        #expect(await h.store.snapshot(for: terminal.id) == nil)
+        let last = try #require(h.publishedSnapshots.last)
+        #expect(last.isEmpty)
+    }
+
     @Test func setEnabledFalseRetractsEveryTerminal() async {
         let h = Harness()
         let a = holderClaude()

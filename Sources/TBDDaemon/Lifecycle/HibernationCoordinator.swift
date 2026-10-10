@@ -337,6 +337,12 @@ public actor HibernationCoordinator {
     /// row there would double-count every manual park.
     private let actuationLog: ActuationLog
 
+    /// The Program Status Protocol (OSC 7501) store. A park or a wake drops the
+    /// terminal's entries (spec "Liveness"): a parked session's program is
+    /// gone, and a SIGKILLed one never sent `state=clear`. Nil in tests that
+    /// do not exercise it.
+    private let programStatus: ProgramStatusStore?
+
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
@@ -355,7 +361,8 @@ public actor HibernationCoordinator {
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
-        actuationLog: ActuationLog
+        actuationLog: ActuationLog,
+        programStatus: ProgramStatusStore? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -372,6 +379,7 @@ public actor HibernationCoordinator {
         self.signaller = signaller
         self.paneProcessInspector = paneProcessInspector
         self.actuationLog = actuationLog
+        self.programStatus = programStatus
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -444,7 +452,8 @@ public actor HibernationCoordinator {
         broadcastHibernation(
             terminal: terminal, hibernated: terminal.isHibernated, keepWarm: keepWarm,
             suspendedSnapshot: terminal.isHibernated ? terminal.suspendedSnapshot : nil,
-            hibernateReason: terminal.isHibernated ? terminal.hibernateReason : nil)
+            hibernateReason: terminal.isHibernated ? terminal.hibernateReason : nil,
+            isParkOrWake: false)
         return true
     }
 
@@ -2066,11 +2075,19 @@ public actor HibernationCoordinator {
     /// `hibernated` flip and reads the row's snapshot once, and wake-on-focus
     /// reads the row's reason — a later refetch is too late. Wake broadcasts
     /// leave them nil.
+    ///
+    /// `isParkOrWake` is false only for a re-broadcast that changes neither
+    /// (`setKeepWarm`); every other caller parks or wakes the row, which drops
+    /// its Program Status entries (`dropProgramStatus`).
     func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
-        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil
+        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
+        isParkOrWake: Bool = true
     ) {
+        if isParkOrWake {
+            dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
+        }
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
@@ -2081,5 +2098,29 @@ public actor HibernationCoordinator {
             suspendedSnapshot: suspendedSnapshot,
             hibernateReason: hibernateReason
         )))
+    }
+
+    /// Drops the terminal's Program Status entries on a park or a wake (spec
+    /// "Liveness"). Every park and wake broadcast funnels through
+    /// `broadcastHibernation`, so this is the one place both are seen.
+    ///
+    /// A park drops unconditionally: the store refuses reports for a parked
+    /// row, so nothing held can be newer than the park. A wake drops only what
+    /// was observed before this call, because by the time a wake broadcasts,
+    /// the replacement session is live and its first report may already be
+    /// held. `broadcastHibernation` is synchronous, so the drop runs as a task;
+    /// the cutoff is read here, before it is scheduled.
+    ///
+    /// A keep-warm toggle (`setKeepWarm`) re-broadcasts the row's current
+    /// state without parking or waking it, so it passes `isParkOrWake: false`
+    /// — on a live row the wake branch would otherwise drop a running
+    /// session's status.
+    private func dropProgramStatus(terminalID: UUID, hibernated: Bool) {
+        guard let programStatus else { return }
+        let reason: ProgramStatusStore.DropReason = hibernated ? .parked : .woke
+        let cutoff: Date? = hibernated ? nil : programStatus.now()
+        Task {
+            await programStatus.drop(terminalID: terminalID, reason: reason, observedBefore: cutoff)
+        }
     }
 }
