@@ -43,7 +43,17 @@ Commits, oldest first:
 
 ## CI status
 
-CI_STATUS_PLACEHOLDER
+Green. The `Test` workflow passed on `090fe5f`, which contains every
+feature commit and the review fixes:
+[run 38029085030](https://github.com/cheapsteak/tbd/actions/runs/38029085030).
+That run covers SwiftLint (strict), the migration lint, the whole unit and
+integration suite (daemon, shared, app, CLI) and the live tier-3 suites.
+
+CI proves the code compiles and the tests pass. It does not prove the
+feature works against a real Claude Code process: no test drives an actual
+`claude` binary through the probe. A review pass against the spec found
+three bugs, all fixed in `507b60f`: a drop/ingest race, the two readers
+answering the probe differently, and a wake dropping live state.
 
 ## What only a local session can verify
 
