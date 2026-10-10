@@ -1653,6 +1653,169 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error == "Profile not found")
     }
+
+    // MARK: - execEnvironment
+
+    private func execEnvironment(
+        _ router: RPCRouter, id: UUID
+    ) async throws -> RPCResponse {
+        await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileExecEnvironment,
+            params: ModelProfileExecEnvironmentParams(id: id)
+        ))
+    }
+
+    @Test("execEnvironment: a token profile gets its stored token and its own provisioned config dir")
+    func execEnvironmentTokenProfile() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+        defer { Task { await cleanupKeychain(db) } }
+
+        let profile = try await db.modelProfiles.create(
+            name: "Reviewer", kind: .oauthToken, model: "claude-sonnet-4-5")
+        let token = freshToken()
+        try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
+
+        let resp = try await execEnvironment(router, id: profile.id)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileExecEnvironmentResult.self)
+        let configDir = manager.configDirectory(forProfileID: profile.id).path
+        #expect(result.profileID == profile.id)
+        #expect(result.kind == .oauthToken)
+        #expect(result.environment == [
+            "CLAUDE_CODE_OAUTH_TOKEN": token,
+            "CLAUDE_CONFIG_DIR": configDir,
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+        ])
+        // Provisioned like a spawn's: the dir exists and is seeded.
+        #expect(FileManager.default.fileExists(atPath: configDir + "/.claude.json"))
+        // Printing the result names the variable, never its value.
+        #expect(!String(describing: result).contains(token))
+        #expect(!String(reflecting: result).contains(token))
+        var dumped = ""
+        dump(result, to: &dumped)
+        #expect(!dumped.contains(token))
+        #expect(String(describing: result).contains("CLAUDE_CODE_OAUTH_TOKEN"))
+    }
+
+    @Test("execEnvironment: a token profile with no stored token is refused, naming the repair")
+    func execEnvironmentTokenProfileWithoutToken() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(name: "Empty", kind: .oauthToken)
+        let resp = try await execEnvironment(router, id: profile.id)
+        #expect(!resp.success)
+        #expect(resp.error?.contains("'Empty'") == true)
+        #expect(resp.error?.contains("claude setup-token") == true)
+    }
+
+    @Test("execEnvironment: an API-key profile with no stored key is refused")
+    func execEnvironmentAPIKeyProfileWithoutKey() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(name: "Keyless", kind: .apiKey)
+        let resp = try await execEnvironment(router, id: profile.id)
+        #expect(!resp.success)
+        #expect(resp.error?.contains("'Keyless'") == true)
+        #expect(resp.error?.contains("API key") == true)
+    }
+
+    @Test("execEnvironment: an API-key profile gets ANTHROPIC_API_KEY, its endpoint and its config dir")
+    func execEnvironmentAPIKeyProfile() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+        defer { Task { await cleanupKeychain(db) } }
+
+        let profile = try await db.modelProfiles.create(
+            name: "Proxy", kind: .apiKey, baseURL: "https://models.acme.example")
+        let key = freshToken(Self.apiPrefix)
+        try ModelProfileKeychain.store(id: profile.id.uuidString, token: key)
+
+        let result = try (try await execEnvironment(router, id: profile.id))
+            .decodeResult(ModelProfileExecEnvironmentResult.self)
+        #expect(result.environment == [
+            "ANTHROPIC_API_KEY": key,
+            "ANTHROPIC_BASE_URL": "https://models.acme.example",
+            "CLAUDE_CONFIG_DIR": manager.configDirectory(forProfileID: profile.id).path,
+        ])
+    }
+
+    @Test("execEnvironment: a signed-in profile gets its config dir and no token")
+    func execEnvironmentOAuthProfile() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(name: "Personal", kind: .oauth)
+        let result = try (try await execEnvironment(router, id: profile.id))
+            .decodeResult(ModelProfileExecEnvironmentResult.self)
+        #expect(result.environment == [
+            "CLAUDE_CONFIG_DIR": manager.configDirectory(forProfileID: profile.id).path,
+        ])
+    }
+
+    @Test("execEnvironment: a Bedrock profile gets its AWS routing and no config dir")
+    func execEnvironmentBedrockProfile() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(
+            name: "West", kind: .bedrock, model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2", awsProfile: "acme-prod")
+        let result = try (try await execEnvironment(router, id: profile.id))
+            .decodeResult(ModelProfileExecEnvironmentResult.self)
+        #expect(result.environment == [
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "AWS_REGION": "us-west-2",
+            "AWS_PROFILE": "acme-prod",
+            "ANTHROPIC_MODEL": "anthropic.claude-sonnet-4-5",
+        ])
+    }
+
+    @Test("execEnvironment: global and profile overrides apply, and never outrank the profile's credential")
+    func execEnvironmentEnvOverrides() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+        defer { Task { await cleanupKeychain(db) } }
+
+        let profile = try await db.modelProfiles.create(name: "Layered", kind: .oauthToken)
+        let token = freshToken()
+        try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
+        try await db.config.setEnvOverrides([
+            "GLOBAL_ONLY": "g",
+            "SHARED": "from-global",
+            "CLAUDE_CODE_OAUTH_TOKEN": "an-override-must-not-win",
+        ])
+        try await db.modelProfiles.setEnvOverrides(id: profile.id, overrides: [
+            "SHARED": "from-profile",
+            "CLAUDE_CONFIG_DIR": "/an/override/must/not/win",
+        ])
+
+        let result = try (try await execEnvironment(router, id: profile.id))
+            .decodeResult(ModelProfileExecEnvironmentResult.self)
+        #expect(result.environment == [
+            "GLOBAL_ONLY": "g",
+            "SHARED": "from-profile",
+            "CLAUDE_CODE_OAUTH_TOKEN": token,
+            "CLAUDE_CONFIG_DIR": manager.configDirectory(forProfileID: profile.id).path,
+        ])
+    }
+
+    @Test("execEnvironment: unknown id fails with profile-not-found")
+    func execEnvironmentUnknownID() async throws {
+        let (router, _, _) = makeRouter()
+        let resp = try await execEnvironment(router, id: UUID())
+        #expect(!resp.success)
+        #expect(resp.error == "Profile not found")
+    }
 }
 
 }

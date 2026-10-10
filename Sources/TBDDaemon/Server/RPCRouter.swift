@@ -843,6 +843,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.modelProfilePrepareConfigDir:
                 return try await handleModelProfilePrepareConfigDir(request.paramsData)
+            case RPCMethod.modelProfileExecEnvironment:
+                return try await handleModelProfileExecEnvironment(request.paramsData)
             case RPCMethod.modelProfileSetPoolOptOut:
                 return try await handleModelProfileSetPoolOptOut(request.paramsData)
             case RPCMethod.appSetForegroundState:

@@ -212,6 +212,7 @@ public enum RPCMethod {
     public static let modelProfileUsageRefresh = "modelProfile.usageRefresh"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
+    public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
@@ -1069,6 +1070,61 @@ public struct ModelProfilePrepareConfigDirResult: Codable, Sendable {
     /// (`~/tbd/profiles/<lowercased-uuid>/claude`).
     public let configDirPath: String
     public init(configDirPath: String) { self.configDirPath = configDirPath }
+}
+
+/// Params for `modelProfile.execEnvironment` — the environment a process run
+/// under a profile needs, for `tbd profile exec`.
+public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+/// Result of `modelProfile.execEnvironment`: what a Claude session spawned on
+/// the profile gets in its environment from the profile — its routing keys
+/// (`CLAUDE_CONFIG_DIR`, base URL, model, Bedrock region and AWS profile), its
+/// credential (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and the
+/// free-form env overrides at global and profile scope.
+///
+/// **This is the one RPC result that carries a whole secret.** Everywhere else
+/// a token profile is shown only by its masked tail. This result exists so
+/// `tbd profile exec` can put the credential into a child process's
+/// environment, which is where a spawned session's credential goes too. It
+/// travels over the daemon's owner-only socket, the same boundary as the 0600
+/// file the daemon reads it from. `description`, `debugDescription` and
+/// `customMirror` name the keys only, so printing, interpolating or dumping the
+/// value cannot reveal the secret.
+public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
+{
+    public let profileID: UUID
+    public let name: String
+    public let kind: CredentialKind
+    /// Variables to set in the child's environment. Holds the credential for a
+    /// token or API-key profile.
+    public let environment: [String: String]
+
+    public init(profileID: UUID, name: String, kind: CredentialKind, environment: [String: String]) {
+        self.profileID = profileID
+        self.name = name
+        self.kind = kind
+        self.environment = environment
+    }
+
+    public var description: String {
+        "ModelProfileExecEnvironmentResult(profile: \(name), kind: \(kind.rawValue), "
+            + "keys: [\(environment.keys.sorted().joined(separator: ", "))])"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "profileID": profileID,
+            "name": name,
+            "kind": kind,
+            "environmentKeys": environment.keys.sorted(),
+        ])
+    }
 }
 
 public struct NotificationsListResult: Codable, Sendable {
