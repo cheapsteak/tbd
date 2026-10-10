@@ -83,8 +83,13 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
     /// through the manager's own poll rather than written to the store
     /// directly: a store-only snapshot with no poll behind it reads as an
     /// inventory that has not refreshed since restart, which is stale.
-    private func listing(state: RemoteProcessState = .running, agentState: RemoteAgentState) -> ProviderResult {
-        providerOK(#"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"}]}"#)
+    private func listing(state: RemoteProcessState = .running, agentState: RemoteAgentState,
+                         pendingPrompt: Bool = false) -> ProviderResult {
+        let prompt = pendingPrompt
+            ? #", "pending_prompt": {"id": "p-1", "kind": "permission", "tool_name": "Bash"}"#
+            : ""
+        return providerOK(
+            #"{"sessions": [{"id": "s-1", "state": "\#(state.rawValue)", "agent_state": "\#(agentState.rawValue)"\#(prompt)}]}"#)
     }
 
     /// Everything `remote.sendMessage` needs on: remote backends.
@@ -305,13 +310,29 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         try await db.config.setTranscriptPromptAnswerEnabled(true)
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["send", RemoteCapability.sendSubmit, RemoteCapability.answer]),
-            listing(agentState: .waitingInput),
+            listing(agentState: .waitingInput, pendingPrompt: true),
         ])
         let m = await manager(invoker)
         await poll(m)
         let response = try await send(router(m))
         #expect(response.error == RPCRouter.sendMessageWaitingInputAnswerOnCardRefusal)
         #expect(response.error?.contains("on the card in the transcript") == true)
+        #expect(Self.sends(invoker).isEmpty)
+    }
+
+    /// Answerable, but the session mirrors no pending prompt: there is no card
+    /// to point at, so the refusal points at the terminal.
+    @Test func sendRefusalPointsAtTheTerminalWithoutAPendingPrompt() async throws {
+        try await enableSend()
+        try await db.config.setTranscriptPromptAnswerEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["send", RemoteCapability.sendSubmit, RemoteCapability.answer]),
+            listing(agentState: .waitingInput),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let response = try await send(router(m))
+        #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal)
         #expect(Self.sends(invoker).isEmpty)
     }
 

@@ -954,7 +954,8 @@ extension RPCRouter {
         "the agent is waiting on a prompt; answer it in the terminal"
 
     /// The `waiting_input` refusal when the prompt can be answered from its
-    /// transcript card (`remote.answer`).
+    /// transcript card (`remote.answer`): the session mirrors a pending
+    /// prompt, and the provider can answer it.
     static let sendMessageWaitingInputAnswerOnCardRefusal =
         "the agent is waiting on a prompt; answer it on the card in the transcript"
 
@@ -1021,8 +1022,11 @@ extension RPCRouter {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
         let row = try await db.remoteSessions.row(provider: params.provider, sessionID: params.sessionID)
+        // The refusal points at the card only when there is one to point at:
+        // a mirrored pending prompt the provider can answer.
         var answerable = false
-        if row?.agentState == RemoteAgentState.waitingInput.rawValue {
+        if row?.agentState == RemoteAgentState.waitingInput.rawValue,
+           row?.decodedPayload?.effectivePendingPrompt != nil {
             answerable = try await remotePromptAnswerable(manager, provider: params.provider)
         }
         if let refusal = Self.sendMessageStateRefusal(row, promptAnswerable: answerable) {
