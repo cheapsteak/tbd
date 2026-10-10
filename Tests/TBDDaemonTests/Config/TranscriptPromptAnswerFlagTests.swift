@@ -95,7 +95,7 @@ struct TranscriptPromptAnswerFlagTests {
         for value in [true, false] {
             let setRequest = try RPCRequest(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
-                params: ConfigSetTranscriptPromptAnswerEnabledParams(enabled: value))
+                params: ConfigSetPromptAnswerParams(enabled: value))
             let set = await router.handle(setRequest)
             #expect(set.success)
             let capsResponse = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))

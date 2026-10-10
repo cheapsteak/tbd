@@ -3707,7 +3707,7 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
 /// answering Claude's question and permission dialogs from the transcript
 /// (default OFF during soak). Design:
 /// `docs/specs/2026-10-09-transcript-prompt-answer-design.md`.
-public struct ConfigSetTranscriptPromptAnswerEnabledParams: Codable, Sendable {
+public struct ConfigSetPromptAnswerParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

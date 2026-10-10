@@ -1193,7 +1193,7 @@ actor DaemonClient {
     func setTranscriptPromptAnswer(enabled: Bool) async throws {
         try await callVoidAsync(
             method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
-            params: ConfigSetTranscriptPromptAnswerEnabledParams(enabled: enabled)
+            params: ConfigSetPromptAnswerParams(enabled: enabled)
         )
     }
 

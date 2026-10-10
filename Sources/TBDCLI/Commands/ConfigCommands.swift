@@ -157,7 +157,7 @@ struct ConfigSet: AsyncParsableCommand {
             let parsed = try Self.parseOnOff(value, key: key)
             try client.callVoid(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
-                params: ConfigSetTranscriptPromptAnswerEnabledParams(enabled: parsed.boolValue))
+                params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)
