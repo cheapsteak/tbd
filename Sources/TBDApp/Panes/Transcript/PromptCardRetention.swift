@@ -43,6 +43,12 @@ final class PromptCardRetention {
     @ObservationIgnored private let retainFor: Duration
     @ObservationIgnored private let clock: any Clock<Duration>
 
+    /// Called with a prompt id when its card retires on the timeout, so
+    /// whoever keeps per-prompt state (the answer controller's drafts and
+    /// delivery states) can drop it — a card retired this way is never
+    /// reported settled.
+    @ObservationIgnored var onRetire: (@MainActor (String) -> Void)?
+
     init(retainFor: Duration = .seconds(30),
          clock: any Clock<Duration> = ContinuousClock()) {
         self.retainFor = retainFor
@@ -138,6 +144,7 @@ final class PromptCardRetention {
     private func retire(_ promptID: String, generation: UInt64) {
         guard held[promptID]?.generation == generation else { return }
         release(promptID)
+        onRetire?(promptID)
     }
 
     private func release(_ promptID: String) {

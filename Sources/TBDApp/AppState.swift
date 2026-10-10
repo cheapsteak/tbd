@@ -2319,6 +2319,11 @@ final class AppState {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        // A card retired on its timeout is never reported settled, so its
+        // drafts and delivery state are dropped here instead.
+        promptCardRetention.onRetire = { [weak self] promptID in
+            self?.promptAnswers.forget([promptID])
+        }
         themeStore.reloadFromDisk()
         themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each

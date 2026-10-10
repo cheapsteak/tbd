@@ -58,6 +58,10 @@ final class PromptAnswerController {
     private var drafts: [String: Draft] = [:]
     /// The last answer sent per prompt, for `retry`.
     @ObservationIgnored private var lastAnswers: [String: PromptAnswer] = [:]
+    /// The submit currently in flight per prompt. A submit whose token is no
+    /// longer here when its call returns was forgotten (or superseded) while
+    /// it travelled, and writes nothing back.
+    @ObservationIgnored private var inFlight: [String: UUID] = [:]
 
     @ObservationIgnored private let local: LocalSender
     @ObservationIgnored private let remote: RemoteSender
@@ -101,14 +105,17 @@ final class PromptAnswerController {
         drafts[promptID] = draft
     }
 
-    /// Drops everything kept for prompts whose tool result reached the
-    /// transcript. The panes call it with the merge's `settled` set, from
-    /// `.onChange`, never during a body evaluation.
+    /// Drops everything kept for prompts that are over: their tool result
+    /// reached the transcript (the panes pass the merge's `settled` set, from
+    /// `.onChange`, never during a body evaluation), or `PromptCardRetention`
+    /// retired their card on its timeout. A submit still in flight for one of
+    /// them writes nothing back when it returns.
     func forget(_ promptIDs: Set<String>) {
         for promptID in promptIDs {
             if states[promptID] != nil { states.removeValue(forKey: promptID) }
             if drafts[promptID] != nil { drafts.removeValue(forKey: promptID) }
             lastAnswers.removeValue(forKey: promptID)
+            inFlight.removeValue(forKey: promptID)
         }
     }
 
@@ -125,6 +132,8 @@ final class PromptAnswerController {
     func submit(_ prompt: PendingPromptPresentation, answer: PromptAnswer) async {
         let promptID = prompt.promptID
         guard states[promptID] != .sending else { return }
+        let token = UUID()
+        inFlight[promptID] = token
         lastAnswers[promptID] = answer
         states[promptID] = .sending
         do {
@@ -135,11 +144,21 @@ final class PromptAnswerController {
             case .remote(let provider, let sessionID):
                 result = try await remote(provider, sessionID, promptID, answer)
             }
+            guard finish(promptID, token: token) else { return }
             apply(result.outcome, prompt: prompt, answer: answer)
         } catch {
+            guard finish(promptID, token: token) else { return }
             let message = Self.message(for: error)
             states[promptID] = .failed(message: message, retryable: Self.isRetryable(message))
         }
+    }
+
+    /// Ends the submit `token` names. False when the prompt was forgotten
+    /// while it travelled: the card is gone, and its state must not come back.
+    private func finish(_ promptID: String, token: UUID) -> Bool {
+        guard inFlight[promptID] == token else { return false }
+        inFlight.removeValue(forKey: promptID)
+        return true
     }
 
     /// Resends the last answer sent for `prompt`. A retry of an answer that

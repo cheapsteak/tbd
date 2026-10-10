@@ -200,6 +200,31 @@ struct PromptAnswerControllerTests {
         #expect(controller.state(for: "p1") == .answered(summary: "Allowed"))
     }
 
+    /// A submit still travelling when its prompt is forgotten writes nothing
+    /// back: no resurrected state, and no answered card held again.
+    @Test func aSubmitInFlightWhenForgottenWritesNothingBack() async {
+        let recorder = Recorder()
+        let controller = Controller(
+            local: { terminalID, promptID, answer in
+                recorder.localCalls.append((terminalID, promptID, answer))
+                return await withCheckedContinuation { recorder.pending = $0 }
+            },
+            remote: { _, _, _, _ in PromptAnswerResult(outcome: .delivered) },
+            onDelivered: { prompt, summary in recorder.delivered.append((prompt.promptID, summary)) })
+        let prompt = permission
+        let answer = allow
+        let first = Task { await controller.submit(prompt, answer: answer) }
+        for _ in 0..<200 where recorder.pending == nil { await Task.yield() }
+        #expect(controller.state(for: "p1") == .sending)
+
+        controller.forget(["p1"])
+        recorder.pending?.resume(returning: PromptAnswerResult(outcome: .delivered))
+        await first.value
+
+        #expect(controller.state(for: "p1") == .waiting)
+        #expect(recorder.delivered.isEmpty)
+    }
+
     @Test func forgetDropsStateAndDraft() async {
         let recorder = Recorder()
         let controller = makeController(recorder)

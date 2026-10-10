@@ -410,6 +410,32 @@ struct PromptCardRetentionTests {
         #expect(after.items.isEmpty)
     }
 
+    /// A card retired on the timeout is never settled, so retention reports
+    /// it for the answer controller to drop its drafts and state.
+    @Test func aTimeoutRetirementIsReported() async {
+        let clock = TestClock()
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
+        var retired: [String] = []
+        retention.onRetire = { retired.append($0) }
+        let prompt = Fix.local(Fix.permissionPayload(id: "p9", toolUseID: nil))
+        retention.observe(live: [prompt], for: Self.target)
+        retention.observe(live: [], for: Self.target)
+        #expect(retired.isEmpty)
+
+        await clock.advanceWhenSuspended(by: Self.retainFor)
+        #expect(await waitUntilReleased(retention) == .satisfied)
+        #expect(retired == ["p9"])
+    }
+
+    @Test func aSettledCardIsNotReportedAsRetired() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        var retired: [String] = []
+        retention.onRetire = { retired.append($0) }
+        retention.markAnswered(Fix.local(Fix.permissionPayload()), summary: "Allowed")
+        retention.settle(["p1"])
+        #expect(retired.isEmpty, "settled prompts are forgotten by the pane's own settle path")
+    }
+
     @Test func anAnsweredCardWhoseResultNeverComesRetiresOnTheTimeout() async {
         let clock = TestClock()
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
