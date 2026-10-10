@@ -24,6 +24,9 @@ struct TableTranscriptView: NSViewRepresentable {
     /// Jump-to-bottom request token: incrementing it asks the coordinator to
     /// scroll to the last row.
     let scrollToBottomToken: Int
+    /// Scroll-to-row request: a new token asks the coordinator to bring the
+    /// row whose node id equals `itemID` into view, once per token.
+    var scrollToItem: TranscriptScrollRequest?
     /// Bumped by the pane whenever the USER toggles an activity group open or
     /// shut. The node array that arrives with a bumped token is the result of a
     /// disclosure gesture, not of streaming, so the coordinator anchors the
@@ -103,6 +106,7 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.lastScrollItemToken = scrollToItem?.token
         coordinator.lastActivityToggleToken = activityToggleToken
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
@@ -173,12 +177,17 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
+        let nodes = nodesProvider()
         coordinator.update(
-            nodes: nodesProvider(),
+            nodes: nodes,
             atBottom: $atBottom,
             activityToggleToken: activityToggleToken,
             linkRoot: linkRoot
         )
+        if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
+            coordinator.lastScrollItemToken = request.token
+            coordinator.scrollToRow(withNodeID: request.itemID)
+        }
     }
 
     // MARK: - Coordinator
@@ -198,6 +207,7 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+        var lastScrollItemToken: Int?
         /// Last activity-group toggle token seen by `update`. A token that has
         /// MOVED means this node array came from the user opening or shutting a
         /// group, which must keep the clicked row where it is rather than
@@ -2136,6 +2146,18 @@ struct TableTranscriptView: NSViewRepresentable {
             let viewportHeight = scrollView.contentView.bounds.height
             let threshold = max(400, viewportHeight * 0.5)
             return viewportGapToBottom() <= threshold
+        }
+
+        /// Brings the row for `nodeID` into view; falls back to the end when no
+        /// row carries that id (an appended card sits at the tail).
+        func scrollToRow(withNodeID nodeID: String) {
+            guard let tableView else { return }
+            guard let row = nodes.firstIndex(where: { $0.id == nodeID }),
+                  row < tableView.numberOfRows else {
+                scrollToEnd(animated: true)
+                return
+            }
+            tableView.scrollRowToVisible(row)
         }
 
         func scrollToEnd(animated: Bool) {

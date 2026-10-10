@@ -194,6 +194,13 @@ enum PendingPromptMerge {
         let prompts: [String: PendingPromptPresentation]
         /// Prompts whose tool result is already on disk.
         let settled: Set<String>
+
+        /// The row id of an open card whose controls are live, or nil. The
+        /// composer's hint shows exactly while this is non-nil: flag off, or a
+        /// remote provider without `answer`, make every card read-only.
+        var answerableCardItemID: String? {
+            prompts.filter { $0.value.acceptsAnswer }.keys.sorted().first
+        }
     }
 
     static func apply(items: [TranscriptItem],
@@ -269,5 +276,17 @@ final class PromptFirstSeenDates {
             dates.removeValue(forKey: order.removeFirst())
         }
         return now
+    }
+}
+
+/// A request to bring one transcript row into view. The token changes on every
+/// request, so asking for the same row twice scrolls twice.
+struct TranscriptScrollRequest: Equatable {
+    let itemID: String
+    let token: Int
+
+    /// The request that follows `current`, for `itemID`.
+    static func next(after current: TranscriptScrollRequest?, itemID: String) -> TranscriptScrollRequest {
+        TranscriptScrollRequest(itemID: itemID, token: (current?.token ?? 0) &+ 1)
     }
 }

@@ -29,6 +29,9 @@ enum RemoteAgentAttention {
         guard !session.gone else { return nil }
         switch session.payload.agentState {
         case .waitingInput:
+            if let permission = permissionSummary(session.payload.effectivePendingPrompt) {
+                return permission
+            }
             if let question = questionSummary(session.payload.pendingQuestion) { return question }
             if let reason = humanizedReason(session.payload.agentStateReason) { return reason }
             return "Waiting for input."
@@ -74,6 +77,41 @@ enum RemoteAgentAttention {
         guard !trimmed.isEmpty else { return nil }
         if trimmed == "permission_prompt" { return "Blocked on a permission prompt." }
         return trimmed
+    }
+
+    /// A pending permission prompt as one line: "Blocked on permission: <tool>
+    /// <short input>". The short input is a Bash command's first line or a
+    /// file tool's path; any other tool shows its name only. Nil for anything
+    /// but a permission prompt. Capped at 80 characters of input.
+    static func permissionSummary(_ prompt: RemotePendingPrompt?) -> String? {
+        guard let prompt, prompt.kind == .permission else { return nil }
+        let tool = prompt.toolName.flatMap { $0.isEmpty ? nil : $0 } ?? "tool"
+        var line = "Blocked on permission: \(tool)"
+        if let input = shortToolInput(toolName: tool, json: prompt.toolInputJSON) {
+            line += " \(input)"
+        }
+        return line
+    }
+
+    private static let maxInputCharacters = 80
+
+    private static func shortToolInput(toolName: String, json: String?) -> String? {
+        guard let json, let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        let raw: String?
+        switch toolName {
+        case "Bash":
+            raw = (object["command"] as? String)?
+                .split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init)
+        case "Write", "Edit", "MultiEdit", "NotebookEdit":
+            raw = object["file_path"] as? String
+        default:
+            raw = nil
+        }
+        guard let text = raw?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        guard text.count > maxInputCharacters else { return text }
+        return String(text.prefix(maxInputCharacters)) + "…"
     }
 
     /// The structured question block as one line: the first question's

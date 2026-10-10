@@ -143,6 +143,57 @@ struct RemoteAgentAttentionTests {
         #expect(summary.needsAttention.isEmpty)
     }
 
+    // MARK: - Permission prompts
+
+    private func permissionSession(tool: String?, inputJSON: String?) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: "agentbox",
+            payload: RemoteSessionPayload(
+                id: "s1", title: "s1", state: .running, agentState: .waitingInput,
+                pendingPrompt: RemotePendingPrompt(
+                    id: "p1", kind: .permission, toolName: tool, toolInputJSON: inputJSON)),
+            gone: false, dismissed: false,
+            lastSeen: Date(timeIntervalSince1970: 1_000))
+    }
+
+    @Test func bashPermissionNamesTheFirstLineOfTheCommand() {
+        let session = permissionSession(
+            tool: "Bash", inputJSON: #"{"command":"touch x\nrm y"}"#)
+        #expect(RemoteAgentAttention.explanation(for: session)
+            == "Blocked on permission: Bash touch x")
+    }
+
+    @Test func aLongBashCommandIsTruncated() {
+        let command = String(repeating: "a", count: 200)
+        let session = permissionSession(tool: "Bash", inputJSON: "{\"command\":\"\(command)\"}")
+        let expected = "Blocked on permission: Bash " + String(repeating: "a", count: 80) + "…"
+        #expect(RemoteAgentAttention.explanation(for: session) == expected)
+    }
+
+    @Test func writePermissionNamesThePath() {
+        let session = permissionSession(
+            tool: "Write", inputJSON: #"{"content":"x","file_path":"/tmp/a.txt"}"#)
+        #expect(RemoteAgentAttention.explanation(for: session)
+            == "Blocked on permission: Write /tmp/a.txt")
+    }
+
+    @Test func otherToolsShowTheNameOnly() {
+        let session = permissionSession(tool: "WebFetch", inputJSON: #"{"url":"https://example.com"}"#)
+        #expect(RemoteAgentAttention.explanation(for: session) == "Blocked on permission: WebFetch")
+    }
+
+    @Test func aQuestionPromptKeepsTodaysText() {
+        let session = RemoteSessionInfo(
+            provider: "agentbox",
+            payload: RemoteSessionPayload(
+                id: "s1", title: "s1", state: .running, agentState: .waitingInput,
+                pendingQuestion: RemotePendingQuestion(
+                    questions: [RemotePendingQuestionItem(prompt: "Go on?")])),
+            gone: false, dismissed: false,
+            lastSeen: Date(timeIntervalSince1970: 1_000))
+        #expect(RemoteAgentAttention.explanation(for: session) == "Blocked on a question: Go on?")
+    }
+
     private func session(
         id: String = "s1",
         provider: String = "agentbox",

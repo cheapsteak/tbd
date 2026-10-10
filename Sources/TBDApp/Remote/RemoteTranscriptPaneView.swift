@@ -45,6 +45,7 @@ struct RemoteTranscriptPaneView: View {
     @State private var presentationMemo = TranscriptPresentationMemo()
     @State private var atBottom = true
     @State private var scrollToBottomToken = 0
+    @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
     @State private var activityToggleToken = 0
     /// Stable `createdAt` for a remote prompt card; see `PromptFirstSeenDates`.
@@ -206,6 +207,7 @@ struct RemoteTranscriptPaneView: View {
                 ),
                 atBottom: $atBottom,
                 scrollToBottomToken: scrollToBottomToken,
+                scrollToItem: promptScroll,
                 activityToggleToken: activityToggleToken,
                 linkRoot: "",
                 nodesProvider: { presentation.nodes }
@@ -241,7 +243,13 @@ struct RemoteTranscriptPaneView: View {
         let state = appState.remoteComposerState(for: selection)
         if state != .hidden {
             Divider()
-            MessageComposerView(target: .remote(selection), state: state.composerState)
+            let cardID = merged(items).answerableCardItemID
+            MessageComposerView(
+                target: .remote(selection),
+                state: state.composerState(promptAnswerable: cardID != nil),
+                promptHint: cardID.map { id in
+                    { promptScroll = .next(after: promptScroll, itemID: id) }
+                })
                 .id(ComposerKey.remote(selection))
         }
     }

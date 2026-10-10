@@ -29,14 +29,27 @@ import TBDShared
 struct MessageComposerView: View {
     let target: ComposerTarget
     let state: ComposerState
+    /// Set while the pane has an open, answerable prompt card. The blocked
+    /// banner then points at the card and this scrolls to it.
+    let promptHint: (() -> Void)?
 
-    init(target: ComposerTarget, state: ComposerState) {
-        self.target = target
-        self.state = state
+    static let promptHintText = "Claude is waiting on a prompt above"
+
+    /// The text of the blocked banner: the hint while a card can be answered,
+    /// else the state's own message.
+    static func blockedBannerText(message: String, hasPromptHint: Bool) -> String {
+        hasPromptHint ? promptHintText : message
     }
 
-    init(terminal: Terminal, worktree: LocalWorktree, state: ComposerState) {
-        self.init(target: .terminal(terminal, worktree), state: state)
+    init(target: ComposerTarget, state: ComposerState, promptHint: (() -> Void)? = nil) {
+        self.target = target
+        self.state = state
+        self.promptHint = promptHint
+    }
+
+    init(terminal: Terminal, worktree: LocalWorktree, state: ComposerState,
+         promptHint: (() -> Void)? = nil) {
+        self.init(target: .terminal(terminal, worktree), state: state, promptHint: promptHint)
     }
 
     @Environment(AppState.self) private var appState
@@ -665,11 +678,16 @@ struct MessageComposerView: View {
     private func blockedBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-            Text(message)
+            Text(Self.blockedBannerText(message: message, hasPromptHint: promptHint != nil))
                 .font(.caption)
                 .lineLimit(2)
                 .accessibilityIdentifier(ComposerAccessibility.blockedMessage)
             Spacer(minLength: 0)
+            if let promptHint {
+                Button("Show", action: promptHint)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(ComposerAccessibility.blockedShowPrompt)
+            }
             if case .terminal(let terminal, _) = target {
                 Button("Reveal Terminal") {
                     appState.revealTerminal(terminalID: terminal.id)

@@ -40,6 +40,7 @@ struct TableTranscriptPaneView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
     @State private var scrollToBottomToken: Int = 0
+    @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
     /// Bumped alongside every write to `activityGroupExpansion`, so the table can
     /// tell a user-driven disclosure toggle (anchor the clicked row) from a
@@ -285,6 +286,7 @@ struct TableTranscriptPaneView: View {
                     context: cardContext,
                     atBottom: $atBottom,
                     scrollToBottomToken: scrollToBottomToken,
+                    scrollToItem: promptScroll,
                     activityToggleToken: activityToggleToken,
                     linkRoot: linkRoot,
                     nodesProvider: { timedRenderNodes(presentation.nodes) },
@@ -312,7 +314,8 @@ struct TableTranscriptPaneView: View {
                     MessageComposerView(
                         terminal: decision.terminal,
                         worktree: decision.worktree,
-                        state: decision.state)
+                        state: decision.state,
+                        promptHint: promptHint(for: merged))
                         // A terminal switch reuses this pane, and the composer's
                         // registration is keyed on the terminal it was made for.
                         // A fresh view per terminal is what keeps the two agreeing.
@@ -376,6 +379,13 @@ struct TableTranscriptPaneView: View {
             return nil
         }
         return ComposerMount(terminal: terminal, worktree: local, state: state)
+    }
+
+    /// The composer's "prompt above" hint action, or nil when no open card can
+    /// be answered from this pane.
+    private func promptHint(for merged: PendingPromptMerge.Merged) -> (() -> Void)? {
+        guard let itemID = merged.answerableCardItemID else { return nil }
+        return { promptScroll = .next(after: promptScroll, itemID: itemID) }
     }
 
     private func setActivityGroup(_ id: String, expanded: Bool) {

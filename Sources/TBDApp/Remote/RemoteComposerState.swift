@@ -43,11 +43,22 @@ enum RemoteComposerState: Equatable {
 
     /// The disabled-state note shown in place of a working composer.
     var disabledMessage: String? {
+        disabledMessage(promptAnswerable: false)
+    }
+
+    /// The text shown in place of the terminal-only note when the pane has an
+    /// open prompt card the person can answer from the transcript.
+    static let promptAboveMessage = "Claude is waiting on a prompt above"
+
+    func disabledMessage(promptAnswerable: Bool) -> String? {
         switch self {
         case .exited: return "Session has exited"
         case .starting: return "Session is starting"
         case .stateUnknown: return "Session state is unknown"
-        case .blocked: return "Waiting on a prompt — answer it in the terminal"
+        case .blocked:
+            return promptAnswerable
+                ? Self.promptAboveMessage
+                : "Waiting on a prompt — answer it in the terminal"
         case .hidden, .running: return nil
         }
     }
@@ -58,12 +69,17 @@ enum RemoteComposerState: Equatable {
     /// terminal is already beside it), and an exited one a disabled note, since
     /// there is no wake path to offer.
     var composerState: ComposerState {
+        composerState(promptAnswerable: false)
+    }
+
+    func composerState(promptAnswerable: Bool) -> ComposerState {
+        let message = disabledMessage(promptAnswerable: promptAnswerable) ?? ""
         switch self {
         case .hidden: return .hidden
         case .running: return .running
-        case .blocked: return .blocked(message: disabledMessage ?? "")
+        case .blocked: return .blocked(message: message)
         case .exited, .starting, .stateUnknown:
-            return .unavailable(message: disabledMessage ?? "")
+            return .unavailable(message: message)
         }
     }
 
