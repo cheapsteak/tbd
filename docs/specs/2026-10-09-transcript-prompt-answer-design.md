@@ -332,12 +332,14 @@ pending prompt attached to that row until the prompt resolves.
   transcript that has no result yet becomes the card in place. A provider
   that sends only `pending_question` never names the tool call, and its row
   is already on disk, so an appended copy would draw the question twice.
-- **No `tool_use_id`, a question whose dialog has closed** while its card is
-  held, with no open `AskUserQuestion` row left. Its row has its result by
-  now, so the newest answered `AskUserQuestion` row is taken as its row: no
+- **No `tool_use_id`, a question that is no longer live** — its card is
+  only held — with no open `AskUserQuestion` row left. Its row has its result
+  by now, so the newest answered `AskUserQuestion` row is taken as its row: no
   card is drawn, and the prompt counts as settled, which releases the hold.
   Appending a card here would draw the answered question twice until the hold
-  timed out.
+  timed out. Liveness decides, not the card's phase: a prompt still live, even
+  one already answered from its card, may not have its row yet, and an older
+  answered row is not its row, so it stays appended.
 - **No `tool_use_id` otherwise**, or an open question with no open
   `AskUserQuestion` row. The card is appended under the id `prompt-<id>`. It
   retires on a timeout once the prompt resolves, because nothing can replace
@@ -440,8 +442,8 @@ Each branch of the flag gets a test, following the repo rule.
     group id
   - the `prompt-<id>` fallback, and an unpaired question carding the open
     `AskUserQuestion` row instead
-  - a held unpaired question settling on the answered row rather than
-    appending a duplicate, while an open one still appends
+  - a held-only unpaired question settling on the answered row rather than
+    appending a duplicate, while a live one, open or answered, still appends
   - never a window start
 - **Store:** each way a prompt resolves; a second answer refused; delivery
   acknowledged or timed out; `disabled` while the flag is off; the pairing

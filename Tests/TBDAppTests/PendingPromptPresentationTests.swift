@@ -307,25 +307,17 @@ struct PendingPromptPresentationTests {
             .map(\.answerability) == [.answerable])
     }
 
-    @Test func seedIsOpenFollowsThePhase() {
+    /// The seed's liveness follows the card's `isLive`, never its phase: an
+    /// answered card whose prompt is still live is still live.
+    @Test func seedIsLiveFollowsLivenessNotThePhase() {
         var card = Fix.local(Fix.questionPayload(toolUseID: nil))
-        #expect(card.seed.isOpen)
-        card.phase = .closed
-        #expect(!card.seed.isOpen)
+        #expect(card.seed.isLive)
         card.phase = .answered(summary: "A")
-        #expect(!card.seed.isOpen)
-    }
-
-    /// A held unpaired question whose row has its result renders no second
-    /// card and is reported settled, so retention lets it go.
-    @Test func heldUnpairedQuestionDoesNotDuplicateTheAnsweredRow() {
-        var card = Fix.local(Fix.questionPayload(toolUseID: nil))
+        #expect(card.seed.isLive)
         card.phase = .closed
-        let items = [Fix.toolCall("toolu_Q", "AskUserQuestion", input: Fix.askInput, result: Fix.done)]
-        let merged = PendingPromptMerge.apply(items: items, prompts: [card])
-        #expect(merged.items == items)
-        #expect(merged.prompts.isEmpty)
-        #expect(merged.settled == ["q1"])
+        #expect(card.seed.isLive)
+        card.isLive = false
+        #expect(!card.seed.isLive)
     }
 
     @Test func firstSeenDatesHoldStill() {
@@ -351,6 +343,48 @@ struct PromptCardRetentionTests {
         await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
             await MainActor.run { retention.heldCount == 0 }
         }
+    }
+
+    /// A held unpaired question whose row has its result renders no second
+    /// card and is reported settled, so retention lets it go.
+    @Test func heldUnpairedQuestionDoesNotDuplicateTheAnsweredRow() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let target = Self.target
+        let card = Fix.local(Fix.questionPayload(toolUseID: nil))
+        retention.observe(live: [card], for: target)
+        retention.observe(live: [], for: target)
+        let items = [Fix.toolCall("toolu_Q", "AskUserQuestion", input: Fix.askInput, result: Fix.done)]
+        let merged = PendingPromptMerge.apply(items: items, prompts: retention.cards(live: [], for: target))
+        #expect(merged.items == items)
+        #expect(merged.prompts.isEmpty)
+        #expect(merged.settled == ["q1"])
+    }
+
+    /// A live unpaired question answered from its card, with no row of its own
+    /// yet, is not settled onto an older answered `AskUserQuestion` row: that
+    /// would release the hold and redraw the prompt as an open card. It stays
+    /// appended, showing its answer, while live, and settles once it is no
+    /// longer live.
+    @Test func liveAnsweredUnpairedQuestionStaysAppendedUntilItIsNoLongerLive() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let target = Self.target
+        let card = Fix.local(Fix.questionPayload(toolUseID: nil))
+        retention.observe(live: [card], for: target)
+        retention.markAnswered(card, summary: "A")
+        let older = [Fix.toolCall("toolu_Q0", "AskUserQuestion", input: Fix.askInput, result: Fix.done)]
+
+        let whileLive = PendingPromptMerge.apply(items: older, prompts: retention.cards(live: [card], for: target))
+        #expect(whileLive.items.map(\.id) == ["toolu_Q0", "prompt-q1"])
+        #expect(whileLive.prompts["prompt-q1"]?.phase == .answered(summary: "A"))
+        #expect(whileLive.settled.isEmpty, "an older answered row must not settle a live prompt")
+        retention.settle(whileLive.settled)
+        #expect(retention.heldPhase(for: "q1") == .answered(summary: "A"))
+
+        retention.observe(live: [], for: target)
+        let afterwards = PendingPromptMerge.apply(items: older, prompts: retention.cards(live: [], for: target))
+        #expect(afterwards.items == older)
+        #expect(afterwards.prompts.isEmpty)
+        #expect(afterwards.settled == ["q1"])
     }
 
     @Test func anAnsweredCardShowsItsAnswerWhileLiveAndAfterItCloses() {

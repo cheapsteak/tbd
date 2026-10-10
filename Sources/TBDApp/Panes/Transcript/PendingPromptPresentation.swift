@@ -70,6 +70,10 @@ struct PendingPromptPresentation: Hashable, Sendable {
     /// never move between body evaluations.
     let createdAt: Date
     var phase: PromptCardPhase = .open
+    /// Whether the prompt's source still reports it. False only for a card
+    /// `PromptCardRetention` holds after the prompt stopped being live; an
+    /// answered card whose prompt is still live stays true.
+    var isLive: Bool = true
 
     /// Whether the card's controls are live: answerable and still open.
     var acceptsAnswer: Bool { answerability.isAnswerable && phase.isOpen }
@@ -157,7 +161,7 @@ struct PendingPromptPresentation: Hashable, Sendable {
             // without `tool_input` gets the questions re-encoded.
             toolInputJSON: toolInputJSON ?? Self.questionsInputJSON(questions) ?? "{}",
             timestamp: createdAt,
-            isOpen: phase.isOpen)
+            isLive: isLive)
     }
 
     /// `{"questions":[…]}` in `AskUserQuestion`'s `tool_input` shape, or nil

@@ -70,10 +70,10 @@ import Testing
         #expect(result.cardItemIDs == ["prompt-p9": "p9"])
     }
 
-    private static func questionSeed(_ promptID: String, isOpen: Bool = true) -> PromptCardSeed {
+    private static func questionSeed(_ promptID: String, isLive: Bool = true) -> PromptCardSeed {
         PromptCardSeed(
             promptID: promptID, toolUseID: nil, kind: .question, toolName: "AskUserQuestion",
-            toolInputJSON: #"{"questions":[]}"#, timestamp: when, isOpen: isOpen)
+            toolInputJSON: #"{"questions":[]}"#, timestamp: when, isLive: isLive)
     }
 
     /// A remote provider sending only `pending_question` never names the tool
@@ -111,18 +111,19 @@ import Testing
             Self.text("a"),
             Self.toolCall("toolu_Q1", name: "AskUserQuestion", result: answered),
         ]
-        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isOpen: false)])
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isLive: false)])
         #expect(result.items == items, "no duplicate prompt-<id> card")
         #expect(result.cardItemIDs.isEmpty)
         #expect(result.settledPromptIDs == ["q1"])
     }
 
-    /// The same transcript with the dialog still open: the row has not landed
-    /// yet, so the card is appended, and nothing is settled.
+    /// The same transcript with the prompt still live — open, or already
+    /// answered from its card: the row has not landed yet, so the card is
+    /// appended, and nothing is settled. The older answered row is not its row.
     @Test func openUnpairedQuestionStillAppendsWhenItsRowHasNotLanded() {
         let answered = ToolResult(text: "A", truncatedTo: nil, isError: false)
         let items = [Self.toolCall("toolu_Q0", name: "AskUserQuestion", result: answered)]
-        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isOpen: true)])
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isLive: true)])
         #expect(result.items.map(\.id) == ["toolu_Q0", "prompt-q1"])
         #expect(result.cardItemIDs == ["prompt-q1": "q1"])
         #expect(result.settledPromptIDs.isEmpty)
@@ -131,7 +132,7 @@ import Testing
     /// A held question whose row is still open keeps carding that row.
     @Test func heldUnpairedQuestionWithAnOpenRowStaysInPlace() {
         let items = [Self.toolCall("toolu_Q1", name: "AskUserQuestion")]
-        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isOpen: false)])
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1", isLive: false)])
         #expect(result.items == items)
         #expect(result.cardItemIDs == ["toolu_Q1": "q1"])
         #expect(result.settledPromptIDs.isEmpty)

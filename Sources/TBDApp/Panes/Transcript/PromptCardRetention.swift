@@ -57,7 +57,7 @@ final class PromptCardRetention {
 
     /// The cards a pane merges for `target`: the live prompts (an answered one
     /// still live shows its answer), then every held card that is no longer
-    /// live, oldest first.
+    /// live, oldest first, marked ``PendingPromptPresentation/isLive`` false.
     func cards(live: [PendingPromptPresentation],
                for target: PromptAnswerTarget) -> [PendingPromptPresentation] {
         var out = live.map { prompt -> PendingPromptPresentation in
@@ -73,6 +73,11 @@ final class PromptCardRetention {
             .map(\.presentation)
             .filter { $0.target == target && !liveIDs.contains($0.promptID) }
             .sorted { ($0.createdAt, $0.promptID) < ($1.createdAt, $1.promptID) }
+            .map { held -> PendingPromptPresentation in
+                var heldOnly = held
+                heldOnly.isLive = false
+                return heldOnly
+            }
         out.append(contentsOf: extra)
         return out
     }

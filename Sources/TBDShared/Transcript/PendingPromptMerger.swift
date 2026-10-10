@@ -16,20 +16,22 @@ public struct PromptCardSeed: Sendable, Equatable {
     public let toolName: String
     public let toolInputJSON: String
     public let timestamp: Date
-    /// Whether the dialog is still open. False for a card held after its
-    /// dialog closed (answered, or closed elsewhere) while the transcript
-    /// catches up.
-    public let isOpen: Bool
+    /// Whether the prompt is still live: its source (the daemon's prompt
+    /// store, or a remote provider's poll) still reports it. False only for a
+    /// held-only card, kept after the prompt stopped being live while the
+    /// transcript catches up. A live prompt answered from its card is still
+    /// live: its dialog has not closed, and its row may not have landed yet.
+    public let isLive: Bool
 
     public init(promptID: String, toolUseID: String?, kind: PendingPromptKind = .permission,
-                toolName: String, toolInputJSON: String, timestamp: Date, isOpen: Bool = true) {
+                toolName: String, toolInputJSON: String, timestamp: Date, isLive: Bool = true) {
         self.promptID = promptID
         self.toolUseID = toolUseID
         self.kind = kind
         self.toolName = toolName
         self.toolInputJSON = toolInputJSON
         self.timestamp = timestamp
-        self.isOpen = isOpen
+        self.isLive = isLive
     }
 }
 
@@ -52,11 +54,14 @@ public struct PromptCardSeed: Sendable, Equatable {
 ///   `pending_question` never names the tool call, and the row it belongs to
 ///   is already on disk; appending a second row would draw the question
 ///   twice.
-/// - **No `tool_use_id`, kind `question`, held after its dialog closed, and
-///   no open `AskUserQuestion` row.** Its row has its result by now, so the
-///   newest `AskUserQuestion` row with a result is taken as its row: no card,
-///   and the prompt is reported in `settledPromptIDs`. Appending would draw
-///   the answered question a second time until the hold timed out.
+/// - **No `tool_use_id`, kind `question`, no longer live (a held-only card),
+///   and no open `AskUserQuestion` row.** Its row has its result by now, so
+///   the newest `AskUserQuestion` row with a result is taken as its row: no
+///   card, and the prompt is reported in `settledPromptIDs`. Appending would
+///   draw the answered question a second time until the hold timed out. A
+///   prompt still live — even one already answered from its card — never
+///   takes this branch: its row may not have landed, and an older answered
+///   row is not its row.
 /// - **No `tool_use_id` otherwise.** The row is appended under `prompt-<id>`.
 ///
 /// Appended rows keep seed order. No emitted id starts with `line-` or
@@ -142,10 +147,12 @@ public enum PendingPromptMerger {
                 continue
             }
 
-            // A held (closed) unpaired question whose row is no longer open:
-            // the newest answered `AskUserQuestion` row is its row, and the
-            // result there settles it.
-            if seed.toolUseID == nil, seed.kind == .question, !seed.isOpen,
+            // A held-only unpaired question (no longer live) whose row is no
+            // longer open: the newest answered `AskUserQuestion` row is its
+            // row, and the result there settles it. Liveness, not the card's
+            // phase, decides: a live prompt answered from its card may still
+            // be waiting for its own row.
+            if seed.toolUseID == nil, seed.kind == .question, !seed.isLive,
                hasAnsweredQuestionCall {
                 settled.insert(seed.promptID)
                 continue
