@@ -12,14 +12,16 @@ public struct PromptCardSeed: Sendable, Equatable {
     public let promptID: String
     /// The tool call the dialog belongs to; nil for an unpaired prompt.
     public let toolUseID: String?
+    public let kind: PendingPromptKind
     public let toolName: String
     public let toolInputJSON: String
     public let timestamp: Date
 
-    public init(promptID: String, toolUseID: String?, toolName: String,
-                toolInputJSON: String, timestamp: Date) {
+    public init(promptID: String, toolUseID: String?, kind: PendingPromptKind = .permission,
+                toolName: String, toolInputJSON: String, timestamp: Date) {
         self.promptID = promptID
         self.toolUseID = toolUseID
+        self.kind = kind
         self.toolName = toolName
         self.toolInputJSON = toolInputJSON
         self.timestamp = timestamp
@@ -40,7 +42,12 @@ public struct PromptCardSeed: Sendable, Equatable {
 /// - **The transcript does not hold it yet.** A tool-call row is appended at
 ///   the end under the same `tool_use_id`. When the real row lands, it takes
 ///   the same id, so the table sees an update in place rather than a new row.
-/// - **No `tool_use_id`.** The row is appended under `prompt-<id>`.
+/// - **No `tool_use_id`, kind `question`.** The last `AskUserQuestion` call
+///   with no result yet is the card, in place. A provider that sends only
+///   `pending_question` never names the tool call, and the row it belongs to
+///   is already on disk; appending a second row would draw the question
+///   twice.
+/// - **No `tool_use_id` otherwise.** The row is appended under `prompt-<id>`.
 ///
 /// Appended rows keep seed order. No emitted id starts with `line-` or
 /// `tail-`, which the table's prepend anchoring treats as unstable.
@@ -64,6 +71,9 @@ public enum PendingPromptMerger {
         }
     }
 
+    /// The tool an unpaired question prompt pairs with in place.
+    public static let askUserQuestionToolName = "AskUserQuestion"
+
     /// The prefix of an unpaired prompt's row id.
     public static let fallbackIDPrefix = "prompt-"
 
@@ -84,10 +94,15 @@ public enum PendingPromptMerger {
         // Tool call id → whether its result has landed.
         var toolCallHasResult: [String: Bool] = [:]
         var itemIDs = Set<String>()
+        // `AskUserQuestion` calls still waiting for a result, oldest first.
+        var openQuestionCalls: [String] = []
         for item in items {
             itemIDs.insert(item.id)
-            if case .toolCall(let id, _, _, _, let result, _, _, _) = item {
+            if case .toolCall(let id, let name, _, _, let result, _, _, _) = item {
                 toolCallHasResult[id] = result != nil
+                if name == askUserQuestionToolName, result == nil {
+                    openQuestionCalls.append(id)
+                }
             }
         }
 
@@ -102,6 +117,12 @@ public enum PendingPromptMerger {
                 } else if cards[toolUseID] == nil {
                     cards[toolUseID] = seed.promptID
                 }
+                continue
+            }
+
+            if seed.toolUseID == nil, seed.kind == .question,
+               let rowID = openQuestionCalls.last(where: { cards[$0] == nil }) {
+                cards[rowID] = seed.promptID
                 continue
             }
 

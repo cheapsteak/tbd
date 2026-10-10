@@ -70,6 +70,42 @@ import Testing
         #expect(result.cardItemIDs == ["prompt-p9": "p9"])
     }
 
+    private static func questionSeed(_ promptID: String) -> PromptCardSeed {
+        PromptCardSeed(
+            promptID: promptID, toolUseID: nil, kind: .question, toolName: "AskUserQuestion",
+            toolInputJSON: #"{"questions":[]}"#, timestamp: when)
+    }
+
+    /// A remote provider sending only `pending_question` never names the tool
+    /// call; the `AskUserQuestion` row on disk is the card, not a second row.
+    @Test func unpairedQuestionPairsWithTheLastOpenAskUserQuestionRow() {
+        let answered = ToolResult(text: "A", truncatedTo: nil, isError: false)
+        let items = [
+            Self.toolCall("toolu_Q0", name: "AskUserQuestion", result: answered),
+            Self.toolCall("toolu_Q1", name: "AskUserQuestion"),
+            Self.toolCall("toolu_B", name: "Bash"),
+            Self.toolCall("toolu_Q2", name: "AskUserQuestion"),
+            Self.text("b"),
+        ]
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1")])
+        #expect(result.items == items, "no prompt-<id> row is appended beside the real one")
+        #expect(result.cardItemIDs == ["toolu_Q2": "q1"])
+    }
+
+    @Test func unpairedQuestionFallsBackWhenEveryQuestionRowHasAResult() {
+        let answered = ToolResult(text: "A", truncatedTo: nil, isError: false)
+        let items = [Self.toolCall("toolu_Q0", name: "AskUserQuestion", result: answered)]
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.questionSeed("q1")])
+        #expect(result.items.map(\.id) == ["toolu_Q0", "prompt-q1"])
+        #expect(result.cardItemIDs == ["prompt-q1": "q1"])
+    }
+
+    @Test func unpairedPermissionNeverPairsWithAQuestionRow() {
+        let items = [Self.toolCall("toolu_Q1", name: "AskUserQuestion")]
+        let result = PendingPromptMerger.merge(items: items, seeds: [Self.seed("p1", toolUseID: nil)])
+        #expect(result.cardItemIDs == ["prompt-p1": "p1"])
+    }
+
     @Test func settledWhenTheResultIsOnDisk() {
         let done = ToolResult(text: "ok", truncatedTo: nil, isError: false)
         let items = [Self.toolCall("toolu_X", result: done)]

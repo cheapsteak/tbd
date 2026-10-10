@@ -313,7 +313,12 @@ pending prompt attached to that row until the prompt resolves.
   nothing legitimately follows it. Rows that arrive later from an earlier
   point in the turn appear above it. When the real tool call lands, it
   replaces the card in place under the same id.
-- **No `tool_use_id`.** The card is appended under the id `prompt-<id>`. It
+- **No `tool_use_id`, a question.** The last `AskUserQuestion` call in the
+  transcript that has no result yet becomes the card in place. A provider
+  that sends only `pending_question` never names the tool call, and its row
+  is already on disk, so an appended copy would draw the question twice.
+- **No `tool_use_id` otherwise**, or a question with no open
+  `AskUserQuestion` row. The card is appended under the id `prompt-<id>`. It
   retires on a timeout once the prompt resolves, because nothing can replace
   it in place.
 - **Activity groups.** A pending card is always a standalone row. A tool call
@@ -410,7 +415,8 @@ Each branch of the flag gets a test, following the repo rule.
     through `TranscriptStreamPlan`
   - lifting a row out of its activity group and back without changing the
     group id
-  - the `prompt-<id>` fallback
+  - the `prompt-<id>` fallback, and an unpaired question carding the open
+    `AskUserQuestion` row instead
   - never a window start
 - **Store:** each way a prompt resolves; a second answer refused; delivery
   acknowledged or timed out; `disabled` while the flag is off; the pairing

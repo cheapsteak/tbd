@@ -186,6 +186,27 @@ struct PendingPromptPresentationTests {
         #expect(afterNodes.last?.pendingPrompt == prompt)
     }
 
+    /// A provider that sends only `pending_question` projects to a prompt
+    /// with no `tool_use_id`; the `AskUserQuestion` row already on disk is
+    /// its card, not a second `prompt-<id>` copy.
+    @Test func aRemoteQuestionWithoutToolUseIDCardsTheRowOnDisk() {
+        let remote = PendingPromptPresentation.remote(
+            RemotePendingPrompt(
+                id: "rq", kind: .question,
+                questions: [RemotePendingQuestionItem(
+                    prompt: "Which?", label: "Pick", multi: false,
+                    options: [RemotePendingQuestionOption(label: "A")])]),
+            selection: Fix.selection, capabilities: [RemoteCapability.answer],
+            flagOn: true, now: Fix.when)
+        let items: [TranscriptItem] = [
+            .assistantText(id: "a", text: "a", timestamp: nil),
+            Fix.toolCall("toolu_Q", "AskUserQuestion", input: Fix.askInput),
+        ]
+        let merged = PendingPromptMerge.apply(items: items, prompts: [remote])
+        #expect(merged.items == items)
+        #expect(merged.prompts.keys.sorted() == ["toolu_Q"])
+    }
+
     @Test func theAnsweredCardIsHeldUntilTheToolResult() {
         var answered = Fix.local(Fix.permissionPayload())
         answered.phase = .answered(summary: "Allowed")

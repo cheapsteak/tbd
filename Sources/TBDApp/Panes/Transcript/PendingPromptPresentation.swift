@@ -146,6 +146,7 @@ struct PendingPromptPresentation: Hashable, Sendable {
         PromptCardSeed(
             promptID: promptID,
             toolUseID: toolUseID,
+            kind: kind,
             toolName: toolName,
             // An appended question row is drawn by today's AskUserQuestion
             // card, which reads `questions` from this JSON; a remote prompt
