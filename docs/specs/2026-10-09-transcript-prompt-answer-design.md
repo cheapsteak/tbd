@@ -123,6 +123,9 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
   also resolve the session's open prompt when it has no `tool_use_id` and
   shows the same tool and input. This is how the daemon learns that the
   terminal won with Yes, because that answer leaves the waiting hook running.
+  - For `AskUserQuestion` the hash covers `questions` alone, on the notes and
+    the register alike. The post's input carries the merged `answers` as
+    well, so a whole-input hash would never match.
   - These signals come after the tool finishes, not when you answer. So after
     a Yes in the terminal, the card still looks pending while the tool runs.
   - An answer sent from the card in that window reaches a hook whose output

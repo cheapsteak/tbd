@@ -169,7 +169,7 @@ enum PromptHookPayloadParser {
         return PermissionRequest(
             sessionID: sessionID, toolName: toolName, toolInputJSON: toolInputJSON,
             suggestionsJSON: suggestionsJSON,
-            inputHash: PromptInputHash.of(toolInput: toolInput),
+            inputHash: PromptInputHash.of(toolName: toolName, toolInput: toolInput),
             transcriptPath: obj["transcript_path"] as? String)
     }
 
@@ -186,7 +186,7 @@ enum PromptHookPayloadParser {
         case "PostToolUse", "PostToolUseFailure": phase = .post
         default: phase = fallbackPhase
         }
-        let hash = PromptInputHash.of(toolInput: obj["tool_input"] ?? [String: Any]())
+        let hash = PromptInputHash.of(toolName: toolName, toolInput: obj["tool_input"] ?? [String: Any]())
         return ToolEvent(sessionID: sessionID, toolUseID: toolUseID, toolName: toolName,
                          phase: phase, inputHash: hash)
     }

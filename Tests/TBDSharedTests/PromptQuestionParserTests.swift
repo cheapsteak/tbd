@@ -68,6 +68,23 @@ struct PromptInputHashTests {
                 != PromptInputHash.of(toolInputJSON: #"{"command":"touch b"}"#))
     }
 
+    @Test func aQuestionHashesItsQuestionsAlone() {
+        let asked = #"{"questions":[{"question":"Q?","options":[{"label":"A"}]}]}"#
+        let answered = #"{"answers":{"Q?":"A"},"questions":[{"question":"Q?","options":[{"label":"A"}]}]}"#
+        #expect(PromptInputHash.of(toolName: "AskUserQuestion", toolInputJSON: asked)
+                == PromptInputHash.of(toolName: "AskUserQuestion", toolInputJSON: answered))
+        // Without the tool-aware subset the two differ: that is the bug.
+        #expect(PromptInputHash.of(toolInputJSON: asked) != PromptInputHash.of(toolInputJSON: answered))
+    }
+
+    @Test func otherToolsHashTheWholeInput() {
+        let a = #"{"command":"ls","answers":{"x":"1"}}"#
+        let b = #"{"command":"ls"}"#
+        #expect(PromptInputHash.of(toolName: "Bash", toolInputJSON: a)
+                != PromptInputHash.of(toolName: "Bash", toolInputJSON: b))
+        #expect(PromptInputHash.of(toolName: "Bash", toolInputJSON: b) == PromptInputHash.of(toolInputJSON: b))
+    }
+
     @Test func theHashIsSHA256Hex() {
         let hash = PromptInputHash.of(toolInputJSON: "{}")
         #expect(hash.count == 64)

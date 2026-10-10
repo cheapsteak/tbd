@@ -132,7 +132,43 @@ public struct PendingPromptPayload: Codable, Sendable, Equatable, Hashable {
 /// single assistant message are told apart by their input. Both payloads hash
 /// `tool_input` re-serialized with sorted keys, so key order in either payload
 /// does not matter.
+///
+/// The hook paths hash through ``of(toolName:toolInput:)``, which picks the
+/// part of the input that stays the same across the call's life. For
+/// `AskUserQuestion` that is `questions` alone: the `PostToolUse` input
+/// carries the merged `answers` too, and a whole-input hash would never let
+/// the post close an unpaired question.
 public enum PromptInputHash {
+    /// The tool whose `tool_input` hashes by `questions` alone.
+    public static let askUserQuestionToolName = "AskUserQuestion"
+
+    /// The hash the pre and post notes and the register all carry: of the
+    /// part of `toolInput` that ``hashedSubset(toolName:toolInput:)`` picks.
+    public static func of(toolName: String, toolInput: Any) -> String {
+        of(toolInput: hashedSubset(toolName: toolName, toolInput: toolInput))
+    }
+
+    /// As `of(toolName:toolInput:)`, from JSON text. Text that is not JSON
+    /// hashes as its raw bytes.
+    public static func of(toolName: String, toolInputJSON: String) -> String {
+        guard let object = try? JSONSerialization.jsonObject(
+            with: Data(toolInputJSON.utf8), options: [.fragmentsAllowed]) else {
+            return of(toolInputJSON: toolInputJSON)
+        }
+        return of(toolName: toolName, toolInput: object)
+    }
+
+    /// `questions` for an `AskUserQuestion` input that has it; the whole
+    /// input otherwise.
+    public static func hashedSubset(toolName: String, toolInput: Any) -> Any {
+        if toolName == askUserQuestionToolName,
+           let object = toolInput as? [String: Any],
+           let questions = object["questions"] {
+            return questions
+        }
+        return toolInput
+    }
+
     /// SHA-256 hex of `toolInput` (a `JSONSerialization` object) re-serialized
     /// with sorted keys.
     public static func of(toolInput: Any) -> String {

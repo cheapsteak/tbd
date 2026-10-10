@@ -4869,7 +4869,8 @@ public struct PromptNoteParams: Codable, Sendable {
     public let phase: PromptNotePhase
     public let toolUseID: String
     public let toolName: String
-    /// `PromptInputHash` of `tool_input`. On `post` it lets the daemon close
+    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input` (`questions`
+    /// alone for `AskUserQuestion`). On `post` it lets the daemon close
     /// an unpaired prompt showing the same call; nil when the payload had no
     /// `tool_input`.
     public let inputHash: String?
@@ -4891,7 +4892,8 @@ public struct PromptRegisterParams: Codable, Sendable {
     public let toolName: String
     public let toolInputJSON: String
     public let suggestionsJSON: String?
-    /// `PromptInputHash` of `tool_input`, matched against `prompt.note`.
+    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input`, matched
+    /// against `prompt.note`.
     public let inputHash: String
     /// Set on a re-register after a reconnect, so the prompt keeps its id and
     /// pairing.

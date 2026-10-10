@@ -35,7 +35,7 @@ struct PendingPromptResolutionTests {
     ) -> PromptRegisterParams {
         PromptRegisterParams(
             terminalID: terminal, sessionID: session, toolName: tool, toolInputJSON: input,
-            suggestionsJSON: suggestions, inputHash: PromptInputHash.of(toolInputJSON: input),
+            suggestionsJSON: suggestions, inputHash: PromptInputHash.of(toolName: tool, toolInputJSON: input),
             knownPromptID: knownPromptID, knownToolUseID: knownToolUseID)
     }
 
@@ -45,7 +45,7 @@ struct PendingPromptResolutionTests {
     ) async -> Set<UUID> {
         await store.note(
             terminalID: terminal, sessionID: session, phase: .pre, toolUseID: toolUseID,
-            toolName: tool, inputHash: PromptInputHash.of(toolInputJSON: input))
+            toolName: tool, inputHash: PromptInputHash.of(toolName: tool, toolInputJSON: input))
     }
 
     private func register(
@@ -228,6 +228,31 @@ struct PendingPromptResolutionTests {
         let changed = await store.note(
             terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_unknown",
             toolName: "Bash", inputHash: PromptInputHash.of(toolInputJSON: Self.bashInput))
+
+        #expect(changed == [terminal])
+        #expect(await waiter.value == .resolvedElsewhere)
+        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+    }
+
+    /// A question's `PostToolUse` input carries the merged `answers` beside
+    /// `questions`; the hash covers `questions` alone, so the post still
+    /// closes the unpaired question the terminal answered.
+    @Test func postNoteWithAnswersClosesAnUnpairedQuestion() async {
+        let store = makeStore()
+        let terminal = UUID()
+        let (id, _) = await register(store, params(
+            terminal: terminal, session: "s1", tool: "AskUserQuestion", input: Self.questionInput,
+            knownPromptID: "question-before-restart"))
+        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
+        let waiter = await attachWaiter(store, id: id)
+
+        let answeredInput = #"""
+        {"answers":{"Pick one":"A"},"questions":[{"question":"Pick one","header":"Choice","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]}]}
+        """#
+        let changed = await store.note(
+            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_unknown",
+            toolName: "AskUserQuestion",
+            inputHash: PromptInputHash.of(toolName: "AskUserQuestion", toolInputJSON: answeredInput))
 
         #expect(changed == [terminal])
         #expect(await waiter.value == .resolvedElsewhere)

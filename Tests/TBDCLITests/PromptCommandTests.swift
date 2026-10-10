@@ -244,6 +244,21 @@ struct PromptHookPayloadParserTests {
         #expect(e.inputHash == r.inputHash)
     }
 
+    /// The terminal answered an unpaired question: the `PostToolUse` input
+    /// carries the merged `answers`, and its hash must still match the
+    /// register's so the daemon can close the prompt.
+    @Test func questionPostWithAnswersHashesLikeTheRegister() throws {
+        let questions = #"[{"question":"Q?","multiSelect":false,"options":[{"label":"A"}]}]"#
+        let perm = #"{"session_id":"s","tool_name":"AskUserQuestion","tool_input":{"questions":\#(questions)}}"#
+        let post = #"{"session_id":"s","tool_use_id":"u","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_input":{"answers":{"Q?":"A"},"questions":\#(questions)}}"#
+        let pre = #"{"session_id":"s","tool_use_id":"u","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":\#(questions)}}"#
+        let r = try #require(PromptHookPayloadParser.permissionRequest(Data(perm.utf8)))
+        let p = try #require(PromptHookPayloadParser.toolEvent(Data(post.utf8)))
+        let e = try #require(PromptHookPayloadParser.toolEvent(Data(pre.utf8)))
+        #expect(p.inputHash == r.inputHash)
+        #expect(e.inputHash == r.inputHash)
+    }
+
     @Test func toolEventPhases() throws {
         func event(_ name: String?, fallback: PromptNotePhase = .pre) throws -> PromptHookPayloadParser.ToolEvent {
             let ev = name.map { #","hook_event_name":"\#($0)""# } ?? ""
