@@ -211,6 +211,19 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(try actuationRows().isEmpty)
     }
 
+    /// A question prompt whose questions arrive only in `tool_input` (no
+    /// `questions` items) is validated against those questions, as the card
+    /// draws them: the correct answer fits, and a missing one is still caught.
+    @Test func aQuestionCarriedOnlyInToolInputValidatesItsAnswer() {
+        let prompt = RemotePendingPrompt(
+            id: "p-q", kind: .question, toolName: "AskUserQuestion",
+            toolInputJSON: #"{"questions":[{"multiSelect":false,"options":[{"label":"A"},{"label":"B"}],"question":"Which?"}]}"#)
+        #expect(prompt.questions == nil)
+        #expect(RPCRouter.validationFailure(.question(answers: ["Which?": "A"]), against: prompt) == nil)
+        #expect(RPCRouter.validationFailure(.question(answers: ["Other?": "A"]), against: prompt)
+            == .missingAnswer(question: "Which?"))
+    }
+
     /// `allow_always` on a prompt that offered no suggestions.
     @Test func allowAlwaysWithoutSuggestionsIsRefusedLocally() async throws {
         try await enable()

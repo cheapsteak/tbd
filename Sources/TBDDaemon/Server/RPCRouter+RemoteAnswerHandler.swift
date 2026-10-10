@@ -158,14 +158,14 @@ extension RPCRouter {
 
     /// Why `answer` does not fit the mirrored prompt, or nil when it does —
     /// the same check `prompt.answer` makes locally. A question prompt's
-    /// answers are keyed on each question's full text; `allow_always` needs
-    /// the "don't ask again" suggestions the prompt offered.
+    /// answers are keyed on each question's full text, read through
+    /// `effectiveQuestions` exactly as the card reads them (so a prompt whose
+    /// questions arrive only in `tool_input` validates too); `allow_always`
+    /// needs the "don't ask again" suggestions the prompt offered.
     static func validationFailure(
         _ answer: PromptAnswer, against prompt: RemotePendingPrompt
     ) -> PromptAnswerValidation? {
-        let questions = (prompt.questions ?? []).map {
-            PromptQuestion(text: $0.prompt, header: $0.label, multiSelect: $0.multi)
-        }
+        let questions = prompt.effectiveQuestions
         let hasSuggestions = PermissionSuggestionSummary.sessionScoped(fromJSON: prompt.suggestionsJSON) != nil
         do {
             try answer.validate(kind: prompt.kind, questions: questions, hasSuggestions: hasSuggestions)

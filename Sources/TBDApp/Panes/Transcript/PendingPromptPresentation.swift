@@ -115,14 +115,7 @@ struct PendingPromptPresentation: Hashable, Sendable {
     static func remote(_ prompt: RemotePendingPrompt, selection: RemoteSessionSelection,
                        capabilities: [String], flagOn: Bool,
                        now: Date) -> PendingPromptPresentation {
-        let questions: [PromptQuestion]
-        if let items = prompt.questions, !items.isEmpty {
-            questions = PromptQuestionParser.questions(fromRemote: items)
-        } else if prompt.kind == .question, let json = prompt.toolInputJSON {
-            questions = PromptQuestionParser.questions(fromAskUserQuestionInput: json) ?? []
-        } else {
-            questions = []
-        }
+        let questions = prompt.effectiveQuestions
         let toolName = prompt.toolName.flatMap { $0.isEmpty ? nil : $0 }
             ?? (prompt.kind == .question ? unnamedQuestionTool : unnamedPermissionTool)
         return PendingPromptPresentation(

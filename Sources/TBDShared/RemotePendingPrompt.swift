@@ -42,6 +42,19 @@ public struct RemotePendingPrompt: Codable, Sendable, Equatable {
         self.suggestionsJSON = suggestionsJSON
     }
 
+    /// The questions a card draws and an answer is validated against: the
+    /// `questions` items when there are any, else, for a `.question` prompt,
+    /// the ones parsed from `tool_input`. Empty for a permission prompt or
+    /// when neither carries a usable question. The app and the daemon both
+    /// read this, so a card never offers a question `remote.answer` refuses.
+    public var effectiveQuestions: [PromptQuestion] {
+        if let questions, !questions.isEmpty {
+            return PromptQuestionParser.questions(fromRemote: questions)
+        }
+        guard kind == .question, let toolInputJSON else { return [] }
+        return PromptQuestionParser.questions(fromAskUserQuestionInput: toolInputJSON) ?? []
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, kind, questions, suggestions
         case toolUseID = "tool_use_id"

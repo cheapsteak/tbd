@@ -148,4 +148,20 @@ struct RemotePendingPromptTests {
             pendingPrompt: RemotePendingPrompt(id: "p-1", kind: .permission))
         #expect(exited.projectedForStaleSnapshot() == exited)
     }
+
+    @Test("effective questions prefer the items, then fall back to tool_input")
+    func effectiveQuestions() {
+        let input = #"{"questions":[{"header":"H","multiSelect":true,"options":[{"label":"A"}],"question":"From input?"}]}"#
+        let fromInput = RemotePendingPrompt(id: "p-1", kind: .question, toolInputJSON: input)
+        #expect(fromInput.effectiveQuestions.map(\.text) == ["From input?"])
+        #expect(fromInput.effectiveQuestions.first?.multiSelect == true)
+
+        let fromItems = RemotePendingPrompt(
+            id: "p-2", kind: .question,
+            questions: [RemotePendingQuestionItem(prompt: "From items?")], toolInputJSON: input)
+        #expect(fromItems.effectiveQuestions.map(\.text) == ["From items?"])
+
+        let permission = RemotePendingPrompt(id: "p-3", kind: .permission, toolInputJSON: input)
+        #expect(permission.effectiveQuestions.isEmpty)
+    }
 }
