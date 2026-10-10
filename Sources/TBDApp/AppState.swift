@@ -1761,21 +1761,32 @@ final class AppState {
     /// Sends prompt-card answers and keeps each card's draft and delivery
     /// state by prompt id. Itself `@Observable`. Lazy because its senders
     /// capture `self`; settable so tests install fake senders.
-    @ObservationIgnored lazy var promptAnswers = PromptAnswerController(
-        local: { [daemonClient] terminalID, promptID, answer in
-            try await daemonClient.promptAnswer(
-                terminalID: terminalID, promptID: promptID, answer: answer)
-        },
-        remote: { [daemonClient] provider, sessionID, promptID, answer in
-            try await daemonClient.remoteAnswer(
-                provider: provider, sessionID: sessionID, promptID: promptID, answer: answer)
-        },
-        onDelivered: { [weak self] prompt, summary in
-            self?.promptCardRetention.markAnswered(prompt, summary: summary)
-        },
-        onRemoteDelivered: { [weak self] selection in
-            self?.requestRemoteTranscriptSync(selection)
-        })
+    ///
+    /// Built by `makePromptAnswerController()` rather than inline: Swift
+    /// checks a lazy property's initializer expression like a default
+    /// argument, and one expression mixing `@MainActor` callbacks with
+    /// closures that call the `DaemonClient` actor is refused as "both main
+    /// actor-isolated and actor-isolated". A method body has one isolation.
+    @ObservationIgnored lazy var promptAnswers: PromptAnswerController = makePromptAnswerController()
+
+    private func makePromptAnswerController() -> PromptAnswerController {
+        let daemonClient = self.daemonClient
+        return PromptAnswerController(
+            local: { terminalID, promptID, answer in
+                try await daemonClient.promptAnswer(
+                    terminalID: terminalID, promptID: promptID, answer: answer)
+            },
+            remote: { provider, sessionID, promptID, answer in
+                try await daemonClient.remoteAnswer(
+                    provider: provider, sessionID: sessionID, promptID: promptID, answer: answer)
+            },
+            onDelivered: { [weak self] prompt, summary in
+                self?.promptCardRetention.markAnswered(prompt, summary: summary)
+            },
+            onRemoteDelivered: { [weak self] selection in
+                self?.requestRemoteTranscriptSync(selection)
+            })
+    }
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app
