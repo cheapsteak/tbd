@@ -87,6 +87,13 @@ struct PendingPromptPresentation: Hashable, Sendable {
     /// transcript lays out exactly as it would with no prompt at all.
     var rendersAsPromptCard: Bool { answerability != .readOnly(note: nil) }
 
+    /// Whether the AskUserQuestion row draws `InteractiveQuestionCard` rather
+    /// than the static card — the same test `AskUserQuestionCard.body` makes,
+    /// so the table's height estimate picks the card that will render.
+    var rendersAsInteractiveQuestionCard: Bool {
+        answerability.isAnswerable && !questions.isEmpty
+    }
+
     /// The tool name an appended row carries when a remote provider omitted it.
     static let unnamedQuestionTool = "AskUserQuestion"
     static let unnamedPermissionTool = "Permission"

@@ -105,6 +105,37 @@ struct PromptCardTests {
         }
     }
 
+    /// The table's estimate for an unrealized interactive question card is
+    /// the card's own, not the static AskUserQuestion card's, and it stays on
+    /// the low side of the measured height so realizing the row grows it.
+    @Test func interactiveQuestionCardHasItsOwnHeightEstimate() throws {
+        try withAppState { appState in
+            let prompt = questionPrompt
+            #expect(prompt.rendersAsInteractiveQuestionCard)
+            let row = node(prompt, name: "AskUserQuestion", input: Self.twoQuestionInput)
+            let estimate = TableTranscriptView.Coordinator.estimate(for: row, width: 680)
+            #expect(estimate == TableTranscriptView.Coordinator.interactiveQuestionCardEstimate(prompt))
+            #expect(estimate != TableTranscriptView.Coordinator.askUserQuestionEstimate(
+                inputJSON: Self.twoQuestionInput))
+
+            let measured = height(of: row, appState: appState)
+            #expect(estimate <= measured, "estimate \(estimate) over-reserves measured \(measured)")
+            #expect(estimate >= measured * 0.75, "estimate \(estimate) is far under measured \(measured)")
+        }
+    }
+
+    /// A question that is not answerable (the flag is off) keeps the static
+    /// card, and its estimate.
+    @Test func readOnlyQuestionKeepsTheStaticCardEstimate() {
+        let readOnly = Fix.local(PendingPromptPayload(
+            id: "q1", kind: .question, toolUseID: "toolu_Q", toolName: "AskUserQuestion",
+            toolInputJSON: Self.twoQuestionInput, suggestionsJSON: nil, createdAt: Fix.when), flagOn: false)
+        #expect(!readOnly.rendersAsInteractiveQuestionCard)
+        let row = node(readOnly, name: "AskUserQuestion", input: Self.twoQuestionInput)
+        #expect(TableTranscriptView.Coordinator.estimate(for: row, width: 680)
+            == TableTranscriptView.Coordinator.askUserQuestionEstimate(inputJSON: Self.twoQuestionInput))
+    }
+
     @Test func permissionCardHeightIsTheSameWithTheDenyFieldOpen() throws {
         try withAppState { appState in
             let prompt = permissionPrompt

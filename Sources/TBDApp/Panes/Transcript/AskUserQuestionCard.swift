@@ -92,7 +92,7 @@ struct AskUserQuestionCard: View {
     }
 
     var body: some View {
-        if let pending, pending.answerability.isAnswerable, !pending.questions.isEmpty {
+        if let pending, pending.rendersAsInteractiveQuestionCard {
             InteractiveQuestionCard(presentation: pending, timestamp: timestamp)
         } else if let note = readOnlyNote {
             VStack(alignment: .leading, spacing: 2) {

@@ -998,6 +998,8 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   estimate error.
         /// * askUserQuestion (a hosted SwiftUI card): a calibrated constant; the
         ///   realized card measures exactly and corrects.
+        /// * prompt cards: the permission card and the interactive question card
+        ///   each have their own count-driven estimate.
         static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
             guard let node else { return 32 }
             switch node.kind {
@@ -1015,6 +1017,10 @@ struct TableTranscriptView: NSViewRepresentable {
                 // a one-line chrome activity row.
                 if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .permission {
                     return permissionCardEstimate(prompt)
+                }
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .question,
+                   prompt.rendersAsInteractiveQuestionCard {
+                    return interactiveQuestionCardEstimate(prompt)
                 }
                 if name == "AskUserQuestion" { return askUserQuestionEstimate(inputJSON: inputJSON) }
                 return activityRowHeight(style: .chrome)
@@ -1083,6 +1089,41 @@ struct TableTranscriptView: NSViewRepresentable {
             var height = chrome + PermissionPromptCard.previewHeight + PermissionPromptCard.footerHeight
             if prompt.hasSuggestions {
                 height += 14 + 16 * CGFloat(prompt.suggestionLines.count)
+            }
+            return height
+        }
+
+        /// Estimated height of an unrealized interactive question card
+        /// (`InteractiveQuestionCard`), corrected exactly when the card realizes.
+        ///
+        /// That card is laid out differently from the static AskUserQuestion
+        /// card `askUserQuestionEstimate` models: compact option rows rather
+        /// than one bubble each, descriptions cut to two lines, an Other row
+        /// under every question, and one fixed footer. Its height therefore
+        /// follows the counts alone. Line heights are the fonts' one-line
+        /// heights rounded down, so what error remains is on the low side.
+        static func interactiveQuestionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            // Outer vertical padding, the role header line and its spacing, and
+            // the bubble's vertical padding.
+            let chrome: CGFloat = 8 + (12 + 3) + 16
+            var height = chrome + InteractiveQuestionCard.footerHeight
+            for question in prompt.questions {
+                // The stack spacing that separates this block from what follows.
+                height += 10
+                if let header = question.header, !header.isEmpty, header != question.text {
+                    height += 12 + 4
+                }
+                // The question line, the block's spacing, the options' top padding.
+                height += 13 + 4 + 4
+                for option in question.options {
+                    // Row padding and its label line, then the row spacing.
+                    height += 6 + 14 + 2
+                    if let description = option.description, !description.isEmpty {
+                        height += 2 + 12
+                    }
+                }
+                // The Other row: its text field and the row padding.
+                height += 22 + 6
             }
             return height
         }
