@@ -423,6 +423,24 @@ private struct SendableContext: @unchecked Sendable {
 
 // MARK: - NIO Channel Handler
 
+extension SocketServer {
+    /// Methods served without taking an RPC concurrency limiter slot.
+    ///
+    /// - `state.subscribe` and `prompt.await` hold their connection open for
+    ///   as long as the subscription or the dialog lasts; a handful of them
+    ///   would otherwise occupy every slot and freeze the daemon.
+    /// - `prompt.ack` is the hook confirming it printed a decision. The
+    ///   `prompt.answer` that delivered it waits 5 s for this ack and reads
+    ///   its absence as `already_resolved`, so an ack queued behind a burst
+    ///   of slow RPCs would turn a delivered answer into a false "answered
+    ///   elsewhere". It does no subprocess work, which is all the limiter
+    ///   bounds.
+    static func bypassesConcurrencyLimiter(method: String?) -> Bool {
+        guard let method else { return false }
+        return [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck].contains(method)
+    }
+}
+
 /// Handles individual socket connections. Reads newline-delimited JSON,
 /// routes through RPCRouter, and writes back JSON + newline.
 private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable {
@@ -581,12 +599,18 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         // no subprocess fan-out). `release()` is an actor method and so cannot
         // run from a `defer`, but there is no throwing/early-exit point between
         // acquire and release, so the slot is always returned.
+        //
+        // `prompt.ack` skips the slot — see
+        // `SocketServer.bypassesConcurrencyLimiter(method:)`.
         let method = request?.method ?? "unknown"
-        let inFlight = await limiter.acquire()
-        // Cheap in-flight gauge: only log when contention is notable, never at
-        // info on every request.
-        if inFlight > RPCConcurrencyLimiter.maxConcurrentRPCs / 2 {
-            perfLogger.debug("rpc in-flight high: \(inFlight, privacy: .public)")
+        let limited = !SocketServer.bypassesConcurrencyLimiter(method: request?.method)
+        if limited {
+            let inFlight = await limiter.acquire()
+            // Cheap in-flight gauge: only log when contention is notable,
+            // never at info on every request.
+            if inFlight > RPCConcurrencyLimiter.maxConcurrentRPCs / 2 {
+                perfLogger.debug("rpc in-flight high: \(inFlight, privacy: .public)")
+            }
         }
 
         let signposter = RPCSignposts.signposter
@@ -595,7 +619,7 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         let response = await router.handleRaw(data, connection: connection)
         signposter.endInterval("rpc.handle", intervalState)
 
-        await limiter.release()
+        if limited { await limiter.release() }
 
         do {
             let responseData = try JSONEncoder().encode(response)

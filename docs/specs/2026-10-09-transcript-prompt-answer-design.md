@@ -173,7 +173,9 @@ A prompt resolves on the first of these:
 - **`prompt.answer` from the app.** The store hands the payload to the
   waiting hook, and the RPC returns once the hook acknowledges it. If no
   acknowledgement arrives within 5 seconds, the RPC answers
-  `already_resolved`.
+  `already_resolved`. The acknowledgement (`prompt.ack`) bypasses the RPC
+  concurrency limiter, so a burst of slow RPCs can't delay it past that
+  window and turn a delivered answer into "answered elsewhere".
   - If no hook is attached at that moment, for example while a daemon restart
     is still reconnecting it, the RPC returns a retryable error. The card
     offers Retry.
