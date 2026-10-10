@@ -146,7 +146,7 @@ struct ProgramStatusAppTests {
         state.forwardProgramStatusReport(
             terminalID: id, payload: Array("state=blocked;kind=permission".utf8), observedAt: observedAt)
 
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { sent.count == 2 }
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == 2 }
         if outcome == .timedOut {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
@@ -175,7 +175,7 @@ struct ProgramStatusAppTests {
         // Positive control on the same forwarder: an eligible report behind
         // them arrives, and being serial, it arrives after anything they sent.
         state.forwardProgramStatusReport(terminalID: holder, payload: Array("state=done".utf8), observedAt: Date())
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { sent.count >= 1 }
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 1 }
         if outcome == .timedOut {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
