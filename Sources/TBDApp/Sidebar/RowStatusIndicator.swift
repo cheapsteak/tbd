@@ -29,6 +29,13 @@ enum SuffixRowIndicator: Equatable {
     /// kept alive). A calm, whisper-quiet moon — deliberately NOT alarming: the
     /// session is safe and wakes automatically on focus.
     case hibernated
+    /// The agent reported over OSC 7501 that it is blocked on signing in.
+    case needsAuth
+    /// The agent reported over OSC 7501 that its last turn ended in an error.
+    case turnFailed
+    /// The agent reported over OSC 7501 that its work is finished. Quiet, and
+    /// distinct from idle (which shows nothing).
+    case finished
 
     /// SF Symbol for glyph-based suffixes. `.working` is `nil` because it is
     /// rendered as an animated `TypingDotsView`, not a static symbol.
@@ -39,6 +46,9 @@ enum SuffixRowIndicator: Equatable {
         case .working:    return nil
         case .suspended:  return "pause.circle.fill"
         case .hibernated: return "moon.zzz.fill"
+        case .needsAuth:  return "person.crop.circle.badge.exclamationmark"
+        case .turnFailed: return "exclamationmark.triangle.fill"
+        case .finished:   return "checkmark.circle"
         }
     }
 
@@ -63,6 +73,15 @@ enum SuffixRowIndicator: Equatable {
             // Tertiary — quieter than suspended, so it reads as "resting", not
             // "stopped". A whisper, not a flag.
             return Color.secondary.opacity(0.55)
+        case .needsAuth:
+            // Same amber as `.attention`: signing in is something only the
+            // user can do.
+            return SuffixRowIndicator.attention.color
+        case .turnFailed:
+            return .orange
+        case .finished:
+            // Quiet — a finished session asks for review, not alarm.
+            return Color.secondary.opacity(0.7)
         }
     }
 }
@@ -133,8 +152,9 @@ enum RowStatusIndicator {
         }
     }
 
-    /// Suffix slot. Priority (highest first): error > attention > working >
-    /// suspended > hibernated. `taskComplete` produces no suffix;
+    /// Suffix slot. Priority (highest first): error > needsAuth > attention >
+    /// turnFailed > working > turnFinished > suspended > hibernated.
+    /// `taskComplete` produces no suffix;
     /// `responseComplete` is surfaced as a bold name in the view, not as a
     /// suffix. Hibernated is lowest — it's the calmest, safest state, so any
     /// louder signal wins the slot.
@@ -157,20 +177,37 @@ enum RowStatusIndicator {
     /// `.informational` and `.unrecognized` are no signal here — see
     /// `AwaitingInputClass`, where an unknown class is never guessed into a
     /// neighbouring one.
+    ///
+    /// `needsAuth`, `turnFailed` and `turnFinished` come only from
+    /// OSC-authoritative terminals (Program Status Protocol, flag on) and
+    /// default to false, so every other caller resolves exactly as before.
+    /// Needs-sign-in outranks attention because nothing else moves until the
+    /// user signs in; a failed turn sits below attention (a live prompt is
+    /// more urgent) and above working; finished sits below working, as the
+    /// quiet "ready for review" state.
     static func suffix(
         notification: NotificationType?,
         isWorking: Bool,
         isSuspended: Bool,
         isHibernated: Bool = false,
-        hasPromptOnScreen: Bool = false
+        hasPromptOnScreen: Bool = false,
+        needsAuth: Bool = false,
+        turnFailed: Bool = false,
+        turnFinished: Bool = false
     ) -> SuffixRowIndicator? {
         if notification == .error {
             return .error
+        } else if needsAuth {
+            return .needsAuth
         } else if notification == .attentionNeeded || notification == .focusRequest
                     || hasPromptOnScreen {
             return .attention
+        } else if turnFailed {
+            return .turnFailed
         } else if isWorking {
             return .working
+        } else if turnFinished {
+            return .finished
         } else if isSuspended {
             return .suspended
         } else if isHibernated {

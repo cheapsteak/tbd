@@ -50,6 +50,53 @@ extension AppState {
     private func programStatusTerminal(_ terminalID: UUID) -> Terminal? {
         terminals.values.lazy.flatMap { $0 }.first { $0.id == terminalID }
     }
+
+    // MARK: - Snapshot mirror
+
+    /// Apply one snapshot from the daemon. A snapshot older than the last one
+    /// applied for its terminal is dropped, so a late list result or an
+    /// out-of-order delta cannot resurrect retracted state. An empty snapshot
+    /// is a retraction and removes the entry; its revision is still recorded.
+    func applyProgramStatusSnapshot(_ snapshot: ProgramStatusSnapshot) {
+        if let applied = programStatusRevisions[snapshot.terminalID], snapshot.revision < applied {
+            return
+        }
+        programStatusRevisions[snapshot.terminalID] = snapshot.revision
+        if snapshot.isEmpty {
+            programStatusSnapshots.removeValue(forKey: snapshot.terminalID)
+        } else {
+            programStatusSnapshots[snapshot.terminalID] = snapshot
+        }
+    }
+
+    /// Seed the mirror from `terminal.programStatusList`. Best-effort: a
+    /// failure leaves the mirror to the deltas.
+    func hydrateProgramStatus() async {
+        do {
+            let snapshots = try await programStatusListFetcher()
+            for snapshot in snapshots {
+                applyProgramStatusSnapshot(snapshot)
+            }
+        } catch {
+            programStatusLogger.debug(
+                "program status list failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Keep the mirror in step with the flag after a capabilities refresh:
+    /// off drops every snapshot (nothing renders them, and `title`/`msg` need
+    /// not linger in memory); a switch from off to on re-seeds from the list.
+    /// Revisions are kept — the daemon never resets them within a run.
+    func programStatusCapabilitiesChanged(wasEnabled: Bool) {
+        let enabled = daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
+        if !enabled {
+            if !programStatusSnapshots.isEmpty {
+                programStatusSnapshots.removeAll()
+            }
+        } else if !wasEnabled {
+            Task { [weak self] in await self?.hydrateProgramStatus() }
+        }
+    }
 }
 
 /// Serial, in-order delivery of program-status reports to the daemon.

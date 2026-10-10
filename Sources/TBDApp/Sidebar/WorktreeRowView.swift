@@ -95,7 +95,71 @@ struct WorktreeRowView: View {
 
     private var hasWorkingTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        return Self.hasForegroundWork(in: terminals)
+        let resolutions = programStatusResolutions
+        return terminals.contains { terminal in
+            if let resolution = resolutions[terminal.id] {
+                return resolution.value == .working
+            }
+            return Self.isForegroundWorking(terminal)
+        }
+    }
+
+    // MARK: - Program Status Protocol (OSC 7501)
+
+    /// Whether `program_status_enabled` is on, as the daemon last reported.
+    private var programStatusEnabled: Bool {
+        appState.daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
+    }
+
+    /// The OSC-authoritative state of each of this row's terminals that has
+    /// one. A terminal absent from the map keeps today's hook-rail reading.
+    private var programStatusResolutions: [UUID: ProgramStatusResolution] {
+        let enabled = programStatusEnabled
+        guard enabled else { return [:] }
+        let terminals = appState.terminals[worktree.id] ?? []
+        var result: [UUID: ProgramStatusResolution] = [:]
+        for terminal in terminals {
+            if let resolution = ProgramStatusRowPresentation.resolution(
+                terminal: terminal,
+                snapshot: appState.programStatusSnapshots[terminal.id],
+                enabled: enabled
+            ) {
+                result[terminal.id] = resolution
+            }
+        }
+        return result
+    }
+
+    private var hasNeedsAuthTerminal: Bool {
+        programStatusResolutions.values.contains { $0.value == .needsAuth }
+    }
+
+    private var hasTurnFailedTerminal: Bool {
+        programStatusResolutions.values.contains { $0.value == .error }
+    }
+
+    private var hasTurnFinishedTerminal: Bool {
+        programStatusResolutions.values.contains { $0.value == .done }
+    }
+
+    /// Running task entries across this row's OSC-authoritative terminals —
+    /// the small count on the working dots.
+    private var backgroundTaskCount: Int {
+        programStatusResolutions.values.reduce(0) { $0 + $1.workingTaskCount }
+    }
+
+    /// The status badge's tooltip when any terminal is OSC-authoritative; nil
+    /// otherwise, so the badge keeps its generic help text.
+    private var programStatusTooltip: String? {
+        let resolutions = programStatusResolutions
+        guard !resolutions.isEmpty else { return nil }
+        let terminals = appState.terminals[worktree.id] ?? []
+        var entries: [(label: String, snapshot: ProgramStatusSnapshot)] = []
+        for terminal in terminals where resolutions[terminal.id] != nil {
+            guard let snapshot = appState.programStatusSnapshots[terminal.id] else { continue }
+            entries.append((label: ProgramStatusRowPresentation.tooltipLabel(for: terminal), snapshot: snapshot))
+        }
+        return ProgramStatusRowPresentation.tooltip(terminals: entries)
     }
 
     /// One of the row's terminals has a prompt on screen right now.
@@ -105,13 +169,24 @@ struct WorktreeRowView: View {
     /// notification is auto-marked-read for every visible worktree, so the
     /// selected or pinned row — the one being looked at — lost it and animated
     /// the thinking dots at a session waiting on a permission prompt.
+    ///
+    /// An OSC-authoritative terminal speaks for itself instead: it has a
+    /// prompt on screen exactly when it resolves to awaiting input.
     private var hasPromptOnScreenTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        return Self.hasPromptOnScreen(in: terminals)
+        let resolutions = programStatusResolutions
+        return terminals.contains { terminal in
+            if let resolution = resolutions[terminal.id] {
+                if case .awaitingInput = resolution.value { return true }
+                return false
+            }
+            return terminal.hasPromptOnScreen
+        }
     }
 
-    /// The collection form of `Terminal.hasPromptOnScreen`, used by the row,
-    /// by the jump menu, and by pure presentation tests.
+    /// The collection form of `Terminal.hasPromptOnScreen`, used by pure
+    /// presentation tests. The row composes per terminal instead, so an
+    /// OSC-authoritative terminal can speak for itself.
     nonisolated static func hasPromptOnScreen(in terminals: [Terminal]) -> Bool {
         terminals.contains { $0.hasPromptOnScreen }
     }
@@ -141,7 +216,9 @@ struct WorktreeRowView: View {
             && terminal.presentationActivityState == .working
     }
 
-    /// The collection form used by the row and by pure presentation tests.
+    /// The collection form used by pure presentation tests. The row composes
+    /// per terminal instead, so an OSC-authoritative terminal can speak for
+    /// itself.
     nonisolated static func hasForegroundWork(in terminals: [Terminal]) -> Bool {
         terminals.contains(where: isForegroundWorking)
     }
@@ -515,27 +592,39 @@ struct WorktreeRowView: View {
 
     @ViewBuilder
     private func suffixIcon() -> some View {
+        let tooltip: String? = programStatusTooltip
+        let taskCount: Int = backgroundTaskCount
         switch RowStatusIndicator.suffix(
             notification: notification,
             isWorking: hasWorkingTerminal,
             // Suspend retired: every parked session funnels to the moon.
             isSuspended: false,
             isHibernated: hasParkedTerminal,
-            hasPromptOnScreen: hasPromptOnScreenTerminal
+            hasPromptOnScreen: hasPromptOnScreenTerminal,
+            needsAuth: hasNeedsAuthTerminal,
+            turnFailed: hasTurnFailedTerminal,
+            turnFinished: hasTurnFinishedTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
                 .frame(width: 14, height: 12)
+                .overlay(alignment: .topTrailing) {
+                    if taskCount > 0 {
+                        Text("\(taskCount)")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 .padding(.leading, -3)
                 .offset(y: 2)
-                .help(Self.suffixHelp(.working))
+                .help(tooltip ?? Self.suffixHelp(.working))
         case let indicator?:
             if let symbol = indicator.systemImage {
                 Image(systemName: symbol)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(indicator.color)
                     .frame(width: 12, height: 12)
-                    .help(Self.suffixHelp(indicator))
+                    .help(tooltip ?? Self.suffixHelp(indicator))
             }
         case nil:
             EmptyView()
@@ -549,6 +638,9 @@ struct WorktreeRowView: View {
         case .working:    return "Agent is working"
         case .suspended:  return "Suspended"
         case .hibernated: return "Hibernating — wakes on focus"
+        case .needsAuth:  return "Needs you to sign in again"
+        case .turnFailed: return "The last turn failed"
+        case .finished:   return "Finished"
         }
     }
 
