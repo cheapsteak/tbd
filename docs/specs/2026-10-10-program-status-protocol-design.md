@@ -118,20 +118,28 @@ data.
 When `program_status_enabled` resolves true, whichever reader owns the holder
 pty answers a `?` query with `ESC ] 7501 ; ? BEL`:
 
-- **App attached** – `TBDTerminalView`'s OSC observer (`observeOscEvents`,
-  the same non-preempting hook OSC 777 uses) sees code 7501 and writes the
+The reply must be written synchronously, while SwiftTerm parses the probe.
+Claude Code writes the probe before its DA1 query and treats DA1's reply as
+the end of the probe batch: a 7501 reply that arrives after the DA1 reply
+settles the protocol off. SwiftTerm answers DA1 synchronously during parsing,
+so the probe reply comes from a synchronous OSC handler
+(`registerOscHandler` for code 7501, which has no built-in handler to
+preempt), never from the asynchronous `observeOscEvents` stream.
+
+- **App attached** – `TBDTerminalView` registers the handler and writes the
   reply through the terminal's normal send path, which lands on the holder's
   write fd.
-- **App detached** – the daemon's headless `HolderEmulator` observes the same
-  code and replies through `ReplyForwardingDelegate`, the path it already uses
-  for DA1 and friends.
+- **App detached** – the daemon's headless `HolderEmulator` registers the
+  same handler and replies through `ReplyForwardingDelegate`, the path it
+  already uses for DA1 and friends.
 
 Both readers must answer identically, because Claude Code asks once at
 startup: a probe answered only by the app would make the feature depend on
 whether the app happened to be attached when Claude launched.
 
-While a snapshot replays, OSC observation is already suspended, so a 7501 in
-replayed history is never answered or ingested.
+A snapshot replay must never answer a probe or ingest a report. Reports are
+read from `observeOscEvents`, which is already suspended during replay; the
+probe handler checks the same replay state and stays silent while it is up.
 
 When the flag resolves false, neither reader answers, Claude Code never
 enables the protocol, and behavior is identical to a build without this
