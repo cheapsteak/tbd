@@ -137,7 +137,7 @@ public final class RPCRouter: Sendable {
     /// effects get rolled back. Never set in production; when nil (always,
     /// outside tests) the promote path is unchanged.
     nonisolated(unsafe) var scratchPromoteMigrationFailureHook: (@Sendable () async throws -> Void)?
-    public let pendingQuestions: PendingQuestionStore
+    public let pendingQuestions: PendingPromptStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
     /// Deletes per-profile Claude Code OAuth credential items from the login
@@ -427,7 +427,7 @@ public final class RPCRouter: Sendable {
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        pendingQuestions: PendingPromptStore = PendingPromptStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),

@@ -64,7 +64,7 @@ public struct WorktreeLifecycle: Sendable {
     public let hooks: HookResolver
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
-    public let pendingQuestions: PendingQuestionStore
+    public let pendingQuestions: PendingPromptStore
     /// Routes ambient claude-projects-root resolution for the revive
     /// transcript sync — injectable (mirroring `RPCRouter.configDirManager`)
     /// so tests point it at a temp dir instead of falling back to the real
@@ -225,7 +225,7 @@ public struct WorktreeLifecycle: Sendable {
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        pendingQuestions: PendingPromptStore = PendingPromptStore(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
         preSessionPollInterval: TimeInterval = 0.5,

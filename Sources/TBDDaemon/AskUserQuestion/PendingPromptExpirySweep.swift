@@ -11,10 +11,10 @@ import TBDShared
 /// satisfy it.
 ///
 /// The sweep owns only the timer; the reap itself is
-/// `PendingQuestionStore.gcExpired`, which the `terminal.transcript` RPC
+/// `PendingPromptStore.gcExpired`, which the `terminal.transcript` RPC
 /// handler also runs for a pane with no transcript path. Running both is
 /// harmless — the second pass finds nothing left to reap.
-actor PendingQuestionExpirySweep {
+actor PendingPromptExpirySweep {
 
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "askUserQuestion")
 
@@ -26,7 +26,7 @@ actor PendingQuestionExpirySweep {
     /// entry is `maxAge + interval` rather than a multiple of either.
     static let interval = Duration.seconds(300)
 
-    private let store: PendingQuestionStore
+    private let store: PendingPromptStore
     private let now: @Sendable () -> Date
     private let onReap: @Sendable (UUID) async -> Void
     private let clock: any Clock<Duration>
@@ -36,7 +36,7 @@ actor PendingQuestionExpirySweep {
     ///   caller can publish the terminal's new (possibly empty) set. Defaults
     ///   to a no-op for tests that only care about the reap.
     init(
-        store: PendingQuestionStore,
+        store: PendingPromptStore,
         now: @escaping @Sendable () -> Date = { Date() },
         onReap: @escaping @Sendable (UUID) async -> Void = { _ in },
         clock: any Clock<Duration> = ContinuousClock()

@@ -2302,7 +2302,7 @@ actor DaemonClient {
 
     /// Tell the daemon that these pending `AskUserQuestion` captures now have a
     /// matching `tool_use` line in the JSONL, so it can drop them from
-    /// `PendingQuestionStore` and retract them from every subscriber.
+    /// `PendingPromptStore` and retract them from every subscriber.
     ///
     /// The app's own transcript reader calls this, because it is the party that
     /// parses the file and so the only one that sees the match. For a pane with

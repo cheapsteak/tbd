@@ -4823,7 +4823,7 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
 }
 
 /// Reports that the app observed a pending capture's `tool_use` line in the
-/// JSONL, so the daemon can drop it from `PendingQuestionStore`.
+/// JSONL, so the daemon can drop it from `PendingPromptStore`.
 ///
 /// This is the lazy clean-up `terminal.transcript` performs for itself, made
 /// callable by the reader that replaces it: the app is the party that parses

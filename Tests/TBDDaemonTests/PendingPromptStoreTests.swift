@@ -3,9 +3,9 @@ import Foundation
 import TBDShared
 @testable import TBDDaemonLib
 
-@Suite struct PendingQuestionStoreTests {
+@Suite struct PendingPromptStoreTests {
     @Test func setThenEntriesReturnsStoredValue() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         let pending = PendingAskUserQuestion(
             toolUseID: "toolu_test1",
@@ -19,7 +19,7 @@ import TBDShared
     }
 
     @Test func twoSetsSameTerminalDifferentToolIDsCoexist() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         await store.set(terminalID: terminalID, PendingAskUserQuestion(
             toolUseID: "toolu_a", inputJSON: "{}", timestamp: Date()))
@@ -31,7 +31,7 @@ import TBDShared
     }
 
     @Test func clearMatchingToolUseIDRemovesOnlyThatEntry() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         await store.set(terminalID: terminalID, PendingAskUserQuestion(
             toolUseID: "toolu_a", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1)))
@@ -43,7 +43,7 @@ import TBDShared
     }
 
     @Test func clearMismatchedToolUseIDIsNoOp() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         await store.set(terminalID: terminalID, PendingAskUserQuestion(
             toolUseID: "toolu_a", inputJSON: "{}", timestamp: Date()))
@@ -53,7 +53,7 @@ import TBDShared
     }
 
     @Test func clearTerminalRemovesAllEntries() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         await store.set(terminalID: terminalID, PendingAskUserQuestion(
             toolUseID: "toolu_a", inputJSON: "{}", timestamp: Date()))
@@ -65,7 +65,7 @@ import TBDShared
     }
 
     @Test func gcExpiredRemovesEntriesOlderThanMaxAge() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         let now = Date(timeIntervalSince1970: 10_000)
         let oldEntry = PendingAskUserQuestion(
@@ -92,7 +92,7 @@ import TBDShared
     // tell which of two racing sends carries the later state.
 
     @Test func snapshotPairsEntriesWithTheRevisionThatProducedThem() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         let before = await store.snapshot(forTerminal: terminalID)
         #expect(before.entries.isEmpty)
@@ -107,7 +107,7 @@ import TBDShared
     }
 
     @Test func everyMutationAdvancesTheRevision() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
         var seen: [UInt64] = []
 
@@ -130,7 +130,7 @@ import TBDShared
     }
 
     @Test func gcExpiredAdvancesOnlyTheReapedTerminalsRevision() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let reaped = UUID()
         let untouched = UUID()
         let now = Date(timeIntervalSince1970: 10_000)
@@ -149,7 +149,7 @@ import TBDShared
     }
 
     @Test func revisionsAreIndependentPerTerminal() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let busy = UUID()
         let quiet = UUID()
         for i in 0..<5 {
@@ -168,7 +168,7 @@ import TBDShared
     }
 
     @Test func entriesIsolatedByTerminalID() async {
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let a = UUID()
         let b = UUID()
         await store.set(terminalID: a, PendingAskUserQuestion(
@@ -204,14 +204,14 @@ struct PendingQuestionBroadcastRevisionTests {
     @Test("each broadcast carries the store's current revision for that terminal")
     func broadcastStampsTheRevision() async {
         let (subs, captured) = capturingManager()
-        let store = PendingQuestionStore()
+        let store = PendingPromptStore()
         let terminalID = UUID()
 
         await store.set(terminalID: terminalID, PendingAskUserQuestion(
             toolUseID: "toolu_a", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1)))
-        await subs.broadcastPendingQuestions(terminalID: terminalID, from: store)
+        await subs.broadcastPendingPrompts(terminalID: terminalID, from: store)
         await store.clear(terminalID: terminalID)
-        await subs.broadcastPendingQuestions(terminalID: terminalID, from: store)
+        await subs.broadcastPendingPrompts(terminalID: terminalID, from: store)
 
         let deltas = captured.all
         #expect(deltas.count == 2)

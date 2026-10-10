@@ -6,7 +6,10 @@ import TBDShared
 /// The merger inside `handleTerminalTranscript` reads from this and
 /// removes entries once a matching `tool_use_id` appears in the JSONL —
 /// see `RPCRouter+TerminalHandlers.swift`.
-public actor PendingQuestionStore {
+///
+/// Not to be confused with `PendingPromptCoordinator`, which parks a
+/// worktree's queued first message.
+public actor PendingPromptStore {
     public struct Key: Hashable, Sendable {
         public let terminalID: UUID
         public let toolUseID: String
@@ -79,7 +82,7 @@ public actor PendingQuestionStore {
     /// hook returns `decision: "block"`, so no matching `tool_use_id` ever
     /// reaches the JSONL to satisfy it.
     ///
-    /// Driven by `PendingQuestionExpirySweep` on its own timer, and also once
+    /// Driven by `PendingPromptExpirySweep` on its own timer, and also once
     /// per `handleTerminalTranscript` while that path is still live. The
     /// returned terminal ids are what a caller broadcasts: a reap is a
     /// mutation like any other, and a set reaped without a retraction leaves

@@ -1730,7 +1730,7 @@ final class AppState {
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
     /// In-flight `AskUserQuestion` captures by terminal, mirrored from the
-    /// daemon's `PendingQuestionStore` over `.terminalPendingQuestionsChanged`.
+    /// daemon's `PendingPromptStore` over `.terminalPendingQuestionsChanged`.
     /// Merged into that terminal's session transcript so a question renders
     /// before its `tool_use` line reaches the JSONL — the job the daemon's
     /// `terminal.transcript` handler did before the app read transcripts
@@ -2781,7 +2781,7 @@ final class AppState {
     func startSubscription() {
         subscriptionTask?.cancel()
         // A new subscription is a new ordering domain. The daemon's
-        // `PendingQuestionStore` is memory-only, so a restarted daemon counts
+        // `PendingPromptStore` is memory-only, so a restarted daemon counts
         // from zero again; keeping the old high-water marks would make the app
         // drop every delta it then sends.
         pendingQuestionRevisions.removeAll()
