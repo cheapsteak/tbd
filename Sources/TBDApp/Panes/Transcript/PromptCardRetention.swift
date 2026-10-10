@@ -75,10 +75,19 @@ final class PromptCardRetention {
     /// previous report and is not any more is held as ``PromptCardPhase/closed``
     /// — unless it is already held (answered from the card), which keeps its
     /// answer and its original timeout.
+    ///
+    /// A prompt held as closed that is live again (a provider's poll missed
+    /// it once, or a hook reconnected under the same id) is released: the
+    /// dialog is open, so the card must be answerable again rather than
+    /// read "Answered elsewhere". An answered hold is kept — TBD's answer is
+    /// on its way, and the dialog has not caught up.
     func observe(live: [PendingPromptPresentation], for target: PromptAnswerTarget) {
         let now = Dictionary(live.map { ($0.promptID, $0) }, uniquingKeysWith: { first, _ in first })
         let before = lastLive[target] ?? [:]
         lastLive[target] = now.isEmpty ? nil : now
+        for promptID in now.keys where held[promptID]?.presentation.phase == .closed {
+            release(promptID)
+        }
         for (promptID, prompt) in before where now[promptID] == nil && held[promptID] == nil {
             var closed = prompt
             closed.phase = .closed

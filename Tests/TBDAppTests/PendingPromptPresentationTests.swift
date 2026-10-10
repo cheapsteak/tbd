@@ -368,6 +368,31 @@ struct PromptCardRetentionTests {
         #expect(retention.cards(live: [], for: .remote(provider: "acme", sessionID: "s1")).isEmpty)
     }
 
+    @Test func aClosedPromptThatComesBackIsOpenAgain() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let prompt = Fix.local(Fix.permissionPayload())
+        retention.observe(live: [prompt], for: Self.target)
+        retention.observe(live: [], for: Self.target)
+        #expect(retention.heldPhase(for: "p1") == .closed)
+
+        // The same id is live again: the dialog is open, so the card is too.
+        retention.observe(live: [prompt], for: Self.target)
+        #expect(retention.heldPhase(for: "p1") == nil)
+        let shown = retention.cards(live: [prompt], for: Self.target)
+        #expect(shown.map(\.phase) == [.open])
+        #expect(shown.first?.acceptsAnswer == true)
+    }
+
+    @Test func anAnsweredHoldSurvivesThePromptBeingLiveAgain() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let prompt = Fix.local(Fix.permissionPayload())
+        retention.observe(live: [prompt], for: Self.target)
+        retention.markAnswered(prompt, summary: "Allowed")
+        retention.observe(live: [], for: Self.target)
+        retention.observe(live: [prompt], for: Self.target)
+        #expect(retention.heldPhase(for: "p1") == .answered(summary: "Allowed"))
+    }
+
     @Test func theFallbackCardRetiresOnTheTimeout() async {
         let clock = TestClock()
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
