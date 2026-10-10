@@ -8,6 +8,7 @@ import TBDShared
 // Design: docs/specs/2026-10-09-transcript-prompt-answer-design.md,
 // "The awaiting-input gate".
 
+@MainActor
 @Suite("Composer prompt hint")
 struct ComposerPromptHintTests {
     typealias Fix = PromptFixtures
