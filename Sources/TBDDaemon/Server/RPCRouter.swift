@@ -801,6 +801,19 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAskUserQuestionCleared(request.paramsData)
             case RPCMethod.terminalAskUserQuestionSatisfied:
                 return try await handleTerminalAskUserQuestionSatisfied(request.paramsData)
+            case RPCMethod.promptNote:
+                return try await handlePromptNote(request.paramsData)
+            case RPCMethod.promptRegister:
+                return try await handlePromptRegister(request.paramsData)
+            case RPCMethod.promptAnswer:
+                return try await handlePromptAnswer(request.paramsData, actor: request.actor)
+            case RPCMethod.promptAck:
+                return try await handlePromptAck(request.paramsData)
+            case RPCMethod.promptAwait:
+                // A long-poll parks a waiter, and only the socket can see the
+                // connection close that releases it. `SocketServer` serves it
+                // around the limiter; every other caller (HTTP) is refused.
+                return RPCResponse(error: Self.promptAwaitSocketOnlyRefusal)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:

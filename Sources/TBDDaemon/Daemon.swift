@@ -2333,6 +2333,17 @@ public final class Daemon: Sendable {
             await http.stop()
         }
 
+        // Settle the open transcript prompts only now, after the socket has
+        // closed every `prompt.await` connection. Resolving them first would
+        // tell each waiting hook "resolved elsewhere" and it would exit for
+        // good; a hook that instead sees its connection drop reconnects to the
+        // next daemon and registers again, keeping its prompt answerable.
+        // This releases whatever the closes did not reach — chiefly a
+        // `prompt.answer` still waiting for a delivery ack.
+        if let router = self.router {
+            await router.pendingQuestions.resolveAll()
+        }
+
         // Remove the PID file only if it still names this process. During a
         // handover the successor has already written its own pid over it, and
         // deleting that claim would reopen the spawn race the successor-first

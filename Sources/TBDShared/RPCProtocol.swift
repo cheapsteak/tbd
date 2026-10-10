@@ -231,6 +231,9 @@ public enum RPCMethod {
     public static let promptAwait = "prompt.await"
     /// `prompt.answer` – the app answers a local prompt.
     public static let promptAnswer = "prompt.answer"
+    /// `prompt.ack` – the hook reports that it printed (or failed to print)
+    /// the decision a `prompt.await` reply handed it.
+    public static let promptAck = "prompt.ack"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -4927,6 +4930,36 @@ public enum PromptAwaitResult: Codable, Sendable, Equatable {
     case answered(hookOutput: String)
     /// The prompt resolved some other way: the hook prints nothing.
     case resolvedElsewhere
+}
+
+/// The reply `prompt.await` sends on the daemon socket.
+///
+/// With `.answered` it carries `deliveryToken`. The hook prints the decision
+/// to stdout and then calls `prompt.ack` with that token: `delivered: true`
+/// once the decision is printed, `false` when printing failed. `prompt.answer`
+/// waits for that ack (5 s) before it reports `delivered`; no ack reads as
+/// `already_resolved`. `deliveryToken` is nil with `.resolvedElsewhere`, which
+/// needs no ack.
+public struct PromptAwaitReply: Codable, Sendable, Equatable {
+    public let result: PromptAwaitResult
+    public let deliveryToken: UUID?
+    public init(result: PromptAwaitResult, deliveryToken: UUID?) {
+        self.result = result
+        self.deliveryToken = deliveryToken
+    }
+}
+
+/// Params for `prompt.ack`. Returns `.ok()`; an unknown or late token is
+/// ignored.
+public struct PromptAckParams: Codable, Sendable {
+    /// The `deliveryToken` from the `prompt.await` reply.
+    public let token: UUID
+    /// Whether the decision reached the hook's stdout.
+    public let delivered: Bool
+    public init(token: UUID, delivered: Bool) {
+        self.token = token
+        self.delivered = delivered
+    }
 }
 
 /// Params for `prompt.answer`. The result is a `PromptAnswerResult`; a hook

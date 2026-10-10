@@ -397,10 +397,24 @@ public actor PendingPromptStore {
     /// id answers `.resolvedElsewhere` at once. A waiter already attached to
     /// the same prompt (a stale one from before a reconnect) is released with
     /// `.resolvedElsewhere`.
-    func awaitResolution(promptID: String, token: UUID) async -> PromptAwaitResult {
+    ///
+    /// `connectionClosed` closes the race between a waiter attaching and its
+    /// connection closing. The socket marks the connection closed before it
+    /// calls `waiterClosed(token:)`, and this reads the mark in the same actor
+    /// turn that attaches the waiter: a close that `waiterClosed` ran too early
+    /// to see is seen here instead, and the prompt resolves `.hookClosed`.
+    func awaitResolution(
+        promptID: String, token: UUID,
+        connectionClosed: @escaping @Sendable () -> Bool = { false }
+    ) async -> PromptAwaitResult {
         guard let record = promptRecords[promptID], !record.answered else { return .resolvedElsewhere }
         return await withCheckedContinuation { (continuation: CheckedContinuation<PromptAwaitResult, Never>) in
             guard var current = promptRecords[promptID], current.generation == record.generation, !current.answered else {
+                continuation.resume(returning: .resolvedElsewhere)
+                return
+            }
+            if connectionClosed() {
+                resolve(promptID, .hookClosed)
                 continuation.resume(returning: .resolvedElsewhere)
                 return
             }
@@ -550,6 +564,11 @@ public actor PendingPromptStore {
     /// Whether a hook is attached to the prompt right now.
     func isWaiterAttached(promptID: String) -> Bool {
         promptRecords[promptID]?.waiter != nil
+    }
+
+    /// The terminal an open prompt belongs to, or nil once it has resolved.
+    func terminalID(ofPrompt promptID: String) -> UUID? {
+        promptRecords[promptID]?.terminalID
     }
 
     /// Whether the unpaired prompt may still adopt a trailing note.

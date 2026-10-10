@@ -565,6 +565,15 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             return
         }
 
+        // prompt.await is a long-poll: it parks until the dialog resolves,
+        // which can be hours. Like state.subscribe it BYPASSES the limiter —
+        // eight parked awaits would otherwise hold every slot and freeze the
+        // daemon for the whole fleet.
+        if let request, request.method == RPCMethod.promptAwait {
+            await servePromptAwait(request, router: router, wrappedCtx: wrappedCtx)
+            return
+        }
+
         // Normal (non-subscribe) request path. Gate on the concurrency limiter
         // so a connection burst can't spawn unbounded concurrent handlers (and
         // their git/gh subprocesses). The expensive work is `handleRaw`; the
@@ -603,6 +612,82 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             }
         } catch {
             // Encoding error - skip
+        }
+    }
+
+    /// Serves one `prompt.await` on its own connection.
+    ///
+    /// Ordering is what makes a closed connection always release its waiter:
+    /// 1. The close handler is installed (on the event loop) and confirmed
+    ///    before the await starts. It marks `closed` first and only then tells
+    ///    the router, so whichever of "waiter attaches" and "close arrives"
+    ///    happens first, the store sees the other — `waiterClosed` finds the
+    ///    attached waiter, or the attach finds the mark.
+    /// 2. An `.answered` reply hands the hook its decision. A write that fails,
+    ///    or a channel already gone, is reported as not delivered at once; a
+    ///    write that succeeds is acknowledged by the hook itself through
+    ///    `prompt.ack`, after it has printed the decision.
+    private static func servePromptAwait(
+        _ request: RPCRequest,
+        router: RPCRouter,
+        wrappedCtx: SendableContext
+    ) async {
+        let token = UUID()
+        let closed = OSAllocatedUnfairLock(initialState: false)
+        let eventLoop = wrappedCtx.context.eventLoop
+
+        let installed: Bool
+        do {
+            installed = try await eventLoop.submit { () -> Bool in
+                let context = wrappedCtx.context
+                context.channel.closeFuture.whenComplete { _ in
+                    closed.withLock { $0 = true }
+                    Task { await router.promptAwaitConnectionClosed(token: token) }
+                }
+                return context.channel.isActive
+            }.get()
+        } catch {
+            installed = false
+        }
+        // The connection is already gone (or its loop is shutting down): no
+        // waiter may park for a hook nobody can reach.
+        guard installed else { return }
+
+        let response = await router.awaitPrompt(
+            request.paramsData, token: token,
+            connectionClosed: { closed.withLock { $0 } })
+        let answered: Bool = {
+            guard let reply = try? response.decodeResult(PromptAwaitReply.self),
+                  case .answered = reply.result else { return false }
+            return true
+        }()
+
+        guard let responseData = try? JSONEncoder().encode(response),
+              let responseString = String(data: responseData, encoding: .utf8) else {
+            if answered { await router.promptAwaitDelivered(token: token, delivered: false) }
+            return
+        }
+
+        eventLoop.execute {
+            let context = wrappedCtx.context
+            guard context.channel.isActive else {
+                if answered {
+                    Task { await router.promptAwaitDelivered(token: token, delivered: false) }
+                }
+                return
+            }
+            var outBuffer = context.channel.allocator.buffer(capacity: responseString.utf8.count + 1)
+            outBuffer.writeString(responseString)
+            outBuffer.writeString("\n")
+            guard answered else {
+                context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: nil)
+                return
+            }
+            let promise = context.eventLoop.makePromise(of: Void.self)
+            promise.futureResult.whenFailure { _ in
+                Task { await router.promptAwaitDelivered(token: token, delivered: false) }
+            }
+            context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: promise)
         }
     }
 

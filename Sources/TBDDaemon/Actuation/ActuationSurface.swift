@@ -124,6 +124,11 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// second one, for the same reason `remoteArchive` sits under
     /// `worktreeArchive`: one intent, one row.
     case remoteDelete
+    /// Answers a local session's open dialog (an `AskUserQuestion` picker or a
+    /// tool permission prompt) from the transcript: the decision goes to the
+    /// session's waiting `PermissionRequest` hook, which hands it to Claude
+    /// Code. A `send` — input into the session — and one row per answer.
+    case promptAnswer
 
     /// The exact public method name that carries this surface's requests.
     var method: String {
@@ -159,6 +164,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteArchive: return RPCMethod.remoteArchive
         case .remoteUnarchive: return RPCMethod.remoteUnarchive
         case .remoteDelete: return RPCMethod.remoteDelete
+        case .promptAnswer: return RPCMethod.promptAnswer
         }
     }
 
@@ -167,7 +173,7 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// `hibernate`/`wake` while keeping their own `method`.
     var kind: ActuationKind {
         switch self {
-        case .terminalSend, .remoteSend, .remoteSendMessage: return .send
+        case .terminalSend, .remoteSend, .remoteSendMessage, .promptAnswer: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .terminalContinueInClaude,
