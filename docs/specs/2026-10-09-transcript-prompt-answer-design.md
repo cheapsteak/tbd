@@ -136,8 +136,10 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
 - **`PermissionRequest`, no matcher: `tbd prompt wait`.** Its hook `timeout`
   is 86400 seconds.
   1. It reads the payload and calls `prompt.register`. The daemon pairs it
-     with a `prompt note` from the same session and tool name, which supplies
-     the `tool_use_id`.
+     with a `prompt note` from the same terminal, session and tool name, which
+     supplies the `tool_use_id`. Notes and the one-open-dialog rule below are
+     scoped to the session in its terminal, because two terminals can share a
+     session id (`--resume` without `--fork-session`).
      - It matches the tool input's hash first, so two calls to the same tool
        in one message pair correctly.
      - If the hash doesn't match, it falls back to the latest note.
@@ -189,8 +191,8 @@ A prompt resolves on the first of these:
 - **`PostToolUse` or `PostToolUseFailure` for its `tool_use_id`**, or, for
   an unpaired prompt, for the same tool and input hash. The terminal won. The existing `AskUserQuestion` post hook also covers
   questions.
-- **A new `prompt.register` in the same session.** A session has one open
-  dialog at a time, so the old one is over.
+- **A new `prompt.register` in the same session and terminal.** A session
+  has one open dialog at a time, so the old one is over.
 - **The hook's connection closing.** No or Escape in the terminal killed it.
 - **The terminal or session ending.**
 - **An hour with no hook attached.** This is a safety sweep, not the normal

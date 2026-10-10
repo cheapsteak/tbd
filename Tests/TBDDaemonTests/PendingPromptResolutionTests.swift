@@ -466,6 +466,35 @@ struct PendingPromptResolutionTests {
         #expect(await store.prompts(forTerminal: terminal).map(\.id) == [new.id])
     }
 
+    /// Two terminals sharing one session id (`--resume` without
+    /// `--fork-session`) each show their own dialog: a register in one never
+    /// supersedes the other's, and neither pairs with the other's note.
+    @Test func terminalsSharingASessionIDStayApart() async {
+        let store = makeStore()
+        let terminalA = UUID()
+        let terminalB = UUID()
+        _ = await preNote(store, terminal: terminalA, session: "shared", toolUseID: "toolu_A")
+
+        let a = await register(store, params(terminal: terminalA, session: "shared"))
+        let waiterA = await attachWaiter(store, id: a.id)
+        let b = await register(store, params(terminal: terminalB, session: "shared"))
+
+        #expect(b.changed == [terminalB], "terminal A's prompt must not be superseded")
+        #expect(await store.prompts(forTerminal: terminalA).map(\.id) == [a.id])
+        #expect(await payload(store, terminal: terminalA, id: a.id)?.toolUseID == "toolu_A")
+        #expect(await payload(store, terminal: terminalB, id: b.id)?.toolUseID == nil)
+
+        // B's post for its own call leaves A's open prompt alone.
+        let changed = await store.note(
+            terminalID: terminalB, sessionID: "shared", phase: .post, toolUseID: "toolu_B",
+            toolName: "Bash", inputHash: PromptInputHash.of(toolName: "Bash", toolInputJSON: Self.bashInput))
+        #expect(changed == [terminalB])
+        #expect(await store.prompts(forTerminal: terminalA).map(\.id) == [a.id])
+        #expect(await store.prompts(forTerminal: terminalB).isEmpty)
+        await store.clear(terminalID: terminalA)
+        _ = await waiterA.value
+    }
+
     @Test func registerInAnotherSessionDoesNotSupersede() async {
         let store = makeStore()
         let terminal = UUID()

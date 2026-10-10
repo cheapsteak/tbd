@@ -94,7 +94,6 @@ public actor PendingPromptStore {
 
     /// A `PreToolUse` note: the tool call a later register pairs with.
     private struct Note {
-        let terminalID: UUID
         let toolUseID: String
         let toolName: String
         let inputHash: String?
@@ -124,11 +123,20 @@ public actor PendingPromptStore {
         var lateNoteTimer: Task<Void, Never>?
     }
 
+    /// The scope a dialog lives in: one Claude session in one terminal. Two
+    /// terminals can share a session id (`--resume` without
+    /// `--fork-session`), and each still shows its own dialogs, so neither
+    /// may supersede or pair with the other's.
+    private struct SessionKey: Hashable {
+        let terminalID: UUID
+        let sessionID: String
+    }
+
     private var promptRecords: [String: PromptRecord] = [:]
-    /// One open prompt per session.
-    private var openPromptBySession: [String: String] = [:]
+    /// One open prompt per session in a terminal.
+    private var openPromptBySession: [SessionKey: String] = [:]
     /// Newest last.
-    private var notes: [String: [Note]] = [:]
+    private var notes: [SessionKey: [Note]] = [:]
     /// `answer` calls parked until the hook acknowledges delivery, by token.
     private var ackWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     /// Tokens whose answer was handed over but whose ack waiter is not yet
@@ -184,10 +192,7 @@ public actor PendingPromptStore {
         for (id, record) in promptRecords where record.terminalID == terminalID {
             resolve(id, .terminalGone, bump: false)
         }
-        for (sessionID, list) in notes {
-            let kept = list.filter { $0.terminalID != terminalID }
-            notes[sessionID] = kept.isEmpty ? nil : kept
-        }
+        notes = notes.filter { $0.key.terminalID != terminalID }
         bumpRevision(terminalID)
     }
 
@@ -258,9 +263,10 @@ public actor PendingPromptStore {
     @discardableResult
     func note(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
               toolUseID: String, toolName: String, inputHash: String?) -> Set<UUID> {
+        let scope = SessionKey(terminalID: terminalID, sessionID: sessionID)
         switch phase {
         case .pre:
-            if let openID = openPromptBySession[sessionID],
+            if let openID = openPromptBySession[scope],
                var record = promptRecords[openID],
                record.payload.toolUseID == nil,
                record.lateNoteWindowOpen,
@@ -276,25 +282,25 @@ public actor PendingPromptStore {
                     "late note attached prompt=\(openID, privacy: .public) toolUseID=\(toolUseID, privacy: .public)")
                 return [record.terminalID]
             }
-            var list = (notes[sessionID] ?? []).filter { $0.toolUseID != toolUseID }
-            list.append(Note(terminalID: terminalID, toolUseID: toolUseID, toolName: toolName,
+            var list = (notes[scope] ?? []).filter { $0.toolUseID != toolUseID }
+            list.append(Note(toolUseID: toolUseID, toolName: toolName,
                              inputHash: inputHash, at: now()))
             if list.count > Self.maxNotesPerSession {
                 list.removeFirst(list.count - Self.maxNotesPerSession)
             }
-            notes[sessionID] = list
+            notes[scope] = list
             return []
         case .post:
-            if let list = notes[sessionID] {
+            if let list = notes[scope] {
                 let kept = list.filter { $0.toolUseID != toolUseID }
-                notes[sessionID] = kept.isEmpty ? nil : kept
+                notes[scope] = kept.isEmpty ? nil : kept
             }
             var changed: Set<UUID> = []
             for (id, record) in promptRecords where record.payload.toolUseID == toolUseID {
                 if let terminal = resolve(id, .toolFinished) { changed.insert(terminal) }
             }
             if let inputHash,
-               let openID = openPromptBySession[sessionID],
+               let openID = openPromptBySession[scope],
                let record = promptRecords[openID],
                record.payload.toolUseID == nil,
                record.payload.toolName == toolName,
@@ -311,18 +317,21 @@ public actor PendingPromptStore {
     /// Records an open dialog for a `PermissionRequest` hook.
     ///
     /// - A register in a session whose open prompt has a different id
-    ///   supersedes it: a session shows one dialog at a time.
+    ///   supersedes it: a session shows one dialog at a time. The scope is
+    ///   the session in this terminal, so a second terminal resumed into the
+    ///   same session id never supersedes the first's dialog.
     /// - A register naming an id this store still holds (the hook reconnected)
     ///   refreshes that record and keeps it open.
-    /// - Otherwise the prompt pairs with a note from the same session and
-    ///   tool: the newest with an equal input hash, else the newest. An
+    /// - Otherwise the prompt pairs with a note from the same session,
+    ///   terminal and tool: the newest with an equal input hash, else the newest. An
     ///   unpaired prompt gets a fresh UUID and a `nil` `tool_use_id`, and may
     ///   still adopt a note arriving within `lateNoteWindow`. A re-register
     ///   after a daemon restart keeps its id (`knownPromptID`) but has no
     ///   note left to pair with.
     func register(_ params: PromptRegisterParams) -> (outcome: RegisterOutcome, changed: Set<UUID>) {
         var changed: Set<UUID> = []
-        if let openID = openPromptBySession[params.sessionID], openID != params.knownPromptID,
+        let scope = SessionKey(terminalID: params.terminalID, sessionID: params.sessionID)
+        if let openID = openPromptBySession[scope], openID != params.knownPromptID,
            let terminal = resolve(openID, .superseded) {
             changed.insert(terminal)
         }
@@ -338,7 +347,7 @@ public actor PendingPromptStore {
                 suggestionsJSON: params.suggestionsJSON,
                 createdAt: existing.payload.createdAt)
             promptRecords[knownID] = existing
-            openPromptBySession[params.sessionID] = knownID
+            openPromptBySession[scope] = knownID
             bumpRevision(existing.terminalID)
             changed.insert(existing.terminalID)
             Self.log.debug("prompt re-registered id=\(knownID, privacy: .public)")
@@ -347,7 +356,7 @@ public actor PendingPromptStore {
 
         let isReRegister = params.knownPromptID != nil
         let toolUseID = params.knownToolUseID
-            ?? (isReRegister ? nil : takeNote(sessionID: params.sessionID,
+            ?? (isReRegister ? nil : takeNote(scope: scope,
                                               toolName: params.toolName,
                                               inputHash: params.inputHash))
         let id = params.knownPromptID ?? UUID().uuidString
@@ -377,7 +386,7 @@ public actor PendingPromptStore {
             }
         }
         promptRecords[id] = record
-        openPromptBySession[params.sessionID] = id
+        openPromptBySession[scope] = id
         bumpRevision(params.terminalID)
         changed.insert(params.terminalID)
         Self.log.debug(
@@ -387,14 +396,14 @@ public actor PendingPromptStore {
 
     /// The newest note in the session for `toolName`, preferring one whose
     /// input hash matches, removed so no second register can take it.
-    private func takeNote(sessionID: String, toolName: String, inputHash: String) -> String? {
-        guard var list = notes[sessionID] else { return nil }
+    private func takeNote(scope: SessionKey, toolName: String, inputHash: String) -> String? {
+        guard var list = notes[scope] else { return nil }
         guard let index = list.lastIndex(where: { $0.toolName == toolName && $0.inputHash == inputHash })
             ?? list.lastIndex(where: { $0.toolName == toolName }) else {
             return nil
         }
         let note = list.remove(at: index)
-        notes[sessionID] = list.isEmpty ? nil : list
+        notes[scope] = list.isEmpty ? nil : list
         return note.toolUseID
     }
 
@@ -553,9 +562,9 @@ public actor PendingPromptStore {
             guard let since = record.detachedSince, since <= cutoff else { continue }
             if let terminal = resolve(id, .detachedTimeout) { changed.insert(terminal) }
         }
-        for (sessionID, list) in notes {
+        for (scope, list) in notes {
             let kept = list.filter { $0.at > cutoff }
-            notes[sessionID] = kept.isEmpty ? nil : kept
+            notes[scope] = kept.isEmpty ? nil : kept
         }
         return changed
     }
@@ -600,8 +609,9 @@ public actor PendingPromptStore {
     @discardableResult
     private func resolve(_ promptID: String, _ resolution: Resolution, bump: Bool = true) -> UUID? {
         guard let record = promptRecords.removeValue(forKey: promptID) else { return nil }
-        if openPromptBySession[record.sessionID] == promptID {
-            openPromptBySession.removeValue(forKey: record.sessionID)
+        let scope = SessionKey(terminalID: record.terminalID, sessionID: record.sessionID)
+        if openPromptBySession[scope] == promptID {
+            openPromptBySession.removeValue(forKey: scope)
         }
         record.lateNoteTimer?.cancel()
         record.waiter?.continuation.resume(returning: .resolvedElsewhere)
