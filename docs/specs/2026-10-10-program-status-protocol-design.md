@@ -135,7 +135,11 @@ preempt), never from the asynchronous `observeOscEvents` stream.
 
 Both readers must answer identically, because Claude Code asks once at
 startup: a probe answered only by the app would make the feature depend on
-whether the app happened to be attached when Claude launched.
+whether the app happened to be attached when Claude launched. Both therefore
+answer for any holder session while the flag is on, whatever its agent;
+ingestion, not the probe, filters to Claude, and a panel created before the
+daemon's capabilities reach the app does not answer, so a Claude started in
+that window runs without the protocol (an accepted gap).
 
 A snapshot replay must never answer a probe or ingest a report. Reports are
 read from `observeOscEvents`, which is already suspended during replay; the
@@ -179,6 +183,15 @@ Claude Code sends `clear` when it exits cleanly, but a SIGKILLed process sends
 nothing. The store therefore drops a terminal's entries — main and tasks —
 when the holder session's child exits, when the terminal is hibernated or
 parked, when its incarnation changes, and when the flag is turned off.
+
+A child exit, a park, or the flag turning off is an unconditional end, so its
+drop also records a per-terminal watermark: a report observed at or before it
+is refused, and so is a report whose validation was suspended on the terminal
+lookup while the drop ran. Otherwise a backlog already in flight — the
+daemon's inbox, or the app's forwarder — would land after the drop and hold an
+entry nothing ever clears. A wake drops only entries whose incarnation differs
+from the terminal's current one, because by the time it runs the replacement
+session is live and what it has already reported is its current state.
 
 ### State model
 

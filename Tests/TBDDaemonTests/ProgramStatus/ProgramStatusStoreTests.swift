@@ -15,15 +15,29 @@ import TestSupport
         let published: OSAllocatedUnfairLock<[ProgramStatusSnapshot]>
         let store: ProgramStatusStore
 
-        init(enabled: Bool = true) {
+        init(
+            enabled: Bool = true,
+            lookupGate: LookupGate? = nil,
+            now: @escaping @Sendable () -> Date = { Date() }
+        ) {
             let terminals = OSAllocatedUnfairLock<[UUID: Terminal]>(initialState: [:])
             let published = OSAllocatedUnfairLock<[ProgramStatusSnapshot]>(initialState: [])
             self.terminals = terminals
             self.published = published
             self.store = ProgramStatusStore(
                 enabled: enabled,
-                terminalLookup: { id in terminals.withLock { $0[id] } },
-                publish: { snapshot in published.withLock { $0.append(snapshot) } })
+                terminalLookup: { id in
+                    if let lookupGate {
+                        await lookupGate.wait()
+                    }
+                    return terminals.withLock { $0[id] }
+                },
+                publish: { snapshot in published.withLock { $0.append(snapshot) } },
+                now: now)
+        }
+
+        func remove(_ terminalID: UUID) {
+            terminals.withLock { $0[terminalID] = nil }
         }
 
         func add(_ terminal: Terminal) {
@@ -33,6 +47,47 @@ import TestSupport
         var publishedSnapshots: [ProgramStatusSnapshot] {
             published.withLock { $0 }
         }
+    }
+
+    /// Holds every terminal lookup suspended until `release()`, so a test can
+    /// run a drop while an ingest is parked on its lookup. Lookups after the
+    /// release pass straight through.
+    fileprivate final class LookupGate: Sendable {
+        private struct State: Sendable {
+            var arrived = false
+            var released = false
+            var waiting: CheckedContinuation<Void, Never>?
+        }
+
+        private let state = OSAllocatedUnfairLock<State>(initialState: State())
+
+        var hasArrived: Bool { state.withLock { $0.arrived } }
+
+        func wait() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let resumeNow: Bool = state.withLock { current in
+                    current.arrived = true
+                    if current.released { return true }
+                    current.waiting = continuation
+                    return false
+                }
+                if resumeNow { continuation.resume() }
+            }
+        }
+
+        func release() {
+            let waiting: CheckedContinuation<Void, Never>? = state.withLock { current in
+                current.released = true
+                let held = current.waiting
+                current.waiting = nil
+                return held
+            }
+            waiting?.resume()
+        }
+    }
+
+    private struct LookupNotReached: Error, CustomStringConvertible {
+        var description: String { "the ingest never reached its terminal lookup" }
     }
 
     private func holderClaude(
@@ -290,25 +345,96 @@ import TestSupport
         #expect(h.publishedSnapshots.count == count)
     }
 
-    /// A wake's drop names a cutoff: what was observed before it goes, and a
-    /// report the woken session made at or after it stays.
-    @Test func dropWithCutoffKeepsReportsObservedAtOrAfterIt() async throws {
-        let h = Harness()
+    /// A drop that runs while an ingest is suspended on its terminal lookup
+    /// finds nothing to drop; the ingest must not then store the report it
+    /// was validating. Observed after the watermark, so only the generation
+    /// check can reject it.
+    @Test func dropDuringSuspendedIngestRejectsTheReport() async {
+        let gate = LookupGate()
+        let dropInstant = t0.addingTimeInterval(100)
+        let h = Harness(lookupGate: gate, now: { dropInstant })
         let terminal = holderClaude()
+        h.add(terminal)
+        let store = h.store
+        let report = inbound(terminal, "state=working:app=claude-code", at: 200)
+        let ingest = Task { await store.ingest(report) }
+
+        let reached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            gate.hasArrived
+        }
+        if reached == .timedOut {
+            Issue.record(LookupNotReached())
+        }
+        await store.drop(terminalID: terminal.id, reason: .childExited)
+        gate.release()
+
+        #expect(await ingest.value == .rejected("dropped during lookup"))
+        #expect(await store.snapshot(for: terminal.id) == nil)
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A report observed at or before a drop belongs to the session that drop
+    /// ended — a backlog delivered late — and is refused; one observed after
+    /// it is accepted.
+    @Test func dropWatermarkRejectsReportsObservedAtOrBeforeIt() async {
+        let dropInstant = t0.addingTimeInterval(10)
+        let h = Harness(now: { dropInstant })
+        let terminal = holderClaude()
+        h.add(terminal)
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+
+        let before = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 5))
+        #expect(before == .rejected("observed before drop"))
+        let at = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 10))
+        #expect(at == .rejected("observed before drop"))
+        #expect(await h.store.snapshot(for: terminal.id) == nil)
+
+        let after = await h.store.ingest(inbound(terminal, "state=done:app=claude-code", at: 11))
+        #expect(after == .accepted)
+        #expect(await h.store.snapshot(for: terminal.id)?.main?.state == .done)
+    }
+
+    /// A wake keeps what the live session has reported: entries of the row's
+    /// current incarnation stay, and nothing is published.
+    @Test func wakeDropKeepsTheCurrentIncarnationsEntries() async {
+        let h = Harness()
+        let terminal = holderClaude(incarnation: UUID())
         h.add(terminal)
         _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 5))
 
         let count = h.publishedSnapshots.count
-        await h.store.drop(
-            terminalID: terminal.id, reason: .woke, observedBefore: t0.addingTimeInterval(5))
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
         #expect(await h.store.snapshot(for: terminal.id)?.main?.state == .working)
         #expect(h.publishedSnapshots.count == count)
+    }
 
-        await h.store.drop(
-            terminalID: terminal.id, reason: .woke, observedBefore: t0.addingTimeInterval(6))
+    /// A wake drops entries from an incarnation the row no longer runs, and
+    /// sets no watermark: the new session's next report is accepted.
+    @Test func wakeDropDiscardsAnOldIncarnationsEntries() async throws {
+        let h = Harness()
+        var terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 5))
+
+        terminal.sessionIncarnationID = UUID()
+        h.add(terminal)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
         #expect(await h.store.snapshot(for: terminal.id) == nil)
         let last = try #require(h.publishedSnapshots.last)
         #expect(last.isEmpty)
+
+        let next = await h.store.ingest(inbound(terminal, "state=idle:app=claude-code", at: 1))
+        #expect(next == .accepted)
+    }
+
+    @Test func wakeDropDiscardsEntriesForAVanishedRow() async {
+        let h = Harness()
+        let terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 5))
+        h.remove(terminal.id)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+        #expect(await h.store.snapshot(for: terminal.id) == nil)
     }
 
     @Test func setEnabledFalseRetractsEveryTerminal() async {
@@ -335,7 +461,7 @@ import TestSupport
         _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1))
         _ = await h.store.ingest(inbound(terminal, "state=clear:app=claude-code", at: 2))
         _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 3))
-        await h.store.drop(terminalID: terminal.id, reason: .woke)
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
         let revisions = h.publishedSnapshots.map(\.revision)
         #expect(revisions == [1, 2, 3, 4])
     }

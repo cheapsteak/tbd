@@ -62,13 +62,14 @@ struct ProgramStatusAppTests {
 
     // MARK: - Eligibility
 
-    @Test("a holder Claude row with the flag on answers the probe")
+    @Test("a holder row with the flag on answers the probe")
     func holderClaudeAnswers() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .holder)
         #expect(state.answersProgramStatusProbe(terminalID: id))
+        #expect(state.answersProgramStatusProbe(transport: .holder))
     }
 
     @Test("the flag off answers nothing, explicitly off or capabilities not loaded")
@@ -78,46 +79,37 @@ struct ProgramStatusAppTests {
         let id = seed(state, kind: .claude, transport: .holder)
         state.daemonCapabilities = nil
         #expect(!state.answersProgramStatusProbe(terminalID: id))
+        #expect(!state.answersProgramStatusProbe(transport: .holder))
         state.daemonCapabilities = capabilities(programStatus: false)
         #expect(!state.answersProgramStatusProbe(terminalID: id))
+        #expect(!state.answersProgramStatusProbe(transport: .holder))
     }
 
-    @Test("a tmux-transport Claude row answers nothing")
+    @Test("a tmux-transport panel answers nothing")
     func tmuxRowAnswersNothing() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .tmux)
         #expect(!state.answersProgramStatusProbe(terminalID: id))
+        #expect(!state.answersProgramStatusProbe(transport: .tmux))
+        #expect(!state.answersProgramStatusProbe(transport: nil))
     }
 
-    @Test("a Codex row answers nothing, by kind or by legacy label")
-    func codexRowAnswersNothing() {
+    /// The probe rule is the daemon reader's: flag and holder transport, blind
+    /// to the agent. Ingestion, not the probe, filters to Claude.
+    @Test("a holder row answers whatever its agent: Codex, shell, or no kind")
+    func holderRowAnswersRegardlessOfKind() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         state.daemonCapabilities = capabilities(programStatus: true)
-        let byKind = seed(state, kind: .codex, transport: .holder)
-        let byLabel = seed(state, kind: nil, label: TerminalLabel.codex, transport: .holder)
-        #expect(!state.answersProgramStatusProbe(terminalID: byKind))
-        #expect(!state.answersProgramStatusProbe(terminalID: byLabel))
-    }
-
-    @Test("a shell row answers nothing")
-    func shellRowAnswersNothing() {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
-        let id = seed(state, kind: .shell, transport: .holder)
-        #expect(!state.answersProgramStatusProbe(terminalID: id))
-    }
-
-    @Test("a legacy row with no kind that is not Codex is treated as Claude")
-    func legacyKindlessRowAnswers() {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
-        let id = seed(state, kind: nil, transport: .holder)
-        #expect(state.answersProgramStatusProbe(terminalID: id))
+        let codexByKind = seed(state, kind: .codex, transport: .holder)
+        let codexByLabel = seed(state, kind: nil, label: TerminalLabel.codex, transport: .holder)
+        let shell = seed(state, kind: .shell, transport: .holder)
+        let legacy = seed(state, kind: nil, transport: .holder)
+        for id in [codexByKind, codexByLabel, shell, legacy] {
+            #expect(state.answersProgramStatusProbe(terminalID: id))
+        }
     }
 
     @Test("an unknown terminal answers nothing")
@@ -126,6 +118,23 @@ struct ProgramStatusAppTests {
         defer { cleanup() }
         state.daemonCapabilities = capabilities(programStatus: true)
         #expect(!state.answersProgramStatusProbe(terminalID: UUID()))
+    }
+
+    @Test("forwarding stays filtered to holder Claude rows, including a legacy row with no kind")
+    func forwardingEligibility() {
+        let holder: (TerminalKind?, String?) -> TBDShared.Terminal = { kind, label in
+            TBDShared.Terminal(
+                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                label: label, kind: kind, transport: .holder)
+        }
+        #expect(AppState.isProgramStatusEligible(holder(.claude, nil)))
+        #expect(AppState.isProgramStatusEligible(holder(nil, nil)))
+        #expect(!AppState.isProgramStatusEligible(holder(.codex, nil)))
+        #expect(!AppState.isProgramStatusEligible(holder(nil, TerminalLabel.codex)))
+        #expect(!AppState.isProgramStatusEligible(holder(.shell, nil)))
+        #expect(!AppState.isProgramStatusEligible(TBDShared.Terminal(
+            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude, transport: .tmux)))
     }
 
     // MARK: - Forwarding
@@ -164,6 +173,7 @@ struct ProgramStatusAppTests {
         defer { cleanup() }
         let holder = seed(state, kind: .claude, transport: .holder)
         let tmux = seed(state, kind: .claude, transport: .tmux)
+        let codex = seed(state, kind: .codex, transport: .holder)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
 
@@ -171,6 +181,8 @@ struct ProgramStatusAppTests {
         state.forwardProgramStatusReport(terminalID: holder, payload: Array("state=idle".utf8), observedAt: Date())
         state.daemonCapabilities = capabilities(programStatus: true)
         state.forwardProgramStatusReport(terminalID: tmux, payload: Array("state=idle".utf8), observedAt: Date())
+        // A Codex holder panel answers the probe but its reports stay local.
+        state.forwardProgramStatusReport(terminalID: codex, payload: Array("state=idle".utf8), observedAt: Date())
 
         // Positive control on the same forwarder: an eligible report behind
         // them arrives, and being serial, it arrives after anything they sent.

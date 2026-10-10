@@ -417,10 +417,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onCloseTab = {
             appState.closeFocusedTab()
         }
-        // Program Status Protocol (OSC 7501): on only for a holder-transport
-        // Claude session with the flag on, so a tmux panel never answers the
-        // probe. Re-evaluated in `updateNSView`.
-        tv.programStatusGate.set(appState.answersProgramStatusProbe(terminalID: terminalID))
+        // Program Status Protocol (OSC 7501) reports go to the app, which
+        // forwards only a holder Claude session's; the probe gate is set
+        // below, once the coordinator knows this panel.
         let programStatusAppState = appState
         let programStatusTerminalID = terminalID
         tv.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in
@@ -440,6 +439,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
+        // Program Status Protocol (OSC 7501): the probe is answered only by a
+        // holder-transport panel with the flag on — whatever agent the session
+        // runs, exactly as the daemon's reader answers — so a tmux panel never
+        // answers. Set before any byte is fed; re-evaluated in `updateNSView`.
+        tv.programStatusGate.set(
+            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -533,7 +538,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .flatMap { $0 }
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
-        nsView.programStatusGate.set(appState.answersProgramStatusProbe(terminalID: terminalID))
+        nsView.programStatusGate.set(
+            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         // Re-assigned here as well as in `makeNSView`: the closure captures the

@@ -9,24 +9,38 @@ private let programStatusLogger = Logger(subsystem: "com.tbd.app", category: "pr
 /// holder pty to `terminal.programStatusReport`.
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
 extension AppState {
-    /// Whether the panel for `terminalID` should answer the OSC 7501 probe and
-    /// forward reports: `program_status_enabled` is on, and the cached row is a
-    /// Claude session on the pty-holder transport. A tmux row, a Codex row, a
-    /// shell row, or a row the app has not loaded yet answers nothing.
+    /// Whether `program_status_enabled` is on, as the daemon's capabilities
+    /// last reported it; the shipped default until they arrive.
+    var programStatusFlagOn: Bool {
+        daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
+    }
+
+    /// Whether a panel on `transport` should answer the OSC 7501 probe: the
+    /// flag is on and the panel is a pty-holder panel. The same rule the
+    /// daemon's headless reader applies, so the answer never depends on which
+    /// reader owns the pty when Claude asks. Deliberately blind to the agent
+    /// kind: answering for a non-Claude session is harmless, because the
+    /// store accepts reports only from Claude sessions.
+    func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
+        programStatusFlagOn && transport == .holder
+    }
+
+    /// `answersProgramStatusProbe(transport:)` for the cached row of
+    /// `terminalID`; false for a row the app has not loaded.
     func answersProgramStatusProbe(terminalID: UUID) -> Bool {
-        let enabled = daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
-        guard enabled, let terminal = programStatusTerminal(terminalID) else { return false }
-        return Self.isProgramStatusEligible(terminal)
+        answersProgramStatusProbe(transport: programStatusTerminal(terminalID)?.transport)
     }
 
     /// Forward one raw OSC 7501 report (the data after `7501;`) read off this
-    /// terminal's live output. Re-checks the same predicate as
-    /// `answersProgramStatusProbe`, since the flag or the row can change
-    /// between the parse and this main-queue turn. The daemon parses and
-    /// validates; the app only carries the bytes, in order.
+    /// terminal's live output, when the flag is on and the cached row is a
+    /// holder Claude session — the store filters to Claude again, so this
+    /// only saves an RPC. Re-checked here because the flag or the row can
+    /// change between the parse and this main-queue turn. The daemon parses
+    /// and validates; the app only carries the bytes, in order.
     func forwardProgramStatusReport(terminalID: UUID, payload: [UInt8], observedAt: Date) {
-        guard answersProgramStatusProbe(terminalID: terminalID),
-              let terminal = programStatusTerminal(terminalID) else { return }
+        guard programStatusFlagOn,
+              let terminal = programStatusTerminal(terminalID),
+              Self.isProgramStatusEligible(terminal) else { return }
         guard let text = String(bytes: payload, encoding: .utf8) else {
             programStatusLogger.debug(
                 "dropped non-UTF-8 OSC 7501 report for \(terminalID.uuidString, privacy: .public)")
@@ -88,8 +102,7 @@ extension AppState {
     /// not linger in memory); a switch from off to on re-seeds from the list.
     /// Revisions are kept — the daemon never resets them within a run.
     func programStatusCapabilitiesChanged(wasEnabled: Bool) {
-        let enabled = daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
-        if !enabled {
+        if !programStatusFlagOn {
             if !programStatusSnapshots.isEmpty {
                 programStatusSnapshots.removeAll()
             }

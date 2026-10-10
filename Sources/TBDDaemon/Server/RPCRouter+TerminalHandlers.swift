@@ -5777,12 +5777,14 @@ extension RPCRouter {
     /// An exit-stamp park or un-park also drops the terminal's Program Status
     /// entries, exactly as `HibernationCoordinator.broadcastHibernation` does
     /// for every other park and wake (spec "Liveness"): unconditionally on a
-    /// park, and on an un-park only what was observed before it, so a report
-    /// from the session the un-park makes live is kept.
+    /// park, and on an un-park only entries from an incarnation other than the
+    /// row's current one, so the live session's state is kept.
     private func broadcastExitStampChange(terminalID: UUID, parked: Bool) async {
-        let cutoff: Date? = parked ? nil : programStatus.now()
-        await programStatus.drop(
-            terminalID: terminalID, reason: parked ? .parked : .woke, observedBefore: cutoff)
+        if parked {
+            await programStatus.drop(terminalID: terminalID, reason: .parked)
+        } else {
+            await programStatus.dropIfIncarnationChanged(terminalID: terminalID, reason: .woke)
+        }
         guard let row = try? await db.terminals.get(id: terminalID) else { return }
         subscriptions.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: row.id,

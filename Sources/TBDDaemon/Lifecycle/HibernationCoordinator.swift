@@ -2104,23 +2104,24 @@ public actor HibernationCoordinator {
     /// "Liveness"). Every park and wake broadcast funnels through
     /// `broadcastHibernation`, so this is the one place both are seen.
     ///
-    /// A park drops unconditionally: the store refuses reports for a parked
-    /// row, so nothing held can be newer than the park. A wake drops only what
-    /// was observed before this call, because by the time a wake broadcasts,
-    /// the replacement session is live and its first report may already be
-    /// held. `broadcastHibernation` is synchronous, so the drop runs as a task;
-    /// the cutoff is read here, before it is scheduled.
+    /// A park drops unconditionally and refuses every report observed before
+    /// it, so a report already on its way cannot land after the drop. A wake
+    /// drops only entries whose incarnation differs from the row's current
+    /// one: by the time a wake broadcasts, the replacement session is live and
+    /// what it has already reported is its current state.
+    /// `broadcastHibernation` is synchronous, so the drop runs as a task.
     ///
     /// A keep-warm toggle (`setKeepWarm`) re-broadcasts the row's current
     /// state without parking or waking it, so it passes `isParkOrWake: false`
-    /// — on a live row the wake branch would otherwise drop a running
-    /// session's status.
+    /// and drops nothing.
     private func dropProgramStatus(terminalID: UUID, hibernated: Bool) {
         guard let programStatus else { return }
-        let reason: ProgramStatusStore.DropReason = hibernated ? .parked : .woke
-        let cutoff: Date? = hibernated ? nil : programStatus.now()
         Task {
-            await programStatus.drop(terminalID: terminalID, reason: reason, observedBefore: cutoff)
+            if hibernated {
+                await programStatus.drop(terminalID: terminalID, reason: .parked)
+            } else {
+                await programStatus.dropIfIncarnationChanged(terminalID: terminalID, reason: .woke)
+            }
         }
     }
 }

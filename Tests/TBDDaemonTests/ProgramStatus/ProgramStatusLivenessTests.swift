@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 import TBDShared
 import TestSupport
 @testable import TBDDaemonLib
@@ -19,16 +20,26 @@ import TestSupport
     private func holderClaude() -> Terminal {
         Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
-            kind: .claude, transport: .holder)
+            sessionIncarnationID: UUID(), kind: .claude, transport: .holder)
     }
 
-    /// A store that knows exactly one terminal and whose clock reads `now`.
-    private func store(for terminal: Terminal, now: Date) -> ProgramStatusStore {
+    /// A store that knows exactly the terminal `row` holds, whose clock reads
+    /// `now`.
+    private func store(
+        for row: OSAllocatedUnfairLock<Terminal>, now: Date
+    ) -> ProgramStatusStore {
         ProgramStatusStore(
             enabled: true,
-            terminalLookup: { id in id == terminal.id ? terminal : nil },
+            terminalLookup: { id in
+                let terminal = row.withLock { $0 }
+                return id == terminal.id ? terminal : nil
+            },
             publish: { _ in },
             now: { now })
+    }
+
+    private func store(for terminal: Terminal, now: Date) -> ProgramStatusStore {
+        store(for: OSAllocatedUnfairLock(initialState: terminal), now: now)
     }
 
     private func coordinator(programStatus: ProgramStatusStore) throws -> HibernationCoordinator {
@@ -64,16 +75,37 @@ import TestSupport
         await awaitDropped(programStatus, terminal, after: "a park broadcast")
     }
 
-    @Test func wakeBroadcastDropsEntriesObservedBeforeIt() async throws {
-        let terminal = holderClaude()
-        let programStatus = store(for: terminal, now: t0.addingTimeInterval(10))
+    /// A wake drops what an earlier incarnation left behind.
+    @Test func wakeBroadcastDropsAnOldIncarnationsEntries() async throws {
+        var terminal = holderClaude()
+        let row = OSAllocatedUnfairLock(initialState: terminal)
+        let programStatus = store(for: row, now: t0.addingTimeInterval(10))
         try await seed(programStatus, terminal, at: t0)
+        terminal.sessionIncarnationID = UUID()
+        let woken = terminal
+        row.withLock { $0 = woken }
         let coord = try coordinator(programStatus: programStatus)
 
         await coord.broadcastHibernation(
             terminal: terminal, hibernated: false, keepWarm: false,
             tmuxWindowID: "", tmuxPaneID: "")
         await awaitDropped(programStatus, terminal, after: "a wake broadcast")
+    }
+
+    /// A wake leaves the live session's current state alone: its entries are
+    /// the row's current incarnation's. One-sided: a regressed drop would run
+    /// in a task and could land after this read; the store's own test pins
+    /// the rule deterministically.
+    @Test func wakeBroadcastKeepsTheCurrentIncarnationsEntries() async throws {
+        let terminal = holderClaude()
+        let programStatus = store(for: terminal, now: t0.addingTimeInterval(10))
+        try await seed(programStatus, terminal, at: t0.addingTimeInterval(20))
+        let coord = try coordinator(programStatus: programStatus)
+
+        await coord.broadcastHibernation(
+            terminal: terminal, hibernated: false, keepWarm: false,
+            tmuxWindowID: "", tmuxPaneID: "")
+        #expect(await programStatus.snapshot(for: terminal.id)?.main?.state == .working)
     }
 
     /// A keep-warm toggle re-broadcasts without parking or waking, and must

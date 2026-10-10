@@ -73,6 +73,16 @@ public actor ProgramStatusStore {
     /// Per-terminal mutation counter, never reset — see
     /// `ProgramStatusSnapshot.revision`.
     private var revisions: [UUID: UInt64] = [:]
+    /// Per-terminal count of unconditional drops, never reset. `ingest`
+    /// captures it before its terminal lookup suspends and refuses to apply
+    /// if it moved: a drop that ran during the lookup found nothing to drop,
+    /// and the report it raced belongs to the session that drop ended.
+    private var dropGenerations: [UUID: UInt64] = [:]
+    /// Per-terminal instant (from `now`) of the latest unconditional drop. A
+    /// report observed at or before it belongs to the session that drop
+    /// ended — a backlog the daemon's inbox or the app's forwarder delivers
+    /// late — and is refused.
+    private var droppedAt: [UUID: Date] = [:]
 
     public init(
         enabled: Bool,
@@ -151,7 +161,14 @@ public actor ProgramStatusStore {
             return reject(terminalID, "app is not \(ProgramStatusProtocol.expectedApp)")
         }
 
+        // A report observed at or before the terminal's latest drop belongs
+        // to the session that drop ended.
+        if let watermark = droppedAt[terminalID], inbound.observedAt <= watermark {
+            return reject(terminalID, "observed before drop")
+        }
+
         // 4. A live holder session whose recorded agent is Claude.
+        let generationBeforeLookup = dropGenerations[terminalID] ?? 0
         guard let terminal = await terminalLookup(terminalID) else {
             return reject(terminalID, "unknown terminal")
         }
@@ -174,6 +191,11 @@ public actor ProgramStatusStore {
 
         // The flag may have been turned off while the lookup was suspended.
         guard gate.isEnabled else { return reject(terminalID, "flag off") }
+        // A drop that ran while the lookup was suspended found nothing to
+        // drop; applying now would hold an entry nothing ever clears.
+        guard (dropGenerations[terminalID] ?? 0) == generationBeforeLookup else {
+            return reject(terminalID, "dropped during lookup")
+        }
 
         // 6. Re-read state after the await (actor reentrancy).
         var current: Held
@@ -247,24 +269,31 @@ public actor ProgramStatusStore {
         return out
     }
 
-    /// Drop every entry for a terminal (spec "Liveness"). Publishes a
-    /// retraction when anything was held.
+    /// Drop every entry for a terminal (spec "Liveness"), and refuse every
+    /// report for it observed up to now — including one whose ingest is
+    /// suspended on its terminal lookup right now. Publishes a retraction
+    /// when anything was held.
     ///
-    /// - Parameter observedBefore: when set, the entries are dropped only if
-    ///   the newest report for the terminal was observed before this instant.
-    ///   A wake drops what the session held before it was parked, but its drop
-    ///   runs after the replacement session is live and may already have
-    ///   reported; a report observed after the cutoff belongs to that session
-    ///   and is kept. Nil drops unconditionally.
-    public func drop(terminalID: UUID, reason: DropReason, observedBefore: Date? = nil) {
-        if let cutoff = observedBefore, let current = held[terminalID],
-            current.lastObservedAt >= cutoff {
-            return
-        }
-        guard let removed = held.removeValue(forKey: terminalID) else { return }
-        programStatusLog.debug(
-            "drop terminal=\(terminalID.uuidString, privacy: .public) reason=\(reason.rawValue, privacy: .public)")
-        publishEmpty(terminalID: terminalID, incarnationID: removed.incarnationID)
+    /// For an end that is unconditional: the child exited, the row parked, or
+    /// the flag went off.
+    public func drop(terminalID: UUID, reason: DropReason) {
+        dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
+        droppedAt[terminalID] = now()
+        removeHeld(terminalID: terminalID, reason: reason)
+    }
+
+    /// Drop the terminal's entries only if they belong to an incarnation other
+    /// than the row's current one (or the row is gone). A wake's drop: by the
+    /// time it runs, the replacement session is live and its reports may
+    /// already be held, and those are its current state. Sets no watermark,
+    /// so the live session's reports keep flowing.
+    public func dropIfIncarnationChanged(terminalID: UUID, reason: DropReason) async {
+        guard held[terminalID] != nil else { return }
+        let terminal = await terminalLookup(terminalID)
+        // Re-read after the await (actor reentrancy).
+        guard let current = held[terminalID] else { return }
+        if let terminal, current.incarnationID == terminal.sessionIncarnationID { return }
+        removeHeld(terminalID: terminalID, reason: reason)
     }
 
     /// Set the gate. Turning it off drops every terminal's entries.
@@ -278,6 +307,13 @@ public actor ProgramStatusStore {
     }
 
     // MARK: - Private
+
+    private func removeHeld(terminalID: UUID, reason: DropReason) {
+        guard let removed = held.removeValue(forKey: terminalID) else { return }
+        programStatusLog.debug(
+            "drop terminal=\(terminalID.uuidString, privacy: .public) reason=\(reason.rawValue, privacy: .public)")
+        publishEmpty(terminalID: terminalID, incarnationID: removed.incarnationID)
+    }
 
     private func reject(_ terminalID: UUID, _ reason: String) -> Outcome {
         programStatusLog.debug(

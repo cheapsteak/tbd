@@ -72,8 +72,8 @@ class TBDTerminalView: TerminalView {
 
     /// Whether this view answers the Program Status Protocol (OSC 7501) probe
     /// and forwards its reports. Written on main by `TerminalPanelRepresentable`
-    /// (on only for a holder-transport Claude session with
-    /// `program_status_enabled` on); read on SwiftTerm's parse thread inside
+    /// (on only for a holder-transport panel with `program_status_enabled` on,
+    /// whatever agent it runs); read on SwiftTerm's parse thread inside
     /// the synchronous OSC handler, hence a lock-guarded box rather than a
     /// plain `Bool`. Off by default, so a tmux panel never answers.
     let programStatusGate = ProgramStatusGate()
