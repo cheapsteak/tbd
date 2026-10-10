@@ -215,6 +215,13 @@ public enum RPCMethod {
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let terminalAskUserQuestionSatisfied = "terminal.askUserQuestionSatisfied"
+    /// The app forwards a raw Program Status Protocol (OSC 7501) report it
+    /// read off a holder pty while attached. Always answers ok: a report the
+    /// daemon rejects is debug-logged and the app must not retry.
+    public static let terminalProgramStatusReport = "terminal.programStatusReport"
+    /// Every terminal's current program-status snapshot (main entry and task
+    /// entries). Empty while `program_status_enabled` is off.
+    public static let terminalProgramStatusList = "terminal.programStatusList"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -4710,6 +4717,34 @@ public struct TerminalAskUserQuestionSatisfiedParams: Codable, Sendable {
     public init(terminalID: UUID, toolUseIDs: [String]) {
         self.terminalID = terminalID
         self.toolUseIDs = toolUseIDs
+    }
+}
+
+/// Params for `terminal.programStatusReport`: one OSC 7501 report the app read
+/// off a holder pty while attached, forwarded raw so the daemon's parser is
+/// the only one on the path that decides anything.
+/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
+public struct TerminalProgramStatusReportParams: Codable, Sendable {
+    public let terminalID: UUID
+    /// The terminal incarnation the app was attached to when it read the
+    /// report. The daemon rejects a report whose incarnation is not the row's.
+    public let incarnationID: UUID?
+    /// The raw OSC data after "7501;", as UTF-8 (the protocol is ASCII).
+    public let payload: String
+    public let observedAt: Date
+    public init(terminalID: UUID, incarnationID: UUID?, payload: String, observedAt: Date) {
+        self.terminalID = terminalID
+        self.incarnationID = incarnationID
+        self.payload = payload
+        self.observedAt = observedAt
+    }
+}
+
+/// Result of `terminal.programStatusList`.
+public struct TerminalProgramStatusListResult: Codable, Sendable {
+    public let snapshots: [ProgramStatusSnapshot]
+    public init(snapshots: [ProgramStatusSnapshot]) {
+        self.snapshots = snapshots
     }
 }
 

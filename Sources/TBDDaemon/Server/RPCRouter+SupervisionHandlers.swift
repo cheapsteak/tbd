@@ -131,6 +131,7 @@ extension RPCRouter {
             actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
             transcriptFingerprinter: transcriptFingerprinter,
             transcriptDeltaInspector: transcriptDeltaInspector,
+            programStatus: programStatus,
             now: now)
         return try RPCResponse(result: await builder.build(facts: facts))
     }

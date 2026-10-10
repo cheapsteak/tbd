@@ -574,6 +574,8 @@ extension RPCRouter {
         let params = try decoder.decode(
             ConfigSetProgramStatusEnabledParams.self, from: paramsData)
         try await db.config.setProgramStatusEnabled(params.enabled)
+        // Turning it off also drops every terminal's entries and retracts them.
+        await programStatus.setEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

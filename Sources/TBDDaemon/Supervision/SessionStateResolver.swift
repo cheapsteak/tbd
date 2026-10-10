@@ -46,17 +46,23 @@ struct SessionStateFacts: Sendable, Equatable {
     /// established it for another reason**, never probed by this path. See the
     /// resolver's note on `.gone`.
     let liveness: ObservedFact<Bool>?
+    /// The terminal's Program Status Protocol (OSC 7501) snapshot from
+    /// `ProgramStatusStore` — memory, not a column. nil when the flag is off or
+    /// the store holds nothing for the terminal. See the resolver's rung 3½.
+    let programStatus: ProgramStatusSnapshot?
 
     init(
         terminal: Terminal,
         transcriptRateLimit: TranscriptRateLimit? = nil,
         transcriptLastAppendedAt: ObservedFact<Date>? = nil,
-        liveness: ObservedFact<Bool>? = nil
+        liveness: ObservedFact<Bool>? = nil,
+        programStatus: ProgramStatusSnapshot? = nil
     ) {
         self.terminal = terminal
         self.transcriptRateLimit = transcriptRateLimit
         self.transcriptLastAppendedAt = transcriptLastAppendedAt
         self.liveness = liveness
+        self.programStatus = programStatus
     }
 }
 
@@ -92,6 +98,18 @@ struct SessionStateFacts: Sendable, Equatable {
 ///    rate-limited session reads as `idle` on the hook rail — its turn *did*
 ///    end — and reporting `idle` invites a supervisor to send work the session
 ///    cannot do until the limit resets.
+/// 3½. **Program status (OSC 7501)** — from the first accepted main-entry
+///    report for the terminal's current incarnation, Claude Code's own report
+///    is the session's state (rolled up with its task entries by
+///    `ProgramStatusRollup`, source `.programStatus`), and the hook rail below
+///    is not consulted. Claude Code computes that state from its own
+///    internals, so once it reports it is the better source; latest-wins
+///    against hooks would flicker, because the two arrive over different
+///    channels with no reliable order between them. Below `.gone`, `.parked`
+///    and `.rateLimited` because those are states TBD owns. A snapshot for
+///    another incarnation, or one with no main entry (after a main `clear`),
+///    is ignored and the hook rail speaks again. Design:
+///    docs/specs/2026-10-10-program-status-protocol-design.md.
 /// 4. **`.awaitingInput` vs `.working`/`.idle`** — decided by **observed-at**,
 ///    not by a fixed rank, and a recorded prompt the transcript has grown past
 ///    resolves `.unknown(why:)` rather than either — unless a second rail
@@ -324,6 +342,18 @@ struct SessionStateResolver: Sendable {
                 value: .rateLimited(until: transcriptRateLimit.limit.resetsAt),
                 source: .transcriptTail,
                 observedAt: transcriptRateLimit.observedAt)
+        }
+
+        // 3½. Program status (OSC 7501). From the first accepted main entry for
+        //     this incarnation, Claude Code's own report is the session's state;
+        //     the hook rail below is not consulted. Gone, parked and
+        //     rate-limited still outrank it — they are states TBD owns.
+        if let snapshot = facts.programStatus,
+           snapshot.incarnationID == terminal.sessionIncarnationID,
+           let resolution = ProgramStatusRollup.resolve(snapshot) {
+            return SessionState(
+                value: resolution.value, source: .programStatus,
+                observedAt: resolution.observedAt)
         }
 
         // 4. The wait reason and the activity state, newest first.

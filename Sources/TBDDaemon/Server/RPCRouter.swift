@@ -132,6 +132,9 @@ public final class RPCRouter: Sendable {
     /// outside tests) the promote path is unchanged.
     nonisolated(unsafe) var scratchPromoteMigrationFailureHook: (@Sendable () async throws -> Void)?
     public let pendingQuestions: PendingQuestionStore
+    /// Program Status Protocol (OSC 7501) reports, per terminal. Memory only.
+    /// Design: docs/specs/2026-10-10-program-status-protocol-design.md.
+    public let programStatus: ProgramStatusStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
     /// Deletes per-profile Claude Code OAuth credential items from the login
@@ -411,6 +414,7 @@ public final class RPCRouter: Sendable {
         modelProfileResolver: ModelProfileResolver? = nil,
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        programStatus: ProgramStatusStore? = nil,
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
@@ -501,6 +505,13 @@ public final class RPCRouter: Sendable {
                 notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
+        // The daemon passes the store its holder readers feed and starts its
+        // run loop; a router built without one (tests, mock mode) gets its own,
+        // gated by the shipped default until `config.setProgramStatusEnabled`.
+        let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
+            db: db, subscriptions: subscriptions,
+            enabled: Config.programStatusEnabledDefault, now: now)
+        self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
@@ -779,6 +790,10 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAskUserQuestionCleared(request.paramsData)
             case RPCMethod.terminalAskUserQuestionSatisfied:
                 return try await handleTerminalAskUserQuestionSatisfied(request.paramsData)
+            case RPCMethod.terminalProgramStatusReport:
+                return try await handleTerminalProgramStatusReport(request.paramsData)
+            case RPCMethod.terminalProgramStatusList:
+                return try await handleTerminalProgramStatusList()
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:
