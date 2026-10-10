@@ -193,7 +193,7 @@ struct PendingQuestionBroadcastRevisionTests {
         let subs = StateSubscriptionManager()
         subs.addSubscriber { data in
             if let delta = try? JSONDecoder().decode(StateDelta.self, from: data),
-               case .terminalPendingQuestionsChanged(let d) = delta {
+               case .terminalPendingPromptsChanged(let d) = delta {
                 captured.append(d)
             }
             return true
@@ -217,8 +217,8 @@ struct PendingQuestionBroadcastRevisionTests {
         #expect(deltas.count == 2)
         let first = deltas.first
         let second = deltas.last
-        #expect(first?.pending.map(\.toolUseID) == ["toolu_a"])
-        #expect(second?.pending.isEmpty == true)
+        #expect(first?.captures.map(\.toolUseID) == ["toolu_a"])
+        #expect(second?.captures.isEmpty == true)
         let firstRevision = first?.revision
         let secondRevision = second?.revision
         #expect(firstRevision != nil, "an unstamped delta cannot be ordered by the app")
@@ -233,12 +233,12 @@ struct PendingQuestionBroadcastRevisionTests {
 /// Collects the pending-question deltas a manager broadcast.
 private final class BroadcastPendingDeltas: @unchecked Sendable {
     private let lock = NSLock()
-    private var storage: [TerminalPendingQuestionsDelta] = []
-    func append(_ delta: TerminalPendingQuestionsDelta) {
+    private var storage: [TerminalPendingPromptsDelta] = []
+    func append(_ delta: TerminalPendingPromptsDelta) {
         lock.lock(); defer { lock.unlock() }
         storage.append(delta)
     }
-    var all: [TerminalPendingQuestionsDelta] {
+    var all: [TerminalPendingPromptsDelta] {
         lock.lock(); defer { lock.unlock() }
         return storage
     }

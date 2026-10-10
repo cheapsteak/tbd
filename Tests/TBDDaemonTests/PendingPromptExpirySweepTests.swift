@@ -1,4 +1,6 @@
+import Clocks
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -81,6 +83,31 @@ struct PendingPromptExpirySweepTests {
         await sweep.sweepOnce()
 
         #expect(await reaped.ids.isEmpty)
+    }
+
+    @Test("the sweep also resolves a prompt no hook has attached to for an hour")
+    func sweepOnceAlsoReapsDetachedPrompts() async {
+        let dates = TestDateSource()
+        let store = PendingPromptStore(now: dates.provider, clock: TestClock<Duration>())
+        let terminalID = UUID()
+        let input = #"{"command":"ls"}"#
+        _ = await store.register(PromptRegisterParams(
+            terminalID: terminalID, sessionID: "s1", toolName: "Bash", toolInputJSON: input,
+            suggestionsJSON: nil, inputHash: PromptInputHash.of(toolInputJSON: input)))
+        let reaped = ReapedTerminals()
+        let sweep = PendingPromptExpirySweep(
+            store: store,
+            now: dates.provider,
+            onReap: { await reaped.record($0) })
+
+        await sweep.sweepOnce()
+        #expect(await reaped.ids.isEmpty, "a freshly registered prompt is not detached long enough")
+
+        dates.advance(by: 3600)
+        await sweep.sweepOnce()
+
+        #expect(await reaped.ids == [terminalID])
+        #expect(await store.prompts(forTerminal: terminalID).isEmpty)
     }
 
     @Test("gcExpired names every terminal that lost an entry")

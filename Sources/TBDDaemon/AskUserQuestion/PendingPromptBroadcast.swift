@@ -2,7 +2,10 @@ import Foundation
 import TBDShared
 
 extension StateSubscriptionManager {
-    /// Publish a terminal's current pending-question set.
+    /// Publish a terminal's current pending set: the legacy `AskUserQuestion`
+    /// captures and the open prompts, in one `.terminalPendingPromptsChanged`.
+    /// The daemon no longer sends `.terminalPendingQuestionsChanged`; the
+    /// case stays decodable for an app paired with an older daemon.
     ///
     /// Every site that mutates `PendingPromptStore` owes the app one of
     /// these. The app mirrors the record rather than deriving it, so a set
@@ -23,15 +26,16 @@ extension StateSubscriptionManager {
         from store: PendingPromptStore
     ) async {
         let snapshot = await store.snapshot(forTerminal: terminalID)
-        broadcast(delta: .terminalPendingQuestionsChanged(
-            TerminalPendingQuestionsDelta(
+        broadcast(delta: .terminalPendingPromptsChanged(
+            TerminalPendingPromptsDelta(
                 terminalID: terminalID,
-                pending: snapshot.entries.map {
+                captures: snapshot.entries.map {
                     PendingQuestionPayload(
                         toolUseID: $0.toolUseID,
                         inputJSON: $0.inputJSON,
                         timestamp: $0.timestamp)
                 },
+                prompts: snapshot.prompts,
                 revision: snapshot.revision)))
     }
 }

@@ -80,9 +80,9 @@ struct TranscriptPollReapBroadcastTests {
         return await router.handle(request)
     }
 
-    private func pendingDeltas(_ deltas: CapturedDeltas) -> [TerminalPendingQuestionsDelta] {
+    private func pendingDeltas(_ deltas: CapturedDeltas) -> [TerminalPendingPromptsDelta] {
         deltas.all.compactMap {
-            if case .terminalPendingQuestionsChanged(let d) = $0 { return d }
+            if case .terminalPendingPromptsChanged(let d) = $0 { return d }
             return nil
         }
     }
@@ -111,7 +111,7 @@ struct TranscriptPollReapBroadcastTests {
         let forOther = broadcasts.filter { $0.terminalID == other.id }
         #expect(forOther.count == 1,
                 "the reaped terminal owes the app exactly one retraction, got \(broadcasts.count) deltas")
-        #expect(forOther.first?.pending.isEmpty == true,
+        #expect(forOther.first?.captures.isEmpty == true,
                 "an empty set is the retraction")
     }
 
@@ -138,7 +138,7 @@ struct TranscriptPollReapBroadcastTests {
 
         let forPolled = pendingDeltas(deltas).filter { $0.terminalID == polled.id }
         #expect(forPolled.count == 1)
-        #expect(forPolled.first?.pending.map(\.toolUseID) == ["toolu_fresh"],
+        #expect(forPolled.first?.captures.map(\.toolUseID) == ["toolu_fresh"],
                 "the surviving entry rides the same broadcast")
     }
 
