@@ -70,14 +70,19 @@ final class PromptAnswerController {
     ///   - onRemoteDelivered: called after a remote delivery; production asks
     ///     the session's pane to sync its transcript now, as the composer does
     ///     after a send.
+    ///
+    /// The two callbacks default to `nil` rather than to an empty closure
+    /// literal: a `@MainActor` closure as a default argument is itself
+    /// main-actor isolated, and Swift 6.3 refuses such a default at a call
+    /// site whose own isolation differs (`AppState`'s lazy initializer).
     init(local: @escaping LocalSender,
          remote: @escaping RemoteSender,
-         onDelivered: @escaping @MainActor (PendingPromptPresentation, String) -> Void = { _, _ in },
-         onRemoteDelivered: @escaping @MainActor (RemoteSessionSelection) -> Void = { _ in }) {
+         onDelivered: (@MainActor (PendingPromptPresentation, String) -> Void)? = nil,
+         onRemoteDelivered: (@MainActor (RemoteSessionSelection) -> Void)? = nil) {
         self.local = local
         self.remote = remote
-        self.onDelivered = onDelivered
-        self.onRemoteDelivered = onRemoteDelivered
+        self.onDelivered = onDelivered ?? { _, _ in }
+        self.onRemoteDelivered = onRemoteDelivered ?? { _ in }
     }
 
     // MARK: - Reads
