@@ -359,7 +359,8 @@ extension RPCRouter {
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
                 watchDeskRole: source.watchDeskRole,
                 worktreePath: worktree.path,
-                profileConfigDir: profileConfigDir),
+                profileConfigDir: profileConfigDir,
+                promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
             sessionName: worktree.displayName)

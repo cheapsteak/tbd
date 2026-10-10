@@ -1634,7 +1634,8 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 // The same config dir this spawn runs with, so the tee
                 // delegates to the user-scope statusline THIS session reads.
-                profileConfigDir: profileConfigDir
+                profileConfigDir: profileConfigDir,
+                promptAnswerHooks: config.transcriptPromptAnswerEnabled
             )
             // **The routing decision, and it happens BEFORE the command is
             // composed.** `ClaudeSpawnCommandBuilder.build` re-exports every
@@ -1942,7 +1943,8 @@ extension WorktreeLifecycle {
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                         fallbackModels: resolvedProfile?.fallbackModels,
                         sessionKey: plannedID.uuidString,
-                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                        promptAnswerHooks: config.transcriptPromptAnswerEnabled
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,
