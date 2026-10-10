@@ -199,7 +199,10 @@ struct PromptWaiter {
     let clock: any Clock<Duration>
     /// Writes the decision to stdout and flushes; false when that failed.
     let write: @Sendable (String) -> Bool
-    /// Total time spent retrying against a daemon that dropped the wait.
+    /// Time spent retrying through one outage of a daemon that dropped the
+    /// wait. A successful register ends the outage and restores the budget,
+    /// so a dialog that stays open across several daemon restarts survives
+    /// each of them.
     var reconnectBudget: Duration = .seconds(180)
     var reconnectInitialInterval: Duration = .milliseconds(500)
     var reconnectMaxInterval: Duration = .seconds(5)
@@ -227,6 +230,9 @@ struct PromptWaiter {
                     promptID = id
                     // Keep a pairing already learned if a later reply lacks it.
                     toolUseID = pairedToolUseID ?? toolUseID
+                    // The daemon is back: a later outage starts afresh.
+                    spent = .zero
+                    interval = reconnectInitialInterval
                 }
                 let reply = try transport.awaitResolution(PromptAwaitParams(promptID: promptID ?? ""))
                 switch reply.result {

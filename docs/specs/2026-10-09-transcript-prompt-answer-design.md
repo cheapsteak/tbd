@@ -157,7 +157,9 @@ existing `AskUserQuestion` pre and post hooks stay as they are.
      - The HTTP transport refuses it, because HTTP can't see a closed
        connection.
      - If the connection drops while the daemon restarts, the hook reconnects
-       and registers again.
+       and registers again, backing off for at most three minutes per outage.
+       A successful register ends the outage, so a dialog left open across
+       several restarts survives each of them.
   4. **An answer arrives:** it prints the decision JSON wrapped as
      `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":…}}`,
      acknowledges delivery to the daemon, and exits 0. A deny without a

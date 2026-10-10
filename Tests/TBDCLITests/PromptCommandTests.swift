@@ -182,6 +182,27 @@ struct PromptWaiterTests {
                 "a restarted daemon has no note left, so the hook must hand the pairing back")
     }
 
+    /// Two outages, each inside the budget but together over it: a successful
+    /// register ends the first, so the second gets the whole budget again.
+    @Test func eachOutageGetsTheWholeReconnectBudget() async {
+        let token = UUID()
+        let t = FakePromptTransport(
+            register: [.success(.registered(promptID: "p1")), .failure(Boom()),
+                       .success(.registered(promptID: "p1")), .failure(Boom()),
+                       .success(.registered(promptID: "p1"))],
+            await: [.failure(Boom()), .failure(Boom()),
+                    .success(PromptAwaitReply(result: .answered(hookOutput: "{}"), deliveryToken: token))])
+        let out = Output()
+        let clock = ImmediateClock()
+        var w = waiter(t, out, clock)
+        w.reconnectBudget = .seconds(2)
+        await w.run(terminalID: terminalID, request: request)
+        #expect(out.written == ["{}"])
+        #expect(t.registers.count == 5)
+        #expect(clock.sleeps == [.milliseconds(500), .seconds(1), .milliseconds(500), .seconds(1)],
+                "the backoff restarts from the initial interval after a successful register")
+    }
+
     @Test func givesUpSilentlyWhenTheDaemonStaysDown() async {
         let t = FakePromptTransport(
             register: [.success(.registered(promptID: "p1"))], await: [.failure(Boom())])
