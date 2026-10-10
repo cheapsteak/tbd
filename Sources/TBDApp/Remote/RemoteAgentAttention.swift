@@ -32,6 +32,7 @@ enum RemoteAgentAttention {
             if let permission = permissionSummary(session.payload.effectivePendingPrompt) {
                 return permission
             }
+            if let question = promptQuestionSummary(session.payload.effectivePendingPrompt) { return question }
             if let question = questionSummary(session.payload.pendingQuestion) { return question }
             if let reason = humanizedReason(session.payload.agentStateReason) { return reason }
             return "Waiting for input."
@@ -119,13 +120,31 @@ enum RemoteAgentAttention {
     /// than one question is pending.
     static func questionSummary(_ question: RemotePendingQuestion?) -> String? {
         guard let question, let first = question.questions.first else { return nil }
-        var line = "Blocked on a question: \(first.prompt)"
-        let options = first.options.map(\.label).filter { !$0.isEmpty }
+        return questionLine(
+            text: first.prompt, optionLabels: first.options.map(\.label), count: question.questions.count)
+    }
+
+    /// The same line for a question-kind pending prompt, read from the
+    /// questions its card draws (`effectiveQuestions`), so a provider that
+    /// sends `pending_prompt` without the legacy `pending_question` still gets
+    /// its question quoted. Nil for a permission prompt or one with no usable
+    /// question.
+    static func promptQuestionSummary(_ prompt: RemotePendingPrompt?) -> String? {
+        guard let prompt, prompt.kind == .question else { return nil }
+        let questions = prompt.effectiveQuestions
+        guard let first = questions.first else { return nil }
+        return questionLine(
+            text: first.text, optionLabels: first.options.map(\.label), count: questions.count)
+    }
+
+    private static func questionLine(text: String, optionLabels: [String], count: Int) -> String {
+        var line = "Blocked on a question: \(text)"
+        let options = optionLabels.filter { !$0.isEmpty }
         if !options.isEmpty {
             line += " (\(options.joined(separator: " / ")))"
         }
-        if question.questions.count > 1 {
-            line += " — and \(question.questions.count - 1) more."
+        if count > 1 {
+            line += " — and \(count - 1) more."
         }
         return line
     }

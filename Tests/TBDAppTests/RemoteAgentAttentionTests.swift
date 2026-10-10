@@ -182,6 +182,24 @@ struct RemoteAgentAttentionTests {
         #expect(RemoteAgentAttention.explanation(for: session) == "Blocked on permission: WebFetch")
     }
 
+    /// A question-kind `pending_prompt` with no legacy `pending_question` is
+    /// quoted from its questions — here carried only in `tool_input`, the
+    /// shape `effectiveQuestions` parses.
+    @Test func aQuestionPromptWithoutTheLegacyBlockIsQuoted() {
+        let input = #"{"questions":[{"question":"Which one?","options":[{"label":"A"},{"label":"B"}]},"#
+            + #"{"question":"And then?","options":[]}]}"#
+        let session = RemoteSessionInfo(
+            provider: "agentbox",
+            payload: RemoteSessionPayload(
+                id: "s1", title: "s1", state: .running, agentState: .waitingInput,
+                pendingPrompt: RemotePendingPrompt(
+                    id: "p1", kind: .question, toolName: "AskUserQuestion", toolInputJSON: input)),
+            gone: false, dismissed: false,
+            lastSeen: Date(timeIntervalSince1970: 1_000))
+        #expect(RemoteAgentAttention.explanation(for: session)
+            == "Blocked on a question: Which one? (A / B) — and 1 more.")
+    }
+
     @Test func aQuestionPromptKeepsTodaysText() {
         let session = RemoteSessionInfo(
             provider: "agentbox",
