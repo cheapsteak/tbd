@@ -106,6 +106,15 @@ final class PromptCardRetention {
         }
     }
 
+    /// Forgets what `target` last reported live, for a pane that stops showing
+    /// it. Without this, a pane mounted again later would compare its first
+    /// report against the old one and hold every prompt that closed in the
+    /// meantime as "Answered elsewhere". Cards already held keep their
+    /// timeouts.
+    func forgetLive(for target: PromptAnswerTarget) {
+        lastLive[target] = nil
+    }
+
     /// TBD delivered an answer to `prompt`; show `summary` until the tool
     /// result lands or the timeout passes.
     func markAnswered(_ prompt: PendingPromptPresentation, summary: String) {

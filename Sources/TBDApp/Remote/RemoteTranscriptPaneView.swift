@@ -112,11 +112,14 @@ struct RemoteTranscriptPaneView: View {
         }
         .onChange(of: selection) { old, _ in
             release(RemoteTranscriptTail.storeKey(old))
+            appState.promptCardRetention.forgetLive(
+                for: .remote(provider: old.provider, sessionID: old.sessionID))
             overlayCoordinator.close()
             activityGroupExpansion.removeAll()
         }
         .onDisappear {
             release(storeKey)
+            appState.promptCardRetention.forgetLive(for: promptTarget)
             overlayCoordinator.close()
         }
         // Prompt-card bookkeeping, outside any body evaluation; see

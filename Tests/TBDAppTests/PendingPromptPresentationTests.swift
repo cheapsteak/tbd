@@ -442,6 +442,31 @@ struct PromptCardRetentionTests {
         #expect(shown.first?.acceptsAnswer == true)
     }
 
+    /// A pane that unmounts forgets what it last saw live, so a prompt that
+    /// closed while no pane showed it is not held as "Answered elsewhere" when
+    /// a pane mounts again.
+    @Test func forgetLiveKeepsARemountFromHoldingAStaleCard() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let prompt = Fix.local(Fix.permissionPayload())
+        retention.observe(live: [prompt], for: Self.target)
+        retention.forgetLive(for: Self.target)
+
+        retention.observe(live: [], for: Self.target)
+        #expect(retention.heldCount == 0)
+        #expect(retention.cards(live: [], for: Self.target).isEmpty)
+    }
+
+    /// Forgetting one target leaves another's report in place.
+    @Test func forgetLiveIsScopedToItsTarget() {
+        let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
+        let prompt = Fix.local(Fix.permissionPayload())
+        retention.observe(live: [prompt], for: Self.target)
+        retention.forgetLive(for: .remote(provider: "acme", sessionID: "s1"))
+
+        retention.observe(live: [], for: Self.target)
+        #expect(retention.heldPhase(for: "p1") == .closed)
+    }
+
     @Test func anAnsweredHoldSurvivesThePromptBeingLiveAgain() {
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())

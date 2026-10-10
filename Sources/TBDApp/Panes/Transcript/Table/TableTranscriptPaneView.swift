@@ -180,6 +180,7 @@ struct TableTranscriptPaneView: View {
         }
         .onDisappear {
             clearWatchdogContext()
+            appState.promptCardRetention.forgetLive(for: .local(terminalID: terminalID))
             if let table = registeredTable.view {
                 appState.unregisterTranscriptView(table, for: terminalID)
             }
