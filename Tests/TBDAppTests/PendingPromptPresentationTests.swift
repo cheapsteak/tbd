@@ -271,6 +271,10 @@ struct PendingPromptPresentationTests {
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let state = AppState(userDefaults: defaults)
+        // Flag on, so the prompts render as cards and actually merge.
+        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        caps.transcriptPromptAnswerEnabled = true
+        state.daemonCapabilities = caps
         let raw: [TranscriptItem] = [.assistantText(id: "a", text: "a", timestamp: nil)]
         state.sessionTranscripts["sid"] = raw
         state.pendingPrompts[Fix.terminalID] = [Fix.permissionPayload(), Fix.permissionPayload(id: "p2", toolUseID: nil)]
