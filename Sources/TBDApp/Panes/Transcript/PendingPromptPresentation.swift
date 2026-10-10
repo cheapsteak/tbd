@@ -156,7 +156,8 @@ struct PendingPromptPresentation: Hashable, Sendable {
             // card, which reads `questions` from this JSON; a remote prompt
             // without `tool_input` gets the questions re-encoded.
             toolInputJSON: toolInputJSON ?? Self.questionsInputJSON(questions) ?? "{}",
-            timestamp: createdAt)
+            timestamp: createdAt,
+            isOpen: phase.isOpen)
     }
 
     /// `{"questions":[…]}` in `AskUserQuestion`'s `tool_input` shape, or nil

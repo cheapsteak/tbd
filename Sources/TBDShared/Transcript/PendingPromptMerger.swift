@@ -16,15 +16,20 @@ public struct PromptCardSeed: Sendable, Equatable {
     public let toolName: String
     public let toolInputJSON: String
     public let timestamp: Date
+    /// Whether the dialog is still open. False for a card held after its
+    /// dialog closed (answered, or closed elsewhere) while the transcript
+    /// catches up.
+    public let isOpen: Bool
 
     public init(promptID: String, toolUseID: String?, kind: PendingPromptKind = .permission,
-                toolName: String, toolInputJSON: String, timestamp: Date) {
+                toolName: String, toolInputJSON: String, timestamp: Date, isOpen: Bool = true) {
         self.promptID = promptID
         self.toolUseID = toolUseID
         self.kind = kind
         self.toolName = toolName
         self.toolInputJSON = toolInputJSON
         self.timestamp = timestamp
+        self.isOpen = isOpen
     }
 }
 
@@ -47,6 +52,11 @@ public struct PromptCardSeed: Sendable, Equatable {
 ///   `pending_question` never names the tool call, and the row it belongs to
 ///   is already on disk; appending a second row would draw the question
 ///   twice.
+/// - **No `tool_use_id`, kind `question`, held after its dialog closed, and
+///   no open `AskUserQuestion` row.** Its row has its result by now, so the
+///   newest `AskUserQuestion` row with a result is taken as its row: no card,
+///   and the prompt is reported in `settledPromptIDs`. Appending would draw
+///   the answered question a second time until the hold timed out.
 /// - **No `tool_use_id` otherwise.** The row is appended under `prompt-<id>`.
 ///
 /// Appended rows keep seed order. No emitted id starts with `line-` or
@@ -96,12 +106,18 @@ public enum PendingPromptMerger {
         var itemIDs = Set<String>()
         // `AskUserQuestion` calls still waiting for a result, oldest first.
         var openQuestionCalls: [String] = []
+        // Whether any `AskUserQuestion` call already has its result.
+        var hasAnsweredQuestionCall = false
         for item in items {
             itemIDs.insert(item.id)
             if case .toolCall(let id, let name, _, _, let result, _, _, _) = item {
                 toolCallHasResult[id] = result != nil
-                if name == askUserQuestionToolName, result == nil {
-                    openQuestionCalls.append(id)
+                if name == askUserQuestionToolName {
+                    if result == nil {
+                        openQuestionCalls.append(id)
+                    } else {
+                        hasAnsweredQuestionCall = true
+                    }
                 }
             }
         }
@@ -123,6 +139,15 @@ public enum PendingPromptMerger {
             if seed.toolUseID == nil, seed.kind == .question,
                let rowID = openQuestionCalls.last(where: { cards[$0] == nil }) {
                 cards[rowID] = seed.promptID
+                continue
+            }
+
+            // A held (closed) unpaired question whose row is no longer open:
+            // the newest answered `AskUserQuestion` row is its row, and the
+            // result there settles it.
+            if seed.toolUseID == nil, seed.kind == .question, !seed.isOpen,
+               hasAnsweredQuestionCall {
+                settled.insert(seed.promptID)
                 continue
             }
 

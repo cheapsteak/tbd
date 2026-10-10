@@ -303,6 +303,27 @@ struct PendingPromptPresentationTests {
             .map(\.answerability) == [.answerable])
     }
 
+    @Test func seedIsOpenFollowsThePhase() {
+        var card = Fix.local(Fix.questionPayload(toolUseID: nil))
+        #expect(card.seed.isOpen)
+        card.phase = .closed
+        #expect(!card.seed.isOpen)
+        card.phase = .answered(summary: "A")
+        #expect(!card.seed.isOpen)
+    }
+
+    /// A held unpaired question whose row has its result renders no second
+    /// card and is reported settled, so retention lets it go.
+    @Test func heldUnpairedQuestionDoesNotDuplicateTheAnsweredRow() {
+        var card = Fix.local(Fix.questionPayload(toolUseID: nil))
+        card.phase = .closed
+        let items = [Fix.toolCall("toolu_Q", "AskUserQuestion", input: Fix.askInput, result: Fix.done)]
+        let merged = PendingPromptMerge.apply(items: items, prompts: [card])
+        #expect(merged.items == items)
+        #expect(merged.prompts.isEmpty)
+        #expect(merged.settled == ["q1"])
+    }
+
     @Test func firstSeenDatesHoldStill() {
         let dates = PromptFirstSeenDates(capacity: 2)
         let t0 = Date(timeIntervalSince1970: 10)
