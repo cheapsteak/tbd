@@ -26,7 +26,8 @@ final class PromptAnswerController {
         /// The call threw. `retryable` is false for refusals a retry cannot
         /// change: the flag being off, or an answer that does not fit.
         case failed(message: String, retryable: Bool)
-        /// A remote call ended without a verdict; the answer may have arrived.
+        /// The call ended without a verdict (a remote timeout, or a local hook
+        /// that never acknowledged delivery); the answer may have arrived.
         case unknownOutcome
     }
 

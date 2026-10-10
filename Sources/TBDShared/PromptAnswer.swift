@@ -127,7 +127,8 @@ extension PromptAnswer {
 /// - `already_resolved` – the prompt was no longer pending: answered in the
 ///   terminal, answered from another card, or moved past.
 /// - `unknown` – the call ended without a verdict (a remote timeout or
-///   signal). Never retried automatically.
+///   signal, or a local hook that never acknowledged delivery). Never retried
+///   automatically.
 ///
 /// Decoding is forward-compatible: a raw value this build does not know reads
 /// as `unknown`, the only reading that never invites a duplicate answer.

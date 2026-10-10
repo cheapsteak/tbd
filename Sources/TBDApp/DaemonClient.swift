@@ -1417,7 +1417,9 @@ actor DaemonClient {
     }
 
     /// Answer a local terminal's pending prompt (`prompt.answer`). Returns once
-    /// the hook acknowledged delivery, or `already_resolved`. A hook that is
+    /// the hook acknowledged delivery, `already_resolved`, or `unknown` when no
+    /// acknowledgement came back in time — never resubmit that automatically.
+    /// A hook that is
     /// reconnecting, the flag being off, and an answer that does not fit the
     /// prompt all throw.
     func promptAnswer(

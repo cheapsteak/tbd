@@ -69,8 +69,12 @@ public actor PendingPromptStore {
         /// The hook acknowledged that it has the decision.
         case delivered
         /// Unknown id, a different terminal, already answered, or the hook
-        /// never acknowledged delivery: the terminal is in charge.
+        /// reported it never got the decision: the terminal is in charge.
         case alreadyResolved
+        /// The decision went to the hook but no acknowledgement came back
+        /// within the ack timeout: it may or may not have reached Claude. The
+        /// prompt is resolved either way, so a retry reads `.alreadyResolved`.
+        case deliveryUnconfirmed
         /// No waiter attached right now (a daemon restart window). Retryable;
         /// the prompt stays open.
         case hookDetached
@@ -138,7 +142,8 @@ public actor PendingPromptStore {
     /// Newest last.
     private var notes: [SessionKey: [Note]] = [:]
     /// `answer` calls parked until the hook acknowledges delivery, by token.
-    private var ackWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    /// `nil` means the ack timed out.
+    private var ackWaiters: [UUID: CheckedContinuation<Bool?, Never>] = [:]
     /// Tokens whose answer was handed over but whose ack waiter is not yet
     /// installed; an ack arriving in that gap lands in `earlyAcks`.
     private var awaitingAck: Set<UUID> = []
@@ -485,9 +490,11 @@ public actor PendingPromptStore {
     /// acknowledges delivery (`acknowledgeDelivery`), or `ackTimeout` passes.
     ///
     /// The second answer to a prompt, an answer naming another terminal, and
-    /// an answer whose delivery was never acknowledged all read
-    /// `.alreadyResolved`. With no waiter attached the prompt stays open and
-    /// the answer is `.hookDetached`, which the caller may retry.
+    /// an answer the hook reports it never got all read `.alreadyResolved`.
+    /// No acknowledgement within `ackTimeout` reads `.deliveryUnconfirmed`:
+    /// the decision may have reached Claude. With no waiter attached the
+    /// prompt stays open and the answer is `.hookDetached`, which the caller
+    /// may retry.
     func answer(terminalID: UUID, promptID: String, answer: PromptAnswer,
                 ackTimeout: Duration = .seconds(5)) async -> (outcome: AnswerOutcome, changed: Set<UUID>) {
         guard var record = promptRecords[promptID], record.terminalID == terminalID, !record.answered else {
@@ -516,14 +523,19 @@ public actor PendingPromptStore {
         awaitingAck.insert(waiter.token)
         waiter.continuation.resume(returning: .answered(hookOutput: hookOutput))
 
-        let delivered = await waitForAck(token: waiter.token, timeout: ackTimeout)
+        let ack = await waitForAck(token: waiter.token, timeout: ackTimeout)
+        let delivered = ack == true
 
         var changed: Set<UUID> = []
         if let current = promptRecords[promptID], current.generation == record.generation,
            let terminal = resolve(promptID, delivered ? .answered : .hookClosed) {
             changed.insert(terminal)
         }
-        return (delivered ? .delivered : .alreadyResolved, changed)
+        switch ack {
+        case .some(true): return (.delivered, changed)
+        case .some(false): return (.alreadyResolved, changed)
+        case .none: return (.deliveryUnconfirmed, changed)
+        }
     }
 
     /// The hook side reports whether the answer reached the hook. Ignored for
@@ -532,16 +544,17 @@ public actor PendingPromptStore {
         settleAck(token: token, delivered: delivered)
     }
 
-    private func waitForAck(token: UUID, timeout: Duration) async -> Bool {
+    /// The hook's ack, or nil when none arrived within `timeout`.
+    private func waitForAck(token: UUID, timeout: Duration) async -> Bool? {
         if let early = earlyAcks.removeValue(forKey: token) {
             awaitingAck.remove(token)
             return early
         }
         let timer = Task { [weak self, clock] in
             do { try await clock.sleep(for: timeout) } catch { return }
-            await self?.settleAck(token: token, delivered: false)
+            await self?.ackTimedOut(token: token)
         }
-        let delivered = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        let delivered = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
             if let early = earlyAcks.removeValue(forKey: token) {
                 awaitingAck.remove(token)
                 continuation.resume(returning: early)
@@ -551,6 +564,12 @@ public actor PendingPromptStore {
         }
         timer.cancel()
         return delivered
+    }
+
+    private func ackTimedOut(token: UUID) {
+        guard let continuation = ackWaiters.removeValue(forKey: token) else { return }
+        awaitingAck.remove(token)
+        continuation.resume(returning: nil)
     }
 
     private func settleAck(token: UUID, delivered: Bool) {

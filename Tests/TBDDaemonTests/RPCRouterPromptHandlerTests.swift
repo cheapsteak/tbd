@@ -288,7 +288,7 @@ struct RPCRouterPromptHandlerTests {
         #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
     }
 
-    @Test func missingAckTimesOutAsAlreadyResolved() async throws {
+    @Test func missingAckTimesOutAsUnknown() async throws {
         let f = try await makeFixture(flagOn: true)
         let id = try await registeredPromptID(f)
         #expect(await f.store.isLateNoteWindowOpen(promptID: id) == false)
@@ -298,9 +298,12 @@ struct RPCRouterPromptHandlerTests {
         _ = await waiter.value
         await f.clock.advanceWhenSuspended(by: .seconds(5))
         let response = try await answering.value
-        #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved,
-                "no ack within 5 s means the hook never had the decision")
+        #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .unknown,
+                "no ack within 5 s may still mean the hook had the decision")
         #expect(await isOpen(f, id) == false)
+
+        let retry = try await answer(f, promptID: id)
+        #expect(try retry.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
     }
 
     @Test func answerWithNoAttachedWaiterIsRetryableError() async throws {

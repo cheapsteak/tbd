@@ -132,6 +132,18 @@ struct PromptAnswerControllerTests {
         #expect(recorder.remoteCalls.map { $0.3 } == [deny, deny], "retry resends the same answer")
     }
 
+    @Test func localUnknownOutcomeOffersRetryThatReadsAnsweredElsewhere() async {
+        let recorder = Recorder()
+        let controller = makeController(recorder, local: [.unknown, .alreadyResolved])
+        await controller.submit(permission, answer: allow)
+        #expect(controller.state(for: "p1") == .unknownOutcome)
+        #expect(PromptCardFooter.resolve(permission, state: controller.state(for: "p1")) == .unknownOutcome)
+        #expect(recorder.delivered.isEmpty, "an unconfirmed delivery is not marked answered")
+        await controller.retry(permission)
+        #expect(controller.state(for: "p1") == .answeredElsewhere)
+        #expect(recorder.localCalls.count == 2, "retry resends the same answer")
+    }
+
     @Test func retryWithNothingSentDoesNothing() async {
         let recorder = Recorder()
         let controller = makeController(recorder)

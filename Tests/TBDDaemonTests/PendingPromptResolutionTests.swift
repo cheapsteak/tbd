@@ -417,7 +417,7 @@ struct PendingPromptResolutionTests {
         #expect(await waiter.value == .resolvedElsewhere)
     }
 
-    @Test func ackTimeoutAnswersAlreadyResolved() async {
+    @Test func ackTimeoutAnswersDeliveryUnconfirmed() async {
         let clock = TestClock<Duration>()
         let store = makeStore(clock: clock)
         let terminal = UUID()
@@ -435,9 +435,13 @@ struct PendingPromptResolutionTests {
         await clock.advanceWhenSuspended(by: .seconds(5))
         let result = await answering.value
 
-        #expect(result.outcome == .alreadyResolved, "no ack within 5 s means the hook never had it")
+        #expect(result.outcome == .deliveryUnconfirmed, "no ack within 5 s may still mean the hook had it")
         #expect(result.changed == [terminal])
         #expect(await store.prompts(forTerminal: terminal).isEmpty)
+
+        let retry = await store.answer(terminalID: terminal, promptID: id,
+                                       answer: .permission(decision: .allow, message: nil))
+        #expect(retry.outcome == .alreadyResolved, "the timed-out prompt is resolved, so a retry cannot answer twice")
     }
 
     // MARK: Other resolutions

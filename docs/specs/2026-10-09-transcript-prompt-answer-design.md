@@ -189,9 +189,12 @@ A prompt resolves on the first of these:
   peer is the recorded app identity, the check `terminal.send` uses for
   envelope suppression, so another session's process and the HTTP transport
   are refused. The store hands the payload to the
-  waiting hook, and the RPC returns once the hook acknowledges it. If no
-  acknowledgement arrives within 5 seconds, the RPC answers
-  `already_resolved`. The acknowledgement (`prompt.ack`) bypasses the RPC
+  waiting hook, and the RPC returns once the hook acknowledges it. A hook
+  that reports it never got the decision answers `already_resolved`. If no
+  acknowledgement arrives within 5 seconds, the decision may or may not have
+  reached Claude, so the RPC answers `unknown` and the card shows "May not
+  have arrived" with Retry; the prompt resolves either way, so a retry of an
+  answer that did arrive comes back `already_resolved`. The acknowledgement (`prompt.ack`) bypasses the RPC
   concurrency limiter, so a burst of slow RPCs can't delay it past that
   window and turn a delivered answer into "answered elsewhere".
   - If no hook is attached at that moment, for example while a daemon restart

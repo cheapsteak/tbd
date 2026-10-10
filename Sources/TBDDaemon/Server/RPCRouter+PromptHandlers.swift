@@ -190,8 +190,10 @@ extension RPCRouter {
 
     /// The app's answer to a local prompt. Returns a `PromptAnswerResult`:
     /// - `delivered` – the hook acknowledged the decision.
-    /// - `already_resolved` – the prompt was gone, answered, or the hook never
-    ///   acknowledged it within the store's ack timeout.
+    /// - `already_resolved` – the prompt was gone or answered, or the hook
+    ///   reported it never got the decision.
+    /// - `unknown` – no acknowledgement within the store's ack timeout; the
+    ///   decision may have reached Claude.
     ///
     /// Errors: the flag is off (`promptAnswerDisabledRefusal`), the caller is
     /// not the TBD app (`promptAnswerNotFromAppRefusal`), no hook is attached
@@ -233,6 +235,9 @@ extension RPCRouter {
         case .alreadyResolved:
             await finishActuation(actuationID, .refused(.notEligible), error: "already_resolved")
             return try RPCResponse(result: PromptAnswerResult(outcome: .alreadyResolved))
+        case .deliveryUnconfirmed:
+            await finishActuation(actuationID, .transportFailed, error: "outcome unknown: no delivery ack")
+            return try RPCResponse(result: PromptAnswerResult(outcome: .unknown))
         case .hookDetached:
             await finishActuation(actuationID, .refused(.notEligible), error: Self.promptHookDetachedRefusal)
             return RPCResponse(error: Self.promptHookDetachedRefusal)
