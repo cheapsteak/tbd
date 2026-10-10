@@ -144,12 +144,13 @@ struct SocketServerPromptAwaitTests {
         // which refuses it, so no waiter would ever attach.
         try await waitAttached(h, ids)
 
-        // A cheap RPC on the normal path still answers with every await parked.
+        // A cheap RPC that takes a limiter slot still answers with every
+        // await parked. (`prompt.ack` would prove nothing: it bypasses the
+        // limiter too.)
+        #expect(!SocketServer.bypassesConcurrencyLimiter(method: RPCMethod.repoList))
         let probe = PromptRawClient()
         try #require(probe.connect(to: h.socketPath, receiveTimeout: TestDeadlines.saturatedPassSeconds))
-        let ack = try RPCRequest(method: RPCMethod.promptAck,
-                                 params: PromptAckParams(token: UUID(), delivered: true))
-        try #require(probe.send(line: try line(ack)))
+        try #require(probe.send(line: try line(RPCRequest(method: RPCMethod.repoList))))
         let raw = await gateHoldingTask { probe.receiveLine() }.value
         let response = try JSONDecoder().decode(RPCResponse.self, from: Data(try #require(raw).utf8))
         #expect(response.success)
