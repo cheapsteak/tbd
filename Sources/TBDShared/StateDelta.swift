@@ -67,6 +67,12 @@ public enum StateDelta: Codable, Sendable {
     /// and reset time so the app can show the limit banner and offer the
     /// one-click switch.
     case terminalLimitHit(TerminalLimitHitDelta)
+    /// A terminal's Program Status Protocol (OSC 7501) snapshot changed: the
+    /// daemon accepted a report, or dropped the terminal's entries. An empty
+    /// snapshot is a retraction. Carries `title`/`msg`, which live only in
+    /// memory. An app build that predates this case fails to decode it and
+    /// drops the line, like `remoteSessionReconnectRequested`.
+    case terminalProgramStatusChanged(ProgramStatusSnapshot)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.

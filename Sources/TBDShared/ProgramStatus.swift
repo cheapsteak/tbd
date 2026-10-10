@@ -273,3 +273,198 @@ public final class ProgramStatusGate: Sendable {
         state.withLock { $0 = enabled }
     }
 }
+
+// MARK: - Snapshot and roll-up
+
+/// The latest report for one entry (the main entry or one task entry), as the
+/// daemon holds it. `title` and `msg` can carry content from the user's work,
+/// so this lives only in daemon and app memory — never in `state.db`.
+public struct ProgramStatusEntry: Codable, Sendable, Equatable {
+    public var state: ProgramStatusState
+    public var kind: ProgramStatusBlockKind?
+    public var title: String?
+    public var msg: String?
+    public var progress: Int?
+    /// When the reader saw the report that produced this entry.
+    public var observedAt: Date
+
+    public init(
+        state: ProgramStatusState,
+        kind: ProgramStatusBlockKind? = nil,
+        title: String? = nil,
+        msg: String? = nil,
+        progress: Int? = nil,
+        observedAt: Date
+    ) {
+        self.state = state
+        self.kind = kind
+        self.title = title
+        self.msg = msg
+        self.progress = progress
+        self.observedAt = observedAt
+    }
+
+    /// The entry a report writes. A report replaces its entry wholesale: the
+    /// sender writes whole entries when they change.
+    public init(report: ProgramStatusReport, observedAt: Date) {
+        self.init(
+            state: report.state,
+            kind: report.kind,
+            title: report.title,
+            msg: report.msg,
+            progress: report.progress,
+            observedAt: observedAt
+        )
+    }
+}
+
+/// One task entry (a background task or subagent), keyed by its sender id.
+public struct ProgramStatusTaskEntry: Codable, Sendable, Equatable {
+    public let id: String
+    public var entry: ProgramStatusEntry
+
+    public init(id: String, entry: ProgramStatusEntry) {
+        self.id = id
+        self.entry = entry
+    }
+}
+
+/// What the daemon holds for one terminal and pushes to the app. Never
+/// persisted.
+///
+/// An empty snapshot (`main == nil`, no tasks) is a retraction: the terminal
+/// is no longer OSC-authoritative and carries no task entries.
+public struct ProgramStatusSnapshot: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    /// The terminal incarnation the reports were accepted for. A reader
+    /// compares it with the row's current `sessionIncarnationID` and ignores
+    /// a snapshot that names another one.
+    public let incarnationID: UUID?
+    /// nil → the terminal is not OSC-authoritative.
+    public let main: ProgramStatusEntry?
+    /// Insertion order.
+    public let tasks: [ProgramStatusTaskEntry]
+    /// Per-terminal mutation counter. Monotonic within one daemon run and
+    /// never reset, so a receiver keeps the newest revision across clears.
+    public let revision: UInt64
+
+    public init(
+        terminalID: UUID,
+        incarnationID: UUID?,
+        main: ProgramStatusEntry?,
+        tasks: [ProgramStatusTaskEntry],
+        revision: UInt64
+    ) {
+        self.terminalID = terminalID
+        self.incarnationID = incarnationID
+        self.main = main
+        self.tasks = tasks
+        self.revision = revision
+    }
+
+    public var isAuthoritative: Bool { main != nil }
+    public var isEmpty: Bool { main == nil && tasks.isEmpty }
+}
+
+/// The state an OSC-authoritative terminal resolves to.
+public struct ProgramStatusResolution: Sendable, Equatable {
+    public let value: SessionStateValue
+    /// Task entries currently `working` — the row's background count. Set in
+    /// every branch, not only the working one.
+    public let workingTaskCount: Int
+    public let observedAt: Date
+
+    public init(value: SessionStateValue, workingTaskCount: Int, observedAt: Date) {
+        self.value = value
+        self.workingTaskCount = workingTaskCount
+        self.observedAt = observedAt
+    }
+}
+
+/// The spec's mapping and roll-up rules, as pure functions.
+/// Design: docs/specs/2026-10-10-program-status-protocol-design.md,
+/// "State model" and "Rolling up task entries".
+public enum ProgramStatusRollup {
+    /// What the main entry alone means.
+    public static func mainValue(_ main: ProgramStatusEntry) -> SessionStateValue {
+        switch main.state {
+        case .working:
+            return .working
+        case .blocked:
+            if main.kind == .auth { return .needsAuth }
+            return .awaitingInput(reason: AwaitingInputReason(
+                message: main.msg ?? main.title ?? "",
+                programStatusBlock: ProgramStatusBlock(kind: main.kind, taskID: nil)))
+        case .error:
+            return .error
+        case .done:
+            return .done
+        case .idle:
+            return .idle
+        case .clear:
+            // The store deletes on `clear` rather than storing it; defensive.
+            return .unknown(why: "program status cleared")
+        case .unrecognized(let raw):
+            return .unknown(why: "unrecognized program status state '\(raw)'")
+        }
+    }
+
+    /// The displayed state of a terminal, or nil when it is not
+    /// OSC-authoritative (no main entry). The first matching rule wins:
+    ///
+    /// 1. main is needs-auth, awaiting input or error → main's state;
+    /// 2. a task entry is blocked → awaiting input, labelled with that task;
+    /// 3. main or any task entry is working → working;
+    /// 4. otherwise main's state (done, idle, unknown).
+    public static func resolve(_ snapshot: ProgramStatusSnapshot) -> ProgramStatusResolution? {
+        guard let main = snapshot.main else { return nil }
+
+        var workingTaskCount = 0
+        for task in snapshot.tasks where task.entry.state == .working {
+            workingTaskCount += 1
+        }
+
+        let mainResolved = mainValue(main)
+
+        // Rule 1.
+        switch mainResolved {
+        case .needsAuth, .awaitingInput, .error:
+            return ProgramStatusResolution(
+                value: mainResolved, workingTaskCount: workingTaskCount,
+                observedAt: main.observedAt)
+        default:
+            break
+        }
+
+        // Rule 2.
+        for task in snapshot.tasks where task.entry.state == .blocked {
+            let reason = AwaitingInputReason(
+                message: task.entry.title ?? task.entry.msg ?? "",
+                programStatusBlock: ProgramStatusBlock(kind: task.entry.kind, taskID: task.id))
+            return ProgramStatusResolution(
+                value: .awaitingInput(reason: reason), workingTaskCount: workingTaskCount,
+                observedAt: task.entry.observedAt)
+        }
+
+        // Rule 3.
+        let mainWorking = main.state == .working
+        if mainWorking || workingTaskCount > 0 {
+            var latest: Date? = mainWorking ? main.observedAt : nil
+            for task in snapshot.tasks where task.entry.state == .working {
+                if let current = latest {
+                    if task.entry.observedAt > current { latest = task.entry.observedAt }
+                } else {
+                    latest = task.entry.observedAt
+                }
+            }
+            return ProgramStatusResolution(
+                value: .working, workingTaskCount: workingTaskCount,
+                observedAt: latest ?? main.observedAt)
+        }
+
+        // Rule 4.
+        return ProgramStatusResolution(
+            value: mainResolved, workingTaskCount: workingTaskCount,
+            observedAt: main.observedAt)
+    }
+}
