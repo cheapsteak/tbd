@@ -262,6 +262,46 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(last["result"] as? String == "refused")
     }
 
+    /// The verb's own error codes describe one answer, not the provider: the
+    /// provider stays healthy and its snapshot fresh, so the next send or
+    /// answer is not refused as stale.
+    @Test(arguments: ["already_resolved", "invalid_params", "not_found"])
+    func answerVerbErrorsLeaveProviderHealthAlone(code: String) async throws {
+        try await enable()
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(describeDeclaring([RemoteCapability.answer])),
+            .result(listing()),
+            .result(failure(code: code, message: "provider says no")),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let before = await m.providerStatuses().first(where: { $0.config.name == "agentbox" })?.health
+        #expect(before == .ok)
+
+        _ = try await answer(router(m))
+
+        #expect(Self.answers(invoker).count == 1)
+        #expect(await m.providerStatuses().first(where: { $0.config.name == "agentbox" })?.health == before)
+        #expect(await m.hasStaleSnapshot(provider: "agentbox") == false)
+    }
+
+    /// The exemption is for the verb's codes only: an unrecognised exit-1
+    /// failure still marks the provider unhealthy.
+    @Test func otherAnswerFailuresStillCountAgainstHealth() async throws {
+        try await enable()
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(describeDeclaring([RemoteCapability.answer])),
+            .result(listing()),
+            .result(failure(code: "internal", message: "box crashed")),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+
+        _ = try await answer(router(m))
+
+        #expect(await m.providerStatuses().first(where: { $0.config.name == "agentbox" })?.health == .error)
+    }
+
     @Test(arguments: ["invalid_params", "not_found"])
     func providerErrorsAreRPCErrorsCarryingTheCode(code: String) async throws {
         try await enable()

@@ -278,6 +278,10 @@ described above.
   6. It invokes the verb with a 30-second timeout. A timeout or signal is an
      unknown outcome and is never retried automatically, as with
      `sendMessage`.
+  7. The verb's own error codes (`already_resolved`, `invalid_params`,
+     `not_found`) describe this one answer, not the provider, so they don't
+     count against provider health. Losing the race to the terminal must not
+     mark the provider unhealthy and every session's snapshot stale.
 
   After a success, the app calls `requestRemoteTranscriptSync`, as the
   composer does after a send, so the tool result appears promptly.

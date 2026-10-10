@@ -105,7 +105,8 @@ extension RPCRouter {
             result = try await manager.invoke(
                 providerName: params.provider,
                 verb: RemoteVerb.answer(sessionID: params.sessionID, promptID: params.promptID),
-                stdin: stdin, timeout: Self.remoteAnswerTimeout)
+                stdin: stdin, timeout: Self.remoteAnswerTimeout,
+                healthNeutralErrorCodes: Self.answerVerbErrorCodes)
         } catch let error as ProviderRunError {
             // No exit status: the decision may have reached the dialog before
             // the deadline killed the provider. Unknown, and never retried.
@@ -149,6 +150,11 @@ extension RPCRouter {
 
     /// The provider error code for a prompt that is no longer pending.
     static let alreadyResolvedCode = "already_resolved"
+
+    /// The `answer` verb's own error codes. Each describes this one answer —
+    /// the prompt moved on, the payload did not fit, the session is unknown —
+    /// and never the provider, so none counts against provider health.
+    static let answerVerbErrorCodes: Set<String> = [alreadyResolvedCode, "invalid_params", "not_found"]
 
     /// Why `answer` does not fit the mirrored prompt, or nil when it does —
     /// the same check `prompt.answer` makes locally. A question prompt's
