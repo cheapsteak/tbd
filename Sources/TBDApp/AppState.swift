@@ -1745,6 +1745,15 @@ final class AppState {
     /// state, so it stays out of Observation: a view that renders
     /// `pendingQuestions` must not also re-render on this.
     @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
+    /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
+    /// prompts) by terminal, mirrored from the daemon's store over
+    /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
+    /// is the only writer. Unrelated to `PendingPromptCoordinator`'s queued
+    /// first messages.
+    var pendingPrompts: [UUID: [PendingPromptPayload]] = [:]
+    /// Last `TerminalPendingPromptsDelta.revision` applied per terminal, for
+    /// the same out-of-order reason as `pendingQuestionRevisions`.
+    @ObservationIgnored var pendingPromptRevisions: [UUID: UInt64] = [:]
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app
@@ -2776,6 +2785,7 @@ final class AppState {
         // from zero again; keeping the old high-water marks would make the app
         // drop every delta it then sends.
         pendingQuestionRevisions.removeAll()
+        pendingPromptRevisions.removeAll()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2829,7 +2839,11 @@ final class AppState {
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
         case .terminalPendingQuestionsChanged(let d):
+            // An older daemon still sends this; a current one sends
+            // `.terminalPendingPromptsChanged` instead.
             applyPendingQuestionsDelta(d)
+        case .terminalPendingPromptsChanged(let d):
+            applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -3220,6 +3234,35 @@ final class AppState {
                     inputJSON: $0.inputJSON,
                     timestamp: $0.timestamp)
             }
+        }
+    }
+
+    /// Mirror one terminal's pending prompts and legacy question captures,
+    /// newest revision wins (see `applyPendingQuestionsDelta` for why order
+    /// matters). The revision is checked once for both sets, since the daemon
+    /// reads both from one store at one revision. An empty array removes its
+    /// key.
+    func applyPendingPromptsDelta(_ delta: TerminalPendingPromptsDelta) {
+        if let revision = delta.revision {
+            if let applied = pendingPromptRevisions[delta.terminalID], revision < applied {
+                return
+            }
+            pendingPromptRevisions[delta.terminalID] = revision
+        }
+        if delta.captures.isEmpty {
+            pendingQuestions.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingQuestions[delta.terminalID] = delta.captures.map {
+                PendingAskUserQuestion(
+                    toolUseID: $0.toolUseID,
+                    inputJSON: $0.inputJSON,
+                    timestamp: $0.timestamp)
+            }
+        }
+        if delta.prompts.isEmpty {
+            pendingPrompts.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingPrompts[delta.terminalID] = delta.prompts
         }
     }
 
