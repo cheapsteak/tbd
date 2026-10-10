@@ -204,7 +204,11 @@ struct ProfileCommandsTests {
             "ANTHROPIC_AUTH_TOKEN": "callers-own",
             "ANTHROPIC_BASE_URL": "http://localhost:8080",
             "ANTHROPIC_MODEL": "callers-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "callers-sonnet",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Callers-Own: 1",
             "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "AWS_BEARER_TOKEN_BEDROCK": "callers-own",
             "AWS_PROFILE": "acme-dev",
             "PATH": "/usr/bin:/bin",
             "HOME": "/Users/x",
@@ -228,6 +232,16 @@ struct ProfileCommandsTests {
             profile: ["AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1"]
         )
         #expect(env == ["AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1", "KEEP": "1"])
+    }
+
+    @Test func execEnvironment_aClearedSelectorTheProfileSetsSurvives() {
+        // A profile that needs one of the other selectors carries it in its env
+        // overrides; those arrive in the profile's environment, after the clear.
+        let env = ProfileExecEnvironment.compose(
+            inherited: ["ANTHROPIC_DEFAULT_SONNET_MODEL": "callers"],
+            profile: ["ANTHROPIC_DEFAULT_SONNET_MODEL": "the-profiles"]
+        )
+        #expect(env == ["ANTHROPIC_DEFAULT_SONNET_MODEL": "the-profiles"])
     }
 
     @Test func execEnvironment_clearsEverythingLoginScrubs() {

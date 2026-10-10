@@ -10,7 +10,8 @@ tbd profile exec work -- claude -p "summarize the diff"
 ```
 
 The profile is named the way every `tbd profile` verb names one: exact name,
-unique case-insensitive name, or UUID.
+unique case-insensitive name, or UUID. The design and its rejected alternatives
+are in [the spec](specs/2026-10-09-profile-exec-design.md).
 
 ## What the command gets
 
@@ -37,14 +38,28 @@ the settings overlay with TBD's hooks, and the interactive-only variables
 (`DISABLE_AUTO_UPDATE`, and the Claude display settings in the Terminal
 settings pane, such as fullscreen rendering).
 
-Everything else is inherited from the calling process. The variables that choose
-a Claude account are cleared from it first — `CLAUDE_CODE_OAUTH_TOKEN`,
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_MODEL`, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_USE_BEDROCK` — so a
-caller that is itself a session on another profile cannot leak its own account
-into the command. `AWS_REGION` and `AWS_PROFILE` stay inherited unless the
+Everything else is inherited from the calling process, except the variables
+that choose Claude's credential, provider, endpoint or model. Those are cleared
+first, so a caller that is itself a session on another profile cannot carry its
+own account into the command:
+
+- **Ones a profile sets** – `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and
+  `CLAUDE_CODE_USE_BEDROCK`.
+- **Ones no profile sets** – `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`,
+  `AWS_BEARER_TOKEN_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
+  `CLAUDE_CODE_SKIP_BEDROCK_AUTH`, `CLAUDE_CODE_SKIP_VERTEX_AUTH`,
+  `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`,
+  `ANTHROPIC_VERTEX_PROJECT_ID`, and the model defaults
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`. A profile
+  that needs one sets it in its env overrides, which are applied after the
+  clear.
+
+`AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION` stay inherited unless the
 profile sets them: other tools read them, and Claude Code consults them only for
-Bedrock.
+a cloud provider, and the clear switches off every provider the profile does not
+name.
 
 ## Exit status and output
 

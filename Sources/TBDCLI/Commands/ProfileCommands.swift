@@ -605,10 +605,11 @@ struct ProfileExec: AsyncParsableCommand {
             the profile gets from it: the profile's CLAUDE_CONFIG_DIR, its \
             stored setup token or API key, its endpoint and model, and the \
             global and profile env overrides. Everything else is inherited \
-            from this process. Variables that choose a Claude account \
-            (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR and \
-            the like) are cleared first, so the profile alone decides which \
-            account the command runs on.
+            from this process, except the variables that choose Claude's \
+            credential, provider, endpoint or model (CLAUDE_CODE_OAUTH_TOKEN, \
+            ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR and others; see \
+            docs/profile-exec.md), which are cleared first so this process's \
+            own account does not carry over.
 
             The command replaces this process, so its output, signals and exit \
             status are its own. When the command never runs, the exit status \

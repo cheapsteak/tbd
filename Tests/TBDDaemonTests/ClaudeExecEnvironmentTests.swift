@@ -111,17 +111,22 @@ struct ClaudeExecEnvironmentTests {
         #expect(env["CLAUDE_CONFIG_DIR"] == "/profiles/token/claude")
     }
 
-    @Test("the CLI clears every account-choosing key the builder can produce, and only those")
-    func clearedKeysMatchTheBuilderVocabulary() {
+    @Test("profileKeys is exactly what the builder can produce, less the general-purpose AWS settings")
+    func profileKeysMatchTheBuilderVocabulary() {
         // The keys any profile kind can put in an exec environment.
         let produced = Self.everyKind.reduce(into: Set<String>()) { keys, p in
             keys.formUnion(exec(p).keys)
         }
-        // General-purpose AWS settings stay inherited (see `clearedKeys`), and
-        // ANTHROPIC_AUTH_TOKEN is cleared although no profile sets it.
-        let expected = produced
-            .subtracting(["AWS_REGION", "AWS_PROFILE"])
-            .union(["ANTHROPIC_AUTH_TOKEN"])
-        #expect(ProfileExecEnvironment.clearedKeys == expected)
+        #expect(ProfileExecEnvironment.profileKeys == produced.subtracting(["AWS_REGION", "AWS_PROFILE"]))
+    }
+
+    @Test("the other selectors are ones no profile sets, and the CLI clears both groups")
+    func otherSelectorsAreDisjointFromTheProfile() {
+        let produced = Self.everyKind.reduce(into: Set<String>()) { keys, p in
+            keys.formUnion(exec(p).keys)
+        }
+        #expect(ProfileExecEnvironment.otherSelectors.isDisjoint(with: produced))
+        #expect(ProfileExecEnvironment.clearedKeys
+            == ProfileExecEnvironment.profileKeys.union(ProfileExecEnvironment.otherSelectors))
     }
 }
