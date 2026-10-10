@@ -164,6 +164,52 @@ struct PendingPromptPresentationTests {
         #expect(merged.settled.isEmpty)
     }
 
+    /// With the flag off, prompts must not change the layout at all: no
+    /// appended row, no lift-out of an activity group, no un-hidden row, no
+    /// content-version change.
+    @Test func flagOffPromptsLeaveThePresentationAsWithoutPrompts() {
+        let items: [TranscriptItem] = [
+            .assistantText(id: "a", text: "Working.", timestamp: nil),
+            Fix.toolCall("toolu_R", "Read", input: #"{"file_path":"/x"}"#),
+            Fix.toolCall("toolu_X"),
+            Fix.toolCall("toolu_T", "TodoWrite", input: "{}"),
+        ]
+        let localPrompts = [
+            Fix.local(Fix.permissionPayload(), flagOn: false),
+            Fix.local(Fix.permissionPayload(id: "p2", toolUseID: "toolu_T"), flagOn: false),
+            Fix.local(Fix.permissionPayload(id: "p3", toolUseID: nil), flagOn: false),
+        ]
+        let remotePrompts = [true, false].map { hasAnswer in
+            PendingPromptPresentation.remote(
+                RemotePendingPrompt(id: "r1", kind: .permission, toolUseID: "toolu_X", toolName: "Bash"),
+                selection: Fix.selection,
+                capabilities: hasAnswer ? [RemoteCapability.answer, "events"] : ["events"],
+                flagOn: false, now: Fix.when)
+        }
+        let baseline = TranscriptPresentation.build(
+            items: items, pendingPrompts: [:], memo: TranscriptPresentationMemo()).nodes
+
+        for prompts in [localPrompts, remotePrompts] {
+            let merged = PendingPromptMerge.apply(items: items, prompts: prompts)
+            #expect(merged.items == items)
+            #expect(merged.prompts.isEmpty)
+            let nodes = TranscriptPresentation.build(
+                items: merged.items, pendingPrompts: merged.prompts, memo: TranscriptPresentationMemo()).nodes
+            #expect(nodes.map(\.id) == baseline.map(\.id))
+            #expect(nodes.map(\.contentVersion) == baseline.map(\.contentVersion))
+        }
+    }
+
+    /// With the flag on, a remote provider without `answer` still shows its
+    /// read-only "Attach to answer" card in the transcript.
+    @Test func flagOnRemoteWithoutAnswerStillCardsTheRow() {
+        let remote = PendingPromptPresentation.remote(
+            RemotePendingPrompt(id: "r1", kind: .permission, toolUseID: "toolu_X", toolName: "Bash"),
+            selection: Fix.selection, capabilities: ["events"], flagOn: true, now: Fix.when)
+        let merged = PendingPromptMerge.apply(items: [Fix.toolCall("toolu_X")], prompts: [remote])
+        #expect(merged.prompts["toolu_X"]?.answerability == .readOnly(note: "Attach to answer"))
+    }
+
     @Test @MainActor func appendedCardReplacedBySameIDRowIsNotARebuild() {
         let prompt = Fix.local(Fix.permissionPayload())
         let a: TranscriptItem = .assistantText(id: "a", text: "Running it.", timestamp: nil)

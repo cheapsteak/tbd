@@ -75,8 +75,12 @@ struct PendingPromptPresentation: Hashable, Sendable {
     var acceptsAnswer: Bool { answerability.isAnswerable && phase.isOpen }
 
     /// Whether the row renders as a prompt card (`PermissionPromptCard`, or
-    /// `AskUserQuestionCard` in pending mode). A read-only prompt with no note
-    /// — the flag is off — renders exactly as today's row instead.
+    /// `AskUserQuestionCard` in pending mode): with the flag on, whether or
+    /// not the card is answerable — a remote provider without `answer` still
+    /// shows a read-only card carrying "Attach to answer". With the flag off
+    /// (a read-only prompt with no note) it is false, and
+    /// `PendingPromptMerge.apply` leaves the prompt out entirely, so the
+    /// transcript lays out exactly as it would with no prompt at all.
     var rendersAsPromptCard: Bool { answerability != .readOnly(note: nil) }
 
     /// The tool name an appended row carries when a remote provider omitted it.
@@ -204,8 +208,12 @@ enum PendingPromptMerge {
         }
     }
 
+    /// Only prompts that render as a card take part: one that does not (the
+    /// flag is off) appends no row, lifts no row out of its activity group,
+    /// un-hides nothing and changes no row's content version.
     static func apply(items: [TranscriptItem],
-                      prompts: [PendingPromptPresentation]) -> Merged {
+                      prompts allPrompts: [PendingPromptPresentation]) -> Merged {
+        let prompts = allPrompts.filter(\.rendersAsPromptCard)
         guard !prompts.isEmpty else { return Merged(items: items, prompts: [:], settled: []) }
         let result = PendingPromptMerger.merge(items: items, seeds: prompts.map(\.seed))
         var byPromptID: [String: PendingPromptPresentation] = [:]

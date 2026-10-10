@@ -395,7 +395,9 @@ Experimental, after the transcript-streaming toggle.
 
 The flag gates two things:
 - **Off:** the overlay leaves out both new hooks, `prompt.answer` and
-  `remote.answer` refuse, and the cards stay read-only.
+  `remote.answer` refuse, and the transcript renders exactly as it would with
+  no pending prompt: no card, no appended row, no row lifted out of its
+  activity group.
 - **On:** everything above.
 
 Hook changes reach a session on its next start, as with every overlay change.
