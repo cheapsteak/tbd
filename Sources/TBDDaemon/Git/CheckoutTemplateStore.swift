@@ -27,7 +27,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "cloneCheckou
 /// worktree: the directory is emptied (keeping `.git`) and `reset --hard`
 /// writes every file. A clone that does not leave `git status` empty takes the
 /// same fallback, so a torn or stale template costs time, never correctness.
-/// The fallback is the only thing a non-APFS volume ever sees.
+/// The fallback is the only thing a non-APFS volume ever sees. A git older
+/// than 2.36 has no `git hook run` for step 5, so there the create is the
+/// plain `git worktree add` and no template is built.
 ///
 /// The template follows the bases worktrees are created from: after each
 /// create, `refresh(…)` moves it to the new worktree's HEAD, writing only what
@@ -81,17 +83,35 @@ public actor CheckoutTemplateStore {
     private var activeClones: [UUID: Int] = [:]
     /// Repos whose template is being written. A clone never starts during one.
     private var refreshing: Set<UUID> = []
-    /// Repos where `clonefile` reported the volume cannot clone (`ENOTSUP`) or
-    /// the template and worktree are on different volumes (`EXDEV`). Neither
-    /// clones nor refreshes are attempted for them until the daemon restarts.
+    /// Repos the store has given up on until the daemon restarts: `clonefile`
+    /// reported the volume cannot clone (`ENOTSUP`), the template and worktree
+    /// are on different volumes (`EXDEV`), or `notCleanLimit` clones in a row
+    /// failed the clean-status check. Neither clones nor refreshes are
+    /// attempted for them.
     private var unsupported: Set<UUID> = []
+    /// Clones in a row, per repo, that did not leave `git status` empty.
+    /// Reset by a clean clone; at `notCleanLimit` the repo joins `unsupported`.
+    private var notCleanStreak: [UUID: Int] = [:]
+    /// Whether this machine's git has `git hook run`. Probed on first use.
+    private var hookRunSupported: Bool?
+
+    /// How many clones in a row may fail the clean-status check before the
+    /// store stops building a template for the repo. One stray file is a torn
+    /// template, which the rebuild after it fixes. The same failure on every
+    /// rebuild is a repo whose own checkout never reads clean (line endings,
+    /// a filter that does not round-trip), and each further attempt would
+    /// cost a full template write plus a full worktree write.
+    static let notCleanLimit = 3
 
     /// The daemon's instance. Resolves `~/tbd/repos` per use, so it honors
     /// `TBD_HOME` set by the test fence.
     public static let shared = CheckoutTemplateStore()
 
-    public init(reposDir: URL? = nil) {
+    /// `hookRunSupported` pre-answers the git version probe; tests use it to
+    /// take the old-git branch on a machine with a current git.
+    public init(reposDir: URL? = nil, hookRunSupported: Bool? = nil) {
         self.reposDir = reposDir
+        self.hookRunSupported = hookRunSupported
     }
 
     nonisolated func paths(repoID: UUID) -> TemplatePaths {
@@ -115,13 +135,21 @@ public actor CheckoutTemplateStore {
 
     /// Creates a worktree on a new branch from `baseBranch`, populated from the
     /// template where possible. Throws only when `git worktree add
-    /// --no-checkout` itself fails, when the fallback checkout fails, or when
-    /// the `post-checkout` hook fails — the failures a plain `worktreeAdd`
-    /// would also have reported, so the caller's cleanup applies unchanged.
+    /// --no-checkout` itself fails, when the fallback checkout fails, when
+    /// the `post-checkout` hook fails, or when the calling task is cancelled
+    /// — the failures a plain `worktreeAdd` would also have reported, so the
+    /// caller's cleanup applies unchanged.
     public nonisolated func addWorktree(
         git: GitManager, repoID: UUID, repoPath: String,
         worktreePath: String, branch: String, baseBranch: String
     ) async throws -> Outcome {
+        guard await canRunHooks(git: git) else {
+            // The clone path runs `post-checkout` itself through `git hook
+            // run`, which this git lacks. The plain add runs the hook.
+            try await git.worktreeAdd(
+                repoPath: repoPath, worktreePath: worktreePath, branch: branch, baseBranch: baseBranch)
+            return .materialized(reason: "git older than 2.36")
+        }
         try await git.worktreeAddNoCheckout(
             repoPath: repoPath, worktreePath: worktreePath, branch: branch, baseBranch: baseBranch)
 
@@ -130,6 +158,10 @@ public actor CheckoutTemplateStore {
             outcome = try await populateFromTemplate(
                 git: git, repoID: repoID, worktreePath: worktreePath)
         } catch {
+            // A cancelled create stops here rather than starting a full
+            // write that the cancellation would cut short in turn. A git
+            // timeout still falls back: the full write has its own bound.
+            if error is CancellationError || Task.isCancelled { throw error }
             logger.info("""
             clone checkout fell back for \(worktreePath, privacy: .public): \
             \(String(describing: error), privacy: .public)
@@ -170,10 +202,12 @@ public actor CheckoutTemplateStore {
         guard try await git.isStatusEmpty(worktreePath: worktreePath) else {
             // The template holds something its commit does not track. The
             // fast refresh path would carry it forward forever, so drop the
-            // commit file: the next refresh rebuilds from scratch.
-            await invalidate(repoID: repoID)
+            // commit file and the next refresh rebuilds from scratch — or,
+            // after `notCleanLimit` in a row, drop the template for good.
+            await recordNotClean(repoID: repoID)
             throw CloneError.notClean
         }
+        await recordClean(repoID: repoID)
         return .cloned(templateCommit: template.commit)
     }
 
@@ -200,11 +234,40 @@ public actor CheckoutTemplateStore {
         let remaining = (activeClones[repoID] ?? 1) - 1
         activeClones[repoID] = remaining > 0 ? remaining : nil
         if isUnsupported {
-            unsupported.insert(repoID)
-            // A template nothing can clone from is a full checkout of waste.
-            try? FileManager.default.removeItem(at: paths(repoID: repoID).root)
-            logger.info("clone checkout: volume cannot clone for repo \(repoID.uuidString, privacy: .public)")
+            giveUp(repoID: repoID, reason: "volume cannot clone")
         }
+    }
+
+    /// Stops cloning and refreshing for the repo until the daemon restarts.
+    private func giveUp(repoID: UUID, reason: String) {
+        unsupported.insert(repoID)
+        // A template nothing will clone from is a full checkout of waste.
+        try? FileManager.default.removeItem(at: paths(repoID: repoID).root)
+        logger.info("clone checkout: \(reason, privacy: .public) for repo \(repoID.uuidString, privacy: .public)")
+    }
+
+    private func recordNotClean(repoID: UUID) {
+        let streak = (notCleanStreak[repoID] ?? 0) + 1
+        notCleanStreak[repoID] = streak
+        if streak >= Self.notCleanLimit {
+            giveUp(repoID: repoID, reason: "\(streak) clones in a row were not clean")
+        } else {
+            invalidate(repoID: repoID)
+        }
+    }
+
+    private func recordClean(repoID: UUID) {
+        notCleanStreak[repoID] = nil
+    }
+
+    private func canRunHooks(git: GitManager) async -> Bool {
+        if let hookRunSupported { return hookRunSupported }
+        let supported = await git.supportsHookRun()
+        if !supported, hookRunSupported == nil {
+            logger.info("clone checkout: git has no `git hook run` (needs 2.36); creates use plain worktree add")
+        }
+        hookRunSupported = supported
+        return supported
     }
 
     /// Makes the repo's template read as absent until a refresh rebuilds it.
@@ -222,7 +285,9 @@ public actor CheckoutTemplateStore {
     /// throws: a failed refresh leaves no template, and creates materialize
     /// normally until a later refresh succeeds.
     public func refresh(git: GitManager, repoID: UUID, repoPath: String, toCommit commit: String) async {
-        guard !unsupported.contains(repoID),
+        // Creates never clone on such a git, so a template would be waste.
+        guard await canRunHooks(git: git),
+              !unsupported.contains(repoID),
               !refreshing.contains(repoID),
               (activeClones[repoID] ?? 0) == 0
         else { return }
@@ -241,6 +306,10 @@ public actor CheckoutTemplateStore {
             """)
         }
         refreshing.remove(repoID)
+        // The store gave up on the repo while this refresh was writing.
+        if unsupported.contains(repoID) {
+            try? FileManager.default.removeItem(at: paths.root)
+        }
     }
 
     private static func writeTemplate(

@@ -24,6 +24,12 @@ the arguments `git worktree add` gives it.
 
 It ships behind `clone_checkout_enabled`, default off.
 
+**Status: proposal.** This design did not go through `/tbd-brainstorming`. Its
+open choices are proposals for review, not settled decisions: the scope limited
+to fresh creates, a template refresh triggered by creates rather than a timer,
+GC reclaiming every template while the flag is off, and the clean-status give-up
+limit of three.
+
 ## Goals
 
 - A new worktree on an APFS volume costs, in real bytes, roughly the size of
@@ -100,6 +106,17 @@ or `EXDEV` marks the repo unsupported until the daemon restarts and deletes its
 template, so neither clones nor template refreshes are attempted for it again.
 A template is never built on a volume that reports it cannot clone.
 
+The same give-up applies after three clones of a repo in a row fail the status
+check in step 5. A single failure is a torn template: it is invalidated, and the
+next refresh rebuilds it from scratch. The same failure after every rebuild
+means the repo's own checkout never reads clean (line endings, a filter that
+does not round-trip), and without a limit each create would pay a full
+template write and a full worktree write.
+
+A cancelled create rethrows instead of falling back, since the cancellation
+would cut the full write short too. A git timeout inside steps 2–5 falls back
+like any other failure; the full write has its own bound.
+
 ### Keeping the template current
 
 After each flagged create, the template is moved to that worktree's HEAD in the
@@ -146,14 +163,29 @@ that a create is using costs that create a full checkout.
 
 ## Costs and risks
 
-- **Create time.** The refresh in step 3 reads the whole checkout once (about
-  440 MB in the field repository). Hashing that on current Apple silicon is on
-  the order of a second or two, against the write it replaces.
+- **Create time.** The refresh in step 3 reads and hashes the whole checkout
+  once, because `read-tree` leaves no stat data to trust. Measured on the
+  22,362-file field repository, a clone-backed create took 1.2× (template at
+  the base) to 2× (template 20 commits behind) as long as a plain one: 10.3 s
+  against 8.6 s, and 7.1 s against 3.6 s. The `clonefile` calls themselves take
+  about 2 s for the whole tree. The trade is a few seconds per create for about
+  450 MB per worktree.
+- **Rejected: trusting the template's stat data to skip the hash.** Seeding the
+  worktree's index from the template's own index and refreshing with
+  `core.checkStat=minimal` would match on mtime and size alone and hash nothing.
+  But each entry would keep the template file's inode and ctime, so the user's
+  first `git status` under default settings would see every entry as changed and
+  hash the whole tree there instead, on the person's time rather than the
+  daemon's. It would also weaken the check that makes a torn template harmless,
+  from content to mtime and size.
 - **One template per repo.** It costs one checkout of disk, once. It is shared
   by every worktree cloned from it, and blocks it drops in a refresh stay owned
   by the worktrees still holding them.
-- **Requires git 2.36** for `git hook run`. Older git fails step 6 and fails
-  the create; macOS's bundled git has been newer than that since 2022.
+- **Uses git 2.36** for `git hook run` in step 6. The store reads
+  `git --version` once per daemon. On an older git, or one whose version it
+  cannot read, a flagged create is the plain `git worktree add` (which runs the
+  hook itself) and no template is built. macOS's bundled git has been newer
+  than 2.36 since 2022.
 - **Sparse checkout and submodules.** A template holds the full tracked tree.
   A repository relying on per-worktree sparse checkout gets a full one under
   this flag. Submodules are left uninitialized, as `git worktree add` leaves

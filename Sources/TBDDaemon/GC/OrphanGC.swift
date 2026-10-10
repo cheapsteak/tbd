@@ -280,7 +280,10 @@ public actor OrphanGC {
             return .init(planned: ["lsof unavailable - sweep skipped"], reaped: 0)
         }
 
-        let repos = (try? await db.repos.list()) ?? []
+        // nil when the read failed: the template leg must tell that apart
+        // from a successful read that found no repos.
+        let reposRead = try? await db.repos.list()
+        let repos = reposRead ?? []
         for repo in repos {
             let candidates = await agentCollector.candidates(repoPath: repo.path)
             for candidate in candidates {
@@ -380,7 +383,7 @@ public actor OrphanGC {
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
         reclaimCheckoutTemplates(
-            config: config, repos: repos, dryRun: dryRun,
+            config: config, repos: reposRead, dryRun: dryRun,
             planned: &planned, reaped: &checkoutTemplatesReaped
         )
 
@@ -413,25 +416,27 @@ public actor OrphanGC {
     /// removal that races a create costs that create a full checkout, never
     /// correctness — the create falls back whenever its clone is incomplete.
     ///
+    /// `repos` is nil when the sweep could not read the repo list. A failed
+    /// read never counts as "this repo is gone"; a successful empty list does,
+    /// so removing the last repo still returns its template's space.
+    ///
     /// No `ReapRecord`: there is no worktree to key one by.
     private func reclaimCheckoutTemplates(
-        config: Config, repos: [Repo], dryRun: Bool,
+        config: Config, repos: [Repo]?, dryRun: Bool,
         planned: inout [String], reaped: inout Int
     ) {
         let fm = FileManager.default
         guard let repoDirs = try? fm.contentsOfDirectory(atPath: unsentPromptsReposBase.path) else {
             return
         }
-        let liveRepoIDs = Set(repos.map(\.id.uuidString))
+        let liveRepoIDs = repos.map { Set($0.map(\.id.uuidString)) }
         for repoDir in repoDirs.sorted() where !repoDir.hasPrefix(".") {
             let template = unsentPromptsReposBase
                 .appendingPathComponent(repoDir)
                 .appendingPathComponent(TBDConstants.checkoutTemplateDirName)
             guard fm.fileExists(atPath: template.path) else { continue }
             let reason: String
-            // An empty list may be a failed read rather than no repos, so it
-            // never counts as "this repo is gone".
-            if !repos.isEmpty, !liveRepoIDs.contains(repoDir) {
+            if let liveRepoIDs, !liveRepoIDs.contains(repoDir) {
                 reason = "repo-removed"
             } else if !config.cloneCheckoutEnabled {
                 reason = "clone-checkout-off"
