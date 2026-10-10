@@ -7,6 +7,9 @@ import SwiftTerm
 // meaning the emulator.
 import struct TBDShared.TerminalModeReading
 import struct TBDShared.TerminalScreen
+import class TBDShared.ProgramStatusGate
+import enum TBDShared.ProgramStatusParser
+import enum TBDShared.ProgramStatusProtocol
 import TBDTerminalSerialization
 import os
 
@@ -178,6 +181,11 @@ actor HolderReader {
     ///   instant arithmetic an age is. `ContinuousClock.Instant` can, which is
     ///   what lets a test hand back `base + .minutes(41)` and assert an exact
     ///   age rather than a tolerance window.
+    /// - Parameter programStatus: the Program Status Protocol (OSC 7501) tap.
+    ///   With one, the emulator answers the `?` probe synchronously — while
+    ///   the gate is open — and hands every report's payload to the tap's
+    ///   `deliver`. nil leaves OSC 7501 unhandled, as it was before the
+    ///   protocol existed.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -187,6 +195,7 @@ actor HolderReader {
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
         readFault: HolderReadFault? = nil,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
+        programStatus: HolderProgramStatusTap? = nil,
         observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         clock: any Clock<Duration> = ContinuousClock()
@@ -208,6 +217,7 @@ actor HolderReader {
             scrollback: scrollbackLines,
             observedChildFromStart: observedChildFromStart,
             monotonicNow: monotonicNow,
+            programStatus: programStatus,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
     }
 
@@ -656,9 +666,22 @@ actor HolderReader {
     /// moves `modesObserved` or `contentObserved`: a re-adopted session stays
     /// unobserved on both axes across every attach and handback, and only a
     /// session this daemon spawned is ever observed.
+    ///
+    /// **A preamble is a replay, never a conversation.** It is fed with the
+    /// emulator's OSC 7501 handler silenced: a probe in it is not answered and
+    /// a report in it is not delivered, because neither came from the child
+    /// now (spec "Answering the probe": a snapshot replay must never answer a
+    /// probe or ingest a report).
     func ingest(preamble: Data) {
         guard state != .stopped, !preamble.isEmpty else { return }
-        emulator.feed([UInt8](preamble)[...])
+        emulator.feedPreamble([UInt8](preamble)[...])
+    }
+
+    /// Feeds bytes to the emulator exactly as the drain loop does — as the
+    /// child's own output, OSC 7501 handler live. Test-facing: it lets a suite
+    /// drive the probe and report paths without a drain thread or a real pty.
+    func feedChildOutputForTesting(_ data: Data) {
+        emulator.feed([UInt8](data)[...])
     }
 
     // MARK: - Input and size
@@ -1321,9 +1344,9 @@ private final class HolderEmulator: @unchecked Sendable {
     /// When this emulator last took in bytes that came from outside the daemon.
     ///
     /// Under `terminalLock` like everything else here, and stamped in `feed`
-    /// only — which is the whole definition, because it is what decides the
-    /// answer for each of the three things that reach `feed` and the one that
-    /// does not:
+    /// and its preamble twin `feedPreamble` only — which is the whole
+    /// definition, because it is what decides the answer for each of the three
+    /// things that reach them and the one that does not:
     ///
     /// - **The drain loop's reads** and **the quiesce remainder** stamp it.
     ///   They are the child's own output; this is the measurement's subject.
@@ -1356,11 +1379,17 @@ private final class HolderEmulator: @unchecked Sendable {
     /// originates from a daemon emulator's own snapshot. Read under
     /// `terminalLock`, like `lastByteAt` and everything else here.
     private let observedChildFromStart: Bool
+    /// True only while `feedPreamble` is parsing a handback preamble, so the
+    /// OSC 7501 handler can tell a replay from the child speaking. Read and
+    /// written only under `terminalLock` — the handler runs inside the parse,
+    /// which `feedPreamble` holds that lock around — like everything else here.
+    private var ingestingPreamble = false
 
     init(
         columns: Int, rows: Int, scrollback: Int,
         observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
+        programStatus: HolderProgramStatusTap?,
         reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void
     ) {
         let delegate = ReplyForwardingDelegate(reply: reply)
@@ -1374,6 +1403,30 @@ private final class HolderEmulator: @unchecked Sendable {
                 cols: max(1, columns),
                 rows: max(1, rows),
                 scrollback: max(0, scrollback)))
+
+        // Program Status Protocol (OSC 7501). A registered handler rather than
+        // `observeOscEvents`, because the probe reply must be written *inside*
+        // the parse: Claude Code queues the probe ahead of its DA1 query and
+        // settles the protocol off if DA1's answer arrives first, and SwiftTerm
+        // answers DA1 synchronously in the same parse. The handler runs under
+        // `terminalLock`, so it must not block or re-enter the emulator: the
+        // reply is one best-effort pty write through the delegate, the same
+        // path DA1's reply takes, and a report is copied out of the borrowed
+        // slice and handed to the tap, whose `deliver` only enqueues.
+        //
+        // Weak `self`: the terminal owns the handler and `self` owns the
+        // terminal, so a strong capture would be a cycle.
+        if let programStatus {
+            terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak self] data in
+                guard let self else { return }
+                guard programStatus.gate.isEnabled, !self.ingestingPreamble else { return }
+                if ProgramStatusParser.isProbe(data) {
+                    self.terminal.sendResponse(text: ProgramStatusProtocol.probeReply)
+                    return
+                }
+                programStatus.deliver([UInt8](data))
+            }
+        }
     }
 
     /// Bytes from outside — the drain loop's reads, the quiesce remainder, a
@@ -1387,6 +1440,21 @@ private final class HolderEmulator: @unchecked Sendable {
     func feed(_ bytes: ArraySlice<UInt8>) {
         terminal.terminalLock.withLock {
             lastByteAt = monotonicNow()
+            terminal.feed(buffer: bytes)
+        }
+    }
+
+    /// `feed`, for a handback preamble: identical, except that the OSC 7501
+    /// handler stays silent for the duration. A preamble is a serialized screen
+    /// and should never carry OSC 7501; the flag makes that structural rather
+    /// than assumed, so a replay can neither answer a probe nor deliver a
+    /// report. Set and cleared inside the same `terminalLock` hold the parse
+    /// runs under.
+    func feedPreamble(_ bytes: ArraySlice<UInt8>) {
+        terminal.terminalLock.withLock {
+            lastByteAt = monotonicNow()
+            ingestingPreamble = true
+            defer { ingestingPreamble = false }
             terminal.feed(buffer: bytes)
         }
     }

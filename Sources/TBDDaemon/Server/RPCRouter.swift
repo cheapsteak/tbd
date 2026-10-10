@@ -506,8 +506,9 @@ public final class RPCRouter: Sendable {
         )
         self.modelProfileResolver = resolvedModelProfileResolver
         // The daemon passes the store its holder readers feed and starts its
-        // run loop; a router built without one (tests, mock mode) gets its own,
-        // gated by the shipped default until `config.setProgramStatusEnabled`.
+        // run loop, in mock mode too; a router built without one (tests) gets
+        // its own, gated by the shipped default until
+        // `config.setProgramStatusEnabled`.
         let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
             db: db, subscriptions: subscriptions,
             enabled: Config.programStatusEnabledDefault, now: now)

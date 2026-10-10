@@ -891,6 +891,22 @@ public final class Daemon: Sendable {
             }
         )
 
+        // The Program Status Protocol (OSC 7501) store, built first because the
+        // registry's readers feed it and the RPC router serves it: both must
+        // hold ONE store, or a report the daemon's reader accepts would be
+        // invisible to `terminal.programStatusList` and the flag's setter would
+        // drive a gate no reader consults. Its gate starts at the persisted
+        // flag, read fresh here; `config.setProgramStatusEnabled` moves it
+        // afterwards. Built in mock mode too — the router always has a store —
+        // where nothing feeds it. Memory only, so it has nothing to reconcile.
+        // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
+        let programStatusEnabledAtBoot: Bool =
+            (try? await database.config.get())?.programStatusEnabled
+            ?? Config.programStatusEnabledDefault
+        let programStatusStore = ProgramStatusStore.live(
+            db: database, subscriptions: subs, enabled: programStatusEnabledAtBoot)
+        Task { await programStatusStore.run() }
+
         // The holder registry, constructed HERE rather than at step 8e where it
         // is first used, because `lifecycle` is copied by value into the RPC
         // router below and both need to reach the same actor: the spawn path
@@ -907,7 +923,8 @@ public final class Daemon: Sendable {
                 listTerminals: { [database] in try await database.terminals.list() },
                 spawner: HolderSpawner.locateSiblingExecutable().map {
                     HolderSpawner(executableURL: $0)
-                })
+                },
+                programStatus: programStatusStore)
             : nil
         self.holderRegistry = holderRegistry
 
@@ -1123,6 +1140,7 @@ public final class Daemon: Sendable {
             // Without it the suggestion is silently unreachable.
             profilePoolCandidateSource: profilePoolCandidateSource,
             pendingQuestions: pendingQuestions,
+            programStatus: programStatusStore,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,
             // Envelope suppression is authenticated against the sidecar's
