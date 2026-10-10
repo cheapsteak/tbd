@@ -423,6 +423,29 @@ private struct SendableContext: @unchecked Sendable {
 
 // MARK: - NIO Channel Handler
 
+extension SocketServer {
+    /// Methods served without taking an RPC concurrency limiter slot.
+    ///
+    /// - `state.subscribe` and `prompt.await` hold their connection open for
+    ///   as long as the subscription or the dialog lasts; a handful of them
+    ///   would otherwise occupy every slot and freeze the daemon.
+    /// - `prompt.ack` is the hook confirming it printed a decision. The
+    ///   `prompt.answer` that delivered it waits 5 s for this ack and reads
+    ///   its absence as `already_resolved`, so an ack queued behind a burst
+    ///   of slow RPCs would turn a delivered answer into a false "answered
+    ///   elsewhere". It does no subprocess work, which is all the limiter
+    ///   bounds.
+    /// - `prompt.note` is sent by the `PreToolUse` / `PostToolUse` hooks of
+    ///   every tool call, under a 3-second hook timeout. It only records or
+    ///   resolves in-memory state — no subprocess work — and a note queued
+    ///   behind slow RPCs would miss its pairing or its close.
+    static func bypassesConcurrencyLimiter(method: String?) -> Bool {
+        guard let method else { return false }
+        return [RPCMethod.stateSubscribe, RPCMethod.promptAwait, RPCMethod.promptAck,
+                RPCMethod.promptNote].contains(method)
+    }
+}
+
 /// Handles individual socket connections. Reads newline-delimited JSON,
 /// routes through RPCRouter, and writes back JSON + newline.
 private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable {
@@ -565,6 +588,15 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             return
         }
 
+        // prompt.await is a long-poll: it parks until the dialog resolves,
+        // which can be hours. Like state.subscribe it BYPASSES the limiter —
+        // eight parked awaits would otherwise hold every slot and freeze the
+        // daemon for the whole fleet.
+        if let request, request.method == RPCMethod.promptAwait {
+            await servePromptAwait(request, router: router, wrappedCtx: wrappedCtx)
+            return
+        }
+
         // Normal (non-subscribe) request path. Gate on the concurrency limiter
         // so a connection burst can't spawn unbounded concurrent handlers (and
         // their git/gh subprocesses). The expensive work is `handleRaw`; the
@@ -572,12 +604,18 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         // no subprocess fan-out). `release()` is an actor method and so cannot
         // run from a `defer`, but there is no throwing/early-exit point between
         // acquire and release, so the slot is always returned.
+        //
+        // `prompt.ack` skips the slot — see
+        // `SocketServer.bypassesConcurrencyLimiter(method:)`.
         let method = request?.method ?? "unknown"
-        let inFlight = await limiter.acquire()
-        // Cheap in-flight gauge: only log when contention is notable, never at
-        // info on every request.
-        if inFlight > RPCConcurrencyLimiter.maxConcurrentRPCs / 2 {
-            perfLogger.debug("rpc in-flight high: \(inFlight, privacy: .public)")
+        let limited = !SocketServer.bypassesConcurrencyLimiter(method: request?.method)
+        if limited {
+            let inFlight = await limiter.acquire()
+            // Cheap in-flight gauge: only log when contention is notable,
+            // never at info on every request.
+            if inFlight > RPCConcurrencyLimiter.maxConcurrentRPCs / 2 {
+                perfLogger.debug("rpc in-flight high: \(inFlight, privacy: .public)")
+            }
         }
 
         let signposter = RPCSignposts.signposter
@@ -586,7 +624,7 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         let response = await router.handleRaw(data, connection: connection)
         signposter.endInterval("rpc.handle", intervalState)
 
-        await limiter.release()
+        if limited { await limiter.release() }
 
         do {
             let responseData = try JSONEncoder().encode(response)
@@ -603,6 +641,82 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             }
         } catch {
             // Encoding error - skip
+        }
+    }
+
+    /// Serves one `prompt.await` on its own connection.
+    ///
+    /// Ordering is what makes a closed connection always release its waiter:
+    /// 1. The close handler is installed (on the event loop) and confirmed
+    ///    before the await starts. It marks `closed` first and only then tells
+    ///    the router, so whichever of "waiter attaches" and "close arrives"
+    ///    happens first, the store sees the other — `waiterClosed` finds the
+    ///    attached waiter, or the attach finds the mark.
+    /// 2. An `.answered` reply hands the hook its decision. A write that fails,
+    ///    or a channel already gone, is reported as not delivered at once; a
+    ///    write that succeeds is acknowledged by the hook itself through
+    ///    `prompt.ack`, after it has printed the decision.
+    private static func servePromptAwait(
+        _ request: RPCRequest,
+        router: RPCRouter,
+        wrappedCtx: SendableContext
+    ) async {
+        let token = UUID()
+        let closed = OSAllocatedUnfairLock(initialState: false)
+        let eventLoop = wrappedCtx.context.eventLoop
+
+        let installed: Bool
+        do {
+            installed = try await eventLoop.submit { () -> Bool in
+                let context = wrappedCtx.context
+                context.channel.closeFuture.whenComplete { _ in
+                    closed.withLock { $0 = true }
+                    Task { await router.promptAwaitConnectionClosed(token: token) }
+                }
+                return context.channel.isActive
+            }.get()
+        } catch {
+            installed = false
+        }
+        // The connection is already gone (or its loop is shutting down): no
+        // waiter may park for a hook nobody can reach.
+        guard installed else { return }
+
+        let response = await router.awaitPrompt(
+            request.paramsData, token: token,
+            connectionClosed: { closed.withLock { $0 } })
+        let answered: Bool = {
+            guard let reply = try? response.decodeResult(PromptAwaitReply.self),
+                  case .answered = reply.result else { return false }
+            return true
+        }()
+
+        guard let responseData = try? JSONEncoder().encode(response),
+              let responseString = String(data: responseData, encoding: .utf8) else {
+            if answered { await router.promptAwaitDelivered(token: token, delivered: false) }
+            return
+        }
+
+        eventLoop.execute {
+            let context = wrappedCtx.context
+            guard context.channel.isActive else {
+                if answered {
+                    Task { await router.promptAwaitDelivered(token: token, delivered: false) }
+                }
+                return
+            }
+            var outBuffer = context.channel.allocator.buffer(capacity: responseString.utf8.count + 1)
+            outBuffer.writeString(responseString)
+            outBuffer.writeString("\n")
+            guard answered else {
+                context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: nil)
+                return
+            }
+            let promise = context.eventLoop.makePromise(of: Void.self)
+            promise.futureResult.whenFailure { _ in
+                Task { await router.promptAwaitDelivered(token: token, delivered: false) }
+            }
+            context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: promise)
         }
     }
 

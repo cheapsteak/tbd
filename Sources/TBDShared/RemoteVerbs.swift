@@ -24,6 +24,10 @@ public enum RemoteCapability {
     public static let transcriptRecall = "transcript.recall"
     /// The `--submit` flag on `send`: stdin is a message, pasted and submitted.
     public static let sendSubmit = "send-submit"
+    /// `answer <session_id> <prompt_id>` — the decision for an open
+    /// `pending_prompt`, as JSON on stdin. A provider declaring it also
+    /// declares `events`.
+    public static let answer = "answer"
 }
 
 /// The argv (after the provider's own `exec` and `args`) for the verbs
@@ -60,5 +64,11 @@ public enum RemoteVerb {
     /// Only for a provider that declared `RemoteCapability.sendSubmit`.
     public static func sendSubmit(sessionID: String) -> [String] {
         ["send", sessionID, "--submit"]
+    }
+
+    /// `answer <session_id> <prompt_id>` — the answer payload travels on stdin
+    /// as JSON. Only for a provider that declared `RemoteCapability.answer`.
+    public static func answer(sessionID: String, promptID: String) -> [String] {
+        ["answer", sessionID, promptID]
     }
 }

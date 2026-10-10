@@ -397,7 +397,7 @@ extension WorktreeLifecycle {
                 try await db.tabs.deleteForWorktree(worktreeID: current.id)
                 for terminal in terminals {
                     await pendingQuestions.clear(terminalID: terminal.id)
-                    await subscriptions?.broadcastPendingQuestions(
+                    await subscriptions?.broadcastPendingPrompts(
                         terminalID: terminal.id, from: pendingQuestions)
                     ClaudeHookOverlay.removePerSessionOverlay(
                         sessionKey: terminal.id.uuidString)
@@ -926,7 +926,7 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
-                await subscriptions?.broadcastPendingQuestions(
+                await subscriptions?.broadcastPendingPrompts(
                     terminalID: terminal.id, from: pendingQuestions)
             }
         }

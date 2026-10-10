@@ -67,15 +67,26 @@ struct TranscriptRenderNode: Identifiable, Equatable {
     /// — including the tests that build nodes by hand — is unchanged.
     let isProvisional: Bool
 
-    init(id: String, kind: Kind, badgeUsage: TokenUsage?, isProvisional: Bool = false) {
+    /// The open (or just-answered) prompt this tool-call row renders as a card,
+    /// set by `transcriptRenderNodes(from:pendingPrompts:)` from the view-time
+    /// merge (`PendingPromptMerge`). Nil for every other row. Hashed into
+    /// `contentVersion`, so a card opening, answering or retiring re-renders
+    /// exactly its row, and `TranscriptPresentation` lifts a node carrying one
+    /// out of its activity group.
+    let pendingPrompt: PendingPromptPresentation?
+
+    init(id: String, kind: Kind, badgeUsage: TokenUsage?, isProvisional: Bool = false,
+         pendingPrompt: PendingPromptPresentation? = nil) {
         self.id = id
         self.kind = kind
         self.badgeUsage = badgeUsage
         self.isProvisional = isProvisional
+        self.pendingPrompt = pendingPrompt
         var hasher = Hasher()
         hasher.combine(kind)
         hasher.combine(badgeUsage)
         hasher.combine(isProvisional)
+        hasher.combine(pendingPrompt)
         self.contentVersion = UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
@@ -139,7 +150,15 @@ struct TranscriptRenderNode: Identifiable, Equatable {
 /// visible usage-carrying item, and emitting a `subagentSummary` node
 /// after any toolCall that has a non-empty subagent timeline. Safe to call
 /// off the main actor.
-nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [TranscriptRenderNode] {
+///
+/// `pendingPrompts` (item id → card, from `PendingPromptMerge`) marks the
+/// tool-call rows that render as prompt cards. A carded row is never hidden:
+/// a dialog waiting on the user must show even for a tool the timeline
+/// normally omits.
+nonisolated func transcriptRenderNodes(
+    from items: [TranscriptItem],
+    pendingPrompts: [String: PendingPromptPresentation] = [:]
+) -> [TranscriptRenderNode] {
     // 1. Find the most-recent visible item carrying a TokenUsage, for badge
     //    attachment. Hidden items (`.thinking`, `.slashCommand`, hidden tool
     //    names) are excluded so the badge never floats below an EmptyView.
@@ -152,7 +171,7 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
     var out: [TranscriptRenderNode] = []
     out.reserveCapacity(items.count)
     for item in items {
-        if isHiddenInTranscript(item) { continue }
+        if isHiddenInTranscript(item), pendingPrompts[item.id] == nil { continue }
 
         let badge: TokenUsage? = (item.id == latestUsageItemID) ? item.usage : nil
 
@@ -192,7 +211,8 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
                 id: id,
                 kind: .toolCall(id: id, name: name, inputJSON: inputJSON,
                                 inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts),
-                badgeUsage: badge
+                badgeUsage: badge,
+                pendingPrompt: pendingPrompts[id]
             ))
 
         case .thinking, .slashCommand:

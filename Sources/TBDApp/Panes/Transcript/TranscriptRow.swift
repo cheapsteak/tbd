@@ -83,8 +83,13 @@ struct TranscriptRow: View {
         case .skillBody(let id, let text, let ts):
             SkillBodyRow(id: id, text: text, timestamp: ts)
         case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let ts):
-            toolCard(id: id, name: name, inputJSON: inputJSON,
-                     inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
+            if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard {
+                promptCard(prompt, id: id, inputJSON: inputJSON,
+                           inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
+            } else {
+                toolCard(id: id, name: name, inputJSON: inputJSON,
+                         inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
+            }
         case .activityGroupSummary(let summary):
             ActivityGroupSummaryRow(summary: summary)
         case .subagentSummary:
@@ -92,6 +97,22 @@ struct TranscriptRow: View {
             // enum case is retained for Codable/source compatibility but is
             // never produced by `transcriptRenderNodes(from:)`.
             EmptyView()
+        }
+    }
+
+    /// A row whose tool call has an open (or just-answered) prompt behind it.
+    /// A read-only prompt with no note never reaches here: it renders as
+    /// today's row (`PendingPromptPresentation.rendersAsPromptCard`).
+    @ViewBuilder
+    private func promptCard(_ prompt: PendingPromptPresentation, id: String, inputJSON: String,
+                            inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?) -> some View {
+        switch prompt.kind {
+        case .question:
+            AskUserQuestionCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo,
+                                result: result, timestamp: timestamp, terminalID: terminalID,
+                                staticHeight: staticCards, pending: prompt)
+        case .permission:
+            PermissionPromptCard(presentation: prompt, id: id, timestamp: timestamp ?? prompt.createdAt)
         }
     }
 

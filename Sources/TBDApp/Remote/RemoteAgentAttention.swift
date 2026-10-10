@@ -29,6 +29,10 @@ enum RemoteAgentAttention {
         guard !session.gone else { return nil }
         switch session.payload.agentState {
         case .waitingInput:
+            if let permission = permissionSummary(session.payload.effectivePendingPrompt) {
+                return permission
+            }
+            if let question = promptQuestionSummary(session.payload.effectivePendingPrompt) { return question }
             if let question = questionSummary(session.payload.pendingQuestion) { return question }
             if let reason = humanizedReason(session.payload.agentStateReason) { return reason }
             return "Waiting for input."
@@ -76,18 +80,71 @@ enum RemoteAgentAttention {
         return trimmed
     }
 
+    /// A pending permission prompt as one line: "Blocked on permission: <tool>
+    /// <short input>". The short input is a Bash command's first line or a
+    /// file tool's path; any other tool shows its name only. Nil for anything
+    /// but a permission prompt. Capped at 80 characters of input.
+    static func permissionSummary(_ prompt: RemotePendingPrompt?) -> String? {
+        guard let prompt, prompt.kind == .permission else { return nil }
+        let tool = prompt.toolName.flatMap { $0.isEmpty ? nil : $0 } ?? "tool"
+        var line = "Blocked on permission: \(tool)"
+        if let input = shortToolInput(toolName: tool, json: prompt.toolInputJSON) {
+            line += " \(input)"
+        }
+        return line
+    }
+
+    private static let maxInputCharacters = 80
+
+    private static func shortToolInput(toolName: String, json: String?) -> String? {
+        guard let json, let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        let raw: String?
+        switch toolName {
+        case "Bash":
+            raw = (object["command"] as? String)?
+                .split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init)
+        case "Write", "Edit", "MultiEdit", "NotebookEdit":
+            raw = object["file_path"] as? String
+        default:
+            raw = nil
+        }
+        guard let text = raw?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        guard text.count > maxInputCharacters else { return text }
+        return String(text.prefix(maxInputCharacters)) + "…"
+    }
+
     /// The structured question block as one line: the first question's
     /// prompt, plus its option labels when it has any, plus a count when more
     /// than one question is pending.
     static func questionSummary(_ question: RemotePendingQuestion?) -> String? {
         guard let question, let first = question.questions.first else { return nil }
-        var line = "Blocked on a question: \(first.prompt)"
-        let options = first.options.map(\.label).filter { !$0.isEmpty }
+        return questionLine(
+            text: first.prompt, optionLabels: first.options.map(\.label), count: question.questions.count)
+    }
+
+    /// The same line for a question-kind pending prompt, read from the
+    /// questions its card draws (`effectiveQuestions`), so a provider that
+    /// sends `pending_prompt` without the legacy `pending_question` still gets
+    /// its question quoted. Nil for a permission prompt or one with no usable
+    /// question.
+    static func promptQuestionSummary(_ prompt: RemotePendingPrompt?) -> String? {
+        guard let prompt, prompt.kind == .question else { return nil }
+        let questions = prompt.effectiveQuestions
+        guard let first = questions.first else { return nil }
+        return questionLine(
+            text: first.text, optionLabels: first.options.map(\.label), count: questions.count)
+    }
+
+    private static func questionLine(text: String, optionLabels: [String], count: Int) -> String {
+        var line = "Blocked on a question: \(text)"
+        let options = optionLabels.filter { !$0.isEmpty }
         if !options.isEmpty {
             line += " (\(options.joined(separator: " / ")))"
         }
-        if question.questions.count > 1 {
-            line += " — and \(question.questions.count - 1) more."
+        if count > 1 {
+            line += " — and \(count - 1) more."
         }
         return line
     }

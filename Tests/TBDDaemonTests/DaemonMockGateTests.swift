@@ -334,7 +334,7 @@ struct DaemonMockGateTests {
     func mockOffPreservesOwnedDeadResumableClaudeState() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorder = StartupReconcileCommandRecorder()
-        let pendingQuestions = PendingQuestionStore()
+        let pendingQuestions = PendingPromptStore()
         let terminalID = UUID()
         let server = "scratch-shared"
         let lifecycle = WorktreeLifecycle(

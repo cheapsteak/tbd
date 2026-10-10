@@ -105,7 +105,7 @@ extension WorktreeLifecycle {
         try await db.terminalHistory.deleteForWorktree(worktreeID: worktreeID)
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)
-            await subscriptions?.broadcastPendingQuestions(
+            await subscriptions?.broadcastPendingPrompts(
                 terminalID: terminal.id, from: pendingQuestions)
             ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
         }

@@ -1730,7 +1730,7 @@ final class AppState {
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
     /// In-flight `AskUserQuestion` captures by terminal, mirrored from the
-    /// daemon's `PendingQuestionStore` over `.terminalPendingQuestionsChanged`.
+    /// daemon's `PendingPromptStore` over `.terminalPendingQuestionsChanged`.
     /// Merged into that terminal's session transcript so a question renders
     /// before its `tool_use` line reaches the JSONL — the job the daemon's
     /// `terminal.transcript` handler did before the app read transcripts
@@ -1745,6 +1745,48 @@ final class AppState {
     /// state, so it stays out of Observation: a view that renders
     /// `pendingQuestions` must not also re-render on this.
     @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
+    /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
+    /// prompts) by terminal, mirrored from the daemon's store over
+    /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
+    /// is the only writer. Unrelated to `PendingPromptCoordinator`'s queued
+    /// first messages.
+    var pendingPrompts: [UUID: [PendingPromptPayload]] = [:]
+    /// Last `TerminalPendingPromptsDelta.revision` applied per terminal, for
+    /// the same out-of-order reason as `pendingQuestionRevisions`.
+    @ObservationIgnored var pendingPromptRevisions: [UUID: UInt64] = [:]
+    /// Prompt cards held on screen after their dialog closed, until the tool
+    /// result reaches the transcript or a bounded timeout passes. Shared by
+    /// the local and remote transcript panes; itself `@Observable`.
+    @ObservationIgnored let promptCardRetention = PromptCardRetention()
+    /// Sends prompt-card answers and keeps each card's draft and delivery
+    /// state by prompt id. Itself `@Observable`. Lazy because its senders
+    /// capture `self`; settable so tests install fake senders.
+    ///
+    /// Built by `makePromptAnswerController()` rather than inline: Swift
+    /// checks a lazy property's initializer expression like a default
+    /// argument, and one expression mixing `@MainActor` callbacks with
+    /// closures that call the `DaemonClient` actor is refused as "both main
+    /// actor-isolated and actor-isolated". A method body has one isolation.
+    @ObservationIgnored lazy var promptAnswers: PromptAnswerController = makePromptAnswerController()
+
+    private func makePromptAnswerController() -> PromptAnswerController {
+        let daemonClient = self.daemonClient
+        return PromptAnswerController(
+            local: { terminalID, promptID, answer in
+                try await daemonClient.promptAnswer(
+                    terminalID: terminalID, promptID: promptID, answer: answer)
+            },
+            remote: { provider, sessionID, promptID, answer in
+                try await daemonClient.remoteAnswer(
+                    provider: provider, sessionID: sessionID, promptID: promptID, answer: answer)
+            },
+            onDelivered: { [weak self] prompt, summary in
+                self?.promptCardRetention.markAnswered(prompt, summary: summary)
+            },
+            onRemoteDelivered: { [weak self] selection in
+                self?.requestRemoteTranscriptSync(selection)
+            })
+    }
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app
@@ -1776,6 +1818,12 @@ final class AppState {
     /// moment late.
     var transcriptStreamingEnabled: Bool {
         daemonCapabilities?.transcriptStreamingEnabled ?? false
+    }
+    /// Whether question and permission prompts can be answered from the
+    /// transcript, as the daemon reports it. False until capabilities have
+    /// been fetched, so a card never offers an answer the daemon would refuse.
+    var transcriptPromptAnswerEnabled: Bool {
+        daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
     }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
@@ -1928,6 +1976,10 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
+    /// How `setTranscriptPromptAnswerEnabled` persists the transcript
+    /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
@@ -2278,6 +2330,11 @@ final class AppState {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        // A card retired on its timeout is never reported settled, so its
+        // drafts and delivery state are dropped here instead.
+        promptCardRetention.onRetire = { [weak self] promptID in
+            self?.promptAnswers.forget([promptID])
+        }
         themeStore.reloadFromDisk()
         themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each
@@ -2761,11 +2818,7 @@ final class AppState {
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
-        // A new subscription is a new ordering domain. The daemon's
-        // `PendingQuestionStore` is memory-only, so a restarted daemon counts
-        // from zero again; keeping the old high-water marks would make the app
-        // drop every delta it then sends.
-        pendingQuestionRevisions.removeAll()
+        resetDeltaOrdering()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2776,6 +2829,15 @@ final class AppState {
             // Subscription disconnected — nil out so poll loop restarts it
             await MainActor.run { self.subscriptionTask = nil }
         }
+    }
+
+    /// Forgets the revision high-water marks, because a new subscription is a
+    /// new ordering domain. The daemon's `PendingPromptStore` is memory-only,
+    /// so a restarted daemon counts from zero again; keeping the old marks
+    /// would make the app drop every delta it then sends.
+    func resetDeltaOrdering() {
+        pendingQuestionRevisions.removeAll()
+        pendingPromptRevisions.removeAll()
     }
 
     func stopSubscription() {
@@ -2819,7 +2881,11 @@ final class AppState {
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
         case .terminalPendingQuestionsChanged(let d):
+            // An older daemon still sends this; a current one sends
+            // `.terminalPendingPromptsChanged` instead.
             applyPendingQuestionsDelta(d)
+        case .terminalPendingPromptsChanged(let d):
+            applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -3210,6 +3276,35 @@ final class AppState {
                     inputJSON: $0.inputJSON,
                     timestamp: $0.timestamp)
             }
+        }
+    }
+
+    /// Mirror one terminal's pending prompts and legacy question captures,
+    /// newest revision wins (see `applyPendingQuestionsDelta` for why order
+    /// matters). The revision is checked once for both sets, since the daemon
+    /// reads both from one store at one revision. An empty array removes its
+    /// key.
+    func applyPendingPromptsDelta(_ delta: TerminalPendingPromptsDelta) {
+        if let revision = delta.revision {
+            if let applied = pendingPromptRevisions[delta.terminalID], revision < applied {
+                return
+            }
+            pendingPromptRevisions[delta.terminalID] = revision
+        }
+        if delta.captures.isEmpty {
+            pendingQuestions.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingQuestions[delta.terminalID] = delta.captures.map {
+                PendingAskUserQuestion(
+                    toolUseID: $0.toolUseID,
+                    inputJSON: $0.inputJSON,
+                    timestamp: $0.timestamp)
+            }
+        }
+        if delta.prompts.isEmpty {
+            pendingPrompts.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingPrompts[delta.terminalID] = delta.prompts
         }
     }
 

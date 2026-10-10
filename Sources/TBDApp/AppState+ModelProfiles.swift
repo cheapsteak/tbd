@@ -996,6 +996,19 @@ extension AppState {
         }
     }
 
+    /// Persist the transcript prompt-answer gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. Sessions pick
+    /// up the hooks on their next start.
+    func setTranscriptPromptAnswerEnabled(_ enabled: Bool) async {
+        do {
+            try await transcriptPromptAnswerFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set transcript prompt answer: \(error, privacy: .public)")
+            showAlert("Failed to set transcript prompt answers: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a profile's pool opt-out, then reload profiles.
     func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
         do {

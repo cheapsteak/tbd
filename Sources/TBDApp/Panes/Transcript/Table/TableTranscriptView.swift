@@ -24,6 +24,9 @@ struct TableTranscriptView: NSViewRepresentable {
     /// Jump-to-bottom request token: incrementing it asks the coordinator to
     /// scroll to the last row.
     let scrollToBottomToken: Int
+    /// Scroll-to-row request: a new token asks the coordinator to bring the
+    /// row whose node id equals `itemID` into view, once per token.
+    var scrollToItem: TranscriptScrollRequest?
     /// Bumped by the pane whenever the USER toggles an activity group open or
     /// shut. The node array that arrives with a bumped token is the result of a
     /// disclosure gesture, not of streaming, so the coordinator anchors the
@@ -103,6 +106,7 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.lastScrollItemToken = scrollToItem?.token
         coordinator.lastActivityToggleToken = activityToggleToken
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
@@ -173,12 +177,17 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
+        let nodes = nodesProvider()
         coordinator.update(
-            nodes: nodesProvider(),
+            nodes: nodes,
             atBottom: $atBottom,
             activityToggleToken: activityToggleToken,
             linkRoot: linkRoot
         )
+        if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
+            coordinator.lastScrollItemToken = request.token
+            coordinator.scrollToRow(withNodeID: request.itemID)
+        }
     }
 
     // MARK: - Coordinator
@@ -198,6 +207,7 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+        var lastScrollItemToken: Int?
         /// Last activity-group toggle token seen by `update`. A token that has
         /// MOVED means this node array came from the user opening or shutting a
         /// group, which must keep the clicked row where it is rather than
@@ -988,6 +998,8 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   estimate error.
         /// * askUserQuestion (a hosted SwiftUI card): a calibrated constant; the
         ///   realized card measures exactly and corrects.
+        /// * prompt cards: the permission card and the interactive question card
+        ///   each have their own count-driven estimate.
         static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
             guard let node else { return 32 }
             switch node.kind {
@@ -1003,6 +1015,13 @@ struct TableTranscriptView: NSViewRepresentable {
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is
                 // a one-line chrome activity row.
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .permission {
+                    return permissionCardEstimate(prompt)
+                }
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .question,
+                   prompt.rendersAsInteractiveQuestionCard {
+                    return interactiveQuestionCardEstimate(prompt)
+                }
                 if name == "AskUserQuestion" { return askUserQuestionEstimate(inputJSON: inputJSON) }
                 return activityRowHeight(style: .chrome)
             }
@@ -1060,6 +1079,53 @@ struct TableTranscriptView: NSViewRepresentable {
         /// construction rather than by review.
         private struct AskCardInput: Decodable {
             let questions: [AskUserQuestionCard.Question]
+        }
+
+        /// Estimated height of an unrealized permission prompt card: its fixed
+        /// preview and footer, the title, and one line per suggestion. The
+        /// realized card measures exactly and corrects.
+        static func permissionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            let chrome: CGFloat = 8 + 16 + 20 + 18
+            var height = chrome + PermissionPromptCard.previewHeight + PermissionPromptCard.footerHeight
+            if prompt.hasSuggestions {
+                height += 14 + 16 * CGFloat(prompt.suggestionLines.count)
+            }
+            return height
+        }
+
+        /// Estimated height of an unrealized interactive question card
+        /// (`InteractiveQuestionCard`), corrected exactly when the card realizes.
+        ///
+        /// That card is laid out differently from the static AskUserQuestion
+        /// card `askUserQuestionEstimate` models: compact option rows rather
+        /// than one bubble each, descriptions cut to two lines, an Other row
+        /// under every question, and one fixed footer. Its height therefore
+        /// follows the counts alone. Line heights are the fonts' one-line
+        /// heights rounded down, so what error remains is on the low side.
+        static func interactiveQuestionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            // Outer vertical padding, the role header line and its spacing, and
+            // the bubble's vertical padding.
+            let chrome: CGFloat = 8 + (12 + 3) + 16
+            var height = chrome + InteractiveQuestionCard.footerHeight
+            for question in prompt.questions {
+                // The stack spacing that separates this block from what follows.
+                height += 10
+                if let header = question.header, !header.isEmpty, header != question.text {
+                    height += 12 + 4
+                }
+                // The question line, the block's spacing, the options' top padding.
+                height += 13 + 4 + 4
+                for option in question.options {
+                    // Row padding and its label line, then the row spacing.
+                    height += 6 + 14 + 2
+                    if let description = option.description, !description.isEmpty {
+                        height += 2 + 12
+                    }
+                }
+                // The Other row: its text field and the row padding.
+                height += 22 + 6
+            }
+            return height
         }
 
         static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
@@ -2121,6 +2187,18 @@ struct TableTranscriptView: NSViewRepresentable {
             let viewportHeight = scrollView.contentView.bounds.height
             let threshold = max(400, viewportHeight * 0.5)
             return viewportGapToBottom() <= threshold
+        }
+
+        /// Brings the row for `nodeID` into view; falls back to the end when no
+        /// row carries that id (an appended card sits at the tail).
+        func scrollToRow(withNodeID nodeID: String) {
+            guard let tableView else { return }
+            guard let row = nodes.firstIndex(where: { $0.id == nodeID }),
+                  row < tableView.numberOfRows else {
+                scrollToEnd(animated: true)
+                return
+            }
+            tableView.scrollRowToVisible(row)
         }
 
         func scrollToEnd(animated: Bool) {

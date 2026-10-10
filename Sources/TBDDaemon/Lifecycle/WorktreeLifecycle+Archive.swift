@@ -152,7 +152,7 @@ extension WorktreeLifecycle {
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)
-            await subscriptions?.broadcastPendingQuestions(
+            await subscriptions?.broadcastPendingPrompts(
                 terminalID: terminal.id, from: pendingQuestions)
         }
 
