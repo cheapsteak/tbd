@@ -112,22 +112,49 @@ The answer payload, for both paths:
 
 ### Hooks
 
-`ClaudeHookOverlay` adds two hooks, and only when the flag is on:
+`ClaudeHookOverlay` adds these hooks, and only when the flag is on. The
+existing `AskUserQuestion` pre and post hooks stay as they are.
 - **`PreToolUse`, no matcher: `tbd prompt note`.** It records
-  `{terminal, session, tool_use_id, tool_name}` with the daemon and returns at
-  once. It never prints a decision. The existing `AskUserQuestion` pre and
-  post hooks stay as they are.
+  `{terminal, session, tool_use_id, tool_name, input hash}` with the daemon
+  and returns at once. It never prints a decision.
+- **`PostToolUse` and `PostToolUseFailure`, no matcher: `tbd prompt note`.**
+  These tell the daemon that a tool call finished, which resolves any prompt
+  still open for its `tool_use_id`. This is how the daemon learns that the
+  terminal won with Yes, because that answer leaves the waiting hook running.
+  - These signals come after the tool finishes, not when you answer. So after
+    a Yes in the terminal, the card still looks pending while the tool runs.
+  - An answer sent from the card in that window reaches a hook whose output
+    Claude Code ignores. The card holds "Answered" until the tool result
+    lands, and the result shows what actually happened.
 - **`PermissionRequest`, no matcher: `tbd prompt wait`.** Its hook `timeout`
   is 86400 seconds.
   1. It reads the payload and calls `prompt.register`. The daemon pairs it
-     with the latest `prompt note` from the same session and tool name, which
-     supplies the `tool_use_id`. An unpaired prompt gets a fresh UUID id
-     instead.
-  2. It then holds `prompt.await(id)`, a long-poll RPC on the daemon socket.
-     If the connection drops while the daemon restarts, it reconnects and
-     registers again.
-  3. **An answer arrives:** it prints the decision JSON and exits 0.
-  4. **The prompt resolved elsewhere, or anything failed:** it prints nothing
+     with a `prompt note` from the same session and tool name, which supplies
+     the `tool_use_id`.
+     - It matches the tool input's hash first, so two calls to the same tool
+       in one message pair correctly.
+     - If the hash doesn't match, it falls back to the latest note.
+     - A note that arrives up to 5 seconds after its register still pairs.
+     - An unpaired prompt gets a fresh UUID id instead.
+     - A restarted daemon has lost its notes. So a prompt that registers
+       again after a daemon restart keeps its id but loses its
+       `tool_use_id`, and its card moves to the fallback row described under
+       "Placement".
+  2. While the flag is off, `prompt.register` answers `disabled`, and the
+     hook exits silently. Sessions that started while the flag was on still
+     carry the hooks until they restart.
+  3. It then holds `prompt.await(id)`, a long-poll RPC on the daemon socket.
+     - Like `state.subscribe`, the call bypasses the RPC concurrency limiter,
+       so many waiting sessions can't block the daemon.
+     - The HTTP transport refuses it, because HTTP can't see a closed
+       connection.
+     - If the connection drops while the daemon restarts, the hook reconnects
+       and registers again.
+  4. **An answer arrives:** it prints the decision JSON wrapped as
+     `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":…}}`,
+     acknowledges delivery to the daemon, and exits 0. A deny without a
+     message carries the text "The user declined this from TBD.".
+  5. **The prompt resolved elsewhere, or anything failed:** it prints nothing
      and exits 0, and the terminal stays in charge.
 
   When the daemon is unreachable, the command exits silently at once. So a
@@ -141,10 +168,15 @@ id, each with its waiting `prompt.await` continuation.
 
 A prompt resolves on the first of these:
 - **`prompt.answer` from the app.** The store hands the payload to the
-  waiting hook. The RPC returns once the hook has the payload.
+  waiting hook, and the RPC returns once the hook acknowledges it. If no
+  acknowledgement arrives within 5 seconds, the RPC answers
+  `already_resolved`.
+  - If no hook is attached at that moment, for example while a daemon restart
+    is still reconnecting it, the RPC returns a retryable error. The card
+    offers Retry.
 - **`PostToolUse` or `PostToolUseFailure` for its `tool_use_id`.** The
-  terminal won. The existing `AskUserQuestion` post hook covers questions, and
-  the `PreToolUse` and `PostToolUse` pair covers everything else.
+  terminal won. The existing `AskUserQuestion` post hook also covers
+  questions.
 - **A new `prompt.register` in the same session.** A session has one open
   dialog at a time, so the old one is over.
 - **The hook's connection closing.** No or Escape in the terminal killed it.
@@ -152,8 +184,14 @@ A prompt resolves on the first of these:
 - **An hour with no hook attached.** This is a safety sweep, not the normal
   path.
 
-Each change emits a per-terminal `pendingPrompts` delta, which replaces
-`pendingQuestions` and carries everything the cards render.
+Each change emits a per-terminal `pendingPrompts` delta, which carries
+everything the cards render. The daemon stops sending the old
+`pendingQuestions` delta. The case stays decodable so an app paired with an
+older daemon still works.
+
+The phrase "pending prompt" already names the queued first message of a new
+worktree (`worktree.pending_prompt`, `PendingPromptCoordinator`). The two are
+unrelated, and the new types say so in their doc comments.
 
 No new durable resource is created:
 - Claude Code owns the waiting hook process and ends it.
@@ -216,11 +254,14 @@ described above.
   already does `RemotePendingQuestion`. A provider that sends only
   `pending_question` is projected to a prompt of kind `question`. It renders,
   but it is answerable only when the provider declares `answer`.
-- **Carry the field everywhere.** Every hand-built `RemoteSessionPayload`
-  carries the field: `withoutTranscriptHint`, `withFreshestAgentAxis`, and
-  `projectedForStaleSnapshot`. A copy that leaves it out silently drops it
-  from the mirror. The field changes only when a prompt opens or closes, so
-  mirroring it doesn't rebroadcast on every poll.
+- **Carry the field through every copy.** Every hand-built
+  `RemoteSessionPayload` copy carries the field, including
+  `withoutTranscriptHint` and `withFreshestAgentAxis`. A copy that leaves it
+  out silently drops it from the mirror. The field changes only when a prompt
+  opens or closes, so mirroring it doesn't rebroadcast on every poll.
+- **Except a stale snapshot.** `projectedForStaleSnapshot` drops it, as it
+  already drops `pending_question`. A stale snapshot can't claim that a
+  dialog is still open.
 - **New RPC `remote.answer`.** It follows `handleRemoteSendMessage`:
   1. It checks the remote gates and the new flag.
   2. It checks the declared `answer` capability. If the capability is
@@ -254,9 +295,12 @@ described above.
 The transcript has two independent sources: the JSONL for rows and the
 pending-prompt state for cards. A merger joins them on `tool_use_id` before
 `TranscriptPresentation.build()` runs, so the table always receives one
-consistent list. The merger generalises `AskUserQuestionMerger` and serves
-both the local pane and the remote pane. The remote pane gains this merge
-step.
+consistent list. The merger serves both the local pane and the remote pane,
+and the remote pane gains this merge step.
+
+`AskUserQuestionMerger` stays beside it, with a different job. It drops a
+pending question once the `tool_use` reaches the file. The new merger keeps a
+pending prompt attached to that row until the prompt resolves.
 
 - **The transcript already holds the tool call** (the normal case). That row
   becomes the card in place, and the file decides its position.
@@ -338,8 +382,8 @@ The card stays read-only, exactly as today, in these cases:
 `transcript_prompt_answer_enabled` is a new `config` column, added by a `.sql`
 migration with no SQL default, so NULL means "never chose". Its default lives
 in `Config.transcriptPromptAnswerDefault = false`. The flag is reported
-through `DaemonCapabilitiesResult` and toggled in Settings next to the
-composer toggles.
+through `DaemonCapabilitiesResult` and toggled in Settings under
+Experimental, after the transcript-streaming toggle.
 
 The flag gates two things:
 - **Off:** the overlay leaves out both new hooks, `prompt.answer` and
@@ -365,7 +409,8 @@ Each branch of the flag gets a test, following the repo rule.
     group id
   - the `prompt-<id>` fallback
   - never a window start
-- **Store:** each way a prompt resolves; a second answer refused; the pairing
+- **Store:** each way a prompt resolves; a second answer refused; delivery
+  acknowledged or timed out; `disabled` while the flag is off; the pairing
   of `PermissionRequest` with `PreToolUse`, including concurrent sessions and
   an unpaired prompt.
 - **Decision encoding:** the question, multi-select, free-text, allow,
@@ -384,8 +429,8 @@ Each branch of the flag gets a test, following the repo rule.
   - unknown outcome on timeout
 
   All of these run against a fake provider.
-- **Payload copies:** `pending_prompt` survives `withoutTranscriptHint`,
-  `withFreshestAgentAxis`, and `projectedForStaleSnapshot`.
+- **Payload copies:** `pending_prompt` survives `withoutTranscriptHint` and
+  `withFreshestAgentAxis`, and `projectedForStaleSnapshot` drops it.
 - **Live check, zero tokens:** the real Claude Code TUI against the fake model
   with TBD's overlay. Answer a question and a permission from the card, win
   and lose the race from the terminal, and check what the model received.
