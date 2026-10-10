@@ -273,7 +273,13 @@ struct TranscriptPresentation {
         projected.reserveCapacity(baseNodes.count)
         var pendingActivity: [TranscriptRenderNode] = []
 
-        func emitGroup(_ members: [TranscriptRenderNode], groupID: String) {
+        /// `liftedRequireResponse` is whether a row lifted out of this run as
+        /// a card would have made the group require a response. It counts as
+        /// if the row were still a member, so a group that expands for an
+        /// `AskUserQuestion` stays expanded while that question shows as a
+        /// card, and folds back without changing its disclosure.
+        func emitGroup(_ members: [TranscriptRenderNode], groupID: String,
+                       liftedRequireResponse: Bool = false) {
             guard let first = members.first else { return }
             // A run of exactly one activity is not worth wrapping: a "Read 1
             // file" summary repeats what the row underneath already says and
@@ -285,7 +291,7 @@ struct TranscriptPresentation {
                 projected.append(first)
                 return
             }
-            let requiresResponse = members.contains(where: isResponseRequired)
+            let requiresResponse = liftedRequireResponse || members.contains(where: isResponseRequired)
             let errorCount = members.reduce(into: 0) { total, node in
                 if isError(node) { total += 1 }
             }
@@ -331,8 +337,10 @@ struct TranscriptPresentation {
                 emitGroup(pendingActivity, groupID: groupID)
                 return
             }
-            emitGroup(pendingActivity.filter { $0.pendingPrompt == nil }, groupID: groupID)
-            projected.append(contentsOf: pendingActivity.filter { $0.pendingPrompt != nil })
+            let lifted = pendingActivity.filter { $0.pendingPrompt != nil }
+            emitGroup(pendingActivity.filter { $0.pendingPrompt == nil }, groupID: groupID,
+                      liftedRequireResponse: lifted.contains(where: isResponseRequired))
+            projected.append(contentsOf: lifted)
         }
 
         for node in baseNodes {

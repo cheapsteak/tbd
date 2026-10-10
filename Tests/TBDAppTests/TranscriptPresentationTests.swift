@@ -521,22 +521,34 @@ struct TranscriptPresentationTests {
         #expect(presentation.nodes.first { $0.id == "b2" }?.pendingPrompt == nil)
     }
 
-    @Test("a lifted card does not count toward the group's needs-response or pending tallies")
-    func liftedCardLeavesTheGroupTallies() {
+    /// A lifted `AskUserQuestion` still counts toward needs-response, so the
+    /// group stays expanded exactly as it is without the card; it leaves the
+    /// pending tally, since the card itself shows it.
+    @Test("a lifted question keeps its group expanded but leaves the pending tally")
+    func liftedQuestionKeepsTheGroupExpanded() {
         let items = [
             succeededTool("r1", "Read", #"{"file_path":"A.swift"}"#),
             succeededTool("r2", "Read", #"{"file_path":"B.swift"}"#),
             tool("q1", "AskUserQuestion", #"{"questions":[]}"#)
         ]
+        let plain = TranscriptPresentation.build(items: items, memo: TranscriptPresentationMemo())
+        guard case .activityGroupSummary(let plainSummary) = plain.nodes.first?.kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(plainSummary.requiresResponse)
+        #expect(plainSummary.isExpanded)
+
         let presentation = TranscriptPresentation.build(
             items: items, pendingPrompts: card(on: "q1"), memo: TranscriptPresentationMemo())
         guard case .activityGroupSummary(let summary) = presentation.nodes.first?.kind else {
             Issue.record("expected a group summary")
             return
         }
-        #expect(!summary.requiresResponse)
+        #expect(summary.requiresResponse)
+        #expect(summary.isExpanded, "the group must not collapse while its question is lifted")
         #expect(summary.pendingCount == 0)
-        #expect(presentation.nodes.map(\.id) == ["r1#activity-group", "q1"])
+        #expect(presentation.nodes.map(\.id) == ["r1#activity-group", "r1", "r2", "q1"])
     }
 
     @Test("the memo treats a change of pending prompts as a new input")
