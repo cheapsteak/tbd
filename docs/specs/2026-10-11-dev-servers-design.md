@@ -73,9 +73,12 @@ status = "scripts/dev/localstack-status"   # optional; exit 0 = running
 ```
 
 - **`command`** is required. Everything else is optional.
+- **`cwd`** must be relative and stay inside the worktree; an absolute `cwd`,
+  or one that escapes the root through `..`, is a parse error for that server.
 - **`stop`** and **`status`** are shell commands run with `sh -c` in the
-  server's `cwd`. `status` answers only *running or not*, by exit code; URLs
-  come only from the running file, so the two can never disagree.
+  server's `cwd`. `status` answers only *running or not*, by exit code, within
+  5 seconds; `stop` has 60 seconds. URLs come only from the running file, so
+  `status` and the file can never disagree.
 - Server names are the TOML keys: lowercase letters, digits and `-`.
 - Unknown keys are ignored, so later versions can add fields without breaking
   older TBD builds.
@@ -89,14 +92,22 @@ scope (see "Not in this version").
 Many repos already carry this file for Claude Code desktop's preview. Each entry
 of `configurations[]` becomes a declared server:
 
-- `name` → the server name.
+- `name` → the server name, as a slug: lowercased, every run of characters
+  outside `a-z0-9` collapsed to one `-`, leading and trailing `-` trimmed. The
+  original `name` becomes the `label`, so "Web App" is the server `web-app`
+  shown as "Web App". An entry whose slug is empty is a parse error.
 - `runtimeExecutable` + `runtimeArgs`, or `node <program> <args…>`, → `command`,
   each argument shell-quoted.
 - `cwd` and `env` carry over; `${workspaceFolder}` resolves to the worktree root.
 - `port`, `url` and `autoPort` are ignored: the repo owns ports and reports URLs
   through the running file.
 
-The file is JSON with comments; TBD strips comments before decoding.
+The file is JSON with comments and trailing commas, as VS Code writes it; TBD
+strips both before decoding.
+
+Declared servers keep the order in which their names first appear across the
+three sources; a server replaced by a later source keeps its original
+position.
 
 ## The running file
 
@@ -174,6 +185,8 @@ server and exits leaves a file that reads stale while the server runs.
   writes a correct file (reading `startTime` from the kernel, `root` from the
   worktree) with one line in a start script. `--pid` is required, so the caller
   names the server process deliberately rather than inheriting a launcher's.
+  `--url <name>=<url>` names an endpoint; an unnamed `--url` is called `main`,
+  and further unnamed ones `main-2`, `main-3`.
 - `tbd server report <name> --clear` deletes it.
 
 The file format is the contract; the helper is a convenience. A repo that does
@@ -186,19 +199,28 @@ not want a dependency on the `tbd` binary writes the JSON itself.
 `tbd server start [name…]`, the toolbar's Start items, and "Start all" (all
 declared servers, started side by side) do the same thing per server:
 
-- TBD opens a terminal tab titled with the server's label, running `sh -c
-  <command>` in `cwd` with `env` applied. The command is the tab's root process,
-  so it leads its own process group and a group signal reaches every child.
-- The command is wrapped so its exit code is recorded — the marker-file wrapper
-  setup hooks already use on the tmux transport, or the holder's own child exit
-  status on the holder transport.
-- The tab keeps its final screen after the command exits, so a crash leaves
-  its output readable.
+- TBD opens a terminal tab titled with the server's label, running `exec
+  /bin/sh -c '<command>'` in `cwd` with `env` applied. The `exec` makes the
+  command the tab's own process, so it leads the tab's process group, a group
+  signal reaches every child, and the command's exit status is the tab's.
+- The exit status is read from the terminal transport, never from a wrapper
+  around the command: tmux's `#{pane_dead_status}`, or the holder's report of
+  its child's exit.
+- On the tmux transport TBD sets `remain-on-exit` on the server's window right
+  after spawning it, so the pane outlives the command and keeps its final
+  screen and its exit status. A command that dies before that option lands —
+  sub-millisecond, after the login shell's startup — loses its window; that
+  race is accepted.
+- On the holder transport the tab does not keep a dead screen, so TBD saves
+  the server's final output instead (see "Exited servers keep their last
+  output").
 - The terminal row records the server's name in a new nullable `server_name`
   column on `terminal`, linking tab to server. That is a migration plus the GRDB
   record plus `Terminal` in `TBDShared/Models.swift`, in one commit.
 - Starting a server that is already running does nothing and says so. A server
-  whose tab exited is started again in that same tab, so tabs do not pile up.
+  whose tmux tab exited is started again in that same tab, so tabs do not pile
+  up; a holder session cannot be respawned, so its exited tab is closed and a
+  new one opened.
 
 ### State
 
@@ -207,36 +229,83 @@ Each server's state is derived, in this order:
 1. **Running, with URLs** – a live running file for this worktree and server.
 2. **Running** – the server's `status` command exits 0, or TBD's tab for it is
    still running the command. No open button: no URL has been reported.
-3. **Exited (code N)** – TBD's tab for it exists and the command ended.
-4. **Stopped** – none of the above.
+3. **Exited (code N)** – the command TBD last started for it ended: its tab
+   still shows the ended command, or its saved last output records the exit.
+   The code is omitted when the transport could not observe it.
+4. **Unknown** – the `status` command timed out and nothing above applies.
+5. **Stopped** – none of the above.
 
-The `status` command is run when the toolbar menu opens and by `tbd server
-list` and `tbd server status`, with a 5-second timeout; a timeout reads as
-*unknown*. It is never run on a timer.
+`status` commands run with a 5-second timeout, and only on demand: by `tbd
+server list` and `tbd server status`, and in the app when a single worktree
+becomes selected, after every Start, Stop or Restart the app issues, and when
+the daemon reports a dev-server change for the selected worktree. They never
+run on a timer and never for the sidebar dot.
 
-TBD watches the running-file directory for changes and re-checks liveness of
-known files every 10 seconds, so a server that died without cleaning up drops
-out. The re-check timer takes an injected clock.
+TBD watches the running-file directory for changes and every 10 seconds
+re-checks the liveness of known running files and of its own server tabs, so a
+server that died without cleaning up, or whose tab's command ended, drops out
+of the sidebar dot. The re-check timer takes an injected clock.
+
+### Exited servers keep their last output
+
+A crashed server's last screen is usually the only explanation of the crash,
+so an exited server's output stays readable:
+
+- **tmux** – the dead pane is the record. Its screen and `#{pane_dead_status}`
+  remain until the tab is closed or the server is started again.
+- **holder** – when a server tab's child exits, the daemon saves the session's
+  final screen and scrollback into Closed Terminals history (the store archive
+  and tab close already write) before the holder registry releases the
+  session's emulator, and records the exit code and server name on that
+  history entry. The holder transport's release behavior is unchanged: the
+  save happens in the step before the release, which always follows. Because
+  the entry lives in the database, the exit code survives a daemon restart —
+  including the reconcile that removes the ended holder tab.
+
+The server's state reads *Exited* from the newest saved entry for its name
+until it is started again or stopped; either detaches the entry from the
+server, and the output stays in Closed Terminals as an ordinary entry. An exit
+caused by a stop is never recorded as the server's last output: the save
+applies only while the server's tab still exists, and a stop closes the tab
+before it clears the server's entries.
+
+The toolbar menu offers **Show last output** for an exited server. On the
+holder transport it opens the saved entry in Session History's Closed
+Terminals viewer; on tmux it focuses the server's tab, where the dead pane
+shows the output.
 
 ### Stopping
 
 `tbd server stop [name…]`, the Stop items and "Stop all" do, per server:
 
-- If the server declares `stop`, run it.
+- If the server declares `stop`, run it, with a 60-second budget. A `stop`
+  that exits non-zero or runs out of time is a failed stop; TBD does not fall
+  back to signalling.
 - Otherwise, signal the process group of the server — TBD's tab process, or the
   live running file's `pid`: SIGTERM, then SIGKILL after 5 seconds. Before
-  signalling, re-verify the pid's start time and refuse process group 0 or 1.
-- Close the server's tab, capturing its scrollback the way archive does, and
-  delete its running file.
+  signalling, re-verify the pid's start time. TBD refuses process group 0, 1
+  and its own process group: a server started with `pnpm dev &` from a shell
+  without job control shares that shell's group, which may be an agent's
+  session or TBD's own. A server should lead its own group (`setsid`, or
+  `set -m` in a start script) or declare `stop`.
+- Close the server's tab, capturing its scrollback the way archive does, delete
+  its running file, and detach its saved last output.
 
+Stop on an exited server closes its tab and clears its *Exited* state.
 `restart` is stop, then start. Pressing Ctrl+C in a server's tab is not a stop
 through TBD: the command exits on its own, so the tab stays open and the server
 reads *Exited*.
 
 ### On archive
 
-Before the archive hook runs, TBD stops every server in the worktree that it
-started or that has a live running file, using the stop rules above.
+Archive stops every server in the worktree that TBD started or that has a live
+running file, using the stop rules above. It does so in archive's first phase,
+right after the worktree's status flips to archived — so a concurrent `server
+start` is refused — and before its tabs are torn down, so group kills reach
+live tab processes and a declared `stop` runs while the checkout still exists.
+This happens before the archive hook runs, and on forced archives too. A
+server that fails to stop is logged and the archive continues; the tab
+teardown still ends what TBD started.
 
 ## CLI
 
@@ -265,14 +334,19 @@ output`.
   one declared or reported server. It follows the PR split button's pattern
   (`ContentView.swift`) and the Liquid Glass grouping rules in
   `Sources/TBDApp/CLAUDE.md`.
-  - The primary part opens the main URL of the first running server that has
-    one; it is disabled when none has.
-  - The menu lists each server with its state and URLs, and Start, Stop and
-    Restart items; then "Start all" and "Stop all"; then any parse errors.
+  - When a running server has reported a URL, the button is a split button:
+    its primary click opens the main URL of the first such server. Otherwise
+    the whole button opens the menu, as the PR button does when no single PR
+    URL applies; a toolbar `Menu` cannot disable its primary half alone.
+  - The menu's first item is "Open <main URL>" whenever there is one. Then
+    each server with its state and URLs and its Start, Stop and Restart items,
+    plus "Show last output" for an exited server; then "Start all" and "Stop
+    all"; then any parse errors and the last action's failures.
 - **Sidebar dot** – a green dot on a worktree's row when any of its servers is
   running according to a live running file or a live TBD server tab. The dot
   never runs `status` commands. Stopped and exited servers show nothing.
-- Exited servers are visible only in the menu and in their tab.
+- Exited servers are visible only in the menu, in their tab, and — on the
+  holder transport — in Closed Terminals.
 
 ## No feature flag
 
@@ -300,15 +374,22 @@ once it writes running files. Nothing runs until someone clicks Start.
 - **Running files** are a new durable resource. `OrphanGC` gains a leg that
   deletes files in the running-file directory that are stale (liveness above)
   and older than `gcGraceSeconds`, under `gcEnabled`. It never signals a
-  process.
+  process. Malformed files and files with a higher major version are kept:
+  liveness is defined only for files TBD can read, and another tool may own a
+  newer format.
+- **Saved last output** is an ordinary Closed Terminals entry with two extra
+  fields, so the history store's existing bounds cover it: the newest 50
+  entries per worktree, removed with the worktree on hard delete.
 
 ## Errors
 
 - **Parse errors** are reported per source and never hide other sources.
 - **A start whose tab cannot be created** fails the command with the reason;
   nothing is recorded.
-- **A `stop` command that exits non-zero** is reported, and TBD does not fall
-  back to signalling: the repo chose its stop path.
+- **A `stop` command that exits non-zero or exceeds 60 seconds** is reported,
+  and TBD does not fall back to signalling: the repo chose its stop path.
+- **A group kill aimed at group 0, 1 or TBD's own group** is refused and
+  reported; nothing is signalled.
 - **A group kill that leaves the process alive after SIGKILL** is reported with
   the pid.
 - **A malformed running file** is ignored and named in `tbd server list
@@ -317,13 +398,23 @@ once it writes running files. Nothing runs until someone clicks Start.
 ## Testing
 
 - Declaration parsing: each source alone; layering by name, including a later
-  source replacing a server whole; a broken source alongside good ones;
-  `launch.json` translation including comments and `${workspaceFolder}`.
+  source replacing a server whole and keeping its position; a broken source
+  alongside good ones; `launch.json` translation including comments, trailing
+  commas, `${workspaceFolder}` and slugged names; a `cwd` that escapes the
+  worktree.
 - Running-file liveness: live, dead pid, reused pid with a mismatched start
   time, zombie, unknown version, malformed JSON.
-- State derivation: each of the four states, and their precedence.
-- Stop: the declared-`stop` path, the group-kill path with an injected clock
-  for the SIGKILL delay, and the refusal of group 0 and 1.
+- State derivation: each of the five states, and their precedence, including
+  *Exited* read from a saved last output once the tab is gone.
+- Stop: the declared-`stop` path and its 60-second budget, the group-kill path
+  with an injected clock for the SIGKILL delay, and the refusal of group 0, 1
+  and TBD's own group.
+- Last output: the holder registry calls its session-ended step before the
+  release, with the established status; a server tab's exit saves its screen
+  and code, an ordinary tab's exit saves nothing, and an exit whose tab is
+  already gone records no server state; start and stop detach the saved entry;
+  "Show last output" opens the entry on the holder transport and focuses the
+  tab on tmux.
 - Archive stops TBD-started and file-reported servers and leaves other
   worktrees' servers alone.
 - The OrphanGC leg deletes stale files only, and only under `gcEnabled`.
