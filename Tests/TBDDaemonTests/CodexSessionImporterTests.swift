@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import os
 import TestSupport
@@ -191,8 +190,8 @@ struct CodexSessionImporterTests {
     }
 
     @Test("a silent app-server times out on the injected clock")
-    func timeoutUsesInjectedClock() async {
-        let clock = TestClock<Duration>()
+    func timeoutUsesInjectedClock() async throws {
+        let clock = EventDrivenTestClock()
         let connection = FakeConnection(responses: [])
         let importer = CodexSessionImporter(
             executablePath: "/opt/bin/codex",
@@ -206,7 +205,11 @@ struct CodexSessionImporterTests {
                 cwd: "/tmp/worktree")
         }
 
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        // The timeout sleep arms inside a task-group child of an unstructured
+        // Task. Arming is signalled from the sleeper's registration, not polled
+        // via checkSuspension()'s megaYield, which starved past the 45 s guard
+        // in the saturated fast pass (#991).
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
 
         await #expect(throws: CodexSessionImportError.timedOut) {
             try await task.value
