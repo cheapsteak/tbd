@@ -14,7 +14,8 @@ fixtures/flake/retry-metrics.
     build.py retry PATH TEST_ID OUTCOME FILE    append one retry-metrics record
     build.py issue WORK --number N [--title T] [--state OPEN|CLOSED]
                  [--label L ...] [--closed-reason R] [--fix SHA@AT[@PR]]
-                 [--comment 'ID|LOGIN|TYPE|BODYFILE' ...]
+                 [--comment 'ID|LOGIN|TYPE|BODYFILE' ...] [--login L --type T]
+                 [--closed-by-bot]
     build.py watchlist WORK --number N [--login L] [--type T] [--created T]
                  [--comment 'ID|LOGIN|TYPE|BODYFILE' ...]
     build.py ledger-body OUT STATE_JSON         a rendered ledger comment
@@ -136,6 +137,11 @@ def main(argv: list[str]) -> int:
         p.add_argument("--closed-reason")
         p.add_argument("--fix")
         p.add_argument("--comment", action="append", default=[])
+        # The issue's author; none by default, so an issue is not the bot's.
+        p.add_argument("--login")
+        p.add_argument("--type")
+        # The latest close event's actor is the bot.
+        p.add_argument("--closed-by-bot", action="store_true")
         a = p.parse_args(rest)
         comments = []
         for spec in a.comment:
@@ -147,7 +153,8 @@ def main(argv: list[str]) -> int:
             fix = {"sha": parts[0], "at": parts[1], "pr": int(parts[2]) if len(parts) > 2 else None}
         issues = _load(Path(a.work) / "issues.json")
         issues.append({"number": a.number, "title": a.title, "state": a.state, "labels": a.label,
-                       "comments": comments, "closed_reason": a.closed_reason, "closing_fix": fix})
+                       "comments": comments, "closed_reason": a.closed_reason, "closing_fix": fix,
+                       "login": a.login, "type": a.type, "closed_by_bot": a.closed_by_bot})
         _save(Path(a.work) / "issues.json", issues)
         return 0
     if command == "watchlist":

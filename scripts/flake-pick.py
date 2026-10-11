@@ -175,6 +175,11 @@ def eligible(view, prs: list[dict]) -> tuple[bool, str]:
         return False, "a bot comment does not parse"
     if state is None:
         return False, "no ledger state"
+    if not fl.has_ci_place(state):
+        # Spec §4.3: nightly stress failures alone never qualify. The
+        # threshold check below says the same; this names the reason, and
+        # holds for an open issue the ledger has not demoted yet (§4.4).
+        return False, "nightly-only failures: the watchlist's, not a fix target"
     if not fl.qualifies(state):
         return False, "below the threshold"
     if view.state != "OPEN":

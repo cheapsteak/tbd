@@ -300,6 +300,11 @@ MAX_COMMENT_CHARS = 60000
 # Spec §4.3: a test qualifies once its current episode spans this many distinct
 # occurrence keys.
 QUALIFY_DISTINCT_OCCURRENCES = 2
+# Spec §4.3: a nightly stress failure's occurrence key starts with this. The
+# nightly run loads the machine on purpose, so its failures measure load
+# sensitivity; a test qualifies only once one of its current episode's
+# failures is somewhere else – a PR, a branch, or `main` in CI.
+NIGHT_PREFIX = "night:"
 # The human-readable failure list shows at most this many, newest first. The
 # JSON block keeps every failure (or, past the body limit, its folded count).
 HUMAN_FAILURE_ROWS = 200
@@ -412,9 +417,24 @@ def current_count(state: State) -> int:
     return len(current_failures(state)) + sum(f.count for f in _current_folded(state))
 
 
+def is_ci_place(occurrence: str) -> bool:
+    """Whether an occurrence key names a CI run – a PR, a branch, or `main` –
+    rather than a night of the stress loop (spec §4.3)."""
+    return not occurrence.startswith(NIGHT_PREFIX)
+
+
+def has_ci_place(state: State) -> bool:
+    """Whether the current episode holds a failure outside the nightly stress
+    run, folded counts included."""
+    return any(is_ci_place(o) for o in distinct_occurrences(state))
+
+
 def qualifies(state: State) -> bool:
-    """Spec §4.3: the current episode spans two or more distinct occurrence
-    keys, or the current episode is a recurrence with at least one failure."""
+    """Spec §4.3: the current episode holds a failure in a CI run, not only
+    in the nightly stress loop, and either spans two or more distinct
+    occurrence keys or is a recurrence with at least one failure."""
+    if not has_ci_place(state):
+        return False
     if state.episode > 0 and current_count(state) > 0:
         return True
     return len(distinct_occurrences(state)) >= QUALIFY_DISTINCT_OCCURRENCES
@@ -587,8 +607,8 @@ def _human(state: State, repo: str, rows: int) -> str:
         "",
         f"**Failures:** {failure_count(state)} recorded in all. The current episode "
         f"(episode {state.episode + 1}) has {current_count(state)}, across {len(distinct)} "
-        f"distinct places (threshold: {QUALIFY_DISTINCT_OCCURRENCES}). Qualifies for a fix "
-        f"attempt: {'yes' if qualifies(state) else 'no'}.",
+        f"distinct places (threshold: {QUALIFY_DISTINCT_OCCURRENCES}, at least one of them a CI run "
+        f"rather than the nightly stress loop). Qualifies for a fix attempt: {'yes' if qualifies(state) else 'no'}.",
     ]
     if state.links:
         refs = ", ".join(f"#{n}" for n in state.links)
@@ -754,9 +774,10 @@ def render_watchlist(states: list[State], repo: str) -> str:
         WATCHLIST_SENTINEL,
         "### Flake watchlist",
         "",
-        f"Tests that have failed in fewer than {QUALIFY_DISTINCT_OCCURRENCES} distinct places and have no issue of "
-        "their own. A test that fails in a second place gets its own issue, seeded with the history kept here, "
-        "and leaves this list.",
+        f"Tests that have failed but do not qualify for an issue of their own: fewer than {QUALIFY_DISTINCT_OCCURRENCES} "
+        "distinct places, or failures only in the nightly stress loop, which loads the machine on purpose. A test "
+        f"that fails in {QUALIFY_DISTINCT_OCCURRENCES} places, at least one of them a CI run (a PR, a branch or `main`), "
+        "gets its own issue, seeded with the history kept here, and leaves this list.",
         "",
     ]
     lines += [_watch_line(s, repo) for s in ordered] or ["Nothing here: no test is on this part of the watchlist."]

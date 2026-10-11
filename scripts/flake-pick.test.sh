@@ -99,6 +99,19 @@ test_a_test_at_the_threshold_is_picked() {
   assert_eq "and the places" '["branch:a","night:2026-10-02"]' "$(jq -c .places "$w/out/target.json")"
 }
 
+test_an_issue_with_nightly_only_failures_is_never_picked() {
+  local w out mutant
+  w="$(world)"
+  issue "$w" '{"number": 10, "failures": [["night:2026-10-01", "2026-10-01T11:00:00Z"], ["night:2026-10-02", "2026-10-02T11:00:00Z"], ["night:2026-10-03", "2026-10-03T11:00:00Z"]]}'
+  out="$(pick "$w")"
+  assert_eq "three nights, open, never picked" "rc=3 none" "$(head -1 <<< "$out")"
+  assert_contains "and the reason names it" "$out" "#10: skipped (nightly-only failures"
+  mutant="$(mutant_of 's/^    if not fl.has_ci_place\(state\):$/    if False:/' "$PICK")"
+  out="$(pick "$w" "$mutant")"
+  assert_lacks "mutation: without its own check the picker gives only the threshold" "$out" "nightly-only failures"
+  assert_eq "which still refuses it: the two checks back each other up" "rc=3 none" "$(head -1 <<< "$out")"
+}
+
 test_a_closed_issue_is_not_picked() {
   local w; w="$(world)"
   issue "$w" "{\"number\": 10, \"state\": \"CLOSED\", $TWO, \"failures\": [[\"branch:a\", \"2026-10-01T10:00:00Z\"], [\"branch:b\", \"2026-10-01T10:00:00Z\"], [\"branch:c\", \"2026-10-03T10:00:00Z\"]]}"

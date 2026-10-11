@@ -4,9 +4,11 @@
 docs/specs/2026-10-07-flake-autofix-design.md is the design. The ledger reads
 per-test results from two sources and keeps each test's failure history: on
 the test's own issue, in one comment, once the test qualifies (two distinct
-places) or already has an issue; until then, as one entry on the single
-`flake-watchlist` issue, whose bot comments hold every such test's history.
-The sources:
+places, at least one of them a CI run rather than the nightly stress loop) or
+already has an issue; until then, as one entry on the single `flake-watchlist`
+issue, whose bot comments hold every such test's history. An open issue the
+bot opened whose test does not qualify is closed back into the watchlist
+(demoted), and reopened if the test qualifies again. The sources:
 
 - **The nightly stress loop** – every failing `<testcase>` in a nightly run's
   `nightly-xunit` artifact.
@@ -375,6 +377,25 @@ class IssueView:
     # A bot comment on this issue does not parse (a hand edit, say). The issue
     # is left untouched and listed, rather than stopping every other test.
     unreadable: bool = False
+    # The bot opened the issue (its author is the App's bot account).
+    opened_by_bot: bool = False
+    # The latest close event's actor is the bot: with `closed_reason`
+    # "not_planned", the ledger itself closed it back into the watchlist.
+    closed_by_bot: bool = False
+
+    @property
+    def demoted(self) -> bool:
+        """Spec §4.4, demotion: the ledger closed this issue as not planned
+        because its test no longer qualified, and nobody has reopened or
+        re-closed it since. Its test's history lives on the watchlist."""
+        return self.state == "CLOSED" and self.closed_reason == "not_planned" and self.closed_by_bot
+
+    @property
+    def reopened_after_demotion(self) -> bool:
+        """Open, but last closed by the ledger's demotion. The ledger reopens a
+        demoted issue only once its test qualifies, so an open one that does
+        not qualify was reopened by a human, who keeps it open."""
+        return self.state == "OPEN" and self.closed_reason == "not_planned" and self.closed_by_bot
 
 
 def _parse(parser, body: str, login: str | None, kind: str | None, where: str):
@@ -397,6 +418,8 @@ def load_issues(raw: list[dict], notes: Notes) -> dict[int, IssueView]:
             labels=list(item.get("labels", [])),
             closed_reason=item.get("closed_reason"),
             closing_fix=item.get("closing_fix"),
+            opened_by_bot=fl.trusted_author(item.get("login"), item.get("type")),
+            closed_by_bot=bool(item.get("closed_by_bot")),
         )
         for comment in sorted(item.get("comments", []), key=lambda c: c["id"]):
             body, login, kind = comment.get("body") or "", comment.get("login"), comment.get("type")
@@ -632,6 +655,9 @@ class Context:
     # Failures left out of this run's plan, for the summary.
     dropped: list[str] = field(default_factory=list)
     missing: set[str] = field(default_factory=set)
+    # The watchlist's issue number, for the demotion comment; None before
+    # the watchlist exists.
+    watchlist_issue: int | None = None
 
 
 def record_pr_outcomes(state: fl.State, view: IssueView | None, ctx: Context) -> tuple[fl.State, list[dict]]:
@@ -735,6 +761,46 @@ def reopen_body(test: str, recurrences: list[tuple[fl.Failure, dict]], repo: str
     )
 
 
+def requalify_body(test: str, state: fl.State, repo: str) -> str:
+    failure = _newest_ci_failure(state)
+    where = (
+        f"in [run {failure.run_id}, attempt {failure.attempt}]({fl.run_url(repo, failure.run_id, failure.attempt)})"
+        if failure is not None else "in a CI run"
+    )
+    return (
+        f"Reopened by the flake ledger: {fl.code_span(test)} failed {where}, not only in the nightly stress loop, "
+        "so it qualifies for a fix attempt again. The ledger closed this issue earlier because every failure it had "
+        "then was in the nightly run; the history it kept on the watchlist meanwhile is in the ledger comment below."
+    )
+
+
+def demote_body(test: str, watchlist_issue: int | None) -> str:
+    where = f"the flake watchlist, #{watchlist_issue}" if watchlist_issue else f"the flake watchlist (the issue labelled `{fl.WATCHLIST_LABEL}`)"
+    return (
+        f"Closed by the flake ledger as not planned: every failure of {fl.code_span(test)} in its current episode "
+        "was in the nightly stress loop. That run loads the machine on purpose, so it measures how a test copes "
+        "with load, not whether it flakes in CI, and a test gets an issue of its own only once it has also failed "
+        f"in a PR, branch or `main` CI run. Its failure history has moved to {where}, where later nightly failures "
+        "are recorded too. If it fails in CI, the ledger reopens this issue with that history."
+    )
+
+
+def _newest_ci_failure(state: fl.State) -> fl.Failure | None:
+    ci = [f for f in fl.current_failures(state) if fl.is_ci_place(f.occurrence)]
+    return max(ci, key=lambda f: (f.at, f.key), default=None)
+
+
+def _recurrence_pair(state: fl.State, closer: dict) -> tuple[fl.Failure, dict] | None:
+    """The newest CI failure of the current episode and the fix it outlived,
+    for a reopen whose recurrence an earlier run recorded while the
+    recurrence was still nightly-only."""
+    failure = _newest_ci_failure(state)
+    fix = next((f for f in state.fixes if f["sha"] == closer["sha"]), None)
+    if failure is None or fix is None:
+        return None
+    return failure, fix
+
+
 def creation_body(test: str, links: list[int]) -> str:
     lines = [
         f"Tracks the flaky test {fl.code_span(test)}: one issue per test (docs/specs/2026-10-07-flake-autofix-design.md).",
@@ -758,10 +824,10 @@ def _same_body(rendered: str, existing: str | None) -> bool:
 def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ctx: Context, notes: Notes, watched: fl.State | None = None) -> tuple[dict | None, dict | None, fl.State | None]:
     """One test's plan: `(action, summary, watch)`. `action` is its issue's
     writes, or None; `watch` is its watchlist entry when it stays on the
-    watchlist – no issue of its own and below the threshold, or promoted off
-    it but not yet confirmed on its issue – else None. A
-    summary of None means the test was skipped, and its watchlist entry, if
-    any, stays as it is."""
+    watchlist – no issue of its own, or one the ledger demoted, and not
+    qualifying; promoted off it but not yet confirmed on its issue; or
+    demoted this run – else None. A summary of None means the test was
+    skipped, and its watchlist entry, if any, stays as it is."""
     view = ctx.issues.get(issue_number) if issue_number is not None else None
     create = None
     add_label = False
@@ -776,6 +842,10 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
             view = ctx.issues[trait]
         elif trait is not None:
             links = [trait]
+    # Spec §4.4, demotion: a demoted issue's test lives on the watchlist, and
+    # its entry is its history. With no entry (it aged out) the test starts
+    # afresh, keeping the episode, fixes and PR outcomes its ledger records.
+    demoted = view is not None and view.demoted
     held = False
     if view is not None and view.ledger is not None:
         state = view.ledger
@@ -784,6 +854,8 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
             # or will once this run's write lands (below).
             state = _absorb(view.ledger, watched)
             held = _holds(view.ledger, state)
+        elif demoted:
+            state = replace(view.ledger, failures=[], folded=[], folded_keys=[])
     elif watched is not None:
         # The watchlist holds the test's history: it seeds a new issue, or
         # an issue found without a ledger comment yet (one a run created and
@@ -801,27 +873,60 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
         closer = [view.closing_fix]
     state = add_fixes(state, pr_fixes + closer)
     state, recurrences = classify(state, new, ctx)
-    reopen = bool(recurrences) and view is not None and view.state == "CLOSED" and bool(closer)
+    qualifies = fl.qualifies(state)
+    # A closed issue reopens once its current episode is newer than the fix it
+    # was closed with – a recurrence – and qualifies. A nightly-only
+    # recurrence is recorded on it and leaves it closed until a CI failure.
+    recurred = False
+    if closer and view.state == "CLOSED" and qualifies:
+        fix_episode = next((f["episode"] for f in state.fixes if f["sha"] == closer[0]["sha"]), state.episode)
+        recurred = state.episode > fix_episode
+    requalified = demoted and qualifies
+    reopen = recurred or requalified
     summary = {
         "test_id": test,
         "issue": view.number if view else None,
         "issue_state": view.state if view else None,
         "create": False,
         "watch": False,
+        "demote": False,
         "from_watchlist": watched is not None,
         "links": state.links,
         "failures": fl.failure_count(state),
         "new_failures": len(state.failures) - known,
         "distinct": sorted(fl.distinct_occurrences(state)),
         "episode": state.episode,
-        "qualifies": fl.qualifies(state),
+        "qualifies": qualifies,
         "reopen": reopen,
     }
-    if view is None and not summary["qualifies"]:
-        # Spec §4.4: below the threshold with no issue of its own, the test
-        # is kept on the watchlist rather than given a public issue.
+    if (view is None or demoted) and not summary["qualifies"]:
+        # Spec §4.4: not qualifying, with no issue of its own or one the
+        # ledger demoted, the test is kept on the watchlist rather than
+        # given a public issue.
         summary["watch"] = True
         return None, summary, state
+
+    if view is not None and view.state == "OPEN" and not qualifies and view.opened_by_bot \
+            and not view.reopened_after_demotion and not _open_bot_prs(state, view):
+        # Spec §4.4, demotion: an open issue the bot opened whose test does
+        # not qualify goes back to the watchlist. The watchlist is written
+        # before any issue, so the history is there before the issue closes;
+        # the issue's ledger comment is left as it was.
+        summary["watch"] = summary["demote"] = True
+        action = {
+            "test_id": test,
+            "issue": view.number,
+            "create": None,
+            "add_label": False,
+            "reopen": False,
+            "reopen_body": None,
+            "demote": True,
+            "demote_body": demote_body(test, ctx.watchlist_issue),
+            "comment_id": view.ledger_comment_id,
+            "comment_body": None,
+            "qualifies": False,
+        }
+        return action, summary, state
 
     # Spec §4.4, leaving the watchlist: the watchlist is written before any
     # issue, so a test promoted off it keeps its entry, updated, until a run
@@ -839,18 +944,33 @@ def plan_for_test(test: str, issue_number: int | None, new: list[fl.Failure], ct
     existing = view.ledger_body if view is not None else None
     if create is None and not add_label and not reopen and _same_body(body, existing):
         return None, summary, keep
+    reopen_text = None
+    if requalified:
+        reopen_text = requalify_body(test, state, ctx.repo)
+    elif reopen:
+        pair = recurrences[-1] if recurrences else _recurrence_pair(state, closer[0])
+        reopen_text = reopen_body(test, [pair], ctx.repo) if pair else requalify_body(test, state, ctx.repo)
     action = {
         "test_id": test,
         "issue": view.number if view else None,
         "create": create,
         "add_label": add_label,
         "reopen": reopen,
-        "reopen_body": reopen_body(test, recurrences, ctx.repo) if reopen else None,
+        "reopen_body": reopen_text,
+        "demote": False,
+        "demote_body": None,
         "comment_id": view.ledger_comment_id if view else None,
         "comment_body": body,
         "qualifies": summary["qualifies"],
     }
     return action, summary, keep
+
+
+def _open_bot_prs(state: fl.State, view: IssueView) -> list[int]:
+    """Bot PRs for this issue whose outcome is not yet recorded, so still
+    open: an issue is never demoted under an open PR that names it."""
+    recorded = {p["number"] for p in state.prs}
+    return [a.pr for a in view.attempts if a.outcome == "pr-opened" and a.pr is not None and a.pr not in recorded]
 
 
 def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) -> dict:
@@ -921,11 +1041,12 @@ def plan_watchlist(watch: Watchlist, entries: dict[str, fl.State], repo: str) ->
 
 def watchlist_issue_body() -> str:
     return "\n".join([
-        f"The flake ledger's watchlist: every test that has failed in fewer than {fl.QUALIFY_DISTINCT_OCCURRENCES} "
-        "distinct places and has no issue of its own (docs/specs/2026-10-07-flake-autofix-design.md, §4.4).",
+        "The flake ledger's watchlist: every recent failing test that does not qualify for an issue of its own – "
+        f"fewer than {fl.QUALIFY_DISTINCT_OCCURRENCES} distinct places, or failures only in the nightly stress loop "
+        "(docs/specs/2026-10-07-flake-autofix-design.md, §4.3, §4.4).",
         "",
         "Its history lives in the bot's comments below, edited in place each run, because CI keeps the test "
-        "results for only 7 days. A test that fails in a second place gets its own `flaky` issue, seeded with "
+        "results for only 7 days. A test that fails in a second place, one of them a CI run, gets its own `flaky` issue, seeded with "
         "that history, and leaves this list. This issue is never a fix target.",
     ])
 
@@ -1000,10 +1121,14 @@ def analyze(work: Path, collect_missing: bool = False) -> dict:
         gone_issues=gone_issues,
         unresolved=set(_read_json(work / "ancestry_unresolved.json", [])),
     )
+    ctx.watchlist_issue = watch.number
     actions, tests = [], []
-    bound = bound_for_an_issue(watch.entries, mapping, ctx)
+    # A demoted issue's test lives on the watchlist (spec §4.4): its entry
+    # ages, and it is planned only on a new failure or once it qualifies.
+    tracked = {t: n for t, n in mapping.items() if not issues[n].demoted}
+    bound = bound_for_an_issue(watch.entries, tracked, ctx)
     entries = age_out(watch.entries, bound, now, notes)
-    planned = set(by_test) | set(mapping) | bound
+    planned = set(by_test) | set(tracked) | bound
     # A sub-threshold watchlist entry with no new failure carries over as it
     # is; so does one whose test was skipped below.
     on_watch = {t: s for t, s in entries.items() if t not in planned}
@@ -1045,6 +1170,7 @@ def report(plan: dict, write: bool) -> str:
         lines.append("No flaky-test failures in the read window, and no issue to update.")
     watch = plan.get("watchlist") or {"issue": None, "create": None, "writes": [], "tests": 0, "added": 0, "removed": 0, "comments": 0}
     opening = [t for t in tests if t["create"]]
+    demoting = [t for t in tests if t.get("demote")]
     promoted = sum(1 for t in opening if t.get("from_watchlist"))
     if watch["issue"] is not None:
         home = f"#{watch['issue']}"
@@ -1055,12 +1181,15 @@ def report(plan: dict, write: bool) -> str:
     lines += [
         f"**Per-test issues to open: {len(opening)}** ({promoted} promoted from the watchlist). "
         f"**Tests on the watchlist: {watch['tests']}** ({watch['added']} new, {watch['removed']} leaving it), "
-        f"in {watch['comments']} comment(s); the watchlist issue: {home}.",
+        f"in {watch['comments']} comment(s); the watchlist issue: {home}. "
+        f"**Issues to close back into the watchlist: {len(demoting)}** (nightly-only failures).",
         "",
     ]
     for t in sorted(tests, key=lambda t: (-t["failures"], t["test_id"])):
-        if t.get("watch"):
-            where = "the watchlist"
+        if t.get("demote"):
+            where = f"the watchlist; closes #{t['issue']} as not planned (nightly-only failures)"
+        elif t.get("watch"):
+            where = "the watchlist" + (f" (#{t['issue']} stays closed until a CI failure)" if t["issue"] else "")
         elif t["create"]:
             where = "a new issue" + (f", linking #{t['links'][0]}" if t["links"] else "")
             if t.get("from_watchlist"):
@@ -1195,6 +1324,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           ... on ClosedEvent {
             createdAt
             stateReason
+            actor { __typename login }
             closer {
               __typename
               ... on Commit { oid }
@@ -1209,16 +1339,26 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
-def _close_info(repo: str, number: int) -> tuple[str | None, dict | None]:
-    """The latest ClosedEvent's reason and its fix, if it has one: the closer
-    commit, or the closer PR's merge commit (spec §4.4)."""
+def closed_by_bot(actor: dict | None) -> bool:
+    """Whether a ClosedEvent's actor is the bot's App account. GraphQL names a
+    bot actor's login without REST's `[bot]` suffix, so either spelling is
+    accepted, but only with the `Bot` type, which no person's account has."""
+    actor = actor or {}
+    bare = fl.BOT_LOGIN.removesuffix("[bot]")
+    return actor.get("__typename") == "Bot" and actor.get("login") in (fl.BOT_LOGIN, bare)
+
+
+def _close_info(repo: str, number: int) -> tuple[str | None, dict | None, bool]:
+    """The latest ClosedEvent's reason, its fix, if it has one – the closer
+    commit, or the closer PR's merge commit (spec §4.4) – and whether the bot
+    closed it."""
     owner, name = repo.split("/", 1)
     data = gh_json("api", "graphql", "-f", f"query={CLOSE_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={number}")
     nodes = (((data.get("data") or {}).get("repository") or {}).get("issue") or {}).get("timelineItems", {}).get("nodes")
     if nodes is None:
         raise GhError(f"#{number}: no timeline in the GraphQL answer")
     if not nodes:
-        return None, None
+        return None, None, False
     event = nodes[-1]
     reason = {"COMPLETED": "completed", "NOT_PLANNED": "not_planned"}.get(event.get("stateReason") or "", None)
     if (event.get("stateReason") or "") == "DUPLICATE":
@@ -1229,7 +1369,7 @@ def _close_info(repo: str, number: int) -> tuple[str | None, dict | None]:
         fix = {"sha": closer["oid"], "at": event["createdAt"], "pr": None}
     elif closer.get("__typename") == "PullRequest" and closer.get("merged") and closer.get("mergeCommit"):
         fix = {"sha": closer["mergeCommit"]["oid"], "at": closer.get("mergedAt") or event["createdAt"], "pr": closer.get("number")}
-    return reason, fix
+    return reason, fix, closed_by_bot(event.get("actor"))
 
 
 def _sentinel_comments(repo: str, number: int, sentinels: tuple[str, ...]) -> list[dict]:
@@ -1281,11 +1421,15 @@ def _fetch_issue(repo: str, raw: dict) -> dict:
     # Read for open issues too: one that was closed by a fix and reopened keeps
     # that fix on record, which is what lets a run that died between the reopen
     # and the ledger write converge on the next one.
-    reason, fix = _close_info(repo, number)
+    reason, fix, by_bot = _close_info(repo, number)
+    user = raw.get("user") or {}
     return {
         "number": number,
         "title": raw.get("title") or "",
         "state": state,
+        "login": user.get("login"),
+        "type": user.get("type"),
+        "closed_by_bot": by_bot,
         "labels": [label["name"] if isinstance(label, dict) else label for label in raw.get("labels", [])],
         "comments": comments,
         "closed_reason": reason,
@@ -1520,7 +1664,12 @@ def apply(plan: dict, repo: str) -> tuple[list[str], list[str]]:
     comment is found again by title and seeded from the watchlist again, and
     a reopened issue keeps its closing fix on record (`_fetch_issue`), so the
     recurrence is classified again and written. The one write a failure can
-    lose is the reopen comment, whose content the ledger comment repeats."""
+    lose is the reopen comment, whose content the ledger comment repeats, or
+    a demotion's closing comment.
+
+    A demotion writes the issue after the watchlist like any other action:
+    its test's history is on the watchlist before the issue closes. One whose
+    close failed is planned again next run, the issue still open."""
     actions = plan["actions"]
     watch = plan.get("watchlist") or {"create": None, "writes": [], "issue": None}
     labels = set()
@@ -1565,6 +1714,12 @@ def apply(plan: dict, repo: str) -> tuple[list[str], list[str]]:
 
 def _apply_action(action: dict, repo: str, written: dict) -> None:
     number = action["issue"]
+    if action.get("demote"):
+        # Close first: a lost comment is the one write a failure can cost,
+        # while a close retried after its comment landed would post twice.
+        gh_write("api", "-X", "PATCH", f"repos/{repo}/issues/{number}", payload={"state": "closed", "state_reason": "not_planned"})
+        gh_write("api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", payload={"body": action["demote_body"]})
+        return
     if action["create"]:
         created = gh_write("api", "-X", "POST", f"repos/{repo}/issues", payload={**action["create"], "labels": [fl.FLAKY_LABEL]})
         number = written["number"] = int(created["number"])
