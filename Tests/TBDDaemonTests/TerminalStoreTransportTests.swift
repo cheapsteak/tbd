@@ -39,7 +39,10 @@ import Testing
     }
 
     @Test func migratingBlanksTheTmuxCoordinates() async throws {
-        let (database, terminal) = try await makeTmuxRow()
+        let (database, original) = try await makeTmuxRow()
+        try await database.terminals.setHibernated(
+            id: original.id, sessionID: "session-1", at: Date())
+        let terminal = try #require(try await database.terminals.get(id: original.id))
 
         let updated = try await database.terminals.setParkedTransport(
             id: terminal.id,
@@ -52,5 +55,20 @@ import Testing
         let reread = try await database.terminals.get(id: terminal.id)
         #expect(reread?.transport == .holder)
         #expect(reread?.tmuxPaneID == "")
+    }
+
+    @Test func anUnparkedRowIsLeftUntouched() async throws {
+        let (database, terminal) = try await makeTmuxRow()
+
+        let result = try await database.terminals.setParkedTransport(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            transport: .holder)
+
+        #expect(result == nil)
+        let reread = try await database.terminals.get(id: terminal.id)
+        #expect(reread?.transport == .tmux)
+        #expect(reread?.tmuxWindowID == "@7")
+        #expect(reread?.tmuxPaneID == "%12")
     }
 }

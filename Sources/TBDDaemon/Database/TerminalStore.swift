@@ -1486,7 +1486,10 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            guard expectedState.matches(record) else { return nil }
+            guard expectedState.matches(record),
+                  record.hibernatedAt != nil || record.suspendedAt != nil else {
+                return nil
+            }
             record.transport = transport.rawValue
             record.tmuxWindowID = ""
             record.tmuxPaneID = ""
