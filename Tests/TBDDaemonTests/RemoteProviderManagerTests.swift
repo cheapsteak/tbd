@@ -252,6 +252,142 @@ struct RemoteProviderManagerTests {
         #expect(status?.lastSuccessfulSnapshotAt != nil)
     }
 
+    /// The hint's size moves with every record; it must not reach the mirror,
+    /// or every poll and events line would broadcast `.remoteSessionsChanged`.
+    @Test func aHintOnlyChangeDoesNotBroadcast() async throws {
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        func sighting(_ id: String, size: Int) -> RemoteSessionPayload {
+            RemoteSessionPayload(
+                id: id, title: "t", state: .running, agentState: .working,
+                transcript: RemoteTranscriptHint(id: "conv-1", size: size))
+        }
+        func sessionsChangedCount() -> Int {
+            deltas.snapshot().filter {
+                if case .remoteSessionsChanged = $0 { return true }
+                return false
+            }.count
+        }
+        let m = manager(FakeProviderInvoker(script: []))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        // Through apply(snapshot:).
+        try await m.apply(snapshot: [sighting("a", size: 1)], provider: "fake", now: now)
+        let afterFirstSnapshot = sessionsChangedCount()
+        #expect(afterFirstSnapshot >= 1, "a new session reaches the app")
+        try await m.apply(snapshot: [sighting("a", size: 2)], provider: "fake", now: now)
+        #expect(sessionsChangedCount() == afterFirstSnapshot,
+                "a hint-only change through apply(snapshot:) broadcast")
+
+        // Through applyUpsert.
+        await m.applyUpsert(sighting("a", size: 3), provider: "fake", date: now)
+        #expect(sessionsChangedCount() == afterFirstSnapshot,
+                "a hint-only change through applyUpsert broadcast")
+
+        let rows = try await db.remoteSessions.list()
+        let row = try #require(rows.first(where: { $0.sessionID == "a" }))
+        #expect(!row.payload.contains("\"transcript\""))
+    }
+
+    /// The negative control for the test above: a real payload change on the
+    /// same path still broadcasts, so a silent mirror cannot pass it.
+    @Test func aPayloadChangeBesideTheHintStillBroadcasts() async throws {
+        let deltas = BroadcastDeltas()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        func sessionsChangedCount() -> Int {
+            deltas.snapshot().filter {
+                if case .remoteSessionsChanged = $0 { return true }
+                return false
+            }.count
+        }
+        let m = manager(FakeProviderInvoker(script: []))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(
+                id: "a", title: "t", state: .running, agentState: .working,
+                transcript: RemoteTranscriptHint(id: "conv-1", size: 1))],
+            provider: "fake", now: now)
+        let baseline = sessionsChangedCount()
+        await m.applyUpsert(
+            RemoteSessionPayload(
+                id: "a", title: "renamed", state: .running, agentState: .working,
+                transcript: RemoteTranscriptHint(id: "conv-1", size: 2)),
+            provider: "fake", date: now)
+        #expect(sessionsChangedCount() > baseline)
+    }
+
+    /// What the transcript sighting observer was handed, in order.
+    private actor SightingLog {
+        private(set) var providers: [String] = []
+        private(set) var batches: [[RemoteSessionPayload]] = []
+
+        func append(_ sessions: [RemoteSessionPayload], provider: String) {
+            providers.append(provider)
+            batches.append(sessions)
+        }
+    }
+
+    /// Both convergence points hand their sightings to the observer with the
+    /// hint intact — the mirror strips it, the observer must not see it
+    /// stripped.
+    @Test func theSightingObserverSeesSnapshotsAndUpsertsWithTheirHints() async throws {
+        let log = SightingLog()
+        let m = manager(FakeProviderInvoker(script: []))
+        await m.setTranscriptSightingObserver { sessions, provider in
+            await log.append(sessions, provider: provider)
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = RemoteTranscriptHint(id: "conv-a", size: 10)
+        let second = RemoteTranscriptHint(id: "conv-b", size: 20)
+
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .running, transcript: first)],
+            provider: "fake", now: now)
+        await m.applyUpsert(
+            RemoteSessionPayload(id: "b", state: .running, transcript: second),
+            provider: "fake", date: now)
+
+        #expect(await log.providers == ["fake", "fake"])
+        let batches = await log.batches
+        #expect(batches.map { $0.map(\.id) } == [["a"], ["b"]])
+        let expectedHints: [[RemoteTranscriptHint?]] = [[first], [second]]
+        #expect(batches.map { $0.map(\.transcript) } == expectedHints)
+    }
+
+    /// A sighting suppressed as predating its delete never reaches the
+    /// observer, through either path; its siblings in the same snapshot do.
+    @Test func aDeletedSessionIsNotObserved() async throws {
+        let log = SightingLog()
+        let m = manager(FakeProviderInvoker(script: []))
+        await m.setTranscriptSightingObserver { sessions, provider in
+            await log.append(sessions, provider: provider)
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        await m.noteDeletion(provider: "fake", sessionID: "a", at: now)
+
+        try await m.apply(
+            snapshot: [
+                RemoteSessionPayload(id: "a", state: .running, transcript: RemoteTranscriptHint(id: "x", size: 1)),
+                RemoteSessionPayload(id: "b", state: .running, transcript: RemoteTranscriptHint(id: "y", size: 1)),
+            ],
+            provider: "fake", now: now, requestStartedAt: now.addingTimeInterval(-5))
+        await m.applyUpsert(
+            RemoteSessionPayload(id: "a", state: .running, transcript: RemoteTranscriptHint(id: "x", size: 2)),
+            provider: "fake", date: now, composedSince: now.addingTimeInterval(-5))
+
+        #expect(await log.batches.map { $0.map(\.id) } == [["b"]])
+    }
+
     @Test func authFailureMarksNeedsAuthAndSuccessClears() async throws {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(

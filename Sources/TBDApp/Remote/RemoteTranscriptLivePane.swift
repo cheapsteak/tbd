@@ -3,7 +3,9 @@ import SwiftUI
 import TBDShared
 
 /// `RemoteTranscriptPaneView` with its data source attached: feeds each sync's
-/// `{path, generation, caughtUp}` and refresh token into the pane.
+/// `{path, generation, caughtUp}`, refresh token and earlier-history state
+/// into the pane, and the pane's near-top transitions and retry button back to
+/// the driver.
 ///
 /// The decisions — whether to sync, and stopping the old session's driver
 /// before starting the next — live in `RemoteTranscriptSyncSession`; this view
@@ -35,7 +37,12 @@ struct RemoteTranscriptLivePane: View {
             generation: snapshot.generation,
             caughtUp: snapshot.caughtUp,
             refreshToken: snapshot.refreshToken,
-            syncError: snapshot.error)
+            syncError: snapshot.error,
+            head: snapshot.head,
+            hasEarlier: snapshot.hasEarlier,
+            earlier: snapshot.earlier,
+            onNearTop: { session?.driver?.noteNearTop($0) },
+            onLoadEarlier: { session?.driver?.loadEarlier(trigger: .button) })
         .onAppear { start(selection) }
         .onDisappear { session?.stop() }
         .onChange(of: selection) { _, new in start(new) }
@@ -72,6 +79,9 @@ struct RemoteTranscriptLivePane: View {
                     selection: selection,
                     sync: { [appState] selection in
                         try await appState.remoteTranscriptSyncer(selection)
+                    },
+                    loadEarlier: { [appState] selection in
+                        try await appState.remoteTranscriptEarlierLoader(selection)
                     },
                     // Show what the daemon already cached before the first
                     // sync returns: a long load can take a minute or more.

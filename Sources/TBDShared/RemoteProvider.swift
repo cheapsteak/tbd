@@ -132,6 +132,19 @@ public enum ProviderFailureClass: Sendable, Equatable {
     }
 }
 
+/// The optional `transcript` hint on a Session object
+/// (`docs/remote-provider-contract.md` § Transcript hint). A change signal
+/// only: compared with the hint recorded at the last caught-up sync, never
+/// turned into a cursor.
+public struct RemoteTranscriptHint: Codable, Sendable, Equatable, Hashable {
+    /// The identity of the session's current conversation.
+    public let id: String
+    /// That conversation's size in bytes — it grows with every record the
+    /// agent writes.
+    public let size: Int
+    public init(id: String, size: Int) { self.id = id; self.size = size }
+}
+
 /// The contract's Session object. Timestamps stay ISO-8601 strings — TBD
 /// displays them and compares equality; it never does date math on them.
 public struct RemoteSessionPayload: Codable, Sendable, Equatable {
@@ -161,9 +174,13 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// The contract's optional `pending_prompt` — the answerable form of
     /// `pending_question`. Liveness axis, like `pendingQuestion`.
     public let pendingPrompt: RemotePendingPrompt?
+    /// The provider's transcript hint, or `nil` when it sent none — or sent
+    /// one this build cannot read, which degrades the same way. Never stored
+    /// in the mirror: see `withoutTranscriptHint`.
+    public let transcript: RemoteTranscriptHint?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, state, meta, archived
+        case id, title, state, meta, archived, transcript
         case pendingQuestion = "pending_question"
         case pendingPrompt = "pending_prompt"
         case createdAt = "created_at"
@@ -179,13 +196,28 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
                 meta: [String: String]? = nil, archived: Bool? = nil,
                 pendingQuestion: RemotePendingQuestion? = nil,
-                pendingPrompt: RemotePendingPrompt? = nil) {
+                pendingPrompt: RemotePendingPrompt? = nil,
+                transcript: RemoteTranscriptHint? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
         self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
         self.pendingQuestion = pendingQuestion
         self.pendingPrompt = pendingPrompt
+        self.transcript = transcript
+    }
+
+    /// This payload as the mirror stores it. The hint's `size` grows with every
+    /// record the agent writes, so storing it would turn each sighting into a
+    /// changed row and a `.remoteSessionsChanged` broadcast; background sync
+    /// reads the hint from the live sighting instead.
+    public var withoutTranscriptHint: RemoteSessionPayload {
+        RemoteSessionPayload(id: id, title: title, createdAt: createdAt, state: state,
+                             exitCode: exitCode, agentState: agentState,
+                             agentStateReason: agentStateReason, agentStateAt: agentStateAt,
+                             meta: meta, archived: archived,
+                             pendingQuestion: pendingQuestion, pendingPrompt: pendingPrompt,
+                             transcript: nil)
     }
 
     /// Decoded leniently, field by field, and fatal on exactly one thing.
@@ -229,6 +261,10 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         pendingQuestion = lenient(RemotePendingQuestion.self, .pendingQuestion)
         // Same terms: an unreadable prompt costs the explanation only.
         pendingPrompt = lenient(RemotePendingPrompt.self, .pendingPrompt)
+        // A malformed hint (wrong type, or missing `id` or `size`) reads as
+        // absent, like any other wrong-typed optional field: the session
+        // survives and background sync simply has no signal for it.
+        transcript = lenient(RemoteTranscriptHint.self, .transcript)
         let provider = decoder.userInfo[.remoteProviderName] as? String
         meta = Self.decodeMeta(from: c, sessionID: id, provider: provider)
         if !dropped.isEmpty {
@@ -353,7 +389,8 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
             // Liveness axis, like `pendingQuestion`: a provider that stopped
             // answering leaves TBD no standing to say the dialog is still
             // open, and `remote.answer` refuses a stale snapshot anyway.
-            pendingPrompt: nil)
+            pendingPrompt: nil,
+            transcript: transcript)
     }
 }
 
@@ -547,6 +584,11 @@ public struct ProviderErrorEnvelope: Codable, Sendable {
 }
 
 public struct ProviderErrorObject: Codable, Sendable {
+    /// The `code` a `--before` read answers with when the cursor it was given
+    /// no longer names a position the provider can page from
+    /// (`docs/remote-provider-contract.md` § Error model).
+    public static let cursorExpiredCode = "cursor_expired"
+
     public let code: String
     public let message: String
     public let retryable: Bool?

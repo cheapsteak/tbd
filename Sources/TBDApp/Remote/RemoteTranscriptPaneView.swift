@@ -17,7 +17,17 @@ import TBDShared
 ///   non-blocking "Syncing…" while records already cached stay readable. The
 ///   full-pane loading state is only for a session with no cache file yet;
 /// - `refreshToken` – bumped on every completed sync, so an append that moved
-///   none of the other three is still read.
+///   none of the other three is still read;
+/// - `head` – bumped by the daemon on every prepend of earlier history. A
+///   change under the same generation re-reads the whole file and bumps the
+///   table's `prependToken` in the same update, so the top visible row stays
+///   where it was on screen (`ReadPlan`);
+/// - `hasEarlier` / `earlier` – whether history above the cache can be
+///   loaded, and where loading it stands. The table's near-top transitions go
+///   out through `onNearTop` (the driver decides whether to load), and the
+///   header overlay (`RemoteTranscriptEarlierHeader`) shows the state; its
+///   retry button calls `onLoadEarlier`. The pane never reads the flag: with
+///   it off `hasEarlier` is always false and the header never shows.
 ///
 /// Items are published into `AppState.sessionTranscripts` under
 /// `RemoteTranscriptTail.storeKey`, where `TranscriptOverlayView` finds them.
@@ -37,6 +47,13 @@ struct RemoteTranscriptPaneView: View {
     var refreshToken: Int = 0
     /// The last sync's failure, if the most recent one failed.
     var syncError: String?
+    var head: Int = 0
+    var hasEarlier = false
+    var earlier: RemoteTranscriptEarlierState = .idle
+    /// Each near-top transition of the table.
+    var onNearTop: @MainActor (Bool) -> Void = { _ in }
+    /// The header's "Load earlier messages" button.
+    var onLoadEarlier: @MainActor () -> Void = {}
 
     @Environment(AppState.self) var appState
 
@@ -50,6 +67,16 @@ struct RemoteTranscriptPaneView: View {
     @State private var activityToggleToken = 0
     /// Stable `createdAt` for a remote prompt card; see `PromptFirstSeenDates`.
     @State private var promptFirstSeen = PromptFirstSeenDates()
+    @State private var prependToken = 0
+    @State private var isNearTop = false
+    /// The generation and head of the last successful read, so `ReadPlan`
+    /// can tell a prepend from a reset.
+    @State private var lastRead: ReadPlan.Mark?
+    /// Every item ID that has started the loaded window, so an activity group
+    /// that earlier history extends at its front keeps its identity (see
+    /// `TranscriptPresentation.groupKeyID`). Cleared on a new conversation or
+    /// session, whose window shares no IDs with this one.
+    @State private var windowStartIDs: Set<String> = []
 
     private var storeKey: String { RemoteTranscriptTail.storeKey(selection) }
 
@@ -82,7 +109,32 @@ struct RemoteTranscriptPaneView: View {
         let key: String
         let path: String?
         let generation: Int
+        let head: Int
         let refreshToken: Int
+    }
+
+    /// How a read relates to the one before it.
+    enum ReadPlan: Equatable {
+        /// Same generation and head: whatever was appended is read on.
+        case incremental
+        /// Same generation, new head: earlier history landed at the front.
+        /// The file is re-read whole and the table told to hold its top row.
+        case anchoredReread
+        /// New generation: a new conversation. The table's `.id` rebuilds it,
+        /// which opens it at the bottom.
+        case resetToBottom
+
+        struct Mark: Equatable {
+            let generation: Int
+            let head: Int
+        }
+
+        static func next(previous: Mark?, current: Mark) -> ReadPlan {
+            guard let previous else { return .incremental }
+            if previous.generation != current.generation { return .resetToBottom }
+            if previous.head != current.head { return .anchoredReread }
+            return .incremental
+        }
     }
 
     var body: some View {
@@ -106,7 +158,8 @@ struct RemoteTranscriptPaneView: View {
         }
         .environmentObject(overlayCoordinator)
         .task(id: ReadRequest(
-            key: storeKey, path: path, generation: generation, refreshToken: refreshToken)
+            key: storeKey, path: path, generation: generation, head: head,
+            refreshToken: refreshToken)
         ) {
             await read()
         }
@@ -116,6 +169,8 @@ struct RemoteTranscriptPaneView: View {
                 for: .remote(provider: old.provider, sessionID: old.sessionID))
             overlayCoordinator.close()
             activityGroupExpansion.removeAll()
+            windowStartIDs.removeAll()
+            lastRead = nil
         }
         .onDisappear {
             release(storeKey)
@@ -192,6 +247,7 @@ struct RemoteTranscriptPaneView: View {
                 items: withCards.items,
                 expansionOverrides: activityGroupExpansion,
                 pendingPrompts: withCards.prompts,
+                windowStartIDs: windowStartIDs,
                 memo: presentationMemo
             )
             TableTranscriptView(
@@ -213,8 +269,20 @@ struct RemoteTranscriptPaneView: View {
                 scrollToItem: promptScroll,
                 activityToggleToken: activityToggleToken,
                 linkRoot: "",
-                nodesProvider: { presentation.nodes }
+                nodesProvider: { presentation.nodes },
+                prependToken: prependToken,
+                onNearTop: { near in
+                    isNearTop = near
+                    onNearTop(near)
+                }
             )
+            .overlay(alignment: .top) {
+                let content = RemoteTranscriptEarlierHeader.Content.resolve(
+                    state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop)
+                if content != .hidden {
+                    RemoteTranscriptEarlierHeader(content: content, onRetry: onLoadEarlier)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if !atBottom {
                     Button {
@@ -260,11 +328,28 @@ struct RemoteTranscriptPaneView: View {
     private func read() async {
         guard let path else { return }
         let key = storeKey
-        guard let fresh = await tail.read(key: key, path: path, generation: generation),
+        let mark = ReadPlan.Mark(generation: generation, head: head)
+        let plan = ReadPlan.next(previous: lastRead, current: mark)
+        guard let fresh = await tail.read(
+            key: key, path: path, generation: generation, head: head),
               !Task.isCancelled
         else { return }
+        // Only a read that landed moves the mark, so a prepend whose re-read
+        // failed is still anchored when the next read succeeds.
+        lastRead = mark
+        if plan == .resetToBottom { windowStartIDs.removeAll() }
+        // `fresh` is the read before prompt cards merge in, so a card is never
+        // recorded as a window start.
+        if let start = TranscriptPresentation.windowStartID(of: fresh) {
+            windowStartIDs.insert(start)
+        }
         if appState.sessionTranscripts[key] != fresh {
             appState.sessionTranscripts[key] = fresh
+            // Same main-actor turn as the items, so the table sees the new
+            // rows and the reason for them in one update.
+            if plan == .anchoredReread {
+                prependToken &+= 1
+            }
         }
     }
 
