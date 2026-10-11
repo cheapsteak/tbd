@@ -94,6 +94,8 @@ extension WorktreeLifecycle {
     ///     fixture sets the router's supervisor and registry alone — so the
     ///     caller's is the authoritative one. The registry travels inside
     ///     `transport` for the same reason.
+    ///   - serverName: the declared dev server this tab runs (`server.start`),
+    ///     nil for every other spawn.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -111,7 +113,8 @@ extension WorktreeLifecycle {
         watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalSpawnTransport,
         attachment: ModelProxyRouteAttachment.Outcome?,
-        modelProxySupervisor: (any ModelProxyRouting)?
+        modelProxySupervisor: (any ModelProxyRouting)?,
+        serverName: String? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -202,7 +205,8 @@ extension WorktreeLifecycle {
                 // that exists without it for even one suspension can be
                 // snapshotted by a concurrent caller, and a late stamp would
                 // make every replacement that snapshot authorized reject.
-                transcriptStreamPath: attachment?.streamPath
+                transcriptStreamPath: attachment?.streamPath,
+                serverName: serverName
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

@@ -16,6 +16,8 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
     var closedAt: Date
     var claudeSessionID: String?
     var lineCount: Int
+    var serverName: String?
+    var exitCode: Int32?
 
     init(from entry: TerminalHistoryEntry) {
         self.id = entry.id.uuidString
@@ -25,6 +27,8 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
         self.closedAt = entry.closedAt
         self.claudeSessionID = entry.claudeSessionID
         self.lineCount = entry.lineCount
+        self.serverName = entry.serverName
+        self.exitCode = entry.exitCode
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -45,7 +49,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             closedAt: closedAt,
             claudeSessionID: claudeSessionID,
-            lineCount: lineCount
+            lineCount: lineCount,
+            serverName: serverName,
+            exitCode: exitCode
         )
     }
 }
