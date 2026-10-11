@@ -137,7 +137,7 @@ public final class RPCRouter: Sendable {
     /// effects get rolled back. Never set in production; when nil (always,
     /// outside tests) the promote path is unchanged.
     nonisolated(unsafe) var scratchPromoteMigrationFailureHook: (@Sendable () async throws -> Void)?
-    public let pendingQuestions: PendingQuestionStore
+    public let pendingQuestions: PendingPromptStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
     /// Deletes per-profile Claude Code OAuth credential items from the login
@@ -427,7 +427,7 @@ public final class RPCRouter: Sendable {
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        pendingQuestions: PendingPromptStore = PendingPromptStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
@@ -695,8 +695,8 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                // The ONE case that is handed the connection, because it is the
-                // one that makes an authorization decision on it.
+                // Handed the connection because it makes an authorization
+                // decision on it, as `prompt.answer` and `remote.answer` do.
                 return try await handleTerminalSend(
                     request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.terminalCompletions:
@@ -801,6 +801,20 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAskUserQuestionCleared(request.paramsData)
             case RPCMethod.terminalAskUserQuestionSatisfied:
                 return try await handleTerminalAskUserQuestionSatisfied(request.paramsData)
+            case RPCMethod.promptNote:
+                return try await handlePromptNote(request.paramsData)
+            case RPCMethod.promptRegister:
+                return try await handlePromptRegister(request.paramsData)
+            case RPCMethod.promptAnswer:
+                return try await handlePromptAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
+            case RPCMethod.promptAck:
+                return try await handlePromptAck(request.paramsData)
+            case RPCMethod.promptAwait:
+                // A long-poll parks a waiter, and only the socket can see the
+                // connection close that releases it. `SocketServer` serves it
+                // around the limiter; every other caller (HTTP) is refused.
+                return RPCResponse(error: Self.promptAwaitSocketOnlyRefusal)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:
@@ -956,6 +970,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
+            case RPCMethod.configSetTranscriptPromptAnswerEnabled:
+                return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -1000,6 +1016,9 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteTranscriptSync(request.paramsData)
             case RPCMethod.remoteSendMessage:
                 return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
+            case RPCMethod.remoteAnswer:
+                return try await handleRemoteAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:
@@ -1130,6 +1149,7 @@ public final class RPCRouter: Sendable {
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
+        result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         return try RPCResponse(result: result)

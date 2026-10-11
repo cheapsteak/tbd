@@ -24,6 +24,7 @@ struct ConfigGet: AsyncParsableCommand {
             "auto-hibernate-on-merge: \(config.autoHibernateOnMergeDefault ? "on" : "off")",
             "update-mode: \(config.updateMode.rawValue)",
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
+            "transcript-prompt-answer: \(config.transcriptPromptAnswerEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
 
@@ -50,17 +51,18 @@ struct ConfigSet: AsyncParsableCommand {
     /// express one key's vocabulary.
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
+        "transcript-prompt-answer",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        update-mode)
+        transcript-prompt-answer, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults and pr-poll-schedule; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule and transcript-prompt-answer; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -81,6 +83,12 @@ struct ConfigSet: AsyncParsableCommand {
             return "Set pr-poll-schedule to off. TBD checks every worktree's pull request "
                 + "every 30 seconds while the app is in front, and every 5 minutes otherwise. "
                 + "Takes effect now."
+        case ("transcript-prompt-answer", .on):
+            return "Set transcript-prompt-answer to on. New sessions can have their question and "
+                + "permission prompts answered from the transcript."
+        case ("transcript-prompt-answer", .off):
+            return "Set transcript-prompt-answer to off. Prompts can no longer be answered from "
+                + "the transcript. Sessions already running keep their hooks until they restart."
         default:
             return "Set \(key) default to \(value.rawValue)."
         }
@@ -144,6 +152,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetPRPollScheduleEnabled,
                 params: ConfigSetPRPollScheduleEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "transcript-prompt-answer":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
+                params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "update-mode":
             let mode = try Self.parseUpdateMode(value)

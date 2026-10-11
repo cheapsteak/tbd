@@ -1298,9 +1298,19 @@ public actor RemoteProviderManager {
         enrollments[name] == nil ? 0 : 1
     }
 
+    /// Runs `verb` and records a failing result against the provider's
+    /// health.
+    ///
+    /// `healthNeutralErrorCodes` names verb-level outcomes that say nothing
+    /// about the provider itself — `answer`'s `already_resolved`, say, which
+    /// only means the terminal answered first. An exit-1 failure whose
+    /// `error.code` is in the set is returned as usual but not recorded, so
+    /// it cannot mark the provider `.error` and stale every session's
+    /// snapshot. Any other exit class still counts, whatever its code.
     func invoke(
         providerName: String, verb: [String], stdin: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        healthNeutralErrorCodes: Set<String> = []
     ) async throws -> ProviderResult {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
@@ -1313,6 +1323,10 @@ public actor RemoteProviderManager {
             config, verb: verb, stdin: stdin, timeout: timeout,
             contractVersion: contractMajor(for: providerName))
         if let failure = result.failureClass {
+            if failure == .permanent, let code = result.decodedError?.code,
+               healthNeutralErrorCodes.contains(code) {
+                return result
+            }
             recordFailure(provider: providerName, class: failure, result: result)
         }
         return result

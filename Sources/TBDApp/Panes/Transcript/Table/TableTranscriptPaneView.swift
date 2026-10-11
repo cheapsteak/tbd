@@ -40,6 +40,7 @@ struct TableTranscriptPaneView: View {
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
     @State private var scrollToBottomToken: Int = 0
+    @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
     /// Bumped alongside every write to `activityGroupExpansion`, so the table can
     /// tell a user-driven disclosure toggle (anchor the clicked row) from a
@@ -129,7 +130,19 @@ struct TableTranscriptPaneView: View {
     }
 
     private var displayedMessages: [TranscriptItem] {
-        messages
+        mergedTranscript.items
+    }
+
+    /// The transcript with this terminal's prompt cards merged in — open
+    /// dialogs from the daemon's mirror plus cards `PromptCardRetention` still
+    /// holds. View-time only: `appState.sessionTranscripts` stays the unmerged
+    /// list the publish path wrote, so an appended card never enters it.
+    private var mergedTranscript: PendingPromptMerge.Merged {
+        PendingPromptMerge.local(items: messages, appState: appState, terminalID: terminalID)
+    }
+
+    private var livePrompts: [PendingPromptPresentation] {
+        PendingPromptMerge.livePrompts(appState: appState, terminalID: terminalID)
     }
 
     var body: some View {
@@ -155,8 +168,19 @@ struct TableTranscriptPaneView: View {
         .onChange(of: currentSessionID) { _, _ in
             activityGroupExpansion.removeAll()
         }
+        // Prompt-card bookkeeping, outside any body evaluation: a dialog that
+        // closes is held until its tool result lands (the merge's `settled`)
+        // or the retention timeout passes.
+        .onChange(of: livePrompts, initial: true) { _, live in
+            appState.promptCardRetention.observe(live: live, for: .local(terminalID: terminalID))
+        }
+        .onChange(of: mergedTranscript.settled, initial: true) { _, settled in
+            appState.promptCardRetention.settle(settled)
+            appState.promptAnswers.forget(settled)
+        }
         .onDisappear {
             clearWatchdogContext()
+            appState.promptCardRetention.forgetLive(for: .local(terminalID: terminalID))
             if let table = registeredTable.view {
                 appState.unregisterTranscriptView(table, for: terminalID)
             }
@@ -231,9 +255,11 @@ struct TableTranscriptPaneView: View {
 
     @ViewBuilder
     private var tableTranscript: some View {
+        let merged = mergedTranscript
         let presentation = TranscriptPresentation.build(
-            items: displayedMessages,
+            items: merged.items,
             expansionOverrides: activityGroupExpansion,
+            pendingPrompts: merged.prompts,
             memo: presentationMemo
         )
         // Read once per body evaluation, from the same helper the resolver
@@ -261,6 +287,7 @@ struct TableTranscriptPaneView: View {
                     context: cardContext,
                     atBottom: $atBottom,
                     scrollToBottomToken: scrollToBottomToken,
+                    scrollToItem: promptScroll,
                     activityToggleToken: activityToggleToken,
                     linkRoot: linkRoot,
                     nodesProvider: { timedRenderNodes(presentation.nodes) },
@@ -288,7 +315,8 @@ struct TableTranscriptPaneView: View {
                     MessageComposerView(
                         terminal: decision.terminal,
                         worktree: decision.worktree,
-                        state: decision.state)
+                        state: decision.state,
+                        promptHint: promptHint(for: merged))
                         // A terminal switch reuses this pane, and the composer's
                         // registration is keyed on the terminal it was made for.
                         // A fresh view per terminal is what keeps the two agreeing.
@@ -352,6 +380,13 @@ struct TableTranscriptPaneView: View {
             return nil
         }
         return ComposerMount(terminal: terminal, worktree: local, state: state)
+    }
+
+    /// The composer's "prompt above" hint action, or nil when no open card can
+    /// be answered from this pane.
+    private func promptHint(for merged: PendingPromptMerge.Merged) -> (() -> Void)? {
+        guard let itemID = merged.answerableCardItemID else { return nil }
+        return { promptScroll = .next(after: promptScroll, itemID: itemID) }
     }
 
     private func setActivityGroup(_ id: String, expanded: Bool) {

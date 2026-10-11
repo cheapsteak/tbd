@@ -474,7 +474,8 @@ extension RPCRouter {
                 // Per-spawn fragment applies to FRESH spawns only; a
                 // resume must not reapply it. Hooks overlay still resolves
                 // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
+                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil,
+                promptAnswerHooks: createConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
               )
             : nil
 
@@ -916,7 +917,7 @@ extension RPCRouter {
             try await db.tabs.delete(tabID: params.terminalID)
         }
         await pendingQuestions.clear(terminalID: params.terminalID)
-        await broadcastPendingQuestions(terminalID: params.terminalID)
+        await broadcastPendingPrompts(terminalID: params.terminalID)
         await continueInClaudeReadiness.clear(terminalID: params.terminalID)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
@@ -1221,7 +1222,8 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    promptAnswerHooks: reviveConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -1521,7 +1523,7 @@ extension RPCRouter {
                         throw StaleTerminalReplacementError()
                     }
                     await self.pendingQuestions.clear(terminalID: currentTerminal.id)
-                    await self.broadcastPendingQuestions(terminalID: currentTerminal.id)
+                    await self.broadcastPendingPrompts(terminalID: currentTerminal.id)
                     return .parked(try await self.db.terminals.get(id: currentTerminal.id))
                 }
             }
@@ -2519,7 +2521,8 @@ extension RPCRouter {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir
+            profileConfigDir: profileConfigDir,
+            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
         )
 
         // The spawn each arm runs, as a closure rather than a value: the
@@ -6044,7 +6047,7 @@ extension RPCRouter {
 
         // `gcExpired` reaps across every terminal, not just the polled one, so
         // its reaped set is what has to be broadcast — a terminal whose entry
-        // this poll reaped gets no other retraction. `PendingQuestionExpirySweep`
+        // this poll reaped gets no other retraction. `PendingPromptExpirySweep`
         // cannot cover for it: the sweep finds nothing left to reap and stays
         // silent, leaving that terminal's pane rendering the entry forever.
         // Unioned with the polled terminal so a terminal that both lost an
@@ -6059,7 +6062,7 @@ extension RPCRouter {
             affected.insert(params.terminalID)
         }
         for terminalID in affected {
-            await broadcastPendingQuestions(terminalID: terminalID)
+            await broadcastPendingPrompts(terminalID: terminalID)
         }
         let messages = merged.items
 

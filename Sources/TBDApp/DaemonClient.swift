@@ -1188,6 +1188,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the transcript prompt-answer gate (default OFF, soaking). New
+    /// sessions pick up the hooks.
+    func setTranscriptPromptAnswer(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
+            params: ConfigSetPromptAnswerParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
@@ -1390,6 +1399,37 @@ actor DaemonClient {
             params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text),
             resultType: RemoteSendMessageResult.self
         ).outcome
+    }
+
+    /// Answer a remote session's pending prompt (`remote.answer`). Returns the
+    /// outcome; `.unknown` means the answer may have arrived — never resubmit
+    /// it automatically. Refusals (flag off, no `answer` capability, an answer
+    /// that does not fit the prompt) throw.
+    func remoteAnswer(
+        provider: String, sessionID: String, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.remoteAnswer,
+            params: RemoteAnswerParams(
+                provider: provider, sessionID: sessionID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
+    }
+
+    /// Answer a local terminal's pending prompt (`prompt.answer`). Returns once
+    /// the hook acknowledged delivery, `already_resolved`, or `unknown` when no
+    /// acknowledgement came back in time — never resubmit that automatically.
+    /// A hook that is
+    /// reconnecting, the flag being off, and an answer that does not fit the
+    /// prompt all throw.
+    func promptAnswer(
+        terminalID: UUID, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.promptAnswer,
+            params: PromptAnswerParams(terminalID: terminalID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
     }
 
     /// Fetch recent log lines for a remote session. `lines` nil == provider default.
@@ -2293,7 +2333,7 @@ actor DaemonClient {
 
     /// Tell the daemon that these pending `AskUserQuestion` captures now have a
     /// matching `tool_use` line in the JSONL, so it can drop them from
-    /// `PendingQuestionStore` and retract them from every subscriber.
+    /// `PendingPromptStore` and retract them from every subscriber.
     ///
     /// The app's own transcript reader calls this, because it is the party that
     /// parses the file and so the only one that sees the match. For a pane with

@@ -276,6 +276,7 @@ struct GeneralSettingsTab: View {
                 ptyHolderToggle
                 modelProxyToggle
                 transcriptStreamingToggle
+                transcriptPromptAnswerToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -465,6 +466,23 @@ struct GeneralSettingsTab: View {
             ? collector.caption
             : "\(collector.caption) Requires automatic cleanup to be on."
     }
+
+    /// Answer Claude's question and permission dialogs from the transcript.
+    /// Reads `daemon.capabilities`, writes `config.setTranscriptPromptAnswerEnabled`.
+    /// Off by default (soaking). New sessions pick up the hooks.
+    @ViewBuilder
+    private var transcriptPromptAnswerToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Answer Claude's prompts from the transcript", isOn: Binding(
+            get: { capabilities?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault },
+            set: { newValue in Task { await appState.setTranscriptPromptAnswerEnabled(newValue) } }
+        ))
+        .help(Self.transcriptPromptAnswerHelp)
+    }
+
+    static let transcriptPromptAnswerHelp = "Shows question and permission dialogs as cards you can answer in the "
+        + "transcript. The terminal dialog stays live, and whichever answers first wins. Applies to sessions "
+        + "started after you turn it on."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,

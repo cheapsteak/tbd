@@ -4,12 +4,12 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// `terminal.transcript` runs `PendingQuestionStore.gcExpired`, which reaps
+/// `terminal.transcript` runs `PendingPromptStore.gcExpired`, which reaps
 /// across EVERY terminal — not just the polled one. A pane whose terminal has
 /// no transcript path still polls that handler, so its poll can reap the
 /// stranded capture of a terminal the app is reading in-process. Without a
 /// broadcast for that terminal the app never hears about it:
-/// `PendingQuestionExpirySweep` then finds nothing left to reap and stays
+/// `PendingPromptExpirySweep` then finds nothing left to reap and stays
 /// silent, so the app-side pane renders "waiting for your answer" forever.
 @Suite("terminal.transcript broadcasts every terminal its gc reaped")
 struct TranscriptPollReapBroadcastTests {
@@ -80,9 +80,9 @@ struct TranscriptPollReapBroadcastTests {
         return await router.handle(request)
     }
 
-    private func pendingDeltas(_ deltas: CapturedDeltas) -> [TerminalPendingQuestionsDelta] {
+    private func pendingDeltas(_ deltas: CapturedDeltas) -> [TerminalPendingPromptsDelta] {
         deltas.all.compactMap {
-            if case .terminalPendingQuestionsChanged(let d) = $0 { return d }
+            if case .terminalPendingPromptsChanged(let d) = $0 { return d }
             return nil
         }
     }
@@ -111,7 +111,7 @@ struct TranscriptPollReapBroadcastTests {
         let forOther = broadcasts.filter { $0.terminalID == other.id }
         #expect(forOther.count == 1,
                 "the reaped terminal owes the app exactly one retraction, got \(broadcasts.count) deltas")
-        #expect(forOther.first?.pending.isEmpty == true,
+        #expect(forOther.first?.captures.isEmpty == true,
                 "an empty set is the retraction")
     }
 
@@ -138,7 +138,7 @@ struct TranscriptPollReapBroadcastTests {
 
         let forPolled = pendingDeltas(deltas).filter { $0.terminalID == polled.id }
         #expect(forPolled.count == 1)
-        #expect(forPolled.first?.pending.map(\.toolUseID) == ["toolu_fresh"],
+        #expect(forPolled.first?.captures.map(\.toolUseID) == ["toolu_fresh"],
                 "the surviving entry rides the same broadcast")
     }
 

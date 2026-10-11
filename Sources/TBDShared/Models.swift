@@ -1723,6 +1723,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
+    /// Answering question and permission prompts from the transcript. Resolved
+    /// as `transcript_prompt_answer_enabled ?? Config.transcriptPromptAnswerDefault`.
+    /// Assigned after construction by the daemon, so it is a stored property
+    /// with a default rather than a required initializer argument.
+    public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1848,6 +1853,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
+    /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
+    /// place it lives. Graduation flips this constant.
+    public static let transcriptPromptAnswerDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -2069,6 +2077,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        transcriptPromptAnswerEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(

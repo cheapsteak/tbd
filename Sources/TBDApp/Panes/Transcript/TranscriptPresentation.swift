@@ -247,50 +247,63 @@ struct TranscriptPresentation {
     /// the same underlying array storage is re-read from
     /// `appState.sessionTranscripts[sid]`, and `Array.==` short-circuits on
     /// identical buffers.
+    ///
+    /// `pendingPrompts` is the item-id → card map from `PendingPromptMerge`,
+    /// whose merged list is what `items` must be. It joins the memo key.
     nonisolated static func build(
         items: [TranscriptItem],
         expansionOverrides: [String: Bool] = [:],
+        pendingPrompts: [String: PendingPromptPresentation] = [:],
         memo: TranscriptPresentationMemo = .shared
     ) -> TranscriptPresentation {
-        memo.presentation(items: items, expansionOverrides: expansionOverrides, compute: compute)
+        memo.presentation(
+            items: items,
+            expansionOverrides: expansionOverrides,
+            pendingPrompts: pendingPrompts,
+            compute: compute)
     }
 
     private nonisolated static func compute(
         items: [TranscriptItem],
-        expansionOverrides: [String: Bool]
+        expansionOverrides: [String: Bool],
+        pendingPrompts: [String: PendingPromptPresentation]
     ) -> TranscriptPresentation {
-        let baseNodes = transcriptRenderNodes(from: items)
+        let baseNodes = transcriptRenderNodes(from: items, pendingPrompts: pendingPrompts)
         var projected: [TranscriptRenderNode] = []
         projected.reserveCapacity(baseNodes.count)
         var pendingActivity: [TranscriptRenderNode] = []
 
-        func flushActivity() {
-            guard let first = pendingActivity.first else { return }
+        /// `liftedRequireResponse` is whether a row lifted out of this run as
+        /// a card would have made the group require a response. It counts as
+        /// if the row were still a member, so a group that expands for an
+        /// `AskUserQuestion` stays expanded while that question shows as a
+        /// card, and folds back without changing its disclosure.
+        func emitGroup(_ members: [TranscriptRenderNode], groupID: String,
+                       liftedRequireResponse: Bool = false) {
+            guard let first = members.first else { return }
             // A run of exactly one activity is not worth wrapping: a "Read 1
             // file" summary repeats what the row underneath already says and
             // offers a disclosure control with nothing behind it. Emit the row
             // itself, as if it had never been grouped. Both renderers inherit
             // this — neither can see a one-item summary node. (Claude Code
             // collapses only runs of two or more for the same reason.)
-            if pendingActivity.count == 1 {
+            if members.count == 1 {
                 projected.append(first)
-                pendingActivity.removeAll(keepingCapacity: true)
                 return
             }
-            let groupID = "\(first.id)#activity-group"
-            let requiresResponse = pendingActivity.contains(where: isResponseRequired)
-            let errorCount = pendingActivity.reduce(into: 0) { total, node in
+            let requiresResponse = liftedRequireResponse || members.contains(where: isResponseRequired)
+            let errorCount = members.reduce(into: 0) { total, node in
                 if isError(node) { total += 1 }
             }
-            let pendingCount = pendingActivity.reduce(into: 0) { total, node in
+            let pendingCount = members.reduce(into: 0) { total, node in
                 if isPending(node) { total += 1 }
             }
             let defaultsExpanded = requiresResponse || errorCount > 0
             let isExpanded = expansionOverrides[groupID] ?? defaultsExpanded
-            let tally = activityTally(of: pendingActivity)
+            let tally = activityTally(of: members)
             let summary = ActivityGroupSummary(
                 id: groupID,
-                itemCount: pendingActivity.count,
+                itemCount: members.count,
                 bucketCounts: tally.counts,
                 mcpServers: tally.mcpServers,
                 errorCount: errorCount,
@@ -303,8 +316,31 @@ struct TranscriptPresentation {
                 kind: .activityGroupSummary(summary),
                 badgeUsage: nil
             ))
-            if isExpanded { projected.append(contentsOf: pendingActivity) }
-            pendingActivity.removeAll(keepingCapacity: true)
+            if isExpanded { projected.append(contentsOf: members) }
+        }
+
+        // A run of activity, flushed when a narrative bubble (or the end)
+        // closes it.
+        //
+        // A row carrying a prompt card is LIFTED out: a card is always a
+        // standalone row, emitted after whatever remains of its run. Only the
+        // carded row moves — a second tool call beside it stays grouped. The
+        // group id is still keyed on the WHOLE run's first member, lifted rows
+        // included, so lifting never renames the group and the row folds back
+        // into the same group, disclosure state intact, once its prompt
+        // resolves.
+        func flushActivity() {
+            guard let first = pendingActivity.first else { return }
+            defer { pendingActivity.removeAll(keepingCapacity: true) }
+            let groupID = "\(first.id)#activity-group"
+            guard pendingActivity.contains(where: { $0.pendingPrompt != nil }) else {
+                emitGroup(pendingActivity, groupID: groupID)
+                return
+            }
+            let lifted = pendingActivity.filter { $0.pendingPrompt != nil }
+            emitGroup(pendingActivity.filter { $0.pendingPrompt == nil }, groupID: groupID,
+                      liftedRequireResponse: lifted.contains(where: isResponseRequired))
+            projected.append(contentsOf: lifted)
         }
 
         for node in baseNodes {
@@ -559,6 +595,7 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
     private struct Entry {
         let items: [TranscriptItem]
         let expansionOverrides: [String: Bool]
+        let pendingPrompts: [String: PendingPromptPresentation]
         let presentation: TranscriptPresentation
     }
 
@@ -570,18 +607,20 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
     func presentation(
         items: [TranscriptItem],
         expansionOverrides: [String: Bool],
-        compute: ([TranscriptItem], [String: Bool]) -> TranscriptPresentation
+        pendingPrompts: [String: PendingPromptPresentation] = [:],
+        compute: ([TranscriptItem], [String: Bool], [String: PendingPromptPresentation]) -> TranscriptPresentation
     ) -> TranscriptPresentation {
         lock.lock()
         let cached = entry
         lock.unlock()
 
-        // Full value equality on BOTH inputs. A tool call gains its result in
+        // Full value equality on every input. A tool call gains its result in
         // place, leaving `count` and the last item's ID untouched, so any
         // cheaper key would serve a stale transcript.
         if let cached,
            cached.items == items,
-           cached.expansionOverrides == expansionOverrides {
+           cached.expansionOverrides == expansionOverrides,
+           cached.pendingPrompts == pendingPrompts {
             lock.lock()
             hitCount += 1
             lock.unlock()
@@ -591,10 +630,14 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
         // Computed outside the lock: two threads racing here recompute
         // independently and the loser's identical result is simply discarded,
         // which is cheaper than serializing a 70 ms projection.
-        let fresh = compute(items, expansionOverrides)
+        let fresh = compute(items, expansionOverrides, pendingPrompts)
 
         lock.lock()
-        entry = Entry(items: items, expansionOverrides: expansionOverrides, presentation: fresh)
+        entry = Entry(
+            items: items,
+            expansionOverrides: expansionOverrides,
+            pendingPrompts: pendingPrompts,
+            presentation: fresh)
         missCount += 1
         lock.unlock()
         return fresh

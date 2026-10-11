@@ -284,6 +284,9 @@ custom_rules:
       # AttachmentStrip is the composer's thumbnail strip above the text field —
       # also outside the transcript list's row-measurement path.
       - "Sources/TBDApp/Panes/Transcript/Composer/AttachmentStrip\\.swift"
+      # PromptInputPopoverView is the permission card's "Show all" popover — it
+      # renders outside the row and is never part of the row's measurement.
+      - "Sources/TBDApp/Panes/Transcript/PromptInputPopoverView\\.swift"
     regex: '\bScrollView\b'
     match_kinds:
       - identifier

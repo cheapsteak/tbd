@@ -17,6 +17,11 @@ struct RemoteVerbTests {
         #expect(RemoteCapability.transcriptImport == "transcript.import")
         #expect(RemoteCapability.transcriptRecall == "transcript.recall")
         #expect(RemoteCapability.sendSubmit == "send-submit")
+        #expect(RemoteCapability.answer == "answer")
+    }
+
+    @Test func answerPlacesBothOperandsPositionally() {
+        #expect(RemoteVerb.answer(sessionID: "s-1", promptID: "p-1") == ["answer", "s-1", "p-1"])
     }
 
     /// The bare pre-namespace spellings are not capabilities this build

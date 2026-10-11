@@ -158,10 +158,14 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// session is blocked on. Liveness axis, not filing: a snapshot that has
     /// gone stale can no longer assert it (see `projectedForStaleSnapshot`).
     public let pendingQuestion: RemotePendingQuestion?
+    /// The contract's optional `pending_prompt` — the answerable form of
+    /// `pending_question`. Liveness axis, like `pendingQuestion`.
+    public let pendingPrompt: RemotePendingPrompt?
 
     enum CodingKeys: String, CodingKey {
         case id, title, state, meta, archived
         case pendingQuestion = "pending_question"
+        case pendingPrompt = "pending_prompt"
         case createdAt = "created_at"
         case exitCode = "exit_code"
         case agentState = "agent_state"
@@ -174,12 +178,14 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 agentState: RemoteAgentState = .unknown,
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
                 meta: [String: String]? = nil, archived: Bool? = nil,
-                pendingQuestion: RemotePendingQuestion? = nil) {
+                pendingQuestion: RemotePendingQuestion? = nil,
+                pendingPrompt: RemotePendingPrompt? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
         self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
         self.pendingQuestion = pendingQuestion
+        self.pendingPrompt = pendingPrompt
     }
 
     /// Decoded leniently, field by field, and fatal on exactly one thing.
@@ -221,6 +227,8 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         // read: the contract forbids inferring blockage from this field, so
         // its loss costs an explanation and never a state.
         pendingQuestion = lenient(RemotePendingQuestion.self, .pendingQuestion)
+        // Same terms: an unreadable prompt costs the explanation only.
+        pendingPrompt = lenient(RemotePendingPrompt.self, .pendingPrompt)
         let provider = decoder.userInfo[.remoteProviderName] as? String
         meta = Self.decodeMeta(from: c, sessionID: id, provider: provider)
         if !dropped.isEmpty {
@@ -341,7 +349,11 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
             // Liveness axis: "blocked on this question" is a claim about
             // right now, and a provider that has stopped answering leaves
             // TBD no standing to make it.
-            pendingQuestion: nil)
+            pendingQuestion: nil,
+            // Liveness axis, like `pendingQuestion`: a provider that stopped
+            // answering leaves TBD no standing to say the dialog is still
+            // open, and `remote.answer` refuses a stale snapshot anyway.
+            pendingPrompt: nil)
     }
 }
 

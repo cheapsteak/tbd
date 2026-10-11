@@ -186,7 +186,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     /// Timer that expires stranded `AskUserQuestion` captures (step
     /// 11a-questions). `nil` in mock mode.
-    nonisolated(unsafe) var pendingQuestionExpirySweep: PendingQuestionExpirySweep?
+    nonisolated(unsafe) var pendingPromptExpirySweep: PendingPromptExpirySweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
@@ -862,7 +862,7 @@ public final class Daemon: Sendable {
             fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
-        let pendingQuestions = PendingQuestionStore()
+        let pendingQuestions = PendingPromptStore()
 
         // The control-mode bridge is shared by lifecycle + router so every
         // `ensureServer()` call site can open a gated control connection
@@ -1058,10 +1058,10 @@ public final class Daemon: Sendable {
         // below). Skipped in mock mode, like every other rail: with no
         // coordinator the parking RPC refuses, so nothing new is ever parked
         // and nothing already in the column is ever typed.
-        let pendingPrompts: PendingPromptCoordinator? = mockMode == nil
+        let pendingPromptCoordinator: PendingPromptCoordinator? = mockMode == nil
             ? PendingPromptCoordinator(db: database, subscriptions: subs)
             : nil
-        lifecycle.pendingPromptCoordinator = pendingPrompts
+        lifecycle.pendingPromptCoordinator = pendingPromptCoordinator
 
         // Orphan-GC: constructed here — before `lifecycle` gets copied into
         // the RPC router / auto-archive coordinator below (both take a
@@ -1201,8 +1201,8 @@ public final class Daemon: Sendable {
         // Queued prompt, second half: route the parking RPC and the readiness
         // and confirmation hooks to the coordinator, and give it the paste
         // path's send seam.
-        if let pendingPrompts {
-            await rpcRouter.attachPendingPromptCoordinator(pendingPrompts)
+        if let pendingPromptCoordinator {
+            await rpcRouter.attachPendingPromptCoordinator(pendingPromptCoordinator)
         }
         rpcRouter.controlMode = controlModeBridge
         // `terminal.output` renders a holder-backed session from the same
@@ -1659,14 +1659,14 @@ public final class Daemon: Sendable {
             // socket bind above (step 9) — the boot path already blocks that
             // bind for minutes on a large archive set, and work added ahead of
             // it makes a slow start indistinguishable from a dead daemon.
-            let questionSweep = PendingQuestionExpirySweep(
+            let questionSweep = PendingPromptExpirySweep(
                 store: pendingQuestions,
                 onReap: { [weak subs, pendingQuestions] terminalID in
-                    await subs?.broadcastPendingQuestions(
+                    await subs?.broadcastPendingPrompts(
                         terminalID: terminalID, from: pendingQuestions)
                 }
             )
-            self.pendingQuestionExpirySweep = questionSweep
+            self.pendingPromptExpirySweep = questionSweep
             await questionSweep.start()
 
             // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
@@ -2235,7 +2235,7 @@ public final class Daemon: Sendable {
         // `beginDraining` is what the flag's off-flip calls; shutdown must not.
         await modelProxySupervisor?.stop()
 
-        if let questionSweep = pendingQuestionExpirySweep {
+        if let questionSweep = pendingPromptExpirySweep {
             await questionSweep.stop()
         }
 
@@ -2331,6 +2331,17 @@ public final class Daemon: Sendable {
         }
         if let http = httpServer {
             await http.stop()
+        }
+
+        // Settle the open transcript prompts only now, after the socket has
+        // closed every `prompt.await` connection. Resolving them first would
+        // tell each waiting hook "resolved elsewhere" and it would exit for
+        // good; a hook that instead sees its connection drop reconnects to the
+        // next daemon and registers again, keeping its prompt answerable.
+        // This releases whatever the closes did not reach — chiefly a
+        // `prompt.answer` still waiting for a delivery ack.
+        if let router = self.router {
+            await router.pendingQuestions.resolveAll()
         }
 
         // Remove the PID file only if it still names this process. During a

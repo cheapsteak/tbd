@@ -25,6 +25,10 @@ struct AskUserQuestionCard: View {
     /// at layout time — any post-measure growth would overlap the next message.
     /// Defaults to false for previews/tests; the renderer sets it true. (#129)
     var staticHeight: Bool = false
+    /// The open (or just-answered) prompt behind this row, from the view-time
+    /// merge. Answerable → the interactive card (`InteractiveQuestionCard`);
+    /// read-only → today's card, plus the read-only note when there is one.
+    var pending: PendingPromptPresentation? = nil
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
@@ -88,6 +92,28 @@ struct AskUserQuestionCard: View {
     }
 
     var body: some View {
+        if let pending, pending.rendersAsInteractiveQuestionCard {
+            InteractiveQuestionCard(presentation: pending, timestamp: timestamp)
+        } else if let note = readOnlyNote {
+            VStack(alignment: .leading, spacing: 2) {
+                staticCard
+                PromptCardStatusRow(footer: .readOnly(note: note), onRetry: {})
+                    .padding(.horizontal, 16)
+            }
+        } else {
+            staticCard
+        }
+    }
+
+    /// The note a read-only pending prompt carries ("Attach to answer"), if any.
+    private var readOnlyNote: String? {
+        guard case .readOnly(let note)? = pending?.answerability else { return nil }
+        return note
+    }
+
+    /// Today's card: the questions, the options, and the answer once the tool
+    /// result is in.
+    private var staticCard: some View {
         let parsedInput = decodeInput()
         let parsedAnswers = resultText.map(AskUserQuestionParser.parseAnswers) ?? []
         return VStack(alignment: .leading, spacing: 4) {
@@ -554,5 +580,228 @@ enum AskUserQuestionParser {
             }
         }
         return nil
+    }
+}
+
+// MARK: - Interactive card (an open, answerable prompt)
+
+/// `AskUserQuestionCard` while its prompt is open and answerable: options to
+/// pick, an "Other" field, and Submit. Design:
+/// `docs/specs/2026-10-09-transcript-prompt-answer-design.md`, "Question card".
+///
+/// The table measures the row ONCE, so the height comes from the questions
+/// and options alone: option descriptions are cut to two lines (full text in
+/// the tooltip), selection only recolours, and every delivery state shares one
+/// reserved footer row. The draft and the delivery state live in
+/// `PromptAnswerController`, keyed by prompt id, because the table recycles
+/// cells.
+struct InteractiveQuestionCard: View {
+    let presentation: PendingPromptPresentation
+    let timestamp: Date?
+
+    @Environment(AppState.self) private var appState
+
+    static let footerHeight: CGFloat = 28
+
+    var body: some View {
+        let controller = appState.promptAnswers
+        let footer = PromptCardFooter.resolve(
+            presentation, state: controller.state(for: presentation.promptID))
+        return HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                InteractiveQuestionRoleHeader(timestamp: timestamp)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(presentation.questions.enumerated()), id: \.offset) { _, question in
+                        InteractiveQuestionBlock(
+                            question: question, promptID: presentation.promptID,
+                            controller: controller, enabled: footer == .controls)
+                    }
+                    QuestionCardFooterRow(
+                        presentation: presentation, controller: controller, footer: footer)
+                        .frame(height: Self.footerHeight, alignment: .leading)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 52)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+    }
+}
+
+private struct InteractiveQuestionRoleHeader: View {
+    let timestamp: Date?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Claude is asking").font(.caption2).foregroundStyle(.tertiary)
+            if let ts = timestamp {
+                Text("·").foregroundStyle(.quaternary).font(.caption2)
+                Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+}
+
+private struct InteractiveQuestionBlock: View {
+    let question: PromptQuestion
+    let promptID: String
+    let controller: PromptAnswerController
+    let enabled: Bool
+
+    private var hasHeader: Bool {
+        guard let header = question.header else { return false }
+        return !header.isEmpty && header != question.text
+    }
+
+    var body: some View {
+        let draft = controller.draft(for: promptID)
+        return VStack(alignment: .leading, spacing: 4) {
+            if hasHeader, let header = question.header {
+                Text(header)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+            }
+            Text(question.text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(question.options.enumerated()), id: \.offset) { _, option in
+                    InteractiveOptionRow(
+                        option: option, multiSelect: question.multiSelect,
+                        selected: draft.isChosen(option.label, in: question), enabled: enabled
+                    ) {
+                        controller.updateDraft(for: promptID) { $0.choose(option.label, in: question) }
+                    }
+                }
+                InteractiveOtherRow(
+                    question: question, promptID: promptID, controller: controller,
+                    selected: draft.isOtherChosen(in: question), enabled: enabled)
+            }
+            .padding(.top, 4)
+        }
+    }
+}
+
+/// The marker glyph for a radio or checkbox row.
+private func promptOptionSymbol(multiSelect: Bool, selected: Bool) -> String {
+    if multiSelect { return selected ? "checkmark.square.fill" : "square" }
+    return selected ? "largecircle.fill.circle" : "circle"
+}
+
+private struct InteractiveOptionRow: View {
+    let option: PromptQuestionOption
+    let multiSelect: Bool
+    let selected: Bool
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: promptOptionSymbol(multiSelect: multiSelect, selected: selected))
+                    .font(.callout)
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let description = option.description, !description.isEmpty {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .help(description)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(selected ? Color.accentColor.opacity(0.12) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+private struct InteractiveOtherRow: View {
+    let question: PromptQuestion
+    let promptID: String
+    let controller: PromptAnswerController
+    let selected: Bool
+    let enabled: Bool
+
+    static let fieldHeight: CGFloat = 22
+
+    private var text: Binding<String> {
+        Binding(
+            get: { controller.draft(for: promptID).otherText[question.text] ?? "" },
+            set: { value in
+                controller.updateDraft(for: promptID) { $0.setOtherText(value, in: question) }
+            })
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Button {
+                controller.updateDraft(for: promptID) { $0.chooseOther(in: question) }
+            } label: {
+                Image(systemName: promptOptionSymbol(multiSelect: question.multiSelect, selected: selected))
+                    .font(.callout)
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    .frame(width: 16)
+            }
+            .buttonStyle(.plain)
+            TextField("Other", text: text)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .frame(height: Self.fieldHeight)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .disabled(!enabled)
+    }
+}
+
+private struct QuestionCardFooterRow: View {
+    let presentation: PendingPromptPresentation
+    let controller: PromptAnswerController
+    let footer: PromptCardFooter
+
+    var body: some View {
+        if footer == .controls {
+            let answer = PromptAnswerController.questionAnswer(
+                questions: presentation.questions,
+                draft: controller.draft(for: presentation.promptID))
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                Button("Submit") {
+                    guard let answer else { return }
+                    Task { await controller.submit(presentation, answer: answer) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(answer == nil)
+            }
+        } else {
+            PromptCardStatusRow(footer: footer) {
+                Task { await controller.retry(presentation) }
+            }
+        }
     }
 }

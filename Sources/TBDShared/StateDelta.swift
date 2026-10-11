@@ -71,6 +71,12 @@ public enum StateDelta: Codable, Sendable {
     /// and reset time so the app can show the limit banner and offer the
     /// one-click switch.
     case terminalLimitHit(TerminalLimitHitDelta)
+    /// A terminal's pending prompts changed: the dialogs (`AskUserQuestion`
+    /// pickers and tool permission prompts) open and waiting for an answer,
+    /// plus the legacy pre-JSONL `AskUserQuestion` captures. Supersedes
+    /// `.terminalPendingQuestionsChanged`, which stays decodable so an app
+    /// paired with an older daemon still works.
+    case terminalPendingPromptsChanged(TerminalPendingPromptsDelta)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
@@ -125,6 +131,31 @@ public struct PendingQuestionPayload: Codable, Sendable, Equatable {
         self.toolUseID = toolUseID
         self.inputJSON = inputJSON
         self.timestamp = timestamp
+    }
+}
+
+/// The complete pending-prompt state for one terminal. Whole-set for the same
+/// reason `TerminalPendingQuestionsDelta` is: empty arrays are a retraction.
+///
+/// Not to be confused with `PendingPromptCoordinator`, which parks a
+/// worktree's queued first message.
+public struct TerminalPendingPromptsDelta: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    /// Legacy pre-JSONL `AskUserQuestion` captures (what
+    /// `TerminalPendingQuestionsDelta.pending` carried).
+    public let captures: [PendingQuestionPayload]
+    public let prompts: [PendingPromptPayload]
+    /// The daemon's per-terminal mutation counter, as in
+    /// `TerminalPendingQuestionsDelta.revision`. `nil` means "no ordering
+    /// available", and a receiver applies it.
+    public let revision: UInt64?
+
+    public init(terminalID: UUID, captures: [PendingQuestionPayload],
+                prompts: [PendingPromptPayload], revision: UInt64? = nil) {
+        self.terminalID = terminalID
+        self.captures = captures
+        self.prompts = prompts
+        self.revision = revision
     }
 }
 

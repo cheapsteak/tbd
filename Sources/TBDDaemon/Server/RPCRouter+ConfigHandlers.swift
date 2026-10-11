@@ -596,4 +596,14 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the transcript prompt-answer gate (default OFF while it soaks).
+    /// Hook changes reach a session on its next start; the answer RPCs read the
+    /// column on every call, so they follow the toggle at once.
+    func handleConfigSetTranscriptPromptAnswerEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetPromptAnswerParams.self, from: paramsData)
+        try await db.config.setTranscriptPromptAnswerEnabled(params.enabled)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }
