@@ -1469,6 +1469,32 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Move a parked session to another transport only while the complete
+    /// state observed by the caller is still current; nil means the snapshot
+    /// was stale and nothing was written.
+    ///
+    /// The tmux coordinates are blanked in the SAME statement as the transport.
+    /// Two writes that could land separately might leave a holder row still
+    /// naming a pane, the stale-coordinate hazard that let daemon keystrokes
+    /// reach the wrong session.
+    func setParkedTransport(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        transport: TerminalTransport
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record) else { return nil }
+            record.transport = transport.rawValue
+            record.tmuxWindowID = ""
+            record.tmuxPaneID = ""
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
     /// Update the tmux window and pane IDs for a terminal.
     public func updateTmuxIDs(id: UUID, windowID: String, paneID: String) async throws {
         try await writer.write { db in
