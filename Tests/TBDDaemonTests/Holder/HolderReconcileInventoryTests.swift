@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -359,18 +358,24 @@ struct HolderReconcileInventoryTests {
         lifecycle.holderRegistry = registry
 
         // Virtual time, so "spent" is reached by construction rather than by
-        // waiting on a real five seconds: `advanceWhenSuspended` waits until
-        // the budget's timer has actually registered its sleep before moving
-        // the clock past it.
-        let clock = TestClock()
+        // waiting on a real five seconds. The budget's timer is its own
+        // unstructured task, so its sleep registers a scheduling hop after
+        // `begin` returns: the event-driven clock signals that arming instead
+        // of polling for it with megaYield probes, which starve under the
+        // saturated fast pass. Advancing promises only that the sleeper was
+        // resumed, not that the timer has run `expire()`, so the flag is then
+        // awaited rather than sampled.
+        let clock = EventDrivenTestClock()
         await lifecycle.holderProbeBudget.begin(.seconds(5), clock: clock)
-        await clock.advanceWhenSuspended(by: .seconds(5))
-        var spent = false
-        for _ in 0..<500 where !spent {
-            spent = await lifecycle.holderProbeBudget.isSpent
-            if !spent { await Task.yield() }
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
+        let started = ContinuousClock.now
+        let spent = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await lifecycle.holderProbeBudget.isSpent
         }
-        #expect(spent, "the budget's timer never fired after its whole budget elapsed")
+        if spent == .cancelled { return }
+        if spent == .timedOut {
+            Issue.record(BudgetNeverSpent(elapsed: ContinuousClock.now - started))
+        }
 
         let terminal = Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
@@ -383,6 +388,16 @@ struct HolderReconcileInventoryTests {
             daemon's own was bound: \(String(describing: verdict))
             """)
         await lifecycle.holderProbeBudget.end()
+    }
+
+    private struct BudgetNeverSpent: Error, CustomStringConvertible {
+        let elapsed: Duration
+        var description: String {
+            """
+            the budget's timer was resumed past its whole budget, but isSpent was \
+            still false after \(elapsed)
+            """
+        }
     }
 
     /// The other polarity: a fresh budget probes. Without this, a budget that
