@@ -77,7 +77,8 @@ Six components, each with one job:
 
 1. **Ledger** (`scripts/flake-ledger.py`) – reads structured test results from
    the nightly and from CI, and maintains one issue per flaky test, plus one
-   watchlist issue for tests below the threshold. Deterministic; no model
+   watchlist issue for tests below the threshold or failing only in the
+   nightly stress loop. Deterministic; no model
    involved.
 2. **Picker** (`scripts/flake-pick.py`) – chooses tonight's target from the
    ledger, or none.
@@ -239,14 +240,31 @@ Each failure becomes an **occurrence** with a key that names where it happened:
 
 A test's failures are grouped into **episodes**. The first episode starts at
 its first recorded failure; a new one starts at each recurrence after a merged
-fix (§4.4). A test **qualifies** for a fix attempt when either:
+fix (§4.4). A test **qualifies** for a fix attempt only when its current
+episode holds at least one failure at a **CI place** – a `branch:` or `main:`
+key, a PR, branch or `main` run of `test.yml` – and, besides, either:
 
 - its current episode's failures span two or more distinct occurrence keys, in
-  any mix. One night and one PR branch qualify; two failures on the same night
-  or the same branch do not. The rule is meant to separate a test that fails in
-  different places from one bad run; or
+  any other mix. One night and one PR branch qualify; two failures on the same
+  night or the same branch do not, and neither do any number of nights alone.
+  The rule is meant to separate a test that fails in different places from one
+  bad run; or
 - its current episode is a recurrence. One failure on a commit that contains a
-  recorded fix (§4.4) is enough, because it shows that fix did not hold.
+  recorded fix (§4.4) is enough, because it shows that fix did not hold; a
+  recurrence seen only at night waits for a CI failure in its episode, like
+  any other nightly-only history.
+
+Nightly failures still count as places once a CI failure is present, and they
+are always recorded, but they never qualify a test by themselves. The nightly
+stress loop loads the machine on purpose (#962's induced CPU load), so a
+failure there measures how a test copes with load, not whether it flakes in
+the CI runs people wait on. A test that a loaded machine breaks every night
+would otherwise qualify after its second night: a count of the open per-test
+issues on 2026-10-11 found 119, of which 113 held failures only at `night:`
+places and 6 held a CI place. A nightly-only test stays on the watchlist
+(§4.4) however many nights it fails, and its whole history is there the day a
+CI failure qualifies it. `NIGHT_PREFIX` and `has_ci_place` in
+`scripts/flake_lib.py` are the rule.
 
 ### 4.4 The issue
 
@@ -259,7 +277,9 @@ failed in one bad run. So a test gets an issue of its own only once it
 qualifies (§4.3), and until then its history lives on the **watchlist**
 (below), one issue shared by every such test. A test that already has an
 issue – one the ledger opened, or a human's it adopted – keeps recording there
-whether or not it qualifies.
+whether or not it qualifies, with one exception: an open issue the ledger
+opened whose test does not qualify is closed back into the watchlist
+(**demotion**, below).
 
 A test's own issue has three parts:
 
@@ -282,8 +302,8 @@ A test's own issue has three parts:
 **The watchlist** is one issue, titled `Flake watchlist` and labelled
 `flake-watchlist` – its own label, never `flaky`, so neither the per-test
 lookup below nor the picker (§5) ever reads it as a test's issue. It holds every
-test that has failed in the last 30 days, has no issue of its own, and does not
-qualify, and, until a run confirms its history on its new issue, a test that
+test that has failed in the last 30 days, has no open issue of its own – none,
+or one the ledger demoted – and does not qualify, and, until a run confirms its history on its new issue, a test that
 just qualified (below).
 The ledger finds it by label and authorship: the oldest issue under the label
 that the bot itself opened, open or closed. An issue under the label opened by
@@ -367,6 +387,57 @@ its history is on its own issue: if the issue's create or comment write fails,
 the entry still holds everything, and the next run finds the issue (by its
 `flaky` label, or by title) or creates it again, seeded from the entry. Aging
 out is the only other way off the watchlist.
+
+**Demotion: back onto the watchlist.** An open issue the bot opened whose
+test does not qualify – every failure in its current episode is nightly – is
+closed by the ledger itself, as the bot, in its next run. The test's state,
+everything the issue's ledger comment holds plus the run's new failures,
+becomes its watchlist entry, and the watchlist is written before any issue
+(§8), so the history is on the watchlist before the issue changes. Then the
+ledger closes the issue as not planned and posts one comment saying why, in
+plain words: nightly-only failures belong on the watchlist, because the
+nightly run loads the machine on purpose, and a CI failure reopens the issue
+with that history. The ledger comment is left as it was. Three issues are
+never demoted:
+
+- **An issue a human opened** – one adopted by title or by `.flaky(issue:)`.
+  It keeps recording there, as before; the picker never selects it while it
+  does not qualify (§5).
+- **An issue with an open bot PR.** The PR names the issue, and closing it
+  under the PR would strand the review. The ledger demotes it in the first run
+  after the PR closes, if the test still does not qualify.
+- **An issue a human reopened after a demotion** – open, with the bot's own
+  not-planned close as its latest close. The ledger reopens a demoted issue
+  only once its test qualifies, and a qualifying test stays qualified for the
+  rest of its episode, so such an issue that does not qualify was reopened by
+  hand, and stays open.
+
+The ledger recognizes a demoted issue by its latest `ClosedEvent`: reason not
+planned, and actor the bot's own account (`tbd-flake-fixer[bot]`, which
+GraphQL spells `tbd-flake-fixer` with type `Bot`, a type no person's account
+has). A not-planned close by anyone else is an ordinary one (below). A
+demoted issue's test lives on the watchlist like any test without an issue:
+
+- **A nightly failure** updates the watchlist entry. The issue stays closed
+  and its ledger comment is not written.
+- **A quiet month** ages the entry out after 30 days without a failure, as
+  for any entry; the demoted issue does not pin it. A run in which the test
+  has neither a new failure nor an entry plans nothing for it, so no empty
+  entry reappears.
+- **A failure that qualifies it** – a CI failure in the current episode, with
+  a second place or a recurrence – reopens the demoted issue, with a comment
+  linking that failure, writes the entry's history, merged into the issue's
+  ledger comment, and keeps the entry until a later run reads that history
+  on the issue, as for any test promoted off the watchlist. If the entry had
+  aged out, the test's state starts from the ledger comment's episode, fixes
+  and PR outcomes with no failures, as an aged-out test's fresh entry does.
+
+A demotion costs two writes, the close and its comment, paced like any
+other issue's. Demoting all 113 nightly-only issues in the count above takes
+one run of about six minutes and 226 writes, inside GitHub's limits of 80
+content-creating requests a minute and 500 an hour, so the ledger does not
+cap demotions per run. A rate limit stops the writes there, as for any issue
+write (§8), and the next run demotes the rest.
 
 The exact-title search (step 1 below) runs for a test's first failure and,
 once it is on the watchlist, only in a run where its recorded and new
@@ -518,7 +589,12 @@ which GitHub sets to the commit or the merged pull request that closed it.
 - **Closed as not planned, or as completed with no closer** – no fix is on
   record. The issue **stays closed**: the ledger never reopens it, and the
   picker never selects a closed issue. The ledger still records new failures
-  in its comment, so the history is there if a human reopens it.
+  in its comment, so the history is there if a human reopens it. The one
+  exception is an issue the ledger itself closed as not planned, by demotion
+  (above): its test's failures go to the watchlist instead, and the ledger
+  reopens it once the test qualifies. A human who reopens a demoted issue and
+  closes it as not planned again makes it an ordinary not-planned issue,
+  which stays closed for good.
 
 **A failure after a fix commit** counts as a **recurrence** only if the
 failing run's commit contains the fix: the ledger asks GitHub's compare API
@@ -531,8 +607,14 @@ actually tested a merge with the base branch, so a branch that has not been
 rebased since the fix is treated as pre-fix even if the tested merge contained
 it. That errs toward missing a recurrence rather than inventing one.
 
-A recurrence reopens the issue, with a comment linking the failure and the fix,
-and starts a new episode (§4.3), which makes the test eligible again (§5). The
+A recurrence starts a new episode (§4.3) and, once that episode qualifies,
+reopens the issue, with a comment linking the failure and the fix, which makes
+the test eligible again (§5). A recurrence seen only at night is recorded in
+the ledger comment, and the issue stays closed; the first CI failure of that
+episode reopens it, in whatever run it arrives. The ledger reopens a closed
+issue whenever its current episode is newer than the episode of the fix it
+was closed with and qualifies, so a run that died between the recurrence and
+the reopen converges on the next. The
 brief lists the fix as a prior attempt that did not hold. Recurrence after a
 fix is exactly the evidence a human needs to see.
 
@@ -552,7 +634,8 @@ would stay open with no fix on record, and the bot could pick it; a human
 closing it by hand, as completed with no closer, ends that.
 
 The ledger posts nothing besides its one comment per issue, the reopen
-comment above, and the watchlist's comments. A new failure updates the ledger
+comment above, a demotion's closing comment and its reopen comment, and the
+watchlist's comments. A new failure updates the ledger
 comment; it never adds a second one.
 
 The ledger writes the watchlist first, then each test's issue, and paces its
@@ -587,7 +670,10 @@ list of open PRs, and chooses at most one test. It never selects the
 watchlist: it lists only `flaky` issues, and an issue that also carries the
 `flake-watchlist` label is refused by name, on the schedule and on dispatch,
 so a mislabelled watchlist is never a target. A test on the watchlist does not
-qualify and has no issue to pick. A test is **eligible** when:
+qualify and has no issue to pick; a demoted issue is closed. The picker also
+checks the CI-place rule (§4.3) by itself, ahead of the threshold, so an open
+issue whose current failures are all nightly is refused with that reason even
+before the ledger's next run demotes it. A test is **eligible** when:
 
 - it qualifies (§4.3);
 - its issue is open;
@@ -1723,7 +1809,10 @@ names who reclaims its orphans:
 - **Issues** are one per qualifying test, found by exact title before any
   create (§4.4), and the `ledger` job runs under a concurrency group so two runs
   cannot race to create the same one. Issues are records, not leaks; humans
-  close them.
+  close them, and the ledger closes, as not planned, one it opened whose test
+  does not qualify (demotion, §4.4) – a change of state on an existing record,
+  which creates nothing, and which the ledger reverses by reopening the same
+  issue rather than opening another.
 - **The watchlist issue** is one fixed resource: found by its label and the
   bot's authorship before any create, created once, and reused for every
   sub-threshold test. Its comments are edited in place; one left empty is
@@ -1753,7 +1842,8 @@ Five more things the bot creates need no reclaimer, each for a stated reason:
   bounded by the number of attempts, at most one a night, and become
   unreachable with the commit when its branch is reclaimed.
 - **Comments** – one ledger comment and one attempt comment per issue, each
-  edited in place, plus a reopen comment per recurrence and the attempt
+  edited in place, plus a reopen comment per recurrence, a closing comment per
+  demotion and a reopen comment per requalification, and the attempt
   comments `publish` posts, and one note on the tracking issue per streak of
   red `ledger` runs (§8). They live on issues, which are records (above).
 
@@ -1833,7 +1923,24 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   an issue not aged,
   and an aged-out test that fails again starting a fresh entry; folding
   keeping a count's latest failure time; an existing per-test issue below the threshold keeps
-  recording there; a forged watchlist comment and a watchlist issue opened by
+  recording there. The CI-place rule and demotion: fourteen nights alone, a
+  nightly-only recurrence, and a branch failure from an earlier episode each
+  not qualifying, while a night with a branch, `main` with a night, and a
+  folded `main` count do; a test failing on four nights kept on the
+  watchlist with no issue, then given one by a branch failure; an open
+  bot-opened issue with only nightly failures demoted – one action, no ledger
+  write, a closing comment naming the watchlist, its history and the run's
+  failure on the watchlist – and, in write mode, the watchlist written first,
+  then the close as not planned, then the comment; a human-opened issue, one
+  with an open bot PR, and one a human reopened after a demotion, each not
+  demoted; after a demotion, a nightly failure updating the entry with no
+  issue write, a human's not-planned close still recording on the issue, and
+  a CI failure reopening the issue with the entry's history and keeping the
+  entry; a demoted test with no entry planning nothing, and its entry aging
+  out; a nightly recurrence recorded on its closed issue and not reopening
+  it, a CI failure reopening it in the same run, and one in a later run
+  reopening it with the fix named; `fetch` reading a bot's not-planned close,
+  by GraphQL's bare login, as a demotion; a forged watchlist comment and a watchlist issue opened by
   someone else, each ignored and listed; a missing watchlist created once and
   not again; two watchlists, the oldest used and both listed; the report's
   counts of issues to open and tests watched; and a watchlist too big for one
@@ -1856,7 +1963,9 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   of comment, still read; every writer stamping the current version in the
   sentinel and the block; and an older version read while it is listed and
   stopping the reader once it is not.
-- **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
+- **`flake-pick.test.sh`** – each eligibility condition on its own, both sides,
+  including an open issue with three nights and no CI place, refused with
+  that reason;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
   `merged`), with and without a later failure; a `session_failed` abort,
@@ -2038,6 +2147,20 @@ Every harness must prove it can fail: each case that expects a finding runs
 against a fixture that contains one.
 
 ## 14. Rejected alternatives
+
+- **Counting each night as a place on its own.** A night of the stress loop is
+  an independent run, so it looks like a second place. But the loop loads the
+  machine on purpose, so every night repeats the same condition, and a test
+  that load breaks fails on each of them: two nights measure load sensitivity
+  twice, not flakiness in two places. Under that rule 113 of 119 open per-test
+  issues (§4.3) held nightly failures only, and the picker would have spent
+  its one nightly attempt on them instead of on the six tests that had failed
+  in CI. Load sensitivity is still worth a human's look, which the watchlist
+  gives it, with every night's failure kept.
+- **Opening a new issue for a test that requalifies after a demotion.** Two
+  issues with the same exact title would make the title lookup (§4.4)
+  ambiguous and split one test's history across two records. Reopening the
+  demoted issue keeps one issue per test.
 
 - **A session on Linux, with CI as its feedback loop.** A Linux runner cannot
   build this macOS Swift package, so every try would wait on a full CI round

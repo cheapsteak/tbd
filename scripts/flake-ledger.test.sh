@@ -211,17 +211,43 @@ print(m.occurrence_key("ci-retry", "preflight/tbd/foo", "2026-10-02T11:00:00Z"))
 test_threshold_at_one_and_two_keys() {
   local script out mutant
   script="$STATE_PRELUDE"'
-print(m.qualifies(m.State("t/x()", failures=[F("1", "night:2026-10-01"), F("2", "night:2026-10-01")])))
+print(m.qualifies(m.State("t/x()", failures=[F("1", "branch:foo"), F("2", "branch:foo")])))
 print(m.qualifies(m.State("t/x()", failures=[F("1", "night:2026-10-01"), F("2", "branch:foo")])))
 print(m.qualifies(m.State("t/x()", failures=[F("1", "branch:foo"), F("2", "branch:bar")])))
+print(m.qualifies(m.State("t/x()", failures=[F("1", "main:2026-10-01"), F("2", "night:2026-10-02")])))
 '
   out="$(py <<< "$script")"
   assert_eq "two failures, one key: no" "False" "$(sed -n 1p <<< "$out")"
   assert_eq "a night and a branch: yes" "True" "$(sed -n 2p <<< "$out")"
   assert_eq "two branches: yes" "True" "$(sed -n 3p <<< "$out")"
+  assert_eq "main and a night: yes" "True" "$(sed -n 4p <<< "$out")"
   mutant="$(mutant_of 's/^QUALIFY_DISTINCT_OCCURRENCES = 2$/QUALIFY_DISTINCT_OCCURRENCES = 1/' "$LIB")"
   out="$(py "$mutant" <<< "$script")"
-  assert_eq "mutation: a threshold of one qualifies one bad night" "True" "$(sed -n 1p <<< "$out")"
+  assert_eq "mutation: a threshold of one qualifies one bad branch" "True" "$(sed -n 1p <<< "$out")"
+}
+
+test_nightly_only_failures_never_qualify() {
+  local script out mutant
+  script="$STATE_PRELUDE"'
+nights = [F(str(i), f"night:2026-10-{i:02d}") for i in range(1, 15)]
+print(m.qualifies(m.State("t/x()", failures=nights)))
+print(m.qualifies(m.State("t/x()", failures=nights + [F("99", "branch:foo")])))
+print(m.qualifies(m.State("t/x()", episode=1, failures=[F("1", "night:2026-10-01", ep=1)])))
+print(m.qualifies(m.State("t/x()", episode=1, failures=[F("1", "branch:foo"), F("2", "night:2026-10-02", ep=1)])))
+print(m.qualifies(m.State("t/x()", failures=nights, folded=[m.Folded("main:2026-09-30", 0, False, 2, "2026-09-30T01:00:00Z", "2026-09-30T02:00:00Z")])))
+print(m.is_ci_place("night:2026-10-01"), m.is_ci_place("main:2026-10-01"), m.is_ci_place("branch:night:x"))
+'
+  out="$(py <<< "$script")"
+  assert_eq "fourteen nights, no CI place: no" "False" "$(sed -n 1p <<< "$out")"
+  assert_eq "the same nights and one branch: yes" "True" "$(sed -n 2p <<< "$out")"
+  assert_eq "a nightly-only recurrence: no" "False" "$(sed -n 3p <<< "$out")"
+  assert_eq "a branch failure in an earlier episode does not count" "False" "$(sed -n 4p <<< "$out")"
+  assert_eq "a folded main count is a CI place" "True" "$(sed -n 5p <<< "$out")"
+  assert_eq "only a night: key is nightly" "False True True" "$(sed -n 6p <<< "$out")"
+  mutant="$(mutant_of 's/^    if not has_ci_place\(state\):$/    if False:/' "$LIB")"
+  out="$(py "$mutant" <<< "$script")"
+  assert_eq "mutation: without the CI-place rule two nights qualify" "True" "$(sed -n 1p <<< "$out")"
+  assert_eq "mutation: and so does a nightly recurrence" "True" "$(sed -n 3p <<< "$out")"
 }
 
 test_only_the_current_episode_counts() {
@@ -650,7 +676,9 @@ test_a_forged_attempt_comment_is_ignored() {
   body="$(mktmpd)/attempts.md"
   build attempts-body "$body" '[{"run_id": 7, "started_at": "2026-10-02T05:00:00Z", "main_sha": "bbbb", "episode": 0, "outcome": "pr-opened", "pr": 990}]'
   local ledger; ledger="$(mktmpd)/ledger.md"
-  build ledger-body "$ledger" "{\"test_id\": \"$HOLDER\"}"
+  # A qualifying ledger, so the mutant below (which trusts every author,
+  # the issue's own included) has no reason to demote the issue.
+  build ledger-body "$ledger" "{\"test_id\": \"$HOLDER\", \"failures\": [{\"key\": \"1:1:x\", \"run_id\": 1, \"attempt\": 1, \"occurrence\": \"night:2026-09-20\", \"at\": \"2026-09-20T11:00:00Z\", \"source\": \"nightly\"}, {\"key\": \"2:1:x\", \"run_id\": 2, \"attempt\": 1, \"occurrence\": \"branch:x\", \"at\": \"2026-09-21T11:00:00Z\", \"source\": \"ci-xunit\"}]}"
   build issue "$w" --number 970 --title "Flaky test: $HOLDER" --label flaky \
     --comment "70|$BOT|Bot|$ledger" --comment "71|someone|User|$body"
   build set "$w" pr_states.json '{"990": {"state": "MERGED", "merge_sha": "ffff", "merged_at": "2026-10-03T00:00:00Z"}}'
@@ -1133,7 +1161,7 @@ test_a_test_below_the_threshold_goes_on_the_watchlist_only() {
   assert_eq "no per-test issue" "0" "$(jq '.actions | length' <<< "$out")"
   assert_eq "one watchlist comment, on a watchlist to create" "1 Flake watchlist" "$(jq -r '"\(.watchlist.writes | length) \(.watchlist.create.title)"' <<< "$out")"
   assert_contains "holding the test's failure" "$(watch_body "$out")" '"key":"3001:1:xunit-app-swift-testing.xml"'
-  mutant="$(mutant_of 's/^    if view is None and not summary\["qualifies"\]:$/    if False:/' "$LEDGER")"
+  mutant="$(mutant_of 's/^    if \(view is None or demoted\) and not summary\["qualifies"\]:$/    if False:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_eq "mutation: without the watchlist the first failure opens an issue" "Flaky test: $HOLDER" "$(jq -r '.actions[0].create.title' <<< "$out")"
 }
@@ -1220,7 +1248,7 @@ test_a_promoted_test_whose_issue_was_never_created_is_retried_without_a_new_fail
   out="$(analyze "$w")"
   assert_eq "its issue is created again, from the entry, and the entry kept, not aged" "Flaky test: $HOLDER 1" \
     "$(jq -r '"\(.actions[0].create.title) \(.watchlist.tests)"' <<< "$out")"
-  mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(mapping\) \| bound$/    planned = set(by_test) | set(mapping)/' "$LEDGER")"
+  mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(tracked\) \| bound$/    planned = set(by_test) | set(tracked)/' "$LEDGER")"
   assert_eq "mutation: planning only tests with new failures strands it" "0" "$(analyze "$w" "$mutant" | jq '.actions | length')"
   # fetch searches for its issue first, though the test did not fail this run.
   local d entry
@@ -1264,9 +1292,238 @@ test_an_existing_issue_below_the_threshold_keeps_recording_there() {
   out="$(analyze "$w")"
   assert_eq "recorded on #970, not qualified" "970 false" "$(jq -r '.actions[0] | "\(.issue) \(.qualifies)"' <<< "$out")"
   assert_eq "nothing on the watchlist" "0 0" "$(jq -r '"\(.watchlist.tests) \(.watchlist.writes | length)"' <<< "$out")"
-  mutant="$(mutant_of 's/^    if view is None and not summary\["qualifies"\]:$/    if not summary["qualifies"]:/' "$LEDGER")"
+  mutant="$(mutant_of 's/^    if \(view is None or demoted\) and not summary\["qualifies"\]:$/    if not summary["qualifies"]:/' "$LEDGER")"
   out="$(analyze "$w" "$mutant")"
   assert_eq "mutation: watching every unqualified test strands #970" "0 1" "$(jq -r '"\(.actions | length) \(.watchlist.tests)"' <<< "$out")"
+}
+
+# ============================================================================
+# nightly-only failures: the CI-place rule and demotion (spec §4.3, §4.4)
+# ============================================================================
+
+# Two nights of HOLDER failures outside every read window, as state JSON.
+TWO_NIGHTS='{"key": "1:1:x", "run_id": 1, "attempt": 1, "occurrence": "night:2026-09-20", "at": "2026-09-20T11:00:00Z", "source": "nightly"}, {"key": "2:1:x", "run_id": 2, "attempt": 1, "occurrence": "night:2026-09-21", "at": "2026-09-21T11:00:00Z", "source": "nightly"}'
+
+# nightly_only_issue WORK [build issue args...]: issue 970 for HOLDER, opened
+# by the bot, whose ledger comment (80) holds TWO_NIGHTS: an issue opened
+# when two nights qualified a test.
+nightly_only_issue() {
+  local work="$1" ledger; shift
+  ledger="$(mktmpd)/ledger.md"
+  build ledger-body "$ledger" "{\"test_id\": \"$HOLDER\", \"failures\": [$TWO_NIGHTS]}"
+  build issue "$work" --number 970 --title "Flaky test: $HOLDER" --label flaky --login "$BOT" --type Bot \
+    --comment "80|$BOT|Bot|$ledger" "$@"
+}
+
+# demoted_world WORK: issue 970 as the ledger left it after demoting it, and
+# the watchlist (#900) holding its TWO_NIGHTS history and a night recorded
+# there since.
+demoted_world() {
+  local work="$1" body
+  nightly_only_issue "$work" --state CLOSED --closed-reason not_planned --closed-by-bot
+  body="$(mktmpd)/watch.md"
+  build watchlist-body "$body" "[{\"test_id\": \"$HOLDER\", \"failures\": [$TWO_NIGHTS, {\"key\": \"3:1:x\", \"run_id\": 3, \"attempt\": 1, \"occurrence\": \"night:2026-09-22\", \"at\": \"2026-09-22T11:00:00Z\", \"source\": \"nightly\"}]}]"
+  build watchlist "$work" --number 900 --comment "901|$BOT|Bot|$body"
+}
+
+test_a_test_failing_only_at_night_stays_on_the_watchlist_however_many_nights() {
+  local w out mutant
+  w="$(newwork)"
+  watched "$w" "$HOLDER"
+  nightly_run "$w" 2401 2026-10-03 "$HOLDER"
+  nightly_run "$w" 2402 2026-10-04 "$HOLDER"
+  nightly_run "$w" 2403 2026-10-05 "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "four nights: no issue, on the watchlist, not qualified" "0 true false 4" \
+    "$(jq -r '"\(.actions | length) \(.tests[0].watch) \(.tests[0].qualifies) \(.tests[0].distinct | length)"' <<< "$out")"
+  assert_contains "the watchlist holds the new nights" "$(watch_body "$out")" '"occurrence":"night:2026-10-05"'
+  mutant="$(mutant_of 's/^    if not has_ci_place\(state\):$/    if False:/' "$LIB")"
+  assert_eq "mutation: counting nights as places opens an issue" "Flaky test: $HOLDER" "$(analyze "$w" "$mutant" | jq -r '.actions[0].create.title')"
+  erased_run "$w" 2404 sidebar
+  out="$(analyze "$w")"
+  assert_eq "the same nights and one branch: qualifies, and gets its issue" "true true" "$(jq -r '.tests[0] | "\(.qualifies) \(.create)"' <<< "$out")"
+}
+
+test_an_open_nightly_only_issue_is_demoted_into_the_watchlist() {
+  local w out mutant
+  w="$(newwork)"
+  nightly_only_issue "$w"
+  watched "$w" 'TBDSharedTests.OtherTests/other()'
+  nightly_run "$w" 2501 2026-10-05 "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "one action: #970 demoted, its ledger comment not written" "1 970 true null" \
+    "$(jq -r '"\(.actions | length) \(.actions[0].issue) \(.actions[0].demote) \(.actions[0].comment_body)"' <<< "$out")"
+  assert_contains "the closing comment says why" "$(jq -r '.actions[0].demote_body' <<< "$out")" "every failure of"
+  assert_contains "names the watchlist" "$(jq -r '.actions[0].demote_body' <<< "$out")" "the flake watchlist, #900"
+  assert_contains "and says a CI failure reopens it" "$(jq -r '.actions[0].demote_body' <<< "$out")" "If it fails in CI, the ledger reopens this issue"
+  assert_contains "the watchlist gets the issue's history" "$(watch_body "$out")" '"key":"1:1:x"'
+  assert_contains "and this run's failure" "$(watch_body "$out")" '"key":"2501:1:'
+  assert_eq "the summary says so" "true true" "$(jq -r '.tests[] | select(.test_id == "'"$HOLDER"'") | "\(.demote) \(.watch)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    if view is not None and view.state == "OPEN" and not qualifies/    if False and not qualifies/' "$LEDGER")"
+  assert_eq "mutation: without demotion the issue stays open, recording" "false" "$(analyze "$w" "$mutant" | jq -r '.actions[0].demote')"
+  # A human's issue is never demoted: it keeps recording there.
+  w="$(newwork)"
+  nightly_only_issue "$w" --login someone --type User
+  nightly_run "$w" 2502 2026-10-05 "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "a human-opened issue: a ledger write, no demotion" "false 970" "$(jq -r '.actions[0] | "\(.demote) \(.issue)"' <<< "$out")"
+  mutant="$(mutant_of 's/ and view.opened_by_bot \\$/ \\/' "$LEDGER")"
+  assert_eq "mutation: demoting any author's issue closes a human's" "true" "$(analyze "$w" "$mutant" | jq -r '.actions[0].demote')"
+  # Nor while a bot PR for it is open.
+  local attempts; attempts="$(mktmpd)/attempts.md"
+  build attempts-body "$attempts" '[{"run_id": 7, "started_at": "2026-10-01T05:00:00Z", "main_sha": "bbbb", "episode": 0, "outcome": "pr-opened", "pr": 990}]'
+  w="$(newwork)"
+  nightly_only_issue "$w" --comment "81|$BOT|Bot|$attempts"
+  build set "$w" pr_states.json '{"990": {"state": "OPEN", "merge_sha": null, "merged_at": null}}'
+  nightly_run "$w" 2503 2026-10-05 "$HOLDER"
+  assert_eq "an open bot PR: not demoted" "false" "$(analyze "$w" | jq -r '.actions[0].demote')"
+  mutant="$(mutant_of 's/ and not _open_bot_prs\(state, view\):$/:/' "$LEDGER")"
+  assert_eq "mutation: demoting under an open PR" "true" "$(analyze "$w" "$mutant" | jq -r '.actions[0].demote')"
+  # Nor once a human has reopened a demoted issue.
+  w="$(newwork)"
+  nightly_only_issue "$w" --closed-reason not_planned --closed-by-bot
+  nightly_run "$w" 2504 2026-10-05 "$HOLDER"
+  assert_eq "reopened by a human after a demotion: kept open" "false" "$(analyze "$w" | jq -r '.actions[0].demote')"
+  mutant="$(mutant_of 's/^            and not view.reopened_after_demotion and /            and /' "$LEDGER")"
+  assert_eq "mutation: demoting it again overrides the human" "true" "$(analyze "$w" "$mutant" | jq -r '.actions[0].demote')"
+}
+
+test_after_demotion_a_night_failure_goes_to_the_watchlist_and_the_issue_stays_closed() {
+  local w out mutant
+  w="$(newwork)"
+  demoted_world "$w"
+  nightly_run "$w" 2601 2026-10-06 "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "no issue write" "0" "$(jq '.actions | length' <<< "$out")"
+  assert_eq "on the watchlist, not reopened" "true false" "$(jq -r '.tests[0] | "\(.watch) \(.reopen)"' <<< "$out")"
+  assert_contains "the entry gains the night" "$(watch_body "$out")" '"key":"2601:1:'
+  assert_contains "and keeps its history" "$(watch_body "$out")" '"key":"1:1:x"'
+  mutant="$(mutant_of 's/^        return self.state == "CLOSED" and self.closed_reason == "not_planned" and self.closed_by_bot$/        return False/' "$LEDGER")"
+  assert_eq "mutation: read as a human's not-planned close, the night is written to the issue" "1" "$(analyze "$w" "$mutant" | jq '.actions | length')"
+  # A human's not-planned close is not a demotion: the failure is recorded on it.
+  w="$(newwork)"
+  nightly_only_issue "$w" --state CLOSED --closed-reason not_planned
+  nightly_run "$w" 2602 2026-10-06 "$HOLDER"
+  out="$(analyze "$w")"
+  assert_eq "a human's not-planned close: logged on the issue, not reopened, not watched" "970 false 0" \
+    "$(jq -r '"\(.actions[0].issue) \(.actions[0].reopen) \(.watchlist.tests)"' <<< "$out")"
+}
+
+test_after_demotion_a_ci_failure_reopens_the_issue_with_the_watchlist_history() {
+  local w out mutant
+  w="$(newwork)"
+  demoted_world "$w"
+  erased_run "$w" 2603 sidebar
+  out="$(analyze "$w")"
+  assert_eq "#970 reopened, qualified, its ledger comment edited" "970 true true 80" \
+    "$(jq -r '.actions[0] | "\(.issue) \(.reopen) \(.qualifies) \(.comment_id)"' <<< "$out")"
+  assert_contains "the reopen comment says why" "$(jq -r '.actions[0].reopen_body' <<< "$out")" "not only in the nightly stress loop"
+  assert_contains "the ledger holds the CI failure" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"2603:1:xunit-app-swift-testing.xml"'
+  assert_contains "and the nightly history" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"2:1:x"'
+  assert_contains "with the night only the watchlist held" "$(jq -r '.actions[0].comment_body' <<< "$out")" '"key":"3:1:x"'
+  assert_eq "the entry stays until a run reads it on the issue" "1 true" "$(jq -r '"\(.watchlist.tests) \(.tests[0].leaves_watchlist_next_run)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    requalified = demoted and qualifies$/    requalified = False/' "$LEDGER")"
+  assert_eq "mutation: a demoted issue never comes back" "false" "$(analyze "$w" "$mutant" | jq -r '.actions[0].reopen')"
+}
+
+test_a_demoted_test_ages_off_the_watchlist_like_any_other() {
+  local w out mutant body
+  # No entry and no new failure: nothing to do, and no empty entry.
+  w="$(newwork)"
+  nightly_only_issue "$w" --state CLOSED --closed-reason not_planned --closed-by-bot
+  out="$(analyze "$w")"
+  assert_eq "no action, nothing watched" "0 0" "$(jq -r '"\(.actions | length) \(.watchlist.tests)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    planned = set\(by_test\) \| set\(tracked\) \| bound$/    planned = set(by_test) | set(mapping) | bound/' "$LEDGER")"
+  assert_eq "mutation: planning demoted issues every run watches an empty entry" "1" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+  # An entry 39 days quiet ages out, though the test has a (demoted) issue.
+  w="$(newwork --now 2026-10-30T00:00:00Z)"
+  demoted_world "$w"
+  out="$(analyze "$w")"
+  assert_eq "aged out" "0 1" "$(jq -r '"\(.watchlist.tests) \(.notes.aged | length)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    bound = bound_for_an_issue\(watch.entries, tracked, ctx\)$/    bound = bound_for_an_issue(watch.entries, mapping, ctx)/' "$LEDGER")"
+  assert_eq "mutation: an issue, even a demoted one, pins the entry forever" "1" "$(analyze "$w" "$mutant" | jq '.watchlist.tests')"
+}
+
+test_a_nightly_only_recurrence_is_recorded_and_reopens_only_on_a_ci_failure() {
+  local w out mutant ledger aaaa
+  aaaa="$(printf 'a%.0s' $(seq 40))"
+  w="$(newwork)"
+  nightly_run "$w" 2701 2026-10-06 "$HOLDER"
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --state CLOSED --closed-reason completed --label flaky \
+    --fix "9609609@2026-10-05T12:00:00Z@960"
+  build set "$w" ancestry.json "{\"9609609..$aaaa\": true}"
+  out="$(analyze "$w")"
+  assert_eq "a nightly recurrence: episode 2, recorded on the issue, not reopened" "1 false false 970" \
+    "$(jq -r '"\(.tests[0].episode) \(.tests[0].qualifies) \(.actions[0].reopen) \(.actions[0].issue)"' <<< "$out")"
+  mutant="$(mutant_of 's/^    if not has_ci_place\(state\):$/    if False:/' "$LIB")"
+  assert_eq "mutation: a nightly recurrence reopens" "true" "$(analyze "$w" "$mutant" | jq -r '.actions[0].reopen')"
+  erased_run "$w" 2702 rebased --sha cccc
+  build set "$w" ancestry.json "{\"9609609..$aaaa\": true, \"9609609..cccc\": true}"
+  out="$(analyze "$w")"
+  assert_eq "a CI failure in the same run reopens it" "true" "$(jq -r '.actions[0].reopen' <<< "$out")"
+  # A later run: the nightly recurrence is on the ledger already, and a CI
+  # failure of the same episode arrives with no recurrence of its own.
+  ledger="$(mktmpd)/ledger.md"
+  build ledger-body "$ledger" "{\"test_id\": \"$HOLDER\", \"episode\": 1, \"fixes\": [{\"sha\": \"9609609\", \"at\": \"2026-10-05T12:00:00Z\", \"episode\": 0, \"pr\": 960}], \"failures\": [{\"key\": \"5:1:x\", \"run_id\": 5, \"attempt\": 1, \"occurrence\": \"night:2026-10-06\", \"at\": \"2026-10-06T11:00:00Z\", \"source\": \"nightly\", \"head_sha\": \"$aaaa\", \"episode\": 1}]}"
+  w="$(newwork)"
+  erased_run "$w" 2703 rebased --sha cccc
+  build issue "$w" --number 970 --title "Flaky test: $HOLDER" --state CLOSED --closed-reason completed --label flaky \
+    --fix "9609609@2026-10-05T12:00:00Z@960" --comment "80|$BOT|Bot|$ledger"
+  build set "$w" ancestry.json '{"9609609..cccc": true}'
+  out="$(analyze "$w")"
+  assert_eq "a later CI failure reopens it, naming the fix" "true 1" "$(jq -r '"\(.actions[0].reopen) \(.tests[0].episode)"' <<< "$out")"
+  assert_contains "the reopen comment names the fix" "$(jq -r '.actions[0].reopen_body' <<< "$out")" "contains the fix \`9609609\`"
+  mutant="$(mutant_of 's/^        recurred = state.episode > fix_episode$/        recurred = False/' "$LEDGER")"
+  assert_eq "mutation: reopening only on this run's recurrence misses it" "false" "$(analyze "$w" "$mutant" | jq -r '.actions[0].reopen')"
+}
+
+test_write_mode_demotes_after_writing_the_watchlist() {
+  local d ledger writes out q='TBDSharedTests.QuietTests/q()'
+  ledger="$(mktmpd)/ledger.md"
+  build ledger-body "$ledger" "{\"test_id\": \"$q\", \"failures\": [$TWO_NIGHTS]}"
+  d="$(mktmpd)"
+  stub_world "$d" "$(jq -n --arg body "$(cat "$ledger")" --arg bot "$BOT" --arg q "$q" '[
+    {match: "issues\\?labels=flaky", out: (({number: 970, title: ("Flaky test: " + $q), state: "open", labels: [{name: "flaky"}], user: {login: $bot, type: "Bot"}} | tojson) + "\n")},
+    {match: "issues/970/comments\\?per_page", out: (({id: 80, body: $body, user: {login: $bot, type: "Bot"}} | tojson) + "\n")}]')"
+  out="$(FLAKE_WRITE_TOKEN=app-token ledger_run "$d" --write)"
+  assert_contains "the report counts the demotion" "$out" "Issues to close back into the watchlist: 1"
+  assert_contains "and names it" "$out" "closes #970 as not planned"
+  writes="$(writes_in "$d/log")"
+  assert_eq "the watchlist first, then #970 closed, then its comment" \
+    "app-token api -X POST repos/cheapsteak/tbd/labels --input -
+app-token api -X POST repos/cheapsteak/tbd/issues --input -
+app-token api -X POST repos/cheapsteak/tbd/issues/1000/comments --input -
+app-token api -X PATCH repos/cheapsteak/tbd/issues/970 --input -
+app-token api -X POST repos/cheapsteak/tbd/issues/970/comments --input -" "$writes"
+  assert_contains "closed as not planned" "$(cat "$d/log")" '"state_reason": "not_planned"'
+  assert_contains "the watchlist carries the issue's history" "$(cat "$d/log")" "$q"
+  assert_lacks "the ledger comment is left as it was" "$(cat "$d/log")" "-X PATCH repos/cheapsteak/tbd/issues/comments/80"
+}
+
+test_fetch_reads_a_bot_close_as_a_demotion() {
+  local d out
+  d="$(mktmpd)"
+  local issue='{"number": 970, "title": "Flaky test: '"$HOLDER"'", "state": "closed", "labels": [{"name": "flaky"}], "user": {"login": "'"$BOT"'", "type": "Bot"}}'
+  local close='{"data": {"repository": {"issue": {"timelineItems": {"nodes": [{"createdAt": "2026-10-05T12:00:00Z", "stateReason": "NOT_PLANNED", "actor": {"__typename": "Bot", "login": "tbd-flake-fixer"}, "closer": null}]}}}}}'
+  stub_world "$d" "$(jq -n --arg issue "$issue" --arg close "$close" '[
+    {match: "issues\\?labels=flaky", out: ($issue + "\n")},
+    {match: "graphql", out: $close}]')"
+  ledger_run "$d" > /dev/null
+  assert_eq "a bot's not-planned close, by GraphQL's bare login" "true true" "$(jq -r '.[] | select(.number == 970) | "\(.closed_by_bot) \(.login == "'"$BOT"'")"' "$d/work/issues.json")"
+  out="$(python3 - "$LEDGER" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("ledger", sys.argv[1])
+ledger = importlib.util.module_from_spec(spec)
+sys.modules["ledger"] = ledger
+spec.loader.exec_module(ledger)
+print(ledger.closed_by_bot({"__typename": "Bot", "login": "tbd-flake-fixer"}),
+      ledger.closed_by_bot({"__typename": "Bot", "login": "tbd-flake-fixer[bot]"}),
+      ledger.closed_by_bot({"__typename": "User", "login": "tbd-flake-fixer"}),
+      ledger.closed_by_bot({"__typename": "Bot", "login": "other-app"}),
+      ledger.closed_by_bot(None))
+PY
+)"
+  assert_eq "only the bot's own account, by either spelling" "True True False False False" "$out"
 }
 
 test_a_forged_watchlist_comment_or_issue_is_ignored() {
