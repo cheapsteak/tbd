@@ -44,6 +44,34 @@ struct DevServersAppStateTests {
         }
     }
 
+    /// Refreshes overlap (their triggers do not await them): a read that
+    /// started earlier but answers later must not overwrite a newer one.
+    @Test func anOlderListRefreshCannotOverwriteANewerOne() async {
+        await withState { state in
+            let id = UUID()
+            let older = self.list([self.info("web", .running)], id: id)
+            let newer = self.list([self.info("web", .stopped)], id: id)
+            var pending: CheckedContinuation<DevServerListResult, Never>?
+            var calls = 0
+            state.devServerListFetcher = { _, _ in
+                calls += 1
+                if calls == 1 { return await withCheckedContinuation { pending = $0 } }
+                return newer
+            }
+            let first = Task { await state.refreshDevServers(worktreeID: id, runStatusCommands: true) }
+            for _ in 0..<500 where pending == nil { await Task.yield() }
+            guard let held = pending else {
+                Issue.record("the first refresh never reached its fetch")
+                return
+            }
+            await state.refreshDevServers(worktreeID: id, runStatusCommands: true)
+            #expect(state.devServerLists[id] == newer)
+            held.resume(returning: older)
+            await first.value
+            #expect(state.devServerLists[id] == newer, "the older read landed over the newer one")
+        }
+    }
+
     @Test func aFailedActionIsShownAndASuccessClearsIt() async {
         await withState { state in
             let id = UUID()

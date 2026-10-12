@@ -993,6 +993,11 @@ final class AppState {
     /// for the selected worktree on selection (with `status` commands) and
     /// after every Start/Stop/Restart. See `AppState+DevServers.swift`.
     var devServerLists: [UUID: DevServerListResult] = [:]
+    /// The newest `server.list` started per worktree. Refreshes are not
+    /// awaited by their triggers and can overlap; a result whose generation
+    /// is no longer the newest is discarded, so an older read never lands
+    /// over a newer one.
+    @ObservationIgnored var devServerListGenerations: [UUID: UInt64] = [:]
     /// Worktrees with a dev server running by a live running file or a live
     /// TBD server tab (`server.summary`) — the sidebar's green dot.
     var devServerRunningWorktreeIDs: Set<UUID> = []

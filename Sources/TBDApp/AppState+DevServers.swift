@@ -21,8 +21,12 @@ extension AppState {
     }
 
     func refreshDevServers(worktreeID: UUID, runStatusCommands: Bool) async {
+        let generation = (devServerListGenerations[worktreeID] ?? 0) &+ 1
+        devServerListGenerations[worktreeID] = generation
         do {
             let result = try await devServerListFetcher(worktreeID, runStatusCommands)
+            // A refresh started after this one owns the list now.
+            guard devServerListGenerations[worktreeID] == generation else { return }
             if devServerLists[worktreeID] != result { devServerLists[worktreeID] = result }
         } catch {
             logger.debug("server.list failed for \(worktreeID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
