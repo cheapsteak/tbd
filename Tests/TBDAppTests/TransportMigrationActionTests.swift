@@ -320,6 +320,8 @@ struct TransportMigrationActionTests {
         #expect(report.movedNotResumed == [.init(label: "one", reason: "focus the tab")])
         #expect(report.refused.isEmpty, "a session that moved was grouped with the refusals")
         #expect(report.movedNotResumedHeading.contains("Moved to the holder"))
+        #expect(report.skippedHeading == "Check these and try again")
+        #expect(report.refusedHeading == "Can't be moved until this changes")
     }
 
     /// The single-session alert, same distinction. And the veil still waits for

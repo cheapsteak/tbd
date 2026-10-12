@@ -1237,7 +1237,7 @@ enum TransportMigrationMenu {
     /// the named fact changes, so the two are kept apart and worded apart.
     struct Report: Equatable {
         let headline: String
-        let skippedHeading = "Not moved — change this and try again"
+        let skippedHeading = "Check these and try again"
         let refusedHeading = "Can't be moved until this changes"
         /// Its own heading, because these sessions moved. Grouping them under
         /// the refusals would tell a person a session "can't be moved" that is
