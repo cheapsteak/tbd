@@ -285,6 +285,55 @@ struct ContentView: View {
                     }
                 }
 
+                // Dev servers (docs/specs/2026-10-11-dev-servers-design.md):
+                // shown only when the selected worktree declares or reports
+                // one. Same two shapes as the PR button above, chosen at
+                // toolbar-item level for the same reason: a split button whose
+                // primary click opens the main URL when a running server has
+                // one, else a plain menu button whose whole surface opens the
+                // menu. The menu leads with "Open <main URL>" in both shapes.
+                if let worktreeID = appState.selectedWorktreeIDs.first,
+                   appState.selectedWorktreeIDs.count == 1,
+                   let serverList = appState.devServerLists[worktreeID],
+                   AppState.showsServersButton(serverList) {
+                    let serversID = ServersButtonLabel.splitButtonID(
+                        worktreeID: worktreeID, list: serverList,
+                        messages: appState.devServerActionMessages[worktreeID] ?? [],
+                        colorScheme: colorScheme)
+                    if let primaryURL = AppState.primaryDevServerURL(serverList) {
+                        ToolbarItem(placement: .primaryAction) {
+                            ControlGroup {
+                                Menu {
+                                    serversMenu(worktreeID: worktreeID, list: serverList)
+                                } label: {
+                                    ServersButtonLabel(list: serverList)
+                                } primaryAction: {
+                                    appState.openDevServerURL(primaryURL)
+                                }
+                                .tint(.primary)
+                                .help("Open \(primaryURL) · more options")
+                                .id(serversID)
+                            }
+                        }
+                    } else {
+                        ToolbarItem(placement: .primaryAction) {
+                            ControlGroup {
+                                Menu {
+                                    serversMenu(worktreeID: worktreeID, list: serverList)
+                                } label: {
+                                    ServersButtonLabel(list: serverList)
+                                }
+                                .tint(.primary)
+                                .help("Dev servers")
+                                .id(serversID)
+                            }
+                        }
+                    }
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.fixed, placement: .primaryAction)
+                    }
+                }
+
                 // A selected remote session's actions, where a local
                 // session's live: plain buttons (no badges to flatten) on
                 // one fused capsule, like back/forward.
@@ -348,6 +397,14 @@ struct ContentView: View {
                     .help("Toggle file panel (⌘⇧E)")
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
+            }
+            // The Servers button's list, with `status` commands, whenever a
+            // single worktree becomes selected (plan decision D3: the toolbar
+            // menu exposes no reliable will-open hook). Actions and
+            // `devServersChanged` deltas refresh it from `AppState`.
+            .task(id: appState.selectedWorktreeIDs.count == 1 ? appState.selectedWorktreeIDs.first : nil) {
+                guard appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first else { return }
+                await appState.refreshDevServers(worktreeID: id, runStatusCommands: true)
             }
 
             StatusBarView()
@@ -531,6 +588,64 @@ struct ContentView: View {
     static func prPrimaryActionURL(_ bindings: [PRBinding]) -> URL? {
         guard bindings.count == 1 else { return nil }
         return URL(string: bindings[0].url)
+    }
+
+    /// The Servers menu: the main URL first (D4), then each server with its
+    /// state, its URLs and its actions; then Start all / Stop all; then parse
+    /// errors and the last action's failures. Rebuilt via `.id` (see
+    /// `ServersButtonLabel.splitButtonID`).
+    @ViewBuilder
+    private func serversMenu(worktreeID: UUID, list: DevServerListResult) -> some View {
+        if let primaryURL = AppState.primaryDevServerURL(list),
+           let lead = ServersButtonLabel.leadItemTitle(primaryURL: primaryURL) {
+            Button(lead) { appState.openDevServerURL(primaryURL) }
+            Divider()
+        }
+        ForEach(list.servers) { server in
+            Section(ServersButtonLabel.menuTitle(for: server)) {
+                ForEach(server.endpoints, id: \.name) { endpoint in
+                    Button("Open \(endpoint.name) — \(endpoint.url)") { appState.openDevServerURL(endpoint.url) }
+                }
+                // D2: the saved entry (holder) or the dead pane (tmux).
+                if server.state == .exited {
+                    Button("Show last output") {
+                        Task { await appState.showDevServerLastOutput(worktreeID: worktreeID, server: server) }
+                    }
+                    .disabled(server.lastOutputID == nil && server.terminalID == nil)
+                }
+                if server.state == .running || server.state == .unknown {
+                    Button("Stop") {
+                        Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: [server.name]) }
+                    }
+                    if server.isDeclared {
+                        Button("Restart") {
+                            Task { await appState.restartDevServers(worktreeID: worktreeID, names: [server.name]) }
+                        }
+                    }
+                } else if server.isDeclared {
+                    Button("Start") {
+                        Task { await appState.performDevServerAction(.start, worktreeID: worktreeID, names: [server.name]) }
+                    }
+                }
+            }
+        }
+        Divider()
+        Button("Start all") {
+            Task { await appState.performDevServerAction(.start, worktreeID: worktreeID, names: []) }
+        }
+        .disabled(!list.servers.contains { $0.isDeclared && $0.state != .running })
+        Button("Stop all") {
+            Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: []) }
+        }
+        .disabled(!list.servers.contains { $0.state == .running || $0.state == .unknown })
+        let problems = list.parseErrors.map { "\(($0.path as NSString).lastPathComponent): \($0.message)" }
+            + (appState.devServerActionMessages[worktreeID] ?? [])
+        if !problems.isEmpty {
+            Divider()
+            ForEach(Array(problems.enumerated()), id: \.offset) { item in
+                Text(item.element)
+            }
+        }
     }
 
     /// The split button's dropdown. When `showsBindingRows` it opens with one
