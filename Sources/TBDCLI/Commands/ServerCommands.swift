@@ -323,6 +323,22 @@ struct ServerReport: AsyncParsableCommand {
         return worktree.localPath
     }
 
+    /// The reported process's start time, read the way the daemon's
+    /// liveness check reads it (`DevServerProcessProbe`), or a refusal: no
+    /// such process, or a zombie — one that has exited and waits to be
+    /// reaped, which the daemon reads as stale, so its file would never show
+    /// the server as running.
+    static func reportedStartTime(pid: Int32, probe: DevServerProcessProbe = .live) throws -> Date {
+        guard let info = probe.info(pid) else {
+            throw CLIError.invalidArgument("No process with pid \(pid) is running.")
+        }
+        guard !info.isZombie else {
+            throw CLIError.invalidArgument(
+                "Process \(pid) has exited (a zombie waiting to be reaped); report the server process while it runs.")
+        }
+        return info.startTime
+    }
+
     mutating func run() async throws {
         let root = try worktreeRoot()
         let store = DevServerRunningFileStore()
@@ -331,9 +347,8 @@ struct ServerReport: AsyncParsableCommand {
             if json { printJSON(["removed": "\(removed.count)"]) } else { print("Removed \(removed.count) running file(s) for \(name).") }
             return
         }
-        guard let pid, let started = ProcessStartTime.startTime(pid: pid) else {
-            throw CLIError.invalidArgument("No process with pid \(pid ?? 0) is running.")
-        }
+        guard let pid else { throw CLIError.invalidArgument("--pid is required: name the server process itself.") }
+        let started = try Self.reportedStartTime(pid: pid)
         let file = DevServerRunningFile(
             root: root, server: name, endpoints: try ServerCommand.parseEndpoints(urls, server: name),
             pid: pid, startTime: started.timeIntervalSince1970)

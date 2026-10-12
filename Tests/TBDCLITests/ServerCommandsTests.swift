@@ -46,6 +46,29 @@ struct ServerCommandsTests {
     /// `restart` with no names restarts the declared servers its stop
     /// stopped — never every declared server — and nothing when none was
     /// running.
+    @Test func reportReadsTheStartTimeOfARunningProcess() throws {
+        let started = Date(timeIntervalSince1970: 1_800_000_000)
+        let probe = DevServerProcessProbe(info: { pid in
+            pid == 42 ? DevServerProcessInfo(startTime: started, isZombie: false) : nil
+        })
+        #expect(try ServerReport.reportedStartTime(pid: 42, probe: probe) == started)
+    }
+
+    /// A zombie's file would read as stale at once: refuse it, by name.
+    @Test func reportRefusesAZombiePid() {
+        let probe = DevServerProcessProbe(info: { _ in
+            DevServerProcessInfo(startTime: Date(timeIntervalSince1970: 1_800_000_000), isZombie: true)
+        })
+        let error = #expect(throws: CLIError.self) { try ServerReport.reportedStartTime(pid: 42, probe: probe) }
+        #expect(error?.description.contains("zombie") == true)
+    }
+
+    @Test func reportRefusesAMissingPid() {
+        let probe = DevServerProcessProbe(info: { _ in nil })
+        let error = #expect(throws: CLIError.self) { try ServerReport.reportedStartTime(pid: 42, probe: probe) }
+        #expect(error?.description == "No process with pid 42 is running.")
+    }
+
     @Test func restartWithNoNamesStartsOnlyWhatItStopped() {
         let stopped = DevServerActionResult(outcomes: [
             .init(name: "web", status: .stopped),
