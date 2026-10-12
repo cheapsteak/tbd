@@ -43,6 +43,18 @@ struct ServerCommandsTests {
         #expect((try? ServerReport.parse(["web", "--clear"])) != nil)
     }
 
+    /// `restart` with no names restarts the servers its stop stopped —
+    /// never every declared server — and nothing when none was running.
+    @Test func restartWithNoNamesStartsOnlyWhatItStopped() {
+        let stopped = DevServerActionResult(outcomes: [
+            .init(name: "web", status: .stopped),
+            .init(name: "api", status: .stopped),
+        ])
+        #expect(ServerRestart.namesToStart(requested: [], stopped: stopped) == ["web", "api"])
+        #expect(ServerRestart.namesToStart(requested: [], stopped: DevServerActionResult(outcomes: [])) == nil)
+        #expect(ServerRestart.namesToStart(requested: ["db"], stopped: DevServerActionResult(outcomes: [])) == ["db"])
+    }
+
     private func list(_ servers: [DevServerInfo], errors: [DevServerParseError] = []) -> DevServerListResult {
         DevServerListResult(worktreeID: UUID(), servers: servers, parseErrors: errors, runningFileDiagnostics: [])
     }

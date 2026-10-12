@@ -174,7 +174,7 @@ struct ServerStop: AsyncParsableCommand {
 
 struct ServerRestart: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "restart", abstract: "Stop, then start, the named servers (all when none are named)")
+        commandName: "restart", abstract: "Stop, then start, the named servers (every running server when none are named)")
     @Argument(help: "Server names") var names: [String] = []
     @OptionGroup var target: ServerWorktreeOption
     @Flag(name: .long, help: "Output JSON") var json = false
@@ -187,7 +187,15 @@ struct ServerRestart: AsyncParsableCommand {
             if json { printJSON(stopped) } else { print(ServerCommand.render(stopped, verb: "stop")) }
             throw ExitCode(1)
         }
-        let started = try act(RPCMethod.serverStart, client, id, names)
+        guard let toStart = Self.namesToStart(requested: names, stopped: stopped) else {
+            if json {
+                printJSON(stopped)
+            } else {
+                print("No server is running; nothing to restart.")
+            }
+            return
+        }
+        let started = try act(RPCMethod.serverStart, client, id, toStart)
         if json {
             printJSON(DevServerActionResult(outcomes: stopped.outcomes + started.outcomes))
         } else {
@@ -195,6 +203,16 @@ struct ServerRestart: AsyncParsableCommand {
             print(ServerCommand.render(started, verb: "start"))
         }
         if !started.allSucceeded { throw ExitCode(1) }
+    }
+
+    /// What the start half of a restart starts. Named servers are started
+    /// as named. With no names the stop half stopped every running server,
+    /// and exactly those are started again — not every declared one; nil
+    /// when none was running, so nothing is started.
+    static func namesToStart(requested: [String], stopped: DevServerActionResult) -> [String]? {
+        guard requested.isEmpty else { return requested }
+        let names = stopped.outcomes.filter { $0.status == .stopped }.map(\.name)
+        return names.isEmpty ? nil : names
     }
 }
 
