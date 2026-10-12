@@ -73,7 +73,11 @@ struct TmuxWakeBackstopTests {
             Issue.record("expected a refusal, got \(result)")
             return
         }
-        #expect(reason.contains("tbd terminal migrate"))
+        // The command is the whole product of this refusal, so it has to be
+        // runnable as printed: a literal `<id>` would send a stranded person
+        // looking for which session it meant.
+        #expect(reason.contains("tbd terminal migrate \(row.id.uuidString)"),
+                "the refusal does not name the session to migrate: \(reason)")
         let after = try #require(try await f.db.terminals.get(id: row.id))
         #expect(after.isParked, "the refusal must leave the row parked")
         #expect(after.claudeSessionID == Self.sessionID)

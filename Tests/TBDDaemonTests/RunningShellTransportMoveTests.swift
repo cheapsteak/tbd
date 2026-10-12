@@ -91,8 +91,17 @@ struct RunningShellTransportMoveTests {
         }
     }
 
+    /// `holderRegistryPresent` false wires no registry at all, which is a
+    /// daemon that cannot start a holder for a different reason than
+    /// `holderSpawnable` false: there is nothing to take the launch's inherited
+    /// environment from either, so the move refuses before it reads anything.
+    ///
     /// `holderSpawnable` false builds a registry with no spawner — `canSpawn`
     /// is then false and no oracle is wired, which is the production refusal.
+    ///
+    /// `spawnThrowsAlreadyRegistered` makes the oracle throw the registry's own
+    /// "this session already has a holder", which is what the loser of two
+    /// concurrent moves of one row meets.
     ///
     /// `spawnThrows` makes the oracle refuse after recording its launch, which
     /// is what a holder that could not be started looks like from here.
@@ -108,8 +117,10 @@ struct RunningShellTransportMoveTests {
     ///
     /// `windowPresence` is what the kill's failure branch probes.
     private static func makeFixture(
+        holderRegistryPresent: Bool = true,
         holderSpawnable: Bool = true,
         spawnThrows: Bool = false,
+        spawnThrowsAlreadyRegistered: Bool = false,
         paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil,
         panePID: String = "4100",
         paneForegroundPID: Int32? = nil,
@@ -161,14 +172,18 @@ struct RunningShellTransportMoveTests {
             spawner: holderSpawnable
                 ? HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
                 : nil)
-        await coordinator.setHolderRegistry(registry)
+        if holderRegistryPresent { await coordinator.setHolderRegistry(registry) }
 
         let spawns = SpawnRecorder()
-        if holderSpawnable {
+        if holderRegistryPresent, holderSpawnable {
             await coordinator.setHolderSpawnOracle(HolderSpawnOracle(
                 spawn: { terminalID, launch in
                     await spawns.recordLaunch(terminalID, launch)
                     await beforeTheWrite?(db, terminalID)
+                    if spawnThrowsAlreadyRegistered {
+                        throw HolderRegistry.Error.sessionAlreadyRegistered(
+                            terminalID: terminalID)
+                    }
                     if spawnThrows { throw HolderRegistry.Error.holderExecutableUnavailable }
                     return Self.handle
                 },
@@ -223,8 +238,9 @@ struct RunningShellTransportMoveTests {
     }
 
     /// Only the move's own facts change: the tab a person is looking at keeps
-    /// its identity.
-    @Test("the moved row keeps its id, label, pin and kind")
+    /// its identity. The `kind` is the one thing that does not follow the tab —
+    /// it follows the PROGRAM, and a login shell is what now runs there.
+    @Test("the moved row keeps its id, label and pin, and its kind follows the program")
     func theMovedRowKeepsItsIdentity() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
@@ -239,7 +255,11 @@ struct RunningShellTransportMoveTests {
         // renamed `shell` by this gesture would be found by nothing.
         #expect(after.label == row.label, "the move renamed the tab")
         #expect(after.pinnedAt == row.pinnedAt)
-        #expect(after.kind == row.kind)
+        // Not `== row.kind`, which a shell row makes vacuous: the write states
+        // the kind of what is now running, and preserving an agent kind here
+        // would mint a row shape that has never existed — holder-backed,
+        // agent-kinded, with no session.
+        #expect(after.kind == .shell, "the kind did not follow the program")
         #expect(after.worktreeID == row.worktreeID)
     }
 
@@ -333,6 +353,26 @@ struct RunningShellTransportMoveTests {
             reason: TerminalTransportMigrator.holderUnspawnableRefusal))
         #expect(fixture.tmuxArgv.count("kill-window") == 0,
                 "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
+        #expect(try await fixture.db.terminals.get(id: row.id) == row,
+                "a refused move changed the row")
+    }
+
+    /// The other half of the same branch: a daemon with no registry at all.
+    /// The registry is where the launch's inherited environment comes from, so
+    /// a move without one could not compose a launch even if it could spawn.
+    @Test("a daemon with no holder registry refuses and touches nothing")
+    func aDaemonWithNoHolderRegistryRefusesAndTouchesNothing() async throws {
+        let fixture = try await Self.makeFixture(holderRegistryPresent: false)
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
+
+        #expect(outcome == .refused(
+            reason: TerminalTransportMigrator.holderUnspawnableRefusal))
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
+        #expect(await fixture.launches.isEmpty)
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a refused move changed the row")
     }
@@ -506,6 +546,49 @@ struct RunningShellTransportMoveTests {
                 "the row records processes that were never started")
         #expect(await fixture.abandons.isEmpty,
                 "a spawn that never happened was abandoned")
+    }
+
+    /// The loser of two concurrent moves of one row. The registry declines the
+    /// spawn because the winner already has a holder for this session, and the
+    /// spawn-failure message must not be reused for it: its recovery advice —
+    /// the row reads as running on tmux with its window gone, and the tab's
+    /// window-died recovery repairs it — is false in every particular once the
+    /// winner has moved the row.
+    @Test("a spawn the registry declines as already-registered says another move won")
+    func aSecondConcurrentMoveSaysAnotherMoveWon() async throws {
+        let fixture = try await Self.makeFixture(spawnThrowsAlreadyRegistered: true)
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
+
+        #expect(outcome == .refused(
+            reason: HibernationCoordinator.shellMoveAlreadyMovingRefusal))
+        guard case .refused(let reason) = outcome else { return }
+        #expect(!reason.contains("window-died recovery"),
+                "the loser was given the spawn failure's false recovery advice: \(reason)")
+        #expect(await fixture.abandons.isEmpty,
+                "a spawn that never happened was abandoned")
+    }
+
+    /// The parity guard its sibling retire has. No reachable row shape has
+    /// `transport == .tmux` with blank coordinates today, but `kill-window -t
+    /// ''` on a server several worktrees share is not a no-op, and a row that
+    /// names no window has nothing to stop — so the move carries on to the
+    /// replacement shell without asking tmux to kill anything.
+    @Test("a row naming no tmux window kills nothing and still moves")
+    func aRowNamingNoTmuxWindowKillsNothing() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        var row = try await Self.runningShell(fixture)
+        try await fixture.db.terminals.updateTmuxIDs(id: row.id, windowID: "", paneID: "")
+        row = try #require(try await fixture.db.terminals.get(id: row.id))
+
+        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
+
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the move asked tmux to kill a window it does not name: \(fixture.tmuxArgv.all)")
+        #expect(try await fixture.db.terminals.get(id: row.id)?.transport == .holder)
     }
 
     /// The second state, and the reason the abandon is not optional: a holder

@@ -396,10 +396,15 @@ public actor HibernationCoordinator {
     private let actuationLog: ActuationLog
 
     /// What a person is told when a tmux-backed session cannot be woken because
-    /// tmux cannot serve. Names the gesture that moves the session.
-    static let tmuxWakeUnavailableReason =
+    /// tmux cannot serve. Names the gesture that moves the session, **and the
+    /// session**: this string is the entire product of the backstop — it exists
+    /// to hand a stranded person a command they can run — so the id is
+    /// interpolated rather than left as a placeholder to be looked up.
+    static func tmuxWakeUnavailableReason(terminalID: UUID) -> String {
         "This session still runs on the tmux transport, and tmux is not available here. "
-        + "Run `tbd terminal migrate <id>` (or `tbd terminal migrate --all`) to move it to the pty holder, then wake it again."
+        + "Run `tbd terminal migrate \(terminalID.uuidString)` (or `tbd terminal migrate --all`) "
+        + "to move it to the pty holder, then wake it again."
+    }
 
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -772,6 +777,19 @@ public actor HibernationCoordinator {
         + "which the tab's window-died recovery repairs; retry the move after that."
     }
 
+    /// The refusal the loser of two concurrent moves of one row meets: a holder
+    /// is already registered for this session, so the winner has started its
+    /// replacement shell.
+    ///
+    /// Its own reason rather than the spawn-failure one, whose recovery advice
+    /// — the session reads as running on tmux with its window gone, and the
+    /// tab's window-died recovery repairs it — describes a row that was not
+    /// moved. The winner has already moved this one, so that advice would be
+    /// false in every particular.
+    static let shellMoveAlreadyMovingRefusal =
+        "Another move of this session is already running and has started its replacement shell "
+        + "on the pty holder, so this one changed nothing further."
+
     /// The refusal when the one guarded write threw. The holder started for
     /// the move has been abandoned, so no process outlives the row.
     static func shellMoveWriteFailedRefusal(detail: String) -> String {
@@ -787,8 +805,8 @@ public actor HibernationCoordinator {
     ///
     /// **Reached only by shells.** `TransportMigrationEligibility` turns away
     /// every other row that names no conversation — a Codex tab, a Claude tab
-    /// whose session has not begun, a pre-session hook tab — each with its own
-    /// reason, so nothing here has to guess what a tab was for.
+    /// whose session has not begun, a hook tab of either kind — each with its
+    /// own reason, so nothing here has to guess what a tab was for.
     ///
     /// **Four steps, and the order is the contract.** Refuse early what cannot
     /// be done; kill the tmux window under the pane-ownership guard and the
@@ -828,10 +846,15 @@ public actor HibernationCoordinator {
         // The registry is required even when the oracle answers the spawn,
         // because its `environment` is what the job inherits: the same daemon
         // environment every other holder spawn reads, scrubbed by
-        // `SpawnBaseEnvironment` inside `holderLaunch`. There is deliberately
-        // no fallback to `ProcessInfo.processInfo.environment` — under the test
-        // fence that is the ambient `SHELL`, `TBD_HOME` and rendezvous root the
-        // fence exists to keep out of a composed launch.
+        // `SpawnBaseEnvironment` inside `holderLaunch`. The INHERITED
+        // environment deliberately has no fallback to
+        // `ProcessInfo.processInfo.environment` — under the test fence that is
+        // the ambient `TBD_HOME` and rendezvous root the fence exists to keep
+        // out of a composed launch. The program the job runs is a separate
+        // question and does read the ambient `SHELL`: `defaultShell` is
+        // `ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"`, which is
+        // the daemon's own login shell and the same one every other replacement
+        // shell in this file is launched with.
         guard let registry = holderRegistry else {
             logger.warning("shell transport move: refusing \(terminal.id, privacy: .public) — this daemon has no holder registry")
             return .refused(reason: TerminalTransportMigrator.holderUnspawnableRefusal)
@@ -891,27 +914,36 @@ public actor HibernationCoordinator {
             return .busy(reason: Self.shellMovePaneBusyRefusal(pid: busyPID))
         }
 
-        do {
-            try await tmux.killWindow(server: server, windowID: terminal.tmuxWindowID)
-        } catch {
-            // A window that is already gone is not a failure to stop anything:
-            // `PaneOwnership.owned` covers "pane gone, server positively
-            // absent" on purpose, so a row whose window died before the person
-            // reached for this gesture arrives here and must not be refused
-            // with a tmux error about a program that no longer exists. Only
-            // tmux's own positive "no such window" counts; `.alive` is a
-            // program still running, and `.unknown` is "we do not know", which
-            // is a refusal at every site in this family.
-            let detail = "\(error)"
-            switch await tmux.probeWindow(server: server, windowID: terminal.tmuxWindowID) {
-            case .absent:
-                logger.info("shell transport move: the window of \(terminal.id, privacy: .public) was already gone (\(detail, privacy: .public)); continuing to the replacement shell")
-            case .alive, .unknown:
-                // The program is presumed still running, so nothing is started
-                // beside it: two live programs for one row is the one state
-                // this path must never produce.
-                logger.warning("shell transport move: could not stop the window of \(terminal.id, privacy: .public): \(detail, privacy: .public)")
-                return .refused(reason: Self.shellMoveKillFailedRefusal(detail: detail))
+        // The parity guard its sibling retire has
+        // (`retireTmuxWindowAfterTransportMigration`). No reachable row shape
+        // has `transport == .tmux` with blank coordinates today, but
+        // `kill-window -t ''` on a server several worktrees share is not a
+        // no-op, and a row that names no window has nothing to stop.
+        if terminal.tmuxWindowID.isEmpty {
+            logger.info("shell transport move: terminal \(terminal.id, privacy: .public) names no tmux window, so there is nothing to stop; continuing to the replacement shell")
+        } else {
+            do {
+                try await tmux.killWindow(server: server, windowID: terminal.tmuxWindowID)
+            } catch {
+                // A window that is already gone is not a failure to stop anything:
+                // `PaneOwnership.owned` covers "pane gone, server positively
+                // absent" on purpose, so a row whose window died before the person
+                // reached for this gesture arrives here and must not be refused
+                // with a tmux error about a program that no longer exists. Only
+                // tmux's own positive "no such window" counts; `.alive` is a
+                // program still running, and `.unknown` is "we do not know", which
+                // is a refusal at every site in this family.
+                let detail = "\(error)"
+                switch await tmux.probeWindow(server: server, windowID: terminal.tmuxWindowID) {
+                case .absent:
+                    logger.info("shell transport move: the window of \(terminal.id, privacy: .public) was already gone (\(detail, privacy: .public)); continuing to the replacement shell")
+                case .alive, .unknown:
+                    // The program is presumed still running, so nothing is started
+                    // beside it: two live programs for one row is the one state
+                    // this path must never produce.
+                    logger.warning("shell transport move: could not stop the window of \(terminal.id, privacy: .public): \(detail, privacy: .public)")
+                    return .refused(reason: Self.shellMoveKillFailedRefusal(detail: detail))
+                }
             }
         }
 
@@ -945,6 +977,16 @@ public actor HibernationCoordinator {
                     rows: TmuxManager.defaultRows,
                     environment: spawnEnvironment))
         } catch {
+            // Not a spawn that failed: a spawn the registry DECLINED because
+            // this session already has a holder, which is what the loser of two
+            // concurrent moves of one row meets. The winner has moved the row,
+            // so the spawn-failure reason's recovery advice would be false in
+            // every particular.
+            if let registryError = error as? HolderRegistry.Error,
+               case .sessionAlreadyRegistered = registryError {
+                logger.warning("shell transport move: \(terminal.id, privacy: .public) already has a registered holder — another move won; nothing further was changed")
+                return .refused(reason: Self.shellMoveAlreadyMovingRefusal)
+            }
             let detail = "\(error)"
             logger.warning("shell transport move: could not start a holder for \(terminal.id, privacy: .public): \(detail, privacy: .public)")
             return .refused(reason: Self.shellMoveSpawnFailedRefusal(detail: detail))
@@ -1649,8 +1691,12 @@ public actor HibernationCoordinator {
         // holder. Today the leg cannot serve when tmux is not installed; once
         // the tmux path is deleted it can never serve and this is the answer.
         if terminal.transport != .holder, !tmux.canServeTmux {
-            logger.error("wake: terminal \(terminal.id, privacy: .public) is on the tmux transport and tmux is unavailable; refusing and leaving it parked")
-            return .respawnFailed(reason: Self.tmuxWakeUnavailableReason)
+            // `.notice`, not `.error`: a retrying focus-wake reaches this on
+            // every attempt, and a state the person can act on is not a daemon
+            // fault.
+            logger.notice("wake: terminal \(terminal.id, privacy: .public) is on the tmux transport and tmux is unavailable; refusing and leaving it parked")
+            return .respawnFailed(
+                reason: Self.tmuxWakeUnavailableReason(terminalID: terminal.id))
         }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
