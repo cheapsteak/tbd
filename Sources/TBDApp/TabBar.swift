@@ -1022,7 +1022,8 @@ private struct TabBarItem: View {
         // Shells move too, so this sits outside the Claude-only block.
         if TransportMigrationMenu.isOffered(
             for: terminal,
-            holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false) {
+            holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false,
+            watchMode: appState.nightwatchMode) {
             Button {
                 guard let terminalID = terminal?.id else { return }
                 Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }

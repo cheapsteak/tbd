@@ -23,17 +23,36 @@ struct TransportMigrationActionTests {
     }
 
     @Test func theMenuItemIsOfferedOnlyForARowNotOnTheHolder() {
-        #expect(TransportMigrationMenu.isOffered(for: Self.row(transport: .tmux), holderSupported: true))
-        #expect(!TransportMigrationMenu.isOffered(for: Self.row(transport: .holder), holderSupported: true))
-        #expect(!TransportMigrationMenu.isOffered(for: nil, holderSupported: true))
-        #expect(!TransportMigrationMenu.isOffered(for: Self.row(transport: .tmux), holderSupported: false))
+        func offered(_ terminal: Terminal?, holderSupported: Bool = true) -> Bool {
+            TransportMigrationMenu.isOffered(
+                for: terminal, holderSupported: holderSupported, watchMode: .off)
+        }
+        #expect(offered(Self.row(transport: .tmux)))
+        #expect(!offered(Self.row(transport: .holder)))
+        #expect(!offered(nil))
+        #expect(!offered(Self.row(transport: .tmux), holderSupported: false))
+    }
+
+    /// The app half of the Nightwatch/holder gate: nobody is offered a gesture
+    /// the daemon refuses. Both branches, because the offer is a conditional.
+    @Test func theMenuItemIsNotOfferedWhileAWatchModeIsLive() {
+        let row = Self.row(transport: .tmux)
+        #expect(TransportMigrationMenu.isOffered(
+            for: row, holderSupported: true, watchMode: .off))
+        for mode in [NightwatchMode.daywatch, .nightwatch] {
+            #expect(!TransportMigrationMenu.isOffered(
+                for: row, holderSupported: true, watchMode: mode),
+                    "the move was offered with \(mode) active")
+            #expect(TransportMigrationMenu.isBlockedByWatchMode(mode))
+        }
+        #expect(!TransportMigrationMenu.isBlockedByWatchMode(.off))
     }
 
     @Test func theActionSendsTheTerminalIDAndVeilsTheRowDuringTheCall() async {
         await withAppState { state in
             let row = Self.row(transport: .tmux)
             state.terminals[row.worktreeID] = [row]
-            var sent: [UUID?] = []
+            var sent: [UUID] = []
             var veil: SwitchingAccount?
             state.terminalTransportMigrator = { @MainActor id in
                 sent.append(id)
@@ -92,36 +111,65 @@ struct TransportMigrationActionTests {
         }
     }
 
-    @Test func theFleetActionSendsNilAndVeilsOnlyAwakeTmuxRows() async {
+    /// The fleet run is composed from the per-session move: one single-id RPC
+    /// per non-holder row, never the daemon's `--all`. A sequential
+    /// park-and-respawn of a real fleet outruns the app's 300 s receive
+    /// deadline, and when it does the whole report is lost.
+    @Test func theFleetActionSendsOneIDPerNonHolderRow() async {
         await withAppState { state in
             let wt = UUID()
             let tmux = Self.row(transport: .tmux, worktreeID: wt)
             let parked = Self.row(transport: .tmux, parked: true, worktreeID: wt)
             let holder = Self.row(transport: .holder, worktreeID: wt)
             state.terminals[wt] = [tmux, parked, holder]
-            var sent: [UUID?] = []
-            var veiled: Set<UUID> = []
+            var sent: [UUID] = []
+            var veiledPerCall: [UUID: Set<UUID>] = [:]
+            state.transportMoveClock = CountingImmediateClock(counter: SleepCounter())
             state.terminalTransportMigrator = { @MainActor id in
                 sent.append(id)
-                veiled = Set(state.switchingAccountTerminals.keys)
-                return TerminalMigrateTransportResult(migrated: [tmux.id], skipped: [], refused: [])
+                veiledPerCall[id] = Set(state.switchingAccountTerminals.keys)
+                return TerminalMigrateTransportResult(
+                    migrated: [id], skipped: [], refused: [])
             }
             let result = await state.migrateAllTerminalsToHolder()
-            #expect(sent.count == 1 && sent[0] == nil)
-            #expect(veiled == [tmux.id])
+            // A parked row has no live pane, so it is moved without a veil.
+            #expect(Set(sent) == [tmux.id, parked.id],
+                    "the run did not cover every non-holder row: \(sent)")
+            #expect(veiledPerCall[tmux.id] == [tmux.id],
+                    "the awake row was not veiled for its own call")
+            #expect(veiledPerCall[parked.id]?.isEmpty == true,
+                    "a parked row was veiled")
             #expect(state.switchingAccountTerminals.isEmpty)
-            #expect(result?.migrated == [tmux.id])
+            #expect(Set(result.migrated) == [tmux.id, parked.id])
+            // The holder row is answered from the cache rather than by a no-op
+            // round trip of its own.
+            #expect(result.alreadyHolder == [holder.id])
         }
     }
 
-    @Test func theFleetActionClearsTheVeilAndAlertsWhenTheCallFails() async {
-        struct Boom: Error {}
+    /// A throw stops the run and names that row — it does not discard the
+    /// report, because the rows already moved are finished sessions and the
+    /// report is what the person asked for.
+    @Test func theFleetActionKeepsTheReportWhenACallFails() async {
+        struct Boom: LocalizedError {
+            var errorDescription: String? { "daemon went away" }
+        }
         await withAppState { state in
-            let row = Self.row(transport: .tmux)
-            state.terminals[row.worktreeID] = [row]
-            state.terminalTransportMigrator = { @MainActor _ in throw Boom() }
+            let wt = UUID()
+            let first = Self.row(transport: .tmux, parked: true, worktreeID: wt)
+            let second = Self.row(transport: .tmux, parked: true, worktreeID: wt)
+            state.terminals[wt] = [first, second]
+            state.terminalTransportMigrator = { @MainActor id in
+                if id == first.id {
+                    return TerminalMigrateTransportResult(
+                        migrated: [id], skipped: [], refused: [])
+                }
+                throw Boom()
+            }
             let result = await state.migrateAllTerminalsToHolder()
-            #expect(result == nil)
+            #expect(result.migrated == [first.id],
+                    "the finished session vanished from the report")
+            #expect(result.refused.map(\.terminalID) == [second.id])
             #expect(state.switchingAccountTerminals.isEmpty)
             #expect(state.alertMessage != nil)
         }
@@ -225,6 +273,63 @@ struct TransportMigrationActionTests {
         #expect(report.headline == "Moved 1 · 2 already on the holder · 1 skipped · 1 refused")
         #expect(report.skipped == [.init(label: "one", reason: "busy")])
         #expect(report.refused == [.init(label: "two", reason: "no holder")])
+        #expect(report.movedNotResumed.isEmpty)
+    }
+
+    /// A row that moved and did not restart is neither a skip nor a refusal:
+    /// "can't be moved" would be false about it, and leaving it out of the
+    /// headline undercounts what the run did.
+    @Test func theReportCountsAndHeadsAMoveThatDidNotRestart() {
+        let a = UUID()
+        let result = TerminalMigrateTransportResult(
+            migrated: [UUID()],
+            movedNotResumed: [TerminalMigrationSkip(terminalID: a, reason: "focus the tab")],
+            skipped: [], refused: [])
+        let report = TransportMigrationMenu.report(result, label: { _ in "one" })
+        #expect(report.headline == "Moved 1 · 1 moved but not restarted")
+        #expect(report.movedNotResumed == [.init(label: "one", reason: "focus the tab")])
+        #expect(report.refused.isEmpty, "a session that moved was grouped with the refusals")
+        #expect(report.movedNotResumedHeading.contains("Moved to the holder"))
+    }
+
+    /// The single-session alert, same distinction. And the veil still waits for
+    /// the adoption of a row that moved without restarting — it has moved, so
+    /// its pane must not stay attached to the retired window.
+    @Test func aMoveThatDidNotRestartAlertsAndStillWaitsForAdoption() async {
+        await withAppState { state in
+            let row = Self.row(transport: .tmux)
+            state.terminals[row.worktreeID] = [row]
+            let counter = SleepCounter()
+            state.transportMoveClock = CountingImmediateClock(counter: counter)
+            state.terminalTransportMigrator = { @MainActor id in
+                TerminalMigrateTransportResult(
+                    migrated: [],
+                    movedNotResumed: [TerminalMigrationSkip(
+                        terminalID: id, reason: "focus the tab to start it there")],
+                    skipped: [], refused: [])
+            }
+            await state.migrateTerminalToHolder(terminalID: row.id)
+            #expect(state.alertMessage?.contains(
+                TransportMigrationMenu.movedNotResumedAlertPrefix
+                    + "focus the tab to start it there") == true)
+            #expect(counter.count > 0, "the veil ended on the reply for a row that moved")
+            #expect(state.switchingAccountTerminals[row.id] == nil)
+        }
+    }
+
+    /// A parked holder row ends the veil too: a move whose wake failed lands
+    /// one, and holding the veil over it until the bound expires would stall
+    /// the tab for nothing.
+    @Test func adoptingAParkedHolderRowAlsoEndsTheVeil() async {
+        await withAppState { state in
+            let row = Self.row(transport: .tmux)
+            state.terminals[row.worktreeID] = [row]
+            state.switchingAccountTerminals[row.id] = .transportMove
+            var moved = Self.movedRow(like: row)
+            moved.hibernatedAt = Date()
+            state.adoptRecreatedTerminal(moved)
+            #expect(state.switchingAccountTerminals[row.id] == nil)
+        }
     }
 }
 

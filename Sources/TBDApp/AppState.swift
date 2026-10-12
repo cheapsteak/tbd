@@ -1921,9 +1921,13 @@ final class AppState {
     /// How the transport-migration actions reach the daemon — injectable for the
     /// same reason as `terminalProfileSwapper`: the veil's lifetime and the
     /// result's presentation are testable without a running daemon.
+    ///
+    /// One session per call, never the daemon's `--all`: the app's fleet run is
+    /// composed from this, so a long run cannot outrun the receive deadline and
+    /// every row gets its own veil (`migrateAllTerminalsToHolder`).
     @ObservationIgnored
     lazy var terminalTransportMigrator:
-        @MainActor (UUID?) async throws -> TerminalMigrateTransportResult =
+        @MainActor (UUID) async throws -> TerminalMigrateTransportResult =
         { [daemonClient] terminalID in
             try await daemonClient.migrateTerminalTransport(terminalID: terminalID)
         }

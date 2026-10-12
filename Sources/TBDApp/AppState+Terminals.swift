@@ -310,11 +310,13 @@ extension AppState {
               }) else { return }
         terminals[terminal.worktreeID]?[index] = terminal
         replaceTerminalObservationOrder(with: terminal)
-        // The veil of a transport move ends here: the row now reads holder and
-        // awake, so the pane's identity has changed once and the veil has
-        // nothing left to cover.
+        // The veil of a transport move ends here: the row now reads holder, so
+        // the pane's identity has changed once and the veil has nothing left to
+        // cover. Parked or awake — a move whose wake failed lands a parked
+        // holder row, and holding the veil over it until the bound expires
+        // would stall the tab for nothing.
         if switchingAccountTerminals[terminal.id]?.isTransportMove == true,
-           terminal.transport == .holder, !terminal.isParked {
+           terminal.transport == .holder {
             switchingAccountTerminals[terminal.id] = nil
         }
     }
@@ -1167,15 +1169,54 @@ enum TransportMigrationMenu {
     static let title = "Move to Holder (No tmux)"
 
     /// Offered for any row that is not already holder-backed, and only when the
-    /// daemon can run a holder (the capability the Settings toggle reads).
-    static func isOffered(for terminal: Terminal?, holderSupported: Bool) -> Bool {
-        guard holderSupported, let terminal else { return false }
+    /// daemon can run a holder (the capability the Settings toggle reads) and
+    /// no watch mode forbids the move.
+    static func isOffered(
+        for terminal: Terminal?, holderSupported: Bool, watchMode: NightwatchMode
+    ) -> Bool {
+        guard holderSupported, !isBlockedByWatchMode(watchMode), let terminal else {
+            return false
+        }
         return terminal.transport != .holder
+    }
+
+    /// Whether a watch mode forbids moving sessions onto the holder, asked of
+    /// `NightwatchHolderGate` with the same `enabling: true` the daemon's own
+    /// refusal uses — a migration creates holder-backed sessions, which is the
+    /// hazard that gate exists for. Shared by the row's menu item and the
+    /// Settings fleet run so neither offers a gesture the daemon will refuse;
+    /// the daemon's refusal is still what makes it true.
+    static func isBlockedByWatchMode(_ mode: NightwatchMode) -> Bool {
+        NightwatchHolderGate.refusesHolder(enabling: true, currentMode: mode)
     }
 
     /// Prefix for a single-session alert, by group.
     static let skippedAlertPrefix = "Not moved — change this and try again: "
     static let refusedAlertPrefix = "Can't be moved until this changes: "
+    /// Neither of the above: the session DID move, and only its program was not
+    /// started again. Saying "can't be moved" about it would be false.
+    static let movedNotResumedAlertPrefix = "Moved to the holder, but not restarted: "
+
+    /// Every line a single-session alert shows, in the order a person acts on
+    /// them. Empty when the session moved and restarted, which is the case that
+    /// shows no alert at all.
+    static func alertLines(_ result: TerminalMigrateTransportResult) -> [String] {
+        result.skipped.map { skippedAlertPrefix + $0.reason }
+            + result.refused.map { refusedAlertPrefix + $0.reason }
+            + result.movedNotResumed.map { movedNotResumedAlertPrefix + $0.reason }
+    }
+
+    /// Accumulate the per-session results a fleet run is composed from.
+    static func merging(
+        _ base: TerminalMigrateTransportResult, _ next: TerminalMigrateTransportResult
+    ) -> TerminalMigrateTransportResult {
+        TerminalMigrateTransportResult(
+            migrated: base.migrated + next.migrated,
+            movedNotResumed: base.movedNotResumed + next.movedNotResumed,
+            skipped: base.skipped + next.skipped,
+            refused: base.refused + next.refused,
+            alreadyHolder: base.alreadyHolder + next.alreadyHolder)
+    }
 
     /// One line per session the run left alone.
     struct Line: Equatable {
@@ -1190,14 +1231,23 @@ enum TransportMigrationMenu {
         let headline: String
         let skippedHeading = "Not moved — change this and try again"
         let refusedHeading = "Can't be moved until this changes"
+        /// Its own heading, because these sessions moved. Grouping them under
+        /// the refusals would tell a person a session "can't be moved" that is
+        /// already on the holder, and the headline would undercount the run.
+        let movedNotResumedHeading =
+            "Moved to the holder, but not restarted — they resume there when next woken"
         let skipped: [Line]
         let refused: [Line]
+        let movedNotResumed: [Line]
     }
 
     static func report(
         _ result: TerminalMigrateTransportResult, label: (UUID) -> String
     ) -> Report {
         var parts = ["Moved \(result.migrated.count)"]
+        if !result.movedNotResumed.isEmpty {
+            parts.append("\(result.movedNotResumed.count) moved but not restarted")
+        }
         if !result.alreadyHolder.isEmpty {
             parts.append("\(result.alreadyHolder.count) already on the holder")
         }
@@ -1208,7 +1258,8 @@ enum TransportMigrationMenu {
         }
         return Report(
             headline: parts.joined(separator: " · "),
-            skipped: lines(result.skipped), refused: lines(result.refused))
+            skipped: lines(result.skipped), refused: lines(result.refused),
+            movedNotResumed: lines(result.movedNotResumed))
     }
 }
 
@@ -1227,21 +1278,37 @@ extension AppState {
     /// it, bounded so a lost `.terminalReplaced` cannot strand it. The delta and
     /// the RPC reply travel on different sockets with no ordering, so the reply
     /// cannot be taken as the end of the move.
+    ///
+    /// Cancellation ends the wait rather than spinning through the remaining
+    /// steps: a cancelled sleep returns at once, and the caller's `defer` is
+    /// what takes the veil down.
     private func awaitTransportMoveAdoption(_ ids: [UUID]) async {
         var waited: Duration = .zero
-        while waited < Self.transportMoveAdoptionBound,
+        while waited < Self.transportMoveAdoptionBound, !Task.isCancelled,
               ids.contains(where: { switchingAccountTerminals[$0]?.isTransportMove == true }) {
             try? await transportMoveClock.sleep(for: Self.transportMovePollInterval)
             waited += Self.transportMovePollInterval
         }
     }
 
-    /// Move one session to the holder. The veil of an account switch covers the
-    /// park and wake and stays up until the refreshed row arrives as
-    /// `.terminalReplaced`, which `adoptRecreatedTerminal` overwrites in place
-    /// (and which ends the veil), so nothing is refreshed here. A session that
-    /// did not move says why in an alert.
-    func migrateTerminalToHolder(terminalID: UUID) async {
+    /// One session's move, veil and all — the piece both app surfaces are
+    /// composed from, so the fleet run cannot drift from the gesture.
+    ///
+    /// The veil of an account switch covers the park and wake and stays up
+    /// until the refreshed row arrives as `.terminalReplaced`, which
+    /// `adoptRecreatedTerminal` overwrites in place (and which ends the veil),
+    /// so nothing is refreshed here. The reply cannot stand in for that delta:
+    /// the two travel on different sockets with no ordering between them.
+    ///
+    /// `ownsRecord` is what keeps the veil to the rows it belongs to — a row
+    /// already veiled by something else is left alone, and a parked or
+    /// holder-backed row has no live pane to cover.
+    ///
+    /// Throws whatever the RPC threw; the caller decides what to tell the
+    /// person.
+    private func moveOneTerminalToHolder(
+        terminalID: UUID
+    ) async throws -> TerminalMigrateTransportResult {
         let cached = terminals.values.lazy.flatMap { $0 }.first(where: { $0.id == terminalID })
         let ownsRecord = switchingAccountTerminals[terminalID] == nil
             && cached.map { $0.transport != .holder && !$0.isParked } == true
@@ -1251,48 +1318,75 @@ extension AppState {
                 switchingAccountTerminals[terminalID] = nil
             }
         }
+        let result = try await terminalTransportMigrator(terminalID)
+        // Both lists name a row that now reads holder-backed, so both have an
+        // adoption coming — a move whose wake failed has still moved the row,
+        // and its pane must not stay attached to the retired window.
+        let moved = result.migrated.contains(terminalID)
+            || result.movedNotResumed.contains { $0.terminalID == terminalID }
+        if ownsRecord, moved { await awaitTransportMoveAdoption([terminalID]) }
+        return result
+    }
+
+    /// Move one session to the holder. A session that did not move, or moved
+    /// without restarting, says so in an alert.
+    func migrateTerminalToHolder(terminalID: UUID) async {
         do {
-            let result = try await terminalTransportMigrator(terminalID)
-            var lines = result.skipped.map { TransportMigrationMenu.skippedAlertPrefix + $0.reason }
-            lines += result.refused.map { TransportMigrationMenu.refusedAlertPrefix + $0.reason }
-            if !lines.isEmpty {
-                showAlert(lines.joined(separator: "\n"), isError: true)
-            } else if ownsRecord, result.migrated.contains(terminalID) {
-                await awaitTransportMoveAdoption([terminalID])
-            }
+            let lines = TransportMigrationMenu.alertLines(
+                try await moveOneTerminalToHolder(terminalID: terminalID))
+            if !lines.isEmpty { showAlert(lines.joined(separator: "\n"), isError: true) }
         } catch {
             logger.error("Failed to move terminal to the holder: \(error, privacy: .public)")
             showAlert("Failed to move this session off tmux: \(error.localizedDescription)", isError: true)
         }
     }
 
-    /// Move every session to the holder. Returns the result so the caller can
-    /// show what did not move and why; nil when the call itself failed.
+    /// Move every session the app holds to the holder, **one single-session RPC
+    /// at a time**, and return the accumulated report.
+    ///
+    /// **Composed from the per-session move rather than the daemon's `--all`.**
+    /// A sequential park-and-respawn of a real fleet outruns the app's 300 s
+    /// receive deadline (`DaemonClient.rpcRecvDeadlineSeconds`), and when it
+    /// does, `sendRaw` throws while the daemon keeps migrating: the person is
+    /// told the daemon is unresponsive, every veil drops at once, and the
+    /// report — which this run's whole product is — is lost. One RPC per row
+    /// has no deadline to outrun, and gives each row the veil and the adoption
+    /// wait the single gesture already has. The daemon's `--all` stays exactly
+    /// as it is, for the CLI.
+    ///
+    /// **Already-holder rows are answered from the cache**, not by a no-op RPC
+    /// each: the daemon reports them from the row alone, and on a fleet that is
+    /// mostly migrated already that would be a round trip per row for an answer
+    /// the app can read off what it is displaying.
+    ///
+    /// A throw stops the run and names that row as refused rather than
+    /// discarding everything: the rows already moved are finished sessions, and
+    /// their report is what the person asked for.
     @discardableResult
-    func migrateAllTerminalsToHolder() async -> TerminalMigrateTransportResult? {
-        let candidates = terminals.values.flatMap { $0 }
-            .filter { $0.transport != .holder && !$0.isParked && switchingAccountTerminals[$0.id] == nil }
+    func migrateAllTerminalsToHolder() async -> TerminalMigrateTransportResult {
+        let rows = terminals.values.flatMap { $0 }
+        var accumulated = TerminalMigrateTransportResult(
+            migrated: [], skipped: [], refused: [],
+            alreadyHolder: rows.filter { $0.transport == .holder }.map(\.id))
+        let candidates = rows
+            .filter { $0.transport != .holder && switchingAccountTerminals[$0.id] == nil }
             .map(\.id)
-        for id in candidates { switchingAccountTerminals[id] = .transportMove }
-        defer {
-            for id in candidates where switchingAccountTerminals[id]?.isTransportMove == true {
-                switchingAccountTerminals[id] = nil
+        for id in candidates {
+            if Task.isCancelled { break }
+            do {
+                accumulated = TransportMigrationMenu.merging(
+                    accumulated, try await moveOneTerminalToHolder(terminalID: id))
+            } catch {
+                logger.error("Failed to move sessions to the holder: \(error, privacy: .public)")
+                showAlert("Failed to move sessions off tmux: \(error.localizedDescription)", isError: true)
+                return TransportMigrationMenu.merging(
+                    accumulated,
+                    TerminalMigrateTransportResult(
+                        migrated: [], skipped: [],
+                        refused: [TerminalMigrationSkip(
+                            terminalID: id, reason: error.localizedDescription)]))
             }
         }
-        do {
-            let result = try await terminalTransportMigrator(nil)
-            // Only a migrated row has an adoption coming; the rest are done.
-            for id in candidates where !result.migrated.contains(id) {
-                if switchingAccountTerminals[id]?.isTransportMove == true {
-                    switchingAccountTerminals[id] = nil
-                }
-            }
-            await awaitTransportMoveAdoption(result.migrated)
-            return result
-        } catch {
-            logger.error("Failed to move sessions to the holder: \(error, privacy: .public)")
-            showAlert("Failed to move sessions off tmux: \(error.localizedDescription)", isError: true)
-            return nil
-        }
+        return accumulated
     }
 }

@@ -339,7 +339,10 @@ struct GeneralSettingsTab: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if supported {
+        // Hidden while a watch mode forbids the move, which the daemon refuses
+        // outright: the caption below is what explains it, and it renders in
+        // exactly that state.
+        if supported, !TransportMigrationMenu.isBlockedByWatchMode(appState.nightwatchMode) {
             transportMigrationRow
         }
         if supported && !enabled && appState.nightwatchMode != .off {
@@ -375,6 +378,7 @@ struct GeneralSettingsTab: View {
             Text(report.headline)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            transportMigrationLines(report.movedNotResumedHeading, report.movedNotResumed)
             transportMigrationLines(report.skippedHeading, report.skipped)
             transportMigrationLines(report.refusedHeading, report.refused)
         }
