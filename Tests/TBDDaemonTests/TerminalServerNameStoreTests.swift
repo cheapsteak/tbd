@@ -39,6 +39,24 @@ struct TerminalServerNameStoreTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).first?.serverName == "web")
     }
 
+    /// `terminal.recreateWindow` rebuilds a dead server tab as a plain login
+    /// shell. The row must stop naming the server, or the shell would read as
+    /// the running server and stop or archive would signal its group.
+    @Test func recreatingAServerTabAsAShellClearsItsServerName() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wt = try await makeWorktree(db)
+        let t = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1", label: "Web app",
+            kind: .shell, serverName: "web")
+        let token = try await db.terminals.replaceRecreatedShellWindow(
+            id: t.id, expectedIncarnation: TerminalSessionIncarnation(terminal: t),
+            windowID: "@2", paneID: "%2", at: Date())
+        #expect(token != nil)
+        let rebuilt = try #require(try await db.terminals.get(id: t.id))
+        #expect(rebuilt.tmuxPaneID == "%2")
+        #expect(rebuilt.serverName == nil)
+    }
+
     @Test func theFieldSurvivesTheWire() throws {
         var t = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1")
         t.serverName = "web"

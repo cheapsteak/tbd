@@ -1150,6 +1150,11 @@ public struct TerminalStore: Sendable {
             guard expectedIncarnation.matches(record) else { return nil }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            // The rebuilt window runs a plain login shell, not the dev
+            // server's command, so the tab stops being that server's: left
+            // in place, the name would make the server read Running off the
+            // shell and make stop or archive signal the shell's group.
+            record.server_name = nil
             let incarnationID = resetRecreatedShellLifecycle(record: &record, at: date)
             try record.update(db)
             return incarnationID
