@@ -137,3 +137,28 @@ struct DevServerStopperTests {
         #expect(s.sentSignals.isEmpty)
     }
 }
+
+@Suite("Dev server command environment")
+struct DevServerCommandEnvironmentTests {
+    /// A daemon relaunched by LaunchServices can carry launchd's bare PATH;
+    /// `stop` and `status` commands get the package-manager floor appended.
+    @Test func aBarePathGetsTheFallbackDirectoriesAppended() {
+        let env = ProductionDevServerCommandRunner.processEnvironment(
+            declared: ["FEATURE_X": "1"],
+            inheriting: ["PATH": "/usr/bin:/bin", "HOME": "/tmp/acme-home"])
+        let path = env["PATH"]?.split(separator: ":").map(String.init) ?? []
+        #expect(Array(path.prefix(2)) == ["/usr/bin", "/bin"], "the inherited order wins")
+        #expect(path.contains("/opt/homebrew/bin"))
+        #expect(path.contains("/tmp/acme-home/.local/bin"))
+        #expect(env["FEATURE_X"] == "1")
+    }
+
+    /// A PATH the server declares is kept first, and still gets the floor.
+    @Test func aDeclaredPathLeadsAndIsAugmented() {
+        let env = ProductionDevServerCommandRunner.processEnvironment(
+            declared: ["PATH": "/opt/acme/bin"], inheriting: ["PATH": "/usr/bin", "HOME": "/tmp/acme-home"])
+        let path = env["PATH"]?.split(separator: ":").map(String.init) ?? []
+        #expect(path.first == "/opt/acme/bin")
+        #expect(path.contains("/usr/local/bin"))
+    }
+}

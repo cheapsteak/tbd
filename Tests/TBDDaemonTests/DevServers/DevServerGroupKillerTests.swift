@@ -37,6 +37,22 @@ struct DevServerGroupKillerTests {
         #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM), .init(pgid: 500, signal: SIGKILL)])
     }
 
+    /// A cancelled caller must not cut the grace short: the kill runs out
+    /// of the caller's cancellation, so SIGKILL still waits the full grace.
+    @Test func aCancelledCallerStillWaitsOutTheGrace() async {
+        let clock = TestClock()
+        let s = FakeDevServerSignalling()
+        s.add(pid: 500, pgid: 500, start: start, diesOn: [SIGKILL])
+        let k = killer(s, clock: clock)
+        let task = Task { await k.kill(target()) }
+        await clock.advanceWhenSuspended(by: .seconds(1))
+        task.cancel()
+        await clock.advanceWhenSuspended(by: .seconds(3))
+        #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM)], "SIGKILL before the 5 s grace")
+        await clock.advanceWhenSuspended(by: .seconds(1))
+        #expect(await task.value == .killed(pgid: 500))
+    }
+
     @Test func aSurvivorIsReportedWithItsPid() async {
         let clock = TestClock()
         let s = FakeDevServerSignalling()

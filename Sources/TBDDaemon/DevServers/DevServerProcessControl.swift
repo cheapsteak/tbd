@@ -43,10 +43,33 @@ struct ProductionDevServerSignalling: DevServerSignalling {
         _ = Foundation.kill(pid, signal)
     }
 
+    /// Whether any member of the group is still running. A zombie does not
+    /// count: `kill(-pgid, 0)` succeeds while a dead leader waits to be
+    /// reaped, which would report a group that died on SIGKILL as a survivor.
+    /// The group's members are read with `sysctl(KERN_PROC_PGRP)`; only when
+    /// that read fails does the answer fall back to `kill(-pgid, 0)`.
     func groupExists(_ pgid: Int32) -> Bool {
         guard pgid > 1 else { return false }
+        if let states = Self.memberStates(ofGroup: pgid) {
+            return states.contains { $0 != DevServerProcessProbe.zombieState }
+        }
         if Foundation.kill(-pgid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    /// `p_stat` of every process in group `pgid`; nil when the kernel read
+    /// fails.
+    static func memberStates(ofGroup pgid: Int32) -> [Int32]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid]
+        var size = 0
+        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0 else { return nil }
+        let stride = MemoryLayout<kinfo_proc>.stride
+        if size == 0 { return [] }
+        // Headroom: the group can gain members between the two reads.
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: size / stride + 8)
+        size = procs.count * stride
+        guard sysctl(&mib, u_int(mib.count), &procs, &size, nil, 0) == 0 else { return nil }
+        return procs.prefix(size / stride).map { Int32($0.kp_proc.p_stat) }
     }
 }
 
@@ -121,7 +144,15 @@ struct DevServerGroupKiller: Sendable {
     /// kernel value read twice.
     private static let sameProcessTolerance: TimeInterval = 0.001
 
+    /// Runs the whole SIGTERM → grace → SIGKILL sequence in a task of its
+    /// own, which the caller's cancellation does not reach: a cancelled sleep
+    /// throws at once, and a grace cut short would SIGKILL a server that was
+    /// still shutting down cleanly.
     func kill(_ target: DevServerKillTarget) async -> DevServerKillOutcome {
+        await Task { await self.killSequence(target) }.value
+    }
+
+    private func killSequence(_ target: DevServerKillTarget) async -> DevServerKillOutcome {
         guard target.pid > 1 else { return .refused(reason: "pid \(target.pid) is never signalled") }
         guard let info = signalling.processInfo(target.pid), !info.isZombie else { return .notRunning }
         if case .recorded(let expected, let tolerance) = target.anchor,

@@ -158,7 +158,7 @@ public struct DevServerProcessProbe: Sendable {
 
     /// `SZOMB` from <sys/proc.h>. Spelled as a literal because the macro's
     /// import into Swift is not guaranteed.
-    private static let zombieState: Int32 = 5
+    public static let zombieState: Int32 = 5
 
     /// Start time and zombie state from `sysctl(KERN_PROC_PID)` — the same
     /// read `ProcessStartTime.startTime(pid:)` makes, plus `p_stat`.
