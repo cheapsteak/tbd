@@ -135,6 +135,12 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// provider's `answer <session_id> <prompt_id>` verb. A `send`, like
     /// `remoteSendMessage`, and one row per answer.
     case remoteAnswer
+    /// Starts declared dev servers in a worktree: one row per call naming the
+    /// worktree; each server's tab is spawned (or respawned) underneath it.
+    case serverStart
+    /// Stops dev servers: a declared `stop` command or a process-group kill,
+    /// then the server's tab is closed. One row per call naming the worktree.
+    case serverStop
 
     /// The exact public method name that carries this surface's requests.
     var method: String {
@@ -173,6 +179,8 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteDelete: return RPCMethod.remoteDelete
         case .promptAnswer: return RPCMethod.promptAnswer
         case .remoteAnswer: return RPCMethod.remoteAnswer
+        case .serverStart: return RPCMethod.serverStart
+        case .serverStop: return RPCMethod.serverStop
         }
     }
 
@@ -187,10 +195,10 @@ enum ActuationSurface: CaseIterable, Sendable {
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
-             .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive: return .spawn
+             .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive, .serverStart: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,
              .scratchDelete, .scratchArchive, .remoteStop, .remoteArchive,
-             .remoteDelete: return .dispose
+             .remoteDelete, .serverStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }

@@ -820,6 +820,34 @@ extension RPCRouter {
             }
         }
 
+        let (transportCleanupFailure, teardownRefusal) = try await closeTerminalTab(
+            terminal, actuationID: actuationID)
+
+        if let transportCleanupFailure {
+            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
+        } else if let teardownRefusal {
+            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
+        } else {
+            await finishActuation(actuationID, .dispatched)
+        }
+        return try RPCResponse(result: TerminalDeleteResult(
+            closed: true,
+            alreadyGone: false,
+            claudeSessionID: terminal.claudeSessionID
+        ))
+    }
+
+    /// The teardown half of `terminal.delete`: cancel a pending auto-resume,
+    /// capture scrollback into Closed Terminals, kill the window (or dispose
+    /// the holder), delete the row and its tab, clear pending prompts, drop
+    /// the per-session overlay, and broadcast `.terminalRemoved`. Shared with
+    /// `server.stop`, which closes a server's tab under its own actuation row.
+    ///
+    /// Returns the two strings `handleTerminalDelete` turns into its outcome
+    /// row; the caller decides how to record them.
+    func closeTerminalTab(
+        _ terminal: Terminal, actuationID: String
+    ) async throws -> (transportCleanupFailure: String?, teardownRefusal: String?) {
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
         if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
             await limitResumeScheduler?.wake()
@@ -913,33 +941,22 @@ extension RPCRouter {
 
         // Delete from DB
         try await actuating(actuationID) {
-            try await db.terminals.delete(id: params.terminalID)
-            try await db.tabs.delete(tabID: params.terminalID)
+            try await db.terminals.delete(id: terminal.id)
+            try await db.tabs.delete(tabID: terminal.id)
         }
-        await pendingQuestions.clear(terminalID: params.terminalID)
-        await broadcastPendingPrompts(terminalID: params.terminalID)
-        await continueInClaudeReadiness.clear(terminalID: params.terminalID)
+        await pendingQuestions.clear(terminalID: terminal.id)
+        await broadcastPendingPrompts(terminalID: terminal.id)
+        await continueInClaudeReadiness.clear(terminalID: terminal.id)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.
-        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: params.terminalID.uuidString)
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
 
         subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
             terminalID: terminal.id
         )))
 
-        if let transportCleanupFailure {
-            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
-        } else if let teardownRefusal {
-            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
-        } else {
-            await finishActuation(actuationID, .dispatched)
-        }
-        return try RPCResponse(result: TerminalDeleteResult(
-            closed: true,
-            alreadyGone: false,
-            claudeSessionID: terminal.claudeSessionID
-        ))
+        return (transportCleanupFailure, teardownRefusal)
     }
 
     /// What a row's own transport can say about whether its session is still

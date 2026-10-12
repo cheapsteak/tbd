@@ -297,6 +297,28 @@ public final class RPCRouter: Sendable {
     nonisolated(unsafe) var transportMigratorOperationsOverride:
         TerminalTransportMigrator.Operations?
 
+    // MARK: Dev servers (docs/specs/2026-10-11-dev-servers-design.md)
+    //
+    // Wired post-construction by `Daemon.swift`, like `holderRegistry`. The
+    // defaults are the production collaborators, so a router a test builds
+    // without touching them still works; tests replace them with fakes.
+
+    nonisolated(unsafe) var devServerStopper = DevServerStopper()
+    /// nil → `ProductionDevServerTabInspector` over `lifecycle.tmux` and
+    /// `holderRegistry`, built per call so a later `holderRegistry`
+    /// assignment is honored.
+    nonisolated(unsafe) var devServerTabInspector: (any DevServerTabInspecting)?
+    nonisolated(unsafe) var devServerCommandRunner: any DevServerCommandRunning = ProductionDevServerCommandRunner()
+    nonisolated(unsafe) var devServerRunningFiles = DevServerRunningFileStore()
+    nonisolated(unsafe) var devServerProcessProbe: DevServerProcessProbe = .live
+    /// Resolves `servers.toml` (via `TBD_HOME`).
+    nonisolated(unsafe) var devServerEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    /// Called after every start or stop; the daemon points it at the
+    /// running-file monitor's `refresh()`.
+    nonisolated(unsafe) var onDevServersChanged: (@Sendable () async -> Void)?
+    /// `server.summary`'s answer; the daemon points it at the monitor.
+    nonisolated(unsafe) var devServerSummaryProvider: (@Sendable () async -> [UUID])?
+
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
     /// Two things read it: `daemon.capabilities`, which reports whether this
@@ -742,6 +764,14 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData, actor: request.actor)
+            case RPCMethod.serverList:
+                return try await handleServerList(request.paramsData)
+            case RPCMethod.serverStart:
+                return try await handleServerStart(request.paramsData, actor: request.actor)
+            case RPCMethod.serverStop:
+                return try await handleServerStop(request.paramsData, actor: request.actor)
+            case RPCMethod.serverSummary:
+                return try await handleServerSummary()
             case RPCMethod.terminalContinueInCodex:
                 return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
             case RPCMethod.terminalContinueInClaude:
