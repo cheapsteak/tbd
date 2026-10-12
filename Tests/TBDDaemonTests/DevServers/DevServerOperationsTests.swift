@@ -33,7 +33,7 @@ struct DevServerOperationsTests {
             probe: DevServerProcessProbe(info: { _ in nil }), environment: [:])
         let reports = await operations.stopAllForArchive(worktree: local)
         #expect(reports.map(\.name) == ["web"])
-        #expect(reports.allSatisfy(\.succeeded))
+        #expect(reports.allSatisfy { $0.succeeded })
         #expect(signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
         // The tab is archive's to close.
         #expect(try await db.terminals.get(id: webTab.id) != nil)

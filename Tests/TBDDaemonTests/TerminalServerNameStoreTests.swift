@@ -123,7 +123,8 @@ struct TerminalServerNameStoreTests {
                 db, sql: "SELECT serverName, exitCode FROM terminal_history WHERE id = ?", arguments: [entryID]))
             #expect((row["serverName"] as DatabaseValue).isNull)
             #expect((row["exitCode"] as DatabaseValue).isNull)
-            let model = try #require(try #require(try TerminalHistoryRecord.fetchOne(db, key: entryID)).toModel())
+            let record = try #require(try TerminalHistoryRecord.fetchOne(db, key: entryID))
+            let model = try #require(record.toModel())
             #expect(model.serverName == nil)
             #expect(model.exitCode == nil)
         }

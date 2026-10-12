@@ -1,6 +1,8 @@
 import Foundation
 import TBDShared
-import TOMLKit
+// Internal so TOMLKit's literal-expressible types stay out of the type
+// inference of modules that import this one.
+internal import TOMLKit
 
 /// Reads a worktree's declared dev servers from its three sources, fresh on
 /// every call (docs/specs/2026-10-11-dev-servers-design.md, "Declaring

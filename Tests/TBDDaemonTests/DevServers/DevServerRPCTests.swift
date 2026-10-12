@@ -127,7 +127,8 @@ struct DevServerRPCTests {
         let result = try response.decodeResult(DevServerActionResult.self)
         let outcome = try #require(result.outcomes.first)
         #expect(outcome.status == .started)
-        let row = try #require(try await f.db.terminals.get(id: try #require(outcome.terminalID)))
+        let terminalID = try #require(outcome.terminalID)
+        let row = try #require(try await f.db.terminals.get(id: terminalID))
         #expect(row.serverName == "web")
         #expect(row.label == "Web app")
         #expect(row.kind == .shell)
@@ -148,7 +149,8 @@ struct DevServerRPCTests {
         let result = try await f.call(RPCMethod.serverStart,
                                       DevServerActionParams(worktreeID: f.worktree.id, names: []))
             .decodeResult(DevServerActionResult.self)
-        let row = try #require(try await f.db.terminals.get(id: try #require(result.outcomes.first?.terminalID)))
+        let terminalID = try #require(result.outcomes.first?.terminalID)
+        let row = try #require(try await f.db.terminals.get(id: terminalID))
         #expect(f.recorder.all.contains(
             ["-L", "tbd-srv-test", "set-option", "-wt", row.tmuxWindowID, "remain-on-exit", "on"]))
     }

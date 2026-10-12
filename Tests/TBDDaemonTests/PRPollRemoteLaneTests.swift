@@ -723,7 +723,7 @@ private actor RecordingGH {
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         recordedPaths.append(repoPath)
         recordedArgs.append(args)
-        let hostname = args.firstIndex(of: "--hostname").flatMap { index in
+        let hostname: String? = args.firstIndex(of: "--hostname").flatMap { index -> String? in
             args.index(after: index) < args.endIndex ? args[args.index(after: index)] : nil
         }
         if let owner = args.first(where: { $0.hasPrefix("owner=") })?.dropFirst("owner=".count),
