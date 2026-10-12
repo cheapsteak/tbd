@@ -194,6 +194,22 @@ struct TransportMigrationActionTests {
         }
     }
 
+    @Test func theManualRecreationClaimIsAlsoRefusedMidMove() async {
+        await withAppState { state in
+            let row = Self.row(transport: .tmux)
+            state.terminals[row.worktreeID] = [row]
+            state.switchingAccountTerminals[row.id] = .transportMove
+            #expect(state.claimManualTerminalRecreation(terminalID: row.id) == .alreadyInFlight)
+            state.switchingAccountTerminals[row.id] = nil
+            #expect(state.claimManualTerminalRecreation(terminalID: row.id) == .claimed)
+        }
+    }
+
+    @Test func aCaptionOverrideAloneIsNotATransportMove() {
+        #expect(!SwitchingAccount(profileName: nil, captionOverride: "x").isTransportMove)
+        #expect(SwitchingAccount.transportMove.isTransportMove)
+    }
+
     @Test func theAccountSwitchCaptionIsUnchanged() {
         #expect(SwitchingAccount(profileName: "Acme").caption == "Switching account to Acme…")
         #expect(SwitchingAccount(profileName: nil).caption == "Switching account…")
@@ -230,5 +246,87 @@ struct CountingImmediateClock: Clock {
     func sleep(until deadline: Instant, tolerance: Duration?) async throws {
         counter.bump()
         try await base.sleep(until: deadline, tolerance: tolerance)
+    }
+}
+
+/// The reply-races-the-deltas path, on a `TestClock` and through the
+/// production delta entry point (`handleDelta`).
+@MainActor
+@Suite("TransportMigrationRace", .clockDriven, .serialized)
+struct TransportMigrationRaceTests {
+    private func withAppState(_ body: (AppState) async -> Void) async {
+        let name = "tbd-transport-race-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        await body(AppState(userDefaults: defaults))
+        defaults.removePersistentDomain(forName: name)
+    }
+
+    private func setUp(
+        _ state: AppState, clock: TestClock<Duration>
+    ) -> Terminal {
+        let row = Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+            transport: .tmux)
+        state.terminals[row.worktreeID] = [row]
+        state.transportMoveClock = clock
+        state.terminalTransportMigrator = { @MainActor _ in
+            TerminalMigrateTransportResult(migrated: [row.id], skipped: [], refused: [])
+        }
+        return row
+    }
+
+    private func identity(_ state: AppState, _ row: Terminal) -> String {
+        let current = state.terminals[row.worktreeID]!.first { $0.id == row.id }!
+        return TerminalPanePresentation.identity(
+            for: current, switching: state.switchingAccountTerminals[row.id],
+            attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+    }
+
+    @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async {
+        await withAppState { state in
+            let clock = TestClock<Duration>()
+            let row = setUp(state, clock: clock)
+            let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
+            // The migrator parks the row before the reply.
+            await clock.waitForSuspension()
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: row.id, worktreeID: row.worktreeID, hibernated: true, keepWarm: false)))
+            var identities = [identity(state, row)]
+            await clock.advanceWhenSuspended(by: .milliseconds(300))
+            #expect(state.switchingAccountTerminals[row.id] == .transportMove,
+                    "the veil cleared on the reply, before the deltas")
+            #expect((state.terminalAttachEpochs[row.id] ?? 0) == 0)
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: row.id, worktreeID: row.worktreeID, hibernated: false, keepWarm: false)))
+            identities.append(identity(state, row))
+            var moved = row
+            moved.tmuxWindowID = ""
+            moved.tmuxPaneID = ""
+            moved.transport = .holder
+            state.handleDelta(.terminalReplaced(moved))
+            await clock.advanceWhenSuspended(by: .milliseconds(100))
+            await task.value
+
+            #expect(state.switchingAccountTerminals[row.id] == nil)
+            #expect((state.terminalAttachEpochs[row.id] ?? 0) == 0)
+            #expect(state.terminals[row.worktreeID]?.first?.tmuxWindowID == "")
+            identities.append(identity(state, row))
+            let rebuilds = zip(identities, identities.dropFirst()).filter { $0 != $1 }.count
+            #expect(rebuilds == 1, "the pane rebuilt \(rebuilds) times; identities: \(identities)")
+        }
+    }
+
+    @Test func noDeltaMeansTheBoundClearsTheVeil() async {
+        await withAppState { state in
+            let clock = TestClock<Duration>()
+            let row = setUp(state, clock: clock)
+            let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
+            await clock.waitForSuspension()
+            #expect(state.switchingAccountTerminals[row.id] == .transportMove)
+            await clock.advanceWhenSuspended(by: .seconds(5))
+            await task.value
+            #expect(state.switchingAccountTerminals[row.id] == nil)
+        }
     }
 }

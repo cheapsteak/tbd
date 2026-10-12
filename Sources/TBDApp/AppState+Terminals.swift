@@ -707,6 +707,11 @@ extension AppState {
         terminalID: UUID
     ) -> ManualTerminalRecreationClaim {
         guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
+        // The recovery banner's Retry button reaches this, and can be clicked
+        // while a move has the pane attached to the window it retires.
+        guard switchingAccountTerminals[terminalID]?.isTransportMove != true else {
+            return .alreadyInFlight
+        }
         guard containsTerminal(terminalID) else { return .terminalUnavailable }
         recreatingTerminalIDs.insert(terminalID)
         return .claimed
