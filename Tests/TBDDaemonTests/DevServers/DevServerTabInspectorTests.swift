@@ -18,6 +18,30 @@ struct DevServerTabInspectorTests {
         #expect(TmuxManager.parsePaneExitState("", paneID: "%3") == .gone)
     }
 
+    /// Only tmux's own "not there" answer makes a tab gone; a timeout or an
+    /// unrecognised failure is ignorance, and must never read as stopped.
+    @Test func aFailedQueryIsGoneOnlyWhenTmuxSaysThePaneIsAbsent() {
+        let absentPane = TmuxError.commandFailed(command: "tmux list-panes", status: 1, output: "can't find pane: %3")
+        let noServer = TmuxError.commandFailed(
+            command: "tmux list-panes", status: 1, output: "no server running on /tmp/tmux-501/tbd-x")
+        #expect(TmuxManager.paneExitState(forFailure: absentPane) == .gone)
+        #expect(TmuxManager.paneExitState(forFailure: noServer) == .gone)
+        let timedOut = TmuxError.timedOut(command: "tmux list-panes", timeout: .seconds(15))
+        let unrecognised = TmuxError.commandFailed(command: "tmux list-panes", status: 1, output: "lost server")
+        let noBinary = TmuxError.commandFailed(
+            command: "tmux list-panes", status: 127, output: "tmux executable is unavailable")
+        for error in [timedOut, unrecognised, noBinary] {
+            guard case .unknown = TmuxManager.paneExitState(forFailure: error) else {
+                Issue.record("\(error) did not read as unknown")
+                continue
+            }
+        }
+    }
+
+    @Test func dryRunReadsAPaneAsGone() async {
+        #expect(await TmuxManager(dryRun: true).paneExitState(server: "tbd-x", paneID: "%3") == .gone)
+    }
+
     @Test func theQueryNamesThePane() {
         #expect(TmuxManager.paneExitStateQuery(server: "tbd-x", paneID: "%3")
             == ["-L", "tbd-x", "list-panes", "-t", "%3", "-F",

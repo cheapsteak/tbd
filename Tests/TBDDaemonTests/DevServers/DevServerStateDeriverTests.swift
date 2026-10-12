@@ -47,6 +47,14 @@ struct DevServerStateDeriverTests {
         #expect(derive(tab: tab(.exited(code: 1)), check: .running)?.state == .running)
     }
 
+    /// A tab that could not be read may still run its command: Unknown,
+    /// never Stopped — even when the `status` command says not running.
+    @Test func anUnreadableTabReadsUnknown() {
+        #expect(derive(tab: tab(.unknown(reason: "timed out")))?.state == .unknown)
+        #expect(derive(tab: tab(.unknown(reason: "timed out")), check: .notRunning)?.state == .unknown)
+        #expect(derive(files: [file()], tab: tab(.unknown(reason: "timed out")))?.state == .running)
+    }
+
     /// Review Focus 3.
     @Test func anExitedTabWithACodeReadsExited() {
         let info = derive(tab: tab(.exited(code: 127)))

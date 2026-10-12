@@ -119,6 +119,26 @@ struct DevServerArchiveTests {
         #expect(f.runner.runs.map(\.command) == ["docker compose ps db", "docker compose stop db"])
     }
 
+    /// A server whose `status` timed out reads *Unknown*; archive stops it
+    /// as `server.stop` would, rather than taking it for stopped.
+    @Test func archiveStopsAServerWhoseStatusTimedOut() async throws {
+        var f = try await Self.makeFixture(); defer { f.tearDown() }
+        let runner = FakeDevServerCommandRunner(outcomes: ["probe": .timedOut])
+        f.lifecycle.devServerOperations = DevServerOperations(
+            db: f.db, tabInspector: f.inspector, commandRunner: runner,
+            stopper: DevServerStopper(commandRunner: runner),
+            runningFiles: DevServerRunningFileStore(directory: f.filesDir),
+            probe: DevServerProcessProbe(info: { _ in nil }), environment: [:])
+        try Data("""
+            [servers.db]
+            command = "docker compose up -d db"
+            status = "probe"
+            stop = "make stop"
+            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(runner.runs.map(\.command) == ["probe", "make stop"])
+    }
+
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {
         var f = try await Self.makeFixture(); defer { f.tearDown() }
         f.lifecycle.devServerOperations = nil

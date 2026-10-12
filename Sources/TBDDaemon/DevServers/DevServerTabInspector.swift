@@ -17,12 +17,22 @@ enum DevServerTabStatus: Sendable, Equatable {
     case exited(code: Int32?)
     /// The tab's window or session no longer exists.
     case gone
+    /// The transport could not be asked — a tmux query that timed out or
+    /// failed without saying the pane is gone. The command may still be
+    /// running: the server reads *Unknown*, a start refuses rather than
+    /// open a second tab, and a stop refuses rather than report success.
+    case unknown(reason: String)
+
+    var isUnknown: Bool {
+        if case .unknown = self { return true }
+        return false
+    }
 
     /// The pid of a running tab, verifiable or not.
     var runningPID: Int32? {
         switch self {
         case .running(let pid, _), .runningUnverifiable(let pid): return pid
-        case .exited, .gone: return nil
+        case .exited, .gone, .unknown: return nil
         }
     }
 }
@@ -55,6 +65,7 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
             case .running(let pid): return .running(pid: pid, expectedStart: nil)
             case .dead(let status): return .exited(code: status)
             case .gone: return .gone
+            case .unknown(let reason): return .unknown(reason: reason)
             }
         case .holder:
             if let status = await holderRegistry?.lastKnownStatus(for: terminal.id) {

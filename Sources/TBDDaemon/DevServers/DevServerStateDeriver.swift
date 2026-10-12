@@ -24,7 +24,7 @@ struct DevServerDerivationInput: Sendable {
 /// The spec's state order: running with URLs (live running file) → running
 /// (`status` exit 0, or TBD's tab still running the command) → exited (TBD's
 /// tab ended, or — once the tab is gone — a saved last output) → unknown
-/// (`status` timed out) → stopped.
+/// (TBD's tab could not be read, or `status` timed out) → stopped.
 enum DevServerStateDeriver {
     static func derive(_ input: DevServerDerivationInput) -> [DevServerInfo] {
         let declaredNames = Set(input.declared.map(\.name))
@@ -68,6 +68,9 @@ enum DevServerStateDeriver {
             let own = saved?.id == tab?.terminal.id ? saved : nil
             exitCode = code ?? own?.exitCode
             lastOutputID = own?.id
+        } else if case .unknown? = tab?.status {
+            // TBD's tab could not be read: its command may still run.
+            state = .unknown
         } else if tab == nil, let saved {
             // An ended holder tab's row does not outlive reconcile; its saved
             // output is then the record of the exit.

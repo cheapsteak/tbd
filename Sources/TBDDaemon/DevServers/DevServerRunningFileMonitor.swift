@@ -129,6 +129,11 @@ actor DevServerRunningFileMonitor {
                 state = "running \(pid)"
             case .exited(let code):
                 state = "exited \(code.map(String.init) ?? "?")"
+            case .unknown:
+                // No answer is not an exit: a worktree the dot already shows
+                // keeps it until a read says otherwise.
+                if running.contains(tab.worktreeID) { next.insert(tab.worktreeID) }
+                state = "unknown"
             case .gone:
                 continue
             }

@@ -1046,6 +1046,18 @@ public struct TmuxManager: Sendable {
         /// `status` is nil when tmux reported none (e.g. the pane died to a signal).
         case dead(status: Int32?)
         case gone
+        /// The query got no usable answer — a timeout, a failed spawn, or a
+        /// failure tmux did not word as the pane or its server being absent.
+        /// Ignorance, never evidence that the pane is gone.
+        case unknown(reason: String)
+    }
+
+    /// A failed `paneExitStateQuery`: `.gone` only when tmux itself answered
+    /// that the pane, its window or its server is not there
+    /// (`TmuxPresenceClassifier`); anything else is `.unknown`.
+    static func paneExitState(forFailure error: Error) -> PaneExitState {
+        if TmuxPresenceClassifier.windowPresence(for: error) == .absent { return .gone }
+        return .unknown(reason: String(describing: error))
     }
 
     /// Selects the line for `paneID` — `list-panes -t <pane>` lists every
@@ -1627,14 +1639,15 @@ public struct TmuxManager: Sendable {
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// `.gone` when the pane or its server no longer exists, and in dry-run.
+    /// `.gone` when tmux answers that the pane or its server no longer
+    /// exists, and in dry-run; `.unknown` when it could not be asked.
     public func paneExitState(server: String, paneID: String) async -> PaneExitState {
         if dryRun { return .gone }
         do {
             let output = try await runTmux(Self.paneExitStateQuery(server: server, paneID: paneID))
             return Self.parsePaneExitState(output, paneID: paneID)
         } catch {
-            return .gone
+            return Self.paneExitState(forFailure: error)
         }
     }
 

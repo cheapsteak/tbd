@@ -47,7 +47,11 @@ struct DevServerOperations: Sendable {
         return repo.path
     }
 
-    func snapshot(worktree: LocalWorktree, runStatusCommands: Bool) async -> DevServerSnapshot {
+    /// `statusFor` limits the `status` commands run to those servers (nil:
+    /// every declared one); the others read as if no command ran.
+    func snapshot(
+        worktree: LocalWorktree, runStatusCommands: Bool, statusFor names: Set<String>? = nil
+    ) async -> DevServerSnapshot {
         let declarations = DevServerDeclarationParser.load(
             worktreePath: worktree.path, repoID: worktree.repoID, environment: environment)
         let scan = runningFiles.scan()
@@ -75,7 +79,7 @@ struct DevServerOperations: Sendable {
             let runner = commandRunner
             let jobs: [(name: String, command: String, cwd: String, env: [String: String])] =
                 declarations.servers.compactMap { server in
-                    guard let status = server.status else { return nil }
+                    guard let status = server.status, names?.contains(server.name) ?? true else { return nil }
                     return (server.name, status,
                             DevServerDeclarationParser.resolvedCwd(server, worktreePath: worktree.path),
                             commandEnvironment(server: server, worktree: worktree, repoPath: repoPath))
@@ -123,14 +127,15 @@ struct DevServerOperations: Sendable {
     /// trusted from the snapshot, which can be a `status` timeout old: a
     /// first-hand pid (a tmux pane, the holder registry's child) is then
     /// anchored by the start time the kill reads at once, and a tab whose pid
-    /// cannot be tied to it is reported, never signalled. Running files are
+    /// cannot be tied to it — or whose state cannot be read at all — is
+    /// reported, never signalled. Running files are
     /// anchored by the start time they recorded.
     func stopRequest(for name: String, in snapshot: DevServerSnapshot, repoPath: String?) async -> DevServerStopRequest {
         let declared = snapshot.declared(name)
         var targets: [DevServerKillTarget] = []
         var unverifiable: [String] = []
         var tabWasRunning = false
-        if let tab = snapshot.tabs[name], tab.status.runningPID != nil {
+        if let tab = snapshot.tabs[name], tab.status.runningPID != nil || tab.status.isUnknown {
             tabWasRunning = true
             switch await tabInspector.status(of: tab.terminal, tmuxServer: snapshot.worktree.tmuxServer) {
             case .running(let pid, let expected?):
@@ -143,6 +148,10 @@ struct DevServerOperations: Sendable {
                     pid \(pid) in the server's tab has no recorded start time, so it cannot be told \
                     apart from a reused pid and was not signalled
                     """)
+            case .unknown(let reason):
+                // Its command may still run: neither signalled nor taken
+                // for stopped.
+                unverifiable.append("the state of the server's tab could not be read (\(reason))")
             case .exited, .gone:
                 break
             }
@@ -168,13 +177,14 @@ struct DevServerOperations: Sendable {
 
     /// Archive's half: stop every server that reads running — TBD's tab, a
     /// live running file, or its declared `status` command (each bounded by
-    /// `statusTimeout`) — in parallel. Tabs are left for archive's own
-    /// teardown, which captures their scrollback.
+    /// `statusTimeout`) — or unknown, as `server.stop` does, in parallel.
+    /// Tabs are left for archive's own teardown, which captures their
+    /// scrollback.
     func stopAllForArchive(worktree: LocalWorktree) async -> [DevServerStopReport] {
         let snapshot = await snapshot(worktree: worktree, runStatusCommands: true)
         let repoPath = await repoPath(for: worktree)
         var requests: [DevServerStopRequest] = []
-        for server in snapshot.servers where server.state == .running {
+        for server in snapshot.servers where server.state == .running || server.state == .unknown {
             requests.append(await stopRequest(for: server.name, in: snapshot, repoPath: repoPath))
         }
         let stopper = self.stopper

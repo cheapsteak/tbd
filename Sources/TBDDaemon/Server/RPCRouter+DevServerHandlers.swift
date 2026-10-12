@@ -88,7 +88,8 @@ extension RPCRouter {
             target: .local(worktree: params.worktreeID, terminal: nil),
             agent: "dev-server")
         let (claimed, busy) = await devServerClaims.claim(names, in: worktree.id, for: .start)
-        let snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
+        let snapshot = await operations.snapshot(
+            worktree: worktree, runStatusCommands: true, statusFor: Set(names))
         let repoPath = await operations.repoPath(for: worktree)
         var outcomes: [DevServerActionOutcome] = []
         for name in names {
@@ -106,6 +107,13 @@ extension RPCRouter {
             if let info = snapshot.info(name), info.state == .running {
                 outcomes.append(.init(name: name, status: .alreadyRunning,
                                       terminalID: info.terminalID, message: "already running"))
+                continue
+            }
+            // Its tab could not be read, so its command may still run: a
+            // second tab would be a duplicate server.
+            if let tab = snapshot.tabs[name], case .unknown(let reason) = tab.status {
+                outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
+                                      message: Self.unreadableTabMessage(reason)))
                 continue
             }
             do {
@@ -214,7 +222,7 @@ extension RPCRouter {
     ) async throws {
         try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { current -> Void in
+        ) { current in
             guard let row = try await self.db.terminals.get(id: expected.id),
                   row.serverName == serverName, row.transport == .tmux,
                   row.tmuxWindowID == expected.tmuxWindowID, row.tmuxPaneID == expected.tmuxPaneID
@@ -274,7 +282,8 @@ extension RPCRouter {
             let claim = await devServerClaims.claim(names, in: worktree.id, for: .stop)
             claimed = claim.claimed
             busy = claim.busy
-            snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
+            snapshot = await operations.snapshot(
+                worktree: worktree, runStatusCommands: true, statusFor: Set(names))
         }
         let actuationID: String
         do {
@@ -299,10 +308,18 @@ extension RPCRouter {
                 continue
             }
             let tab = snapshot.tabs[name]
-            // Nothing to signal and no stop command to run: report it, but
-            // still clear an exited server — close its tab, detach its saved
-            // last output.
-            if info.state != .running && info.state != .unknown && !info.hasStopCommand {
+            // An unreadable tab may still run its command: refuse rather
+            // than report a stop that did not happen.
+            if let tab, case .unknown(let reason) = tab.status {
+                outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
+                                      message: Self.unreadableTabMessage(reason)))
+                continue
+            }
+            // An exited server has nothing running, so neither a signal nor
+            // its declared `stop` applies; a stopped one without a `stop`
+            // has nothing to act on. Either way: report it, and clear an
+            // exited server — close its tab, detach its saved last output.
+            if info.state == .exited || (info.state == .stopped && !info.hasStopCommand) {
                 if let tab {
                     if let problem = await closeServerTab(tab.terminal) {
                         outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
@@ -349,6 +366,10 @@ extension RPCRouter {
         await finishServerActuation(actuationID, outcomes: outcomes)
         await onDevServersChanged?()
         return try RPCResponse(result: DevServerActionResult(outcomes: outcomes))
+    }
+
+    static func unreadableTabMessage(_ reason: String) -> String {
+        "the state of its tab could not be read, so it may still be running; try again (\(reason))"
     }
 
     /// Closes a server's tab with no outcome row of its own (the call's one
