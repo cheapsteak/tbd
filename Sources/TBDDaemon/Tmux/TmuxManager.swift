@@ -1032,6 +1032,35 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_pid}"]
     }
 
+    /// Whether a pane's process is alive, and its exit status once dead. A
+    /// dead pane exists only under `remain-on-exit`, which dev-server tabs set
+    /// at spawn. `|`-separated because `pane_dead_status` is empty while the
+    /// pane lives, and a space separator would collapse that field.
+    public static func paneExitStateQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F",
+         "#{pane_id}|#{pane_dead}|#{pane_dead_status}|#{pane_pid}"]
+    }
+
+    public enum PaneExitState: Sendable, Equatable {
+        case running(pid: Int32)
+        /// `status` is nil when tmux reported none (e.g. the pane died to a signal).
+        case dead(status: Int32?)
+        case gone
+    }
+
+    /// Selects the line for `paneID` — `list-panes -t <pane>` lists every
+    /// pane in that pane's window (see `paneSendTargetQuery`).
+    static func parsePaneExitState(_ output: String, paneID: String) -> PaneExitState {
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count == 4, fields[0] == paneID else { continue }
+            if fields[1] == "1" { return .dead(status: Int32(fields[2])) }
+            guard let pid = Int32(fields[3]), pid > 0 else { return .gone }
+            return .running(pid: pid)
+        }
+        return .gone
+    }
+
     public static func paneCurrentPathQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_path}"]
     }
@@ -1596,6 +1625,17 @@ public struct TmuxManager: Sendable {
         if dryRun { return try dryRunPanePID?(server, paneID) ?? "0" }
         let args = Self.panePIDQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `.gone` when the pane or its server no longer exists, and in dry-run.
+    public func paneExitState(server: String, paneID: String) async -> PaneExitState {
+        if dryRun { return .gone }
+        do {
+            let output = try await runTmux(Self.paneExitStateQuery(server: server, paneID: paneID))
+            return Self.parsePaneExitState(output, paneID: paneID)
+        } catch {
+            return .gone
+        }
     }
 
     /// The pane's current working directory (`#{pane_current_path}`). Used by
