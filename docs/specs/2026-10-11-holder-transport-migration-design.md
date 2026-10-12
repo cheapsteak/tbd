@@ -108,12 +108,18 @@ leg's typed-input rail is left exactly as it is.
   transport, blanks the tmux coordinates, records the holder's processes and
   clears the dead process's session and activity facts together. The
   replacement carries a freshly minted incarnation, so a hook from it is
-  attributable to it rather than to what was killed.
+  attributable to it rather than to what was killed. **A command line typed
+  into that shell and not yet run is discarded.** The rails that protect typed
+  input belong to the park, and a shell never reaches a park — nothing it could
+  preserve exists — while the process-table rail that stands in for them sees a
+  half-typed line as an idle shell, because it is one. A fleet run therefore
+  discards whatever is sitting unsent at every idle shell prompt. That is the
+  cost of moving a shell, and it is why nothing moves without a gesture.
 - **Agents migrate through `--resume`** on the session id the row records, the
   same argv a wake builds.
-- **Three rows that name no conversation are skipped rather than moved,
+- **Four rows that name no conversation are skipped rather than moved,
   each with its own reason.** "No conversation to resume" is what sends a row
-  down the shell move, and for these three the move available would start a
+  down the shell move, and for these four the move available would start a
   bare login shell where something else belongs — so each is turned away where
   eligibility is decided, and each reason says what the person can do instead.
   - **A Codex tab.** Moving it properly needs Codex's own launch preparation —
@@ -132,10 +138,16 @@ leg's typed-input rail is left exactly as it is.
     kill the hook mid-run, which the creation flow reports as a hook failure
     with the hook's work lost. The skip is unconditional: the tab is transient,
     so skipping it costs nothing even once its hook has finished, and the row
-    alone cannot say whether the creation flow is still waiting on it. A
-    `setup` hook tab is deliberately not skipped — nothing waits on it, so it
-    moves like any other shell and the busy rail above is what protects it
-    while its hook runs.
+    alone cannot say whether the creation flow is still waiting on it.
+  - **A `setup` hook tab**, for a case no rail can see. A setup hook that
+    *failed* has `exec $SHELL`'d, so a tab somebody deliberately kept open to
+    read the failure holds an idle shell: the process-table rail finds nothing
+    running, the row looks eligible, and the move kills its window with no
+    Closed Terminals capture — destroying exactly the output the tab exists to
+    show. The skip is unconditional for the same reason the pre-session one is,
+    and it costs less: the tab is TBD-created and closing it is what one does
+    with it. `finishAutoCloseSetup` is a live observer of it too whenever
+    `auto_close_setup_enabled` is on, which the row alone cannot see either.
 - **The row keeps its identity**: id, label, pin, profile and history entries
   all survive every path, and on the park → rewrite → wake path the Claude
   session id and transcript path do too, because there only the transport
@@ -168,6 +180,18 @@ Each session's migration is claim-free but ordered: park, rewrite, wake.
   holder-backed, which the ordinary wake path already handles: its next wake
   spawns a holder and resumes the session. The worst case is a session that
   comes back on the holder later rather than now.
+
+  This is **its own reported outcome**, not a refusal, and the distinction is
+  load-bearing in both directions. A refusal says the session is where it was,
+  so reporting this one as a refusal would tell a person a session "can't be
+  moved" that is already on the holder, and would leave the run's migrated
+  count short of what it did. And the rewritten row is **published** for this
+  outcome exactly as for a clean one: the row is holder-backed with its tmux
+  coordinates blanked, so a client that never heard about it keeps attaching to
+  a window the migration has killed, and spends a recovery attempt on a
+  `terminal.recreateWindow` the daemon refuses for a holder row. What a person
+  reads is what happened and what it costs — it is on the holder, and it starts
+  there when the tab is focused or when it is next woken.
 
 A shell's move is the one that stops a program before it writes anything, so it
 is worth saying which states it can leave behind. There are two, and no third.
@@ -212,12 +236,46 @@ back would mean moving working sessions off the transport they now run on.
 ## Surfaces
 
 One RPC method, exposed three ways: a per-session action in the app's row
-context menu, the CLI equivalent, and a fleet-wide run composed from the
-per-session one. The run's report is its product — a person needs to know what
-did not move and why, not merely that something did.
+context menu, the CLI equivalent, and a fleet-wide run. The run's report is its
+product — a person needs to know what did not move and why, not merely that
+something did.
+
+**The fleet run is composed from the per-session move on both surfaces**, and
+each surface has its own reason for that. The daemon's `--all` loops its own
+single-session move, so the actuation record and the publication of each
+rewritten row land at that session's own moment rather than after the whole
+loop: a run's worth of stale transports is a run's worth of panes attached to
+windows the migration has already killed. The app does not call `--all` at all —
+it iterates the non-holder rows it holds and sends one single-session call each.
+A sequential park-and-respawn of a hundred sessions outruns the app's RPC
+receive deadline, and when it does the call throws while the daemon keeps
+migrating: the person is told the daemon is unresponsive, every veil drops at
+once, and the report this run exists to produce is lost. One call per row has no
+deadline to outrun, and it gives every row the same veil and the same wait for
+adoption the single gesture already has.
 
 The actions are unflagged. A gesture that does nothing until somebody asks for
 it needs no switch, which is why "Hibernate now" has never had one.
+
+**They are refused outright while a watch mode is live.** Nightwatch and
+Daywatch never run with the pty-holder transport — on the holder the watch
+desk's liveness check reads an empty tmux window id and leaks one Claude
+session per tick — so the rule is absolute and two doors already enforce it:
+the transport flag refuses to come on while a mode is live, and a mode refuses
+to come on while the holder hazard is. This gesture *creates* holder-backed
+sessions, which makes it the third door, and it is guarded in the same
+vocabulary ([spec](2026-09-22-nightwatch-deprecation-holder-gate-design.md)).
+
+The refusal is per **call** rather than per session, because the hazard is the
+transport and not any one row: nothing is written, nothing is broadcast, nothing
+is migrated. The daemon owns it, which is what makes it hold for the CLI and for
+an app build older than the gate; the app additionally stops offering the
+gesture, so nobody clicks a button that cannot work. A refusal rather than a
+flag, because the remedy is something the person can do — turn the watch mode
+off — and because the state is reachable rather than theoretical: it is exactly
+where the mode refusal sends somebody who wants to keep using Nightwatch on
+tmux, and from there one fleet-wide run would put the forbidden pair live until
+the next daemon boot silently turned their watch mode off.
 
 ## The backstop
 
@@ -235,6 +293,11 @@ without a daemon-initiated migration.
   it ships behind a default-off flag of its own when it is built.
 - **Automatic or wake-time migration.** A session is never moved by the daemon's
   own decision. The backstop refusal covers the row nobody moved.
+- **Moving a session back to tmux.** There is no reverse gesture, and none is
+  planned: the whole point of this one is to drain the transport that is being
+  deleted, so a way back would be a way to re-enter a state the next release
+  removes. A session that must run on tmux is closed and opened again with the
+  transport flag off.
 
 ## Reconcilers
 
@@ -251,11 +314,15 @@ fleet run's worth of residue. The migration therefore kills the window as the
 last step of the rewrite, and the reconcile pass's untracked-window sweep is the
 backstop rather than the mechanism. It kills a window only after the rewrite has
 landed, and only through the pane-ownership guard every other teardown by
-DB-recorded coordinate goes through: the kill proceeds when the pane answers
-with this terminal's id, when it carries no identity to read, or when its whole
-tmux server is positively gone, and it refuses when the pane names a different
-terminal or when the consultation could not be run at all. So a coordinate tmux
-has recycled onto a stranger's pane costs that stranger nothing, while a pane
+DB-recorded coordinate goes through: the kill proceeds on all four of that
+guard's permitting answers — the pane answers with this terminal's id, the pane
+carries no identity to read, tmux positively reports the pane *absent* on a
+server it can reach, or the whole tmux server is positively gone — and it
+refuses when the pane names a different terminal or when the consultation could
+not be run at all. The absent-pane arm is not a technicality: the shell move's
+already-gone-window case depends on it, since that is the state a row whose
+window died before anybody reached for this gesture arrives in. So a coordinate
+tmux has recycled onto a stranger's pane costs that stranger nothing, while a pane
 that answers *without* an identity is still retired — the ordinary state of one
 whose stamp and start command are both unreadable, and not evidence of anybody
 else. A consultation that failed outright is "we do not know" rather than
@@ -267,28 +334,34 @@ ends a running program, so a recycled coordinate would take a stranger's live
 session rather than an idle leftover. It asks the same question through the same
 guard, and a refusal writes nothing at all.
 
-**An exit-stamped row is refused rather than moved while its pane is in use.**
+**An exit-stamped row is skipped rather than moved while its pane is in use.**
 `.exited` parks a row whose pane's shell is still alive and usable, which is the
 whole point of that stamp: the pane is the one the person was sitting in when
 the agent left, and they may have started something in it since. Moving the row
 would blank its coordinates and retire that window, taking their process with
 it. So the migration asks the process table the same question a wake asks before
 its own `respawn-window -k` — is the pane's foreground pid its own shell? — and
-reports the same refusal when it is not. An unreadable pid proceeds, exactly as
-it does for the wake: a pane tmux cannot answer for is not evidence that a
-process is there.
+reports the wake's own reason as a *skip* when it is not: the person stops what
+is running in the pane and runs the migration again, which is what a skip means
+and a refusal does not. An unreadable pid proceeds, exactly as it does for the
+wake: a pane tmux cannot answer for is not evidence that a process is there.
 
 ## Testing
 
 - An idle agent session migrates: the transport flips, the id, Claude session id
-  and transcript path are unchanged, the tmux coordinates are blanked, and the
-  respawn carries `--resume` with the recorded session id.
+  and transcript path are unchanged, and the tmux coordinates are blanked. The
+  session resumes through the ordinary wake — everything above that path's
+  single transport branch is already transport-independent, the `claude --resume`
+  argv included — so what is asserted is that the wake was called and
+  that the row kept the session id it will resume on, not that this path builds
+  an argv of its own. It builds none.
 - A parked session migrates with nothing spawned at all — asserted on a
   spawn-counting double, because "no respawn" is the whole difference between
   the two paths.
 - A busy session is skipped and named, and its row is untouched.
 - A migrated session's tmux window is retired, on the parked path and the
-  running one, while a rewrite that was refused leaves the window alone.
+  running one, while a rewrite that was refused leaves the window alone. A row
+  that names no tmux window asks tmux to kill nothing and still moves.
 - The retire's pane-ownership guard is enumerated beside the other six
   teardown-by-coordinate sites: it refuses both a pane naming a different
   terminal and a consultation that could not be run, writing nothing to the row
@@ -310,7 +383,9 @@ process is there.
   written, while a pane holding only its own idle shell moves, and so does one
   whose pid tmux could not read.
 - Each state a failed shell move can land in: a spawn that fails leaves the row
-  on `tmux` with its coordinates intact, and a write that loses its
+  on `tmux` with its coordinates intact, a spawn the registry declines because
+  the session already has a holder says another move won rather than repeating
+  the spawn failure's recovery advice, and a write that loses its
   compare-and-set abandons the holder and reports the race skip. A worktree
   that gives no local directory refuses before anything is touched. Its kill
   joins the pane-ownership enumeration, refusing both a stranger's pane and an
@@ -323,18 +398,40 @@ process is there.
   rails, with nothing killed, spawned or written: a Codex tab by kind and by
   label, a Claude tab with no session yet (while the same tab *with* a session
   stays eligible, so the skip is about the conversation and not the kind), and
-  a pre-session hook tab including an idle one. A row with no `kind` at all
-  reads as a shell and still moves.
+  a hook tab of either kind including an idle one — while a plain `shell` tab
+  with no conversation still moves, which is what keeps the hook skips about
+  the label rather than about shells. A row with no `kind` at all reads as a
+  shell and still moves.
+- A wake that fails after the rewrite is reported as its own outcome rather
+  than as a refusal, for each shape of wake answer, and the row it names really
+  is holder-backed. Its rewritten row is published like a clean migration's,
+  carrying the new transport and the blanked coordinates.
+- A fleet run publishes each row before it starts the next one, observed from
+  inside the second row's own move, and writes one actuation row per session,
+  each naming that session: the moved one dispatched, a busy one refused as
+  not-eligible with the rail's reason, and one that moved without resuming as a
+  transport failure.
+- The migration is refused outright with a watch mode live — for each mode, with
+  nothing migrated, nothing broadcast and no actuation row — and runs normally
+  with the mode off. The app's offer follows the same fact in both directions.
+- The app's fleet run sends one single-session call per non-holder row and none
+  for a holder row, veils the awake rows and not the parked ones, and keeps the
+  report of the rows already moved when a later call throws.
 - A session already on the holder is answered `.alreadyHolder` with nothing
   touched, for an agent tab and for a shell.
 - A session with unsent typed input is skipped with the rail's reason, proving
   the migration park honours the rails rather than overriding them.
 - An unspawnable holder refuses and leaves the row exactly as it was, in both
-  the running and parked variants.
+  the running and parked variants, and a daemon with no holder registry at all
+  refuses the same way — the registry is where the launch's inherited
+  environment comes from, so a move without one could compose no launch even if
+  it could spawn.
 - A rejected compare-and-set is reported as skipped, with the row consistent.
 - A fleet-wide run containing one refusal still migrates the rest and reports
   the one.
-- The backstop refuses a `tmux` row's wake with its stated reason.
+- The backstop refuses a `tmux` row's wake with its stated reason, and that
+  reason names the session, because the command it hands a stranded person is
+  the whole product of the refusal.
 - Any wait introduced by the migration takes an injected clock.
 
 ## Rejected alternatives
