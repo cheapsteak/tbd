@@ -57,11 +57,49 @@ struct DevServerRunningFileMonitorTests {
                        worktreePath: path, clock: clock, monitor: monitor)
     }
 
-    private func writeFile(_ f: Fixture, pid: Int32) throws {
+    private func writeFile(
+        _ f: Fixture, pid: Int32,
+        endpoints: [DevServerEndpoint] = [DevServerEndpoint(name: "app", url: "http://localhost:3000")]
+    ) throws {
         try DevServerRunningFileStore(directory: f.dir).write(DevServerRunningFile(
-            root: f.worktreePath, server: "web",
-            endpoints: [DevServerEndpoint(name: "app", url: "http://localhost:3000")],
+            root: f.worktreePath, server: "web", endpoints: endpoints,
             pid: pid, startTime: Self.start.timeIntervalSince1970))
+    }
+
+    /// The running set does not move, but the server list's Open buttons do:
+    /// a re-report that adds an endpoint must reach the app.
+    @Test func newEndpointsForAnAlreadyRunningWorktreeBroadcast() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        f.box.set([500: .init(startTime: Self.start, isZombie: false)])
+        try writeFile(f, pid: 500)
+        await f.monitor.refresh()
+        #expect(f.box.deltaCount == 1)
+        try writeFile(f, pid: 500, endpoints: [
+            DevServerEndpoint(name: "app", url: "http://localhost:3000"),
+            DevServerEndpoint(name: "storybook", url: "http://localhost:6006"),
+        ])
+        await f.monitor.refresh()
+        #expect(await f.monitor.runningWorktreeIDs() == [f.worktree.id])
+        #expect(f.box.deltaCount == 2, "an endpoint change must broadcast")
+        await f.monitor.refresh()
+        #expect(f.box.deltaCount == 2, "an unchanged fingerprint must not broadcast")
+    }
+
+    /// A worktree a running file already marks keeps its dot when its server
+    /// tab exits, but the tab's server now reads Exited.
+    @Test func aServerTabExitingBesideALiveFileBroadcasts() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        f.box.set([500: .init(startTime: Self.start, isZombie: false)])
+        try writeFile(f, pid: 500)
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "api")
+        f.inspector.set(.running(pid: 600, expectedStart: nil), for: tab.id)
+        await f.monitor.refresh()
+        #expect(f.box.deltaCount == 1)
+        f.inspector.set(.exited(code: 1), for: tab.id)
+        await f.monitor.refresh()
+        #expect(await f.monitor.runningWorktreeIDs() == [f.worktree.id])
+        #expect(f.box.deltaCount == 2)
     }
 
     @Test func aLiveFileMarksItsWorktreeAndBroadcastsOnce() async throws {

@@ -21,6 +21,9 @@ actor DevServerRunningFileMonitor {
     private let clock: any Clock<Duration>
 
     private var running: Set<UUID> = []
+    /// Per worktree, a sorted description of its live running files and its
+    /// server tabs' states: the facts a server list renders.
+    private var fingerprints: [UUID: [String]] = [:]
     /// Bumped by every `refresh()`; only the newest one may commit, so two
     /// refreshes interleaving across their awaits cannot leave the older
     /// reading in place.
@@ -80,8 +83,11 @@ actor DevServerRunningFileMonitor {
         await refresh()
     }
 
-    /// Recomputes the summary; broadcasts `.devServersChanged` only when it
-    /// moved, so a quiet machine stays silent.
+    /// Recomputes the summary and each worktree's fingerprint; broadcasts
+    /// `.devServersChanged` when either moved, so a quiet machine stays
+    /// silent while anything a server list shows — a running file's
+    /// endpoints or pid, a server tab's running or exited state — reaches the
+    /// app even when the set of running worktrees did not change.
     func refresh() async {
         generation += 1
         let mine = generation
@@ -100,26 +106,46 @@ actor DevServerRunningFileMonitor {
         }
 
         var next = Set<UUID>()
+        var nextFingerprints: [UUID: [String]] = [:]
         let attributed = DevServerRunningFileStore.attribute(runningFiles.scan().entries, worktreePaths: paths)
-        for (id, entries) in attributed
-        where entries.contains(where: { DevServerRunningFileStore.liveness(of: $0.file, probe: probe) == .live }) {
-            next.insert(id)
-        }
-
-        // Plan decision D9: a TBD-started server tab counts while its command
-        // runs, and the recheck is what notices it exiting. One tab read per
-        // server tab; worktrees already marked by a file need none.
-        let serverTabs = ((try? await db.terminals.list()) ?? []).filter { $0.serverName != nil }
-        for tab in serverTabs where !next.contains(tab.worktreeID) {
-            guard let tmuxServer = tmuxServers[tab.worktreeID] else { continue }
-            if case .running = await tabInspector.status(of: tab, tmuxServer: tmuxServer) {
-                next.insert(tab.worktreeID)
+        for (id, entries) in attributed {
+            for entry in entries where DevServerRunningFileStore.liveness(of: entry.file, probe: probe) == .live {
+                next.insert(id)
+                nextFingerprints[id, default: []].append(Self.fingerprint(of: entry.file))
             }
         }
 
-        guard mine == generation, next != running else { return }
+        // Plan decision D9: a TBD-started server tab counts while its command
+        // runs, and the recheck is what notices it exiting. Every server tab
+        // is read — not only those in worktrees no file marks — because a
+        // tab's exit changes what the server list shows either way.
+        let serverTabs = ((try? await db.terminals.list()) ?? []).filter { $0.serverName != nil }
+        for tab in serverTabs {
+            guard let tmuxServer = tmuxServers[tab.worktreeID], let name = tab.serverName else { continue }
+            let state: String
+            switch await tabInspector.status(of: tab, tmuxServer: tmuxServer) {
+            case .running(let pid, _):
+                next.insert(tab.worktreeID)
+                state = "running \(pid)"
+            case .exited(let code):
+                state = "exited \(code.map(String.init) ?? "?")"
+            case .gone:
+                continue
+            }
+            nextFingerprints[tab.worktreeID, default: []].append("tab \(tab.id.uuidString) \(name) \(state)")
+        }
+        nextFingerprints = nextFingerprints.mapValues { $0.sorted() }
+
+        guard mine == generation, next != running || nextFingerprints != fingerprints else { return }
         running = next
+        fingerprints = nextFingerprints
         broadcast(.devServersChanged)
+    }
+
+    /// What the app shows for one live running file.
+    private static func fingerprint(of file: DevServerRunningFile) -> String {
+        let endpoints = file.endpoints.map { "\($0.name)=\($0.url)" }.joined(separator: ",")
+        return "file \(file.server) \(file.pid) \(file.startTime) \(endpoints)"
     }
 
     /// Watches the directory itself: an entry added, removed or renamed in it
