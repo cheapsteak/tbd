@@ -4,17 +4,25 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to
-/// every other call site that tears down a tmux window by DB-recorded
-/// coordinate — `terminal.delete` (`TerminalDeletePaneOwnershipTests`) was
-/// the first, but `forgetWorktree`, `scratch.delete`'s teardown,
-/// `terminal.recreateWindow`'s non-Claude-resumable branch, the transport
-/// migration's window retire and the running-shell move's program stop all
-/// `kill-window`
-/// the exact same way and share the exact same hazard: a tmux server restart
-/// resets window/pane numbering, and several worktrees of one repo share a
-/// server, so a stale row's coordinate can collide with an unrelated live
-/// terminal's.
+/// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to every
+/// other call site that tears down a tmux window by DB-recorded coordinate.
+/// There are seven. `terminal.delete` is the first and is covered by
+/// `TerminalDeletePaneOwnershipTests`; the other six each have a `MARK:`
+/// section below:
+///
+/// - `captureThenKillWindow`, shared by the archive path and the
+///   vanished-worktree reconcile sweep
+/// - the transport migration's window retire, for a parked row
+/// - the running-shell move's program stop
+/// - `forgetWorktree`
+/// - `scratch.delete`'s teardown
+/// - `terminal.recreateWindow`, whose shell and codex branches carry the guard
+///   separately and are tested separately
+///
+/// All of them `kill-window` the exact same way and share the exact same
+/// hazard: a tmux server restart resets window/pane numbering, and several
+/// worktrees of one repo share a server, so a stale row's coordinate can
+/// collide with an unrelated live terminal's.
 ///
 /// Every refusal case runs twice: once against a pane that positively names a
 /// stranger, and once against a probe that could not run at all (a wedged

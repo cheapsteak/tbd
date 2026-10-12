@@ -279,13 +279,18 @@ struct TerminalTransportMigratorTests {
         return try #require(try await fixture.db.terminals.get(id: created.id))
     }
 
-    private static func holderRow(_ fixture: Fixture) async throws -> Terminal {
+    private static func holderRow(
+        _ fixture: Fixture,
+        kind: TerminalKind? = .claude,
+        label: String = TerminalLabel.claudeCode,
+        claudeSessionID: String? = sessionID
+    ) async throws -> Terminal {
         let created = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id,
             tmuxWindowID: "", tmuxPaneID: "",
-            label: TerminalLabel.claudeCode,
-            claudeSessionID: sessionID,
-            kind: .claude,
+            label: label,
+            claudeSessionID: claudeSessionID,
+            kind: kind,
             transport: .holder,
             holderPID: 9101, childPID: 9102)
         return try #require(try await fixture.db.terminals.get(id: created.id))
@@ -647,12 +652,33 @@ struct TerminalTransportMigratorTests {
     func aShellMoveThatLosesItsRaceIsReportedAsTheRaceSkip() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
 
         let outcome = await fixture.recordingMigrator(shellMoveOutcome: .lostTheRace)
             .migrate(terminalID: row.id)
 
         #expect(outcome == .skipped(reason: TerminalTransportMigrator.raceSkip))
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .tmux)
+    }
+
+    /// A busy pane is reported as a SKIP, not a refusal: it names a state the
+    /// person can change, which is the other column of a fleet run's report —
+    /// "change this and try again" rather than "can't be moved until this
+    /// changes".
+    @Test("a shell move's busy pane is reported as a skip, with its reason")
+    func aShellMovesBusyPaneIsReportedAsASkip() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
+
+        let outcome = await fixture.recordingMigrator(
+            shellMoveOutcome: .busy(reason: "something is running in it"))
+            .migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(reason: "something is running in it"))
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .tmux)
     }
@@ -664,7 +690,8 @@ struct TerminalTransportMigratorTests {
     func aShellMovesRefusalIsCarriedThroughVerbatim() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
 
         let outcome = await fixture.recordingMigrator(
             shellMoveOutcome: .refused(reason: "no holder for you"))
@@ -746,7 +773,8 @@ struct TerminalTransportMigratorTests {
     func aRunningShellWhoseHolderCannotBeStartedIsRefused() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
 
         let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
 
@@ -774,6 +802,27 @@ struct TerminalTransportMigratorTests {
         #expect(await fixture.recordingMigrator().migrate(terminalID: row.id) == .alreadyHolder)
         #expect(await fixture.parks.isEmpty)
         #expect(await fixture.wakes.isEmpty)
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after == row)
+    }
+
+    /// A shell that is already holder-backed. Worth its own case beside the
+    /// Claude one: the shell path is the branch that would otherwise reach it
+    /// first, and `.alreadyHolder` has to come before every skip.
+    @Test("a holder-backed shell is left alone entirely")
+    func aHolderBackedShellIsLeftAloneEntirely() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.holderRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
+
+        #expect(await fixture.recordingMigrator().migrate(terminalID: row.id) == .alreadyHolder)
+        #expect(await fixture.shellMoves.isEmpty,
+                "a session already on the holder was restarted")
+        #expect(await fixture.parks.isEmpty)
+        #expect(await fixture.wakes.isEmpty)
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the migration killed a window for a row already on the holder: \(fixture.tmuxArgv.all)")
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after == row)
     }

@@ -192,11 +192,13 @@ actor TerminalTransportMigrator {
         //
         // The test is the row's own `claudeSessionID`, not `isClaudeResumable`,
         // because `performHibernate`'s refusal reads exactly this column: this
-        // branch therefore takes precisely the rows the park would turn away,
-        // and no others. `isClaudeResumable` is a wider question — it also
-        // answers false for a Codex row and for a non-agent kind that *does*
-        // name a conversation — and a running Claude session must still go
-        // park, rewrite, wake.
+        // branch therefore takes precisely the rows the park would turn away.
+        // What keeps it to SHELLS is `TransportMigrationEligibility`, above:
+        // the three kinds of row that name no conversation and must not become
+        // a bare login shell — a Codex tab, a Claude tab whose session has not
+        // begun, a pre-session hook tab — are each skipped there with their own
+        // reason, so by here "no conversation" means "a shell". A running
+        // Claude session with a conversation still goes park, rewrite, wake.
         //
         // The `isParked` half is belt-and-braces rather than a case that
         // arises: every park writes the session id it parks (`setHibernated`,
@@ -211,6 +213,11 @@ actor TerminalTransportMigrator {
                 return .migrated
             case .lostTheRace:
                 return .skipped(reason: Self.raceSkip)
+            case .busy(let reason):
+                // A skip, not a refusal: the person stops what is running in
+                // the pane and runs the migration again.
+                logger.debug("transport migration: skipping \(terminalID, privacy: .public) — \(reason, privacy: .public)")
+                return .skipped(reason: reason)
             case .refused(let reason):
                 return .refused(reason: reason)
             }

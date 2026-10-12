@@ -82,4 +82,71 @@ import Testing
         let t = makeTerminal(transport: .holder, kind: .codex, claudeSessionID: nil)
         #expect(TransportMigrationEligibility.decide(t) == .alreadyHolder)
     }
+
+    // A Claude tab whose agent is still starting up, or whose session hook
+    // never fired, names no conversation either — and that happens in the
+    // field. Without its own skip it would reach the running-shell move and
+    // have a live agent killed and replaced by a bare login shell in a tab
+    // still reading Claude.
+    @Test func aClaudeTabWithNoConversationYetIsSkippedWithItsOwnReason() {
+        let t = makeTerminal(kind: .claude, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.claudeWithoutConversationSkip))
+    }
+
+    /// The same row WITH a conversation is eligible — which is what makes the
+    /// skip above about the missing session rather than about the kind.
+    @Test func aClaudeTabWithAConversationIsEligible() {
+        let t = makeTerminal(kind: .claude, claudeSessionID: "session-1")
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
+    }
+
+    /// A nil `kind` reads as a shell, the `(kind ?? .shell)` idiom the rest of
+    /// the daemon uses for a row written before kinds existed. Such a row must
+    /// still be movable, or it would be stranded on tmux forever.
+    @Test func aKindlessRowWithNoSessionIDReadsAsAShellAndIsEligible() {
+        let t = makeTerminal(kind: nil, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
+    }
+
+    // A pre-session hook tab is a shell with no session id, so without its own
+    // skip it is eligible — and a fleet run during a worktree creation would
+    // kill the hook mid-run, which the creation flow reports as a hook failure
+    // with the hook's work lost.
+    @Test func aPreSessionHookTabIsSkippedWithItsOwnReason() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.preSession, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.preSessionSkip))
+    }
+
+    /// Unconditional, deliberately: the tab is transient, so skipping it costs
+    /// nothing even once its hook has finished, and a row-only view cannot see
+    /// whether the creation flow is still waiting on it. An idle one is
+    /// therefore skipped too.
+    @Test func anIdlePreSessionHookTabIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.preSession,
+            claudeSessionID: nil, activityState: .idle)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.preSessionSkip))
+    }
+
+    /// And `.alreadyHolder` still comes first for it, like every other row.
+    @Test func aPreSessionHookTabOnTheHolderIsAlreadyWhereItBelongs() {
+        let t = makeTerminal(
+            transport: .holder, kind: .shell,
+            label: TerminalLabel.preSession, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t) == .alreadyHolder)
+    }
+
+    /// A `setup` hook tab is deliberately NOT skipped here: it is a parallel
+    /// tab nothing waits on, so it moves like any other shell, and the
+    /// coordinator's busy rail is what protects it while its hook is still
+    /// running.
+    @Test func aSetupHookTabIsEligible() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.setup, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
+    }
 }

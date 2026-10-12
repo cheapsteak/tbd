@@ -1527,13 +1527,16 @@ public struct TerminalStore: Sendable {
     /// like a resume. The incarnation that helper mints is overwritten with the
     /// caller's, which is the one the live job actually carries.
     ///
-    /// **Two of that helper's columns are put back: the label and the kind.**
-    /// The recreate path turns a dead agent tab INTO a shell tab, so relabelling
-    /// and re-kinding the row is its job. This move is not that event — the tab
-    /// is already whatever it was, and a session that moves transport is meant
-    /// to come back as the same tab. A hook tab the person can still read the
-    /// name of would otherwise be renamed `shell` by a gesture that promised to
-    /// change nothing but where the session runs.
+    /// **One of that helper's columns is put back: the label.** It is not a
+    /// display detail — `WorktreeLifecycle+Recovery` and the app's
+    /// `PrimaryTerminal` both FIND a tab by its label — and a session that
+    /// moves transport is meant to come back as the same tab, so a hook tab
+    /// renamed `shell` by this gesture would be found by nothing. The `kind`
+    /// is deliberately NOT put back: the helper's `shell` is the truth about
+    /// what is now running, and preserving an agent kind here would mint a row
+    /// shape that has never existed — holder-backed, agent-kinded, with no
+    /// session — for which the daemon would keep paying transcript and
+    /// statusline work on behalf of a bare login shell.
     ///
     /// `startedAt` doubles as the activity observation's timestamp: it is the
     /// moment the replacement job started, which is when this row's `unknown`
@@ -1556,10 +1559,8 @@ public struct TerminalStore: Sendable {
                 return nil
             }
             let label = record.label
-            let kind = record.kind
             _ = resetRecreatedShellLifecycle(record: &record, at: startedAt)
             record.label = label
-            record.kind = kind
             record.sessionIncarnationID = incarnationID.uuidString
             record.transport = TerminalTransport.holder.rawValue
             record.tmuxWindowID = ""

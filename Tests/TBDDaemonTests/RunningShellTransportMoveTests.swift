@@ -100,11 +100,21 @@ struct RunningShellTransportMoveTests {
     /// `beforeTheWrite` runs inside the oracle's spawn, i.e. after the kill and
     /// before the one guarded write — the window in which a window-died
     /// recovery can rotate the row's incarnation and take the race.
+    /// `panePID` and `paneForegroundPID` drive the busy rail, exactly as they
+    /// do in the migrator's own fixture: a foreground pid equal to the pane's
+    /// pid is an idle interactive shell (the default — `FakeInspector` answers
+    /// with the pane pid when given nil), a different one is something the
+    /// person started, and a pane pid of `"0"` is an unreadable one.
+    ///
+    /// `windowPresence` is what the kill's failure branch probes.
     private static func makeFixture(
         holderSpawnable: Bool = true,
         spawnThrows: Bool = false,
         paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil,
+        panePID: String = "4100",
+        paneForegroundPID: Int32? = nil,
         killWindowThrows: Bool = false,
+        windowPresence: TmuxPresence = .alive,
         beforeTheWrite: (@Sendable (TBDDatabase, UUID) async -> Void)? = nil
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdrstm")
@@ -119,7 +129,9 @@ struct RunningShellTransportMoveTests {
                 guard killWindowThrows else { return nil }
                 return TmuxError.timedOut(command: "kill-window", timeout: .seconds(5))
             },
-            dryRunPaneSendTarget: paneSendTarget)
+            dryRunPaneSendTarget: paneSendTarget,
+            dryRunPanePID: { _, _ in panePID },
+            dryRunWindowPresence: { _, _ in windowPresence })
 
         let repoPath = "\(home)/repo"
         try FileManager.default.createDirectory(
@@ -136,6 +148,8 @@ struct RunningShellTransportMoveTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
+            paneProcessInspector: FakeInspector(
+                claudePID: nil, foregroundPID: paneForegroundPID),
             actuationLog: makeTestActuationLog(tag: "running-shell-move"))
         // The registry is wired in every arm: its `environment` is what the
         // launch's own shell invocation is resolved from, and it must never be
@@ -220,7 +234,10 @@ struct RunningShellTransportMoveTests {
 
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.id == row.id)
-        #expect(after.label == row.label)
+        // The label is not a display detail: `WorktreeLifecycle+Recovery` and
+        // the app's `PrimaryTerminal` both FIND a tab by it, so a hook tab
+        // renamed `shell` by this gesture would be found by nothing.
+        #expect(after.label == row.label, "the move renamed the tab")
         #expect(after.pinnedAt == row.pinnedAt)
         #expect(after.kind == row.kind)
         #expect(after.worktreeID == row.worktreeID)
@@ -350,12 +367,99 @@ struct RunningShellTransportMoveTests {
                 "a refused move changed the row")
     }
 
+    /// The busy rail, and the only one a shell can have: a shell fires no
+    /// hooks, so its activity state is never written and the eligibility rails
+    /// that skip a busy session can never fire for one. The process table
+    /// answers instead, and a fleet-wide run is exactly the case where the
+    /// person did not pick this tab.
+    ///
+    /// `busy`, not `refused`, because it is a state they can change — which is
+    /// a different column of a fleet run's report.
+    @Test("a pane running something other than its own shell is left alone and named")
+    func aPaneRunningSomethingElseIsLeftAloneAndNamed() async throws {
+        let fixture = try await Self.makeFixture(
+            panePID: "4100", paneForegroundPID: 4242)
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
+
+        #expect(outcome == .busy(
+            reason: HibernationCoordinator.shellMovePaneBusyRefusal(pid: 4242)))
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the move stopped something the person started: \(fixture.tmuxArgv.all)")
+        #expect(await fixture.launches.isEmpty, "the move started a holder anyway")
+        #expect(try await fixture.db.terminals.get(id: row.id) == row,
+                "a busy session's row was changed")
+    }
+
+    /// The rail's other two legs, both of which must proceed. A foreground pid
+    /// equal to the pane's own is an idle interactive shell — that is the
+    /// ordinary case and the one the whole feature exists for. A pane pid tmux
+    /// cannot answer for is not evidence that a process is there, so it
+    /// proceeds too, exactly as it does for the wake; refusing on it would
+    /// strand the row behind a probe failure with no way back.
+    @Test(arguments: ["4100", "0"])
+    func anIdleOrUnreadablePaneStillMoves(_ panePID: String) async throws {
+        let fixture = try await Self.makeFixture(panePID: panePID)
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
+
+        #expect(try await fixture.db.terminals.get(id: row.id)?.transport == .holder)
+    }
+
+    /// A worktree that gives the move no local directory. `getLocal` answers
+    /// nil for a row that could not be read AND for a perfectly readable
+    /// REMOTE row, which has no filesystem path and no tmux server, so the
+    /// refusal has to read sensibly for both — this drives the first.
+    @Test("a session whose worktree gives no local directory is refused untouched")
+    func aSessionWithNoLocalWorktreeIsRefused() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        var row = try await Self.runningShell(fixture)
+        row.worktreeID = UUID()
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
+
+        #expect(outcome == .refused(
+            reason: HibernationCoordinator.shellMoveWorktreeUnreadableRefusal))
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
+        #expect(await fixture.launches.isEmpty)
+    }
+
+    /// A window that is already gone is not a failure to stop anything.
+    /// `PaneOwnership.owned` covers "pane gone, server positively absent" on
+    /// purpose, so a row whose window died before the person reached for this
+    /// gesture arrives at the kill and gets an error from it — and must not be
+    /// refused over a program that no longer exists.
+    @Test("a kill that fails on an already-gone window still moves the session")
+    func aKillOnAnAlreadyGoneWindowStillMoves() async throws {
+        let fixture = try await Self.makeFixture(
+            killWindowThrows: true, windowPresence: .absent)
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
+
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder)
+        #expect(after.holderPID == Self.holderPID)
+    }
+
     /// A kill that tmux would not perform leaves the program running, so
     /// nothing may be started beside it: two live programs for one row is the
-    /// one state this path must never produce.
-    @Test("a kill tmux refuses starts nothing and changes nothing")
-    func aKillTmuxRefusesStartsNothing() async throws {
-        let fixture = try await Self.makeFixture(killWindowThrows: true)
+    /// one state this path must never produce. Both answers that are not a
+    /// positive "no such window" refuse — `.unknown` is "we do not know",
+    /// which is a refusal at every site in this family.
+    @Test(arguments: [TmuxPresence.alive, TmuxPresence.unknown])
+    func aKillTmuxRefusesStartsNothingOnAWindowNotProvablyGone(
+        _ presence: TmuxPresence
+    ) async throws {
+        let fixture = try await Self.makeFixture(
+            killWindowThrows: true, windowPresence: presence)
         defer { fixture.tearDown() }
         let row = try await Self.runningShell(fixture)
 
