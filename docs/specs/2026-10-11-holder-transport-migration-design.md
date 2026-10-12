@@ -161,8 +161,16 @@ longer names it, and one dangling window and shell per migrated session is a
 fleet run's worth of residue. The migration therefore kills the window as the
 last step of the rewrite, and the reconcile pass's untracked-window sweep is the
 backstop rather than the mechanism. It kills a window only after the rewrite has
-landed and only when the pane still answers with this terminal's id, so a
-recycled coordinate costs a stranger nothing.
+landed, and only through the pane-ownership guard every other teardown by
+DB-recorded coordinate goes through: the kill proceeds when the pane answers
+with this terminal's id, when it carries no identity to read, or when its whole
+tmux server is positively gone, and it refuses when the pane names a different
+terminal or when the consultation could not be run at all. So a coordinate tmux
+has recycled onto a stranger's pane costs that stranger nothing, while a pane
+that answers *without* an identity is still retired — the ordinary state of one
+whose stamp and start command are both unreadable, and not evidence of anybody
+else. A consultation that failed outright is "we do not know" rather than
+"gone", so it refuses; that is the stance all six sites take.
 
 **An exit-stamped row is refused rather than moved while its pane is in use.**
 `.exited` parks a row whose pane's shell is still alive and usable, which is the
@@ -184,8 +192,14 @@ process is there.
   spawn-counting double, because "no respawn" is the whole difference between
   the two paths.
 - A busy session is skipped and named, and its row is untouched.
-- A migrated session's tmux window is retired, and a window whose pane answers
-  with another terminal's id is left alone.
+- A migrated session's tmux window is retired, on the parked path and the
+  running one, while a rewrite that was refused leaves the window alone.
+- The retire's pane-ownership guard is enumerated beside the other five
+  teardown-by-coordinate sites: it refuses both a pane naming a different
+  terminal and a consultation that could not be run, writing nothing to the row
+  in either case, and proceeds for a pane that answers with the row's own id. A
+  whole migration of a row whose coordinate has been recycled still moves the
+  session and still leaves that window alive.
 - An exit-stamped session with something running in its pane is skipped with
   the wake's own pane-busy refusal and keeps its window and coordinates, while
   an exit-stamped session whose pane is idle migrates.

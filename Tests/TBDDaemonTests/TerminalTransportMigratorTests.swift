@@ -170,7 +170,8 @@ struct TerminalTransportMigratorTests {
         holderSpawnable: Bool = true,
         capturePane: @escaping @Sendable (String, String) -> String = { _, _ in "" },
         panePID: String = "4100",
-        paneForegroundPID: Int32? = nil
+        paneForegroundPID: Int32? = nil,
+        paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdttm")
         try FileManager.default.createDirectory(
@@ -181,6 +182,7 @@ struct TerminalTransportMigratorTests {
             dryRun: true,
             dryRunRecorder: { tmuxArgv.record($0) },
             dryRunCapturePane: capturePane,
+            dryRunPaneSendTarget: paneSendTarget,
             dryRunPanePID: { _, _ in panePID })
 
         let repoPath = "\(home)/repo"
@@ -353,6 +355,33 @@ struct TerminalTransportMigratorTests {
 
         #expect(fixture.tmuxArgv.count("kill-window") == 1,
                 "the migrated session's window was left behind: \(fixture.tmuxArgv.all)")
+    }
+
+    /// The retire's own guard, end to end: a coordinate tmux has recycled onto
+    /// a stranger's pane costs that stranger nothing. The session still moves —
+    /// the window is the only thing the guard protects, and the migration's
+    /// whole point is to move the row — but no `kill-window` is issued.
+    ///
+    /// Both refusal arms and the identity-matched proceed arm are enumerated
+    /// against the coordinator in `KillWindowSiblingSitesPaneOwnershipTests`,
+    /// with the other five sites that tear a window down by DB-recorded
+    /// coordinate. This is the one that proves the migration reaches the guard
+    /// at all; the fixture's other retire tests pass through its
+    /// no-identity-to-read arm, which is what a dry-run pane answers.
+    @Test("a migrated session whose pane now belongs to a stranger keeps that window")
+    func aMigratedSessionWhosePaneBelongsToAStrangerKeepsThatWindow() async throws {
+        let strangerID = UUID().uuidString
+        let fixture = try await Self.makeFixture(
+            paneSendTarget: { _, _ in .live(terminalID: strangerID) })
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true)
+
+        #expect(await fixture.productionMigrator().migrate(terminalID: row.id) == .migrated)
+
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the migration killed a window that now belongs to another terminal: \(fixture.tmuxArgv.all)")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder, "a refused retire blocked the move itself")
     }
 
     /// A rewrite that was refused must not take the window with it: the row is

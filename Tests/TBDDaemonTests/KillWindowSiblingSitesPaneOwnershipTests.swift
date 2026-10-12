@@ -7,8 +7,9 @@ import Testing
 /// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to
 /// every other call site that tears down a tmux window by DB-recorded
 /// coordinate — `terminal.delete` (`TerminalDeletePaneOwnershipTests`) was
-/// the first, but `forgetWorktree`, `scratch.delete`'s teardown, and
-/// `terminal.recreateWindow`'s non-Claude-resumable branch all `kill-window`
+/// the first, but `forgetWorktree`, `scratch.delete`'s teardown,
+/// `terminal.recreateWindow`'s non-Claude-resumable branch and the transport
+/// migration's window retire all `kill-window`
 /// the exact same way and share the exact same hazard: a tmux server restart
 /// resets window/pane numbering, and several worktrees of one repo share a
 /// server, so a stale row's coordinate can collide with an unrelated live
@@ -80,6 +81,77 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         await lifecycle.captureThenKillWindow(terminal: terminal, server: wt.tmuxServer)
 
         #expect(recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane confirmed as this row's own must still be killed: \(recorder.snapshot())")
+    }
+
+    // MARK: - the transport migration's window retire
+
+    /// The sixth site. Moving a session to the pty holder blanks the row's
+    /// tmux coordinates, so the window the park kept belongs to nobody
+    /// afterwards and the migration retires it — through the same guard, for
+    /// the same reason. The hazard is sharper here than for the others
+    /// because the migration is a *bulk* action: a fleet run reaches every
+    /// tmux row on the machine, and a single recycled coordinate would be a
+    /// stranger's live window killed on somebody else's behalf.
+    ///
+    /// The retire writes nothing to the database, so a refusal must leave the
+    /// row's coordinates exactly as the caller handed them over as well as
+    /// leaving the window alive.
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func transportMigrationLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/kwss-migrate-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "b",
+            path: "/tmp/kwss-migrate-wt-\(UUID().uuidString)", tmuxServer: "tbd-kwss-migrate")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
+
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
+        let coordinator = HibernationCoordinator(
+            db: db, tmux: tmux,
+            configDirManager: isolatedConfigDirManager("kwss-migrate-\(refusal.rawValue)"),
+            actuationLog: makeTestActuationLog())
+
+        await coordinator.retireTmuxWindowAfterTransportMigration(terminal: terminal)
+
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
+        let unchanged = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(unchanged.tmuxWindowID == "@2" && unchanged.tmuxPaneID == "%2",
+                "the retire must write nothing to the row")
+    }
+
+    /// The positive control: a pane answering with the row's own id is the
+    /// window the migration is there to retire.
+    @Test func transportMigrationRetiresAWindowWhosePaneAnswersWithItsOwnID() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/kwss-migrate-ok-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "b",
+            path: "/tmp/kwss-migrate-ok-wt-\(UUID().uuidString)", tmuxServer: "tbd-kwss-migrate-ok")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
+
+        let recorder = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorder.append($0) },
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminal.id.uuidString) })
+        let coordinator = HibernationCoordinator(
+            db: db, tmux: tmux,
+            configDirManager: isolatedConfigDirManager("kwss-migrate-ok"),
+            actuationLog: makeTestActuationLog())
+
+        await coordinator.retireTmuxWindowAfterTransportMigration(terminal: terminal)
+
+        #expect(recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@2") },
                 "a pane confirmed as this row's own must still be killed: \(recorder.snapshot())")
     }
 
