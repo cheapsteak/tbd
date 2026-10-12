@@ -6,14 +6,25 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "TransportMig
 
 /// What one session's move to the pty holder came to.
 ///
-/// Four cases rather than a `Bool` and an error, because a fleet-wide run's
+/// Five cases rather than a `Bool` and an error, because a fleet-wide run's
 /// product is its report: a person needs to know what did not move and why,
 /// and "already there" is a different answer from "refused" even though
 /// neither moved anything.
 enum TransportMigrationOutcome: Sendable, Equatable {
-    /// The row now reads holder-backed. A running session was parked and
-    /// woken on the holder; a parked one was only rewritten.
+    /// The row now reads holder-backed and its program is running there. A
+    /// running session was parked and woken on the holder; a parked one was
+    /// only rewritten.
     case migrated
+    /// The row now reads holder-backed and its program was NOT started again:
+    /// the rewrite landed and the wake that follows it did not.
+    ///
+    /// Its own case rather than a refusal, because the two mean opposite
+    /// things to the person reading a report. A refusal leaves the session
+    /// where it was; this one has moved it, and the cost is only that it comes
+    /// back on the holder when next woken rather than now. Reported as a
+    /// refusal it would read as "can't be moved" about a session that had
+    /// moved, and the run's migrated count would undercount what it did.
+    case movedNotResumed(reason: String)
     /// The row was already holder-backed. Nothing was read, parked or written.
     case alreadyHolder
     /// The session did not move, for a reason that names a state a person can
@@ -30,6 +41,17 @@ enum TransportMigrationOutcome: Sendable, Equatable {
     /// The migration could not be attempted or could not be finished. Carries
     /// the reason. Retrying does not help until the named fact changes.
     case refused(reason: String)
+
+    /// Whether this outcome claims to have left the row holder-backed. Decides
+    /// how loudly a row that then could not be re-read is logged: a row absent
+    /// after an outcome that moved nothing is ordinary — the not-found skip is
+    /// exactly that — and surprising after one that did.
+    var claimsTheRowMoved: Bool {
+        switch self {
+        case .migrated, .movedNotResumed: return true
+        case .alreadyHolder, .skipped, .refused: return false
+        }
+    }
 }
 
 /// Moves a session from the tmux transport to the pty holder in place: same
@@ -194,10 +216,10 @@ actor TerminalTransportMigrator {
         // because `performHibernate`'s refusal reads exactly this column: this
         // branch therefore takes precisely the rows the park would turn away.
         // What keeps it to SHELLS is `TransportMigrationEligibility`, above:
-        // the three kinds of row that name no conversation and must not become
+        // the four kinds of row that name no conversation and must not become
         // a bare login shell — a Codex tab, a Claude tab whose session has not
-        // begun, a pre-session hook tab — are each skipped there with their own
-        // reason, so by here "no conversation" means "a shell". A running
+        // begun, and a hook tab of either kind — are each skipped there with
+        // their own reason, so by here "no conversation" means "a shell". A running
         // Claude session with a conversation still goes park, rewrite, wake.
         //
         // The `isParked` half is belt-and-braces rather than a case that
@@ -292,38 +314,43 @@ actor TerminalTransportMigrator {
             logger.info("transport migration: terminal \(terminalID, privacy: .public) moved to the pty holder and resumed")
             return .migrated
         }
-        // Nothing is unwound. The row is parked and recorded as holder-backed,
-        // which the ordinary wake path already handles.
+        // Nothing is unwound, and this is not a refusal: the row IS on the
+        // holder, which the ordinary wake path already handles, so the only
+        // cost is that the session comes back there when next woken rather
+        // than now. The handler publishes the rewritten row for this outcome
+        // too — a client still caching `tmux` and the retired coordinate would
+        // otherwise attach to a window this migration killed.
         logger.warning("transport migration: terminal \(terminalID, privacy: .public) is recorded on the pty holder but was not resumed: \(failure, privacy: .public)")
-        return .refused(reason: failure)
+        return .movedNotResumed(reason: failure)
     }
 
     // MARK: - The fleet
 
-    /// Move every session TBD tracks, one at a time, and report each.
+    /// Every session a fleet-wide run covers, in the order it covers them.
     ///
-    /// **Sequential, deliberately.** Every migration of a running session is a
-    /// respawn, and a machine with a large fleet must not be asked for many
-    /// simultaneous ones.
+    /// The ids rather than the run, so the caller can **interleave per
+    /// session**: the record of what a fleet gesture stopped belongs one row
+    /// per terminal at that terminal's own act moment, and the rewritten row
+    /// has to be published as each one finishes rather than after the whole
+    /// loop — for `--all` over a real fleet, "after the loop" is the whole run,
+    /// during which every mounted pane is attached to a window the migration
+    /// has already killed.
     ///
     /// **Every row, including the ones already on the holder.** A run's
     /// product is its report, and a session absent from it is indistinguishable
     /// from one the run never considered. A holder row costs nothing to
-    /// report: it is answered from the row alone, with no park, no wake and no
-    /// write.
-    func migrateAll() async -> [(terminalID: UUID, outcome: TransportMigrationOutcome)] {
+    /// report: `migrate` answers it from the row alone, with no park, no wake
+    /// and no write.
+    ///
+    /// The caller moves them **sequentially**, deliberately: every migration
+    /// of a running session is a respawn, and a machine with a large fleet must
+    /// not be asked for many simultaneous ones.
+    func fleetTerminalIDs() async -> [UUID] {
         guard let terminals = try? await db.terminals.list() else {
             logger.error("transport migration: could not list terminals; migrated nothing")
             return []
         }
-        var report: [(terminalID: UUID, outcome: TransportMigrationOutcome)] = []
-        report.reserveCapacity(terminals.count)
-        for terminal in terminals {
-            report.append((
-                terminalID: terminal.id,
-                outcome: await migrate(terminalID: terminal.id)))
-        }
-        return report
+        return terminals.map(\.id)
     }
 
     // MARK: - The rewrite

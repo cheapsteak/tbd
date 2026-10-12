@@ -60,6 +60,24 @@ public enum NightwatchHolderGate {
         pty-holder transport. Turn Nightwatch off first.
         """
 
+    /// Why `terminal.migrateTransport` refuses while a watch mode is active.
+    ///
+    /// The third door into the same pair, and it reads like `holderRefusal`
+    /// because it is the same act under another name: a migration *creates*
+    /// holder-backed sessions, which is precisely the hazard the flag's door
+    /// guards against. A gesture that moved a fleet onto the holder while a
+    /// desk was running would leak one Claude session per tick until the next
+    /// daemon boot, where the boot reconcile would silently turn the person's
+    /// watch mode off.
+    ///
+    /// Names no session, deliberately: the refusal is per CALL, because the
+    /// hazard is the transport rather than any one row.
+    public static let migrationRefusal = """
+        Sessions cannot be moved to the pty-holder transport while Nightwatch or \
+        Daywatch is active: Nightwatch is deprecated and does not run with the \
+        pty-holder transport. Turn Nightwatch off first.
+        """
+
     /// The standing deprecation sentence for Settings help and `tbd nightwatch status`.
     public static let deprecationNotice = """
         Nightwatch and Daywatch are deprecated and being replaced by fleet \

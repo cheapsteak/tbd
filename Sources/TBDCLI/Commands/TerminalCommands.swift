@@ -319,8 +319,9 @@ struct TerminalMigrate: AsyncParsableCommand {
             is skipped, and can be retried once it settles.
 
             Prints one line per session: the outcome, and the reason for any
-            session that did not move. Exits non-zero if any session was
-            refused.
+            session that did not move or did not restart. Exits non-zero if any
+            session was refused, or moved onto the holder without its program
+            being started again.
             """
     )
 
@@ -361,15 +362,24 @@ struct TerminalMigrate: AsyncParsableCommand {
         } else {
             for line in Self.reportLines(result) { print(line) }
         }
-        if !result.refused.isEmpty { throw ExitCode(1) }
+        if !result.refused.isEmpty || !result.movedNotResumed.isEmpty { throw ExitCode(1) }
     }
 
-    /// One line per session, grouped by outcome. A skip or refusal carries its
-    /// reason: what did not move, and why, is the point of a fleet run.
+    /// One line per session, grouped by outcome. A skip, a refusal and a move
+    /// that did not restart each carry a reason: what did not move, and why, is
+    /// the point of a fleet run.
+    ///
+    /// `moved, not restarted` is kept apart from `refused` because the two mean
+    /// opposite things to whoever reads the line: a refused session is still on
+    /// tmux, while this one is on the holder and comes back there when it is
+    /// next woken.
     static func reportLines(_ result: TerminalMigrateTransportResult) -> [String] {
         var lines: [String] = []
         lines += result.migrated.map { "\($0.uuidString)  migrated" }
         lines += result.alreadyHolder.map { "\($0.uuidString)  already on the holder" }
+        lines += result.movedNotResumed.map {
+            "\($0.terminalID.uuidString)  moved, not restarted: \($0.reason)"
+        }
         lines += result.skipped.map { "\($0.terminalID.uuidString)  skipped: \($0.reason)" }
         lines += result.refused.map { "\($0.terminalID.uuidString)  refused: \($0.reason)" }
         if lines.isEmpty { lines.append("No sessions.") }

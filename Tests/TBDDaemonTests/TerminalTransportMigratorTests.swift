@@ -502,8 +502,11 @@ struct TerminalTransportMigratorTests {
 
         let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
 
-        guard case .refused(let reason) = outcome else {
-            Issue.record("expected a refusal, got \(outcome)")
+        // Not a refusal: a refusal says the session is where it was, and this
+        // one has moved. The report surfaces group the two apart because the
+        // remedy differs — this session needs nothing but a wake.
+        guard case .movedNotResumed(let reason) = outcome else {
+            Issue.record("expected a moved-but-not-resumed outcome, got \(outcome)")
             return
         }
         #expect(reason.contains("starting a holder for this session failed"),
@@ -511,6 +514,29 @@ struct TerminalTransportMigratorTests {
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .holder, "the refusal unwound the rewrite")
         #expect(after.isParked, "the row was left neither awake nor parked")
+    }
+
+    /// Every wake failure after the rewrite is the same outcome, because the
+    /// rewrite is what decides it: the row is on the holder whatever the wake
+    /// answered. Three shapes of answer, one classification.
+    @Test(arguments: [
+        WakeResult.notHibernated,
+        WakeResult.inFlight,
+        WakeResult.respawnFailed(reason: "tmux said no"),
+    ])
+    func everyWakeFailureAfterTheRewriteIsMovedNotResumed(_ wake: WakeResult) async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        let outcome = await fixture.recordingMigrator(wakeResult: wake)
+            .migrate(terminalID: row.id)
+
+        guard case .movedNotResumed = outcome else {
+            Issue.record("\(wake) after the rewrite was reported as \(outcome)")
+            return
+        }
+        #expect(try await fixture.db.terminals.get(id: row.id)?.transport == .holder)
     }
 
     // MARK: - Refusing before the park
@@ -908,7 +934,7 @@ struct TerminalTransportMigratorTests {
 
         let report = await fixture.recordingMigrator(parkOverride: [
             stale.id: .notEligible(reason: "Terminal window is no longer live"),
-        ]).migrateAll()
+        ]).migrateFleet()
 
         #expect(report.count == 2)
         #expect(report.first { $0.terminalID == parked.id }?.outcome == .migrated)
@@ -926,7 +952,7 @@ struct TerminalTransportMigratorTests {
         let working = try await Self.tmuxRow(fixture, activityState: .working)
         let holder = try await Self.holderRow(fixture)
 
-        let report = await fixture.recordingMigrator().migrateAll()
+        let report = await fixture.recordingMigrator().migrateFleet()
 
         #expect(report.count == 3)
         #expect(report.first { $0.terminalID == parked.id }?.outcome == .migrated)
@@ -935,19 +961,24 @@ struct TerminalTransportMigratorTests {
         #expect(report.first { $0.terminalID == holder.id }?.outcome == .alreadyHolder)
     }
 
-    /// A refusal in the middle of a run migrates the rest and reports the one.
-    @Test("a fleet run containing a refusal still migrates the rest")
-    func aFleetRunContainingARefusalStillMigratesTheRest() async throws {
+    /// A failure in the middle of a run migrates the rest and reports the one.
+    /// The running row's wake fails after its rewrite, which is the
+    /// moved-but-not-resumed outcome rather than a refusal: that row IS on the
+    /// holder.
+    @Test("a fleet run containing a failure still migrates the rest")
+    func aFleetRunContainingAFailureStillMigratesTheRest() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let refused = try await Self.tmuxRow(fixture)
+        let notResumed = try await Self.tmuxRow(fixture)
         let parked = try await Self.tmuxRow(fixture, parked: true)
 
         let report = await fixture.recordingMigrator(
-            wakeResult: .respawnFailed(reason: "no holder for you")).migrateAll()
+            wakeResult: .respawnFailed(reason: "no holder for you")).migrateFleet()
 
-        #expect(report.first { $0.terminalID == refused.id }?.outcome
-            == .refused(reason: "no holder for you"))
+        #expect(report.first { $0.terminalID == notResumed.id }?.outcome
+            == .movedNotResumed(reason: "no holder for you"))
+        #expect(try await fixture.db.terminals.get(id: notResumed.id)?.transport == .holder,
+                "the row the report says moved is not on the holder")
         #expect(report.first { $0.terminalID == parked.id }?.outcome == .migrated)
     }
 
@@ -1017,5 +1048,20 @@ struct TerminalTransportMigratorTests {
 
         #expect(await fixture.coordinator.parkForTransportMigration(
             terminalID: UUID()) == .notFound)
+    }
+}
+
+/// The fleet run as `handleTerminalMigrateTransport` composes it: the
+/// migrator's own list of sessions, moved one at a time. The handler drives the
+/// loop itself because it writes an actuation row and publishes the rewritten
+/// row at each session's own act moment, so the loop lives here for the tests
+/// that only care about the report.
+extension TerminalTransportMigrator {
+    func migrateFleet() async -> [(terminalID: UUID, outcome: TransportMigrationOutcome)] {
+        var report: [(terminalID: UUID, outcome: TransportMigrationOutcome)] = []
+        for id in await fleetTerminalIDs() {
+            report.append((terminalID: id, outcome: await migrate(terminalID: id)))
+        }
+        return report
     }
 }
