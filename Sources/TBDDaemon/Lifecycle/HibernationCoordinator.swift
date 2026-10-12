@@ -218,7 +218,7 @@ public actor HibernationCoordinator {
     /// swap's OWN halves are exempt by construction, not by a flag a caller
     /// could forget to pass: `performHibernate` consults only
     /// `hibernatesInFlight`, and the swap wakes through
-    /// `wakeHolderForProfileSwap`, which consults only the two sets above.
+    /// `wakeHolderAfterInPlaceChange`, which consults only the two sets above.
     private var swapsInFlight: Set<UUID> = []
 
     /// Debounce after a terminal first crosses the idle threshold: the sweep
@@ -517,6 +517,34 @@ public actor HibernationCoordinator {
         }
         return await performHibernate(
             terminal: terminal, reason: .auto, policy: .profileSwap)
+    }
+
+    /// Park a session because it is being moved from the tmux transport to the
+    /// pty holder in place, same row and same session id.
+    ///
+    /// The park half of `TerminalTransportMigrator.migrate`. `.auto` as the
+    /// reason, for the same purpose as the profile swap's: a daemon that dies
+    /// between this park and the wake that follows leaves a row the next
+    /// focus-wake heals, where a manual park is excluded from wake-on-focus
+    /// and would sit there until somebody woke it by hand.
+    ///
+    /// **`.manual` as the policy, which is the opposite of the swap's choice
+    /// and is the point.** `.profileSwap` stops honouring the rails that read
+    /// live state because switching accounts should interrupt regardless; a
+    /// migration instead discards typed-but-unsent input, which is exactly
+    /// what those rails protect. So a rail that refuses this park is
+    /// protecting the session, and its refusal becomes the migration's skip
+    /// reason — a person sends or clears the input and runs the migration
+    /// again. No new policy case is added, and the tmux leg's unconditional
+    /// typed-input rail is untouched.
+    /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`,
+    /// "The park honours every live rail".
+    func parkForTransportMigration(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        return await performHibernate(
+            terminal: terminal, reason: .auto, policy: .manual)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.

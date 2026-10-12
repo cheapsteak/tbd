@@ -426,7 +426,7 @@ struct HolderInPlaceSwapTests {
             expectedState: TerminalReplacementSnapshot(terminal: terminal),
             profileID: fixture.destProfileID))
 
-        let result = await fixture.router.hibernationCoordinator.wakeHolderForProfileSwap(
+        let result = await fixture.router.hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: rehomed,
             worktree: try await fixture.local(),
             sessionID: Self.sessionID,

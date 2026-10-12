@@ -2885,7 +2885,7 @@ extension RPCRouter {
         // parked on its old account while it is in fact awake there.
         //
         // The swap's own halves are unaffected: `performHibernate` consults
-        // `hibernatesInFlight` and `wakeHolderForProfileSwap` consults that and
+        // `hibernatesInFlight` and `wakeHolderAfterInPlaceChange` consults that and
         // `wakesInFlight`, and neither reads the swap claim.
         guard await hibernationCoordinator.claimSwap(terminalID: oldTerminal.id) else {
             let reason = "Terminal \(oldTerminal.id) was not switched to the other account: another pause, wake or account switch of this session is in flight; nothing was changed. Retry once it has finished."
@@ -3034,7 +3034,7 @@ extension RPCRouter {
             supervisor: modelProxySupervisor)
         let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
         let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
-        let woken = await hibernationCoordinator.wakeHolderForProfileSwap(
+        let woken = await hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: target,
             worktree: worktree,
             sessionID: storedSessionID,
