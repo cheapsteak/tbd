@@ -77,6 +77,11 @@ public enum StateDelta: Codable, Sendable {
     /// `.terminalPendingQuestionsChanged`, which stays decodable so an app
     /// paired with an older daemon still works.
     case terminalPendingPromptsChanged(TerminalPendingPromptsDelta)
+    /// Some worktree's dev servers changed: a running file appeared, went
+    /// stale or vanished, or a server tab started, exited or closed. No
+    /// payload (mirrors `.remoteSessionsChanged`) — subscribers refetch via
+    /// `server.summary` / `server.list`. An older app drops the line.
+    case devServersChanged
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
