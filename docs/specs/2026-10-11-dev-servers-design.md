@@ -389,8 +389,11 @@ output`.
     URL applies; a toolbar `Menu` cannot disable its primary half alone.
   - The menu's first item is "Open <main URL>" whenever there is one. Then
     each server with its state and URLs and its Start, Stop and Restart items,
-    plus "Show last output" for an exited server; then "Start all" and "Stop
-    all"; then any parse errors and the last action's failures.
+    plus "Show last output" for an exited server. A server with nothing
+    running that still has its TBD tab — an exited one, declared or not —
+    shows "Close" in place of Stop, which closes that tab. Then "Start all"
+    and "Stop all", which acts on every server showing Stop or Close; then
+    any parse errors and the last action's failures.
 - **Sidebar dot** – a green dot on a worktree's row when any of its servers is
   running according to a live running file or a live TBD server tab. The dot
   never runs `status` commands. Stopped and exited servers show nothing.

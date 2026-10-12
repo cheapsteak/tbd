@@ -613,10 +613,12 @@ struct ContentView: View {
                     }
                     .disabled(server.lastOutputID == nil && server.terminalID == nil)
                 }
-                if server.state == .running || server.state == .unknown {
-                    Button("Stop") {
+                if let stopTitle = ServersButtonLabel.stopItemTitle(for: server) {
+                    Button(stopTitle) {
                         Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: [server.name]) }
                     }
+                }
+                if server.state == .running || server.state == .unknown {
                     if server.isDeclared {
                         Button("Restart") {
                             Task { await appState.restartDevServers(worktreeID: worktreeID, names: [server.name]) }
@@ -634,10 +636,13 @@ struct ContentView: View {
             Task { await appState.performDevServerAction(.start, worktreeID: worktreeID, names: []) }
         }
         .disabled(!list.servers.contains { $0.isDeclared && $0.state != .running })
+        // Named rather than empty: the daemon's "stop all" covers running and
+        // unknown servers only, and this also clears exited servers' tabs.
+        let stopAllNames = ServersButtonLabel.stopAllNames(list)
         Button("Stop all") {
-            Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: []) }
+            Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: stopAllNames) }
         }
-        .disabled(!list.servers.contains { $0.state == .running || $0.state == .unknown })
+        .disabled(stopAllNames.isEmpty)
         let problems = list.parseErrors.map { "\(($0.path as NSString).lastPathComponent): \($0.message)" }
             + (appState.devServerActionMessages[worktreeID] ?? [])
         if !problems.isEmpty {

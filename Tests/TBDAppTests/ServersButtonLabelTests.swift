@@ -59,6 +59,44 @@ struct ServersButtonLabelTests {
         #expect(ServersButtonLabel.menuTitle(for: undeclared) == "Web app — running · undeclared")
     }
 
+    /// An exited server whose declaration is gone keeps its tab, and the
+    /// menu must still offer a way to clear it.
+    @Test func everyServerWithATabOrAProcessOffersAStopItem() {
+        var exitedWithTab = info(.exited, code: 1)
+        exitedWithTab.terminalID = UUID()
+        var undeclaredExitedWithTab = exitedWithTab
+        undeclaredExitedWithTab.source = nil
+        var undeclaredRunning = info(.running)
+        undeclaredRunning.source = nil
+        #expect(ServersButtonLabel.stopItemTitle(for: info(.running)) == "Stop")
+        #expect(ServersButtonLabel.stopItemTitle(for: undeclaredRunning) == "Stop")
+        #expect(ServersButtonLabel.stopItemTitle(for: info(.unknown)) == "Stop")
+        #expect(ServersButtonLabel.stopItemTitle(for: exitedWithTab) == "Close")
+        #expect(ServersButtonLabel.stopItemTitle(for: undeclaredExitedWithTab) == "Close")
+        // Nothing to stop and no tab to close.
+        #expect(ServersButtonLabel.stopItemTitle(for: info(.exited, code: 1)) == nil)
+        #expect(ServersButtonLabel.stopItemTitle(for: info(.stopped)) == nil)
+    }
+
+    @Test func stopAllNamesEveryServerThatOffersAStopItem() {
+        func named(_ name: String, _ server: DevServerInfo) -> DevServerInfo {
+            var copy = server
+            copy.name = name
+            return copy
+        }
+        var exitedWithTab = info(.exited, code: 1)
+        exitedWithTab.terminalID = UUID()
+        exitedWithTab.source = nil
+        let servers = [
+            named("running", info(.running)), named("unknown", info(.unknown)),
+            named("closable", exitedWithTab), named("exited", info(.exited, code: 1)),
+            named("stopped", info(.stopped)),
+        ]
+        #expect(ServersButtonLabel.stopAllNames(list(servers)) == ["running", "unknown", "closable"])
+        let idle = [named("exited", info(.exited, code: 1)), named("stopped", info(.stopped))]
+        #expect(ServersButtonLabel.stopAllNames(list(idle)).isEmpty)
+    }
+
     @Test func theLabelTextCountsRunningServers() {
         #expect(ServersButtonLabel.title(runningCount: 0) == "Servers")
         #expect(ServersButtonLabel.title(runningCount: 2) == "2 running")

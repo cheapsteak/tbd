@@ -37,6 +37,25 @@ struct ServersButtonLabel: View {
         return "\(server.label) — \(state) · \(server.source ?? "undeclared")"
     }
 
+    /// The per-server stop item's title, or nil when the menu offers none.
+    /// "Stop" for a server that runs or may run; "Close" for one that has
+    /// nothing running but still has a TBD tab — an exited server, declared
+    /// or not, which the daemon clears by closing that tab. Without it, an
+    /// exited server whose declaration is gone could not be cleared from the
+    /// menu at all. A live running file always reads as running.
+    static func stopItemTitle(for server: DevServerInfo) -> String? {
+        switch server.state {
+        case .running, .unknown: return "Stop"
+        case .exited, .stopped: return server.terminalID != nil ? "Close" : nil
+        }
+    }
+
+    /// The servers "Stop all" acts on: every server that offers a stop item.
+    /// Empty disables the item.
+    static func stopAllNames(_ list: DevServerListResult) -> [String] {
+        list.servers.filter { stopItemTitle(for: $0) != nil }.map { $0.name }
+    }
+
     /// Everything the label and the menu render, as a String — AppKit
     /// rebuilds the menu only when this changes (`Sources/TBDApp/CLAUDE.md`).
     static func splitButtonID(
