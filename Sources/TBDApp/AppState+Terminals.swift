@@ -310,6 +310,13 @@ extension AppState {
               }) else { return }
         terminals[terminal.worktreeID]?[index] = terminal
         replaceTerminalObservationOrder(with: terminal)
+        // The veil of a transport move ends here: the row now reads holder and
+        // awake, so the pane's identity has changed once and the veil has
+        // nothing left to cover.
+        if switchingAccountTerminals[terminal.id]?.isTransportMove == true,
+           terminal.transport == .holder, !terminal.isParked {
+            switchingAccountTerminals[terminal.id] = nil
+        }
     }
 
     /// Adopt a daemon snapshot without allowing a response that overlaps an
@@ -681,6 +688,11 @@ extension AppState {
         terminalID: UUID
     ) -> AutomaticTerminalRecreationClaim {
         guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
+        // A pane failing to attach mid-move is attaching to the window the
+        // migration retires on purpose; recreating it would fight the move.
+        guard switchingAccountTerminals[terminalID]?.isTransportMove != true else {
+            return .alreadyInFlight
+        }
         guard containsTerminal(terminalID) else { return .terminalUnavailable }
         guard let attempt = terminalRecoveryBudget.claimAttempt(for: terminalID) else {
             logger.error("Automatic terminal recovery budget exhausted for \(terminalID, privacy: .public)")
@@ -1149,11 +1161,16 @@ extension Terminal {
 enum TransportMigrationMenu {
     static let title = "Move to Holder (No tmux)"
 
-    /// Offered for any row that is not already holder-backed.
-    static func isOffered(for terminal: Terminal?) -> Bool {
-        guard let terminal else { return false }
+    /// Offered for any row that is not already holder-backed, and only when the
+    /// daemon can run a holder (the capability the Settings toggle reads).
+    static func isOffered(for terminal: Terminal?, holderSupported: Bool) -> Bool {
+        guard holderSupported, let terminal else { return false }
         return terminal.transport != .holder
     }
+
+    /// Prefix for a single-session alert, by group.
+    static let skippedAlertPrefix = "Not moved — change this and try again: "
+    static let refusedAlertPrefix = "Can't be moved until this changes: "
 
     /// One line per session the run left alone.
     struct Line: Equatable {
@@ -1179,8 +1196,8 @@ enum TransportMigrationMenu {
         if !result.alreadyHolder.isEmpty {
             parts.append("\(result.alreadyHolder.count) already on the holder")
         }
-        if !result.skipped.isEmpty { parts.append("\(result.skipped.count) not moved") }
-        if !result.refused.isEmpty { parts.append("\(result.refused.count) can't be moved") }
+        if !result.skipped.isEmpty { parts.append("\(result.skipped.count) skipped") }
+        if !result.refused.isEmpty { parts.append("\(result.refused.count) refused") }
         func lines(_ list: [TerminalMigrationSkip]) -> [Line] {
             list.map { Line(label: label($0.terminalID), reason: $0.reason) }
         }
@@ -1197,21 +1214,46 @@ extension AppState {
         return row?.label ?? "Session \(terminalID.uuidString.prefix(8))"
     }
 
+    /// Poll step and bound for the veil's wait on adoption.
+    nonisolated static let transportMovePollInterval: Duration = .milliseconds(100)
+    nonisolated static let transportMoveAdoptionBound: Duration = .seconds(5)
+
+    /// Hold the veil of each migrated row until `adoptRecreatedTerminal` clears
+    /// it, bounded so a lost `.terminalReplaced` cannot strand it. The delta and
+    /// the RPC reply travel on different sockets with no ordering, so the reply
+    /// cannot be taken as the end of the move.
+    private func awaitTransportMoveAdoption(_ ids: [UUID]) async {
+        var waited: Duration = .zero
+        while waited < Self.transportMoveAdoptionBound,
+              ids.contains(where: { switchingAccountTerminals[$0]?.isTransportMove == true }) {
+            try? await transportMoveClock.sleep(for: Self.transportMovePollInterval)
+            waited += Self.transportMovePollInterval
+        }
+    }
+
     /// Move one session to the holder. The veil of an account switch covers the
-    /// park and wake; the refreshed row arrives as `.terminalReplaced`, which
-    /// `adoptRecreatedTerminal` overwrites in place, so nothing is refreshed here.
-    /// A session that did not move says why in an alert.
+    /// park and wake and stays up until the refreshed row arrives as
+    /// `.terminalReplaced`, which `adoptRecreatedTerminal` overwrites in place
+    /// (and which ends the veil), so nothing is refreshed here. A session that
+    /// did not move says why in an alert.
     func migrateTerminalToHolder(terminalID: UUID) async {
         let cached = terminals.values.lazy.flatMap { $0 }.first(where: { $0.id == terminalID })
         let ownsRecord = switchingAccountTerminals[terminalID] == nil
             && cached.map { $0.transport != .holder && !$0.isParked } == true
         if ownsRecord { switchingAccountTerminals[terminalID] = .transportMove }
-        defer { if ownsRecord { switchingAccountTerminals[terminalID] = nil } }
+        defer {
+            if ownsRecord, switchingAccountTerminals[terminalID]?.isTransportMove == true {
+                switchingAccountTerminals[terminalID] = nil
+            }
+        }
         do {
             let result = try await terminalTransportMigrator(terminalID)
-            let reasons = (result.skipped + result.refused).map(\.reason)
-            if !reasons.isEmpty {
-                showAlert("Could not move this session off tmux: " + reasons.joined(separator: " "), isError: true)
+            var lines = result.skipped.map { TransportMigrationMenu.skippedAlertPrefix + $0.reason }
+            lines += result.refused.map { TransportMigrationMenu.refusedAlertPrefix + $0.reason }
+            if !lines.isEmpty {
+                showAlert(lines.joined(separator: "\n"), isError: true)
+            } else if ownsRecord, result.migrated.contains(terminalID) {
+                await awaitTransportMoveAdoption([terminalID])
             }
         } catch {
             logger.error("Failed to move terminal to the holder: \(error, privacy: .public)")
@@ -1227,9 +1269,21 @@ extension AppState {
             .filter { $0.transport != .holder && !$0.isParked && switchingAccountTerminals[$0.id] == nil }
             .map(\.id)
         for id in candidates { switchingAccountTerminals[id] = .transportMove }
-        defer { for id in candidates { switchingAccountTerminals[id] = nil } }
+        defer {
+            for id in candidates where switchingAccountTerminals[id]?.isTransportMove == true {
+                switchingAccountTerminals[id] = nil
+            }
+        }
         do {
-            return try await terminalTransportMigrator(nil)
+            let result = try await terminalTransportMigrator(nil)
+            // Only a migrated row has an adoption coming; the rest are done.
+            for id in candidates where !result.migrated.contains(id) {
+                if switchingAccountTerminals[id]?.isTransportMove == true {
+                    switchingAccountTerminals[id] = nil
+                }
+            }
+            await awaitTransportMoveAdoption(result.migrated)
+            return result
         } catch {
             logger.error("Failed to move sessions to the holder: \(error, privacy: .public)")
             showAlert("Failed to move sessions off tmux: \(error.localizedDescription)", isError: true)

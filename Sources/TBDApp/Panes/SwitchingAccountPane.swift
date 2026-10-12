@@ -31,6 +31,11 @@ struct SwitchingAccount: Equatable, Sendable {
     static let transportMove = SwitchingAccount(
         profileName: nil, captionOverride: "Moving session off tmux…")
 
+    /// True for the veil of a session moving to the pty holder. Its lifetime
+    /// ends on adoption of the migrated row, and it does not advance the attach
+    /// epoch: the replaced row's new window id is the one rebuild.
+    var isTransportMove: Bool { captionOverride != nil }
+
     /// What the pane says while the switch runs.
     var caption: String {
         if let captionOverride { return captionOverride }

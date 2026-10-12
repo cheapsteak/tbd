@@ -57,12 +57,12 @@ struct GeneralSettingsTab: View {
     @AppStorage("errorNotificationSoundName") private var errorSoundName: String = "Sosumi"
     @AppStorage("errorNotificationSoundCustomPath") private var errorCustomPath: String = ""
 
+    @State private var migrating = false
+    @State private var migrationResult: TerminalMigrateTransportResult?
     /// In-progress amount text for the hibernate-idle-threshold field. Kept
     /// separate from the committed `hibernateIdleDuration` so a keystroke
     /// never fires an RPC — only `.onSubmit` / focus-loss / a unit-picker
     /// change commits (see `hibernateIdleThresholdRow`).
-    @State private var migrating = false
-    @State private var migrationResult: TerminalMigrateTransportResult?
     @State private var hibernateIdleAmountText: String = ""
     @State private var hibernateIdleDuration = HibernateIdleDuration(totalMinutes: Config.defaultHibernateIdleMinutes)
     @FocusState private var hibernateIdleFieldFocused: Bool
