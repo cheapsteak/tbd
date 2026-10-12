@@ -51,10 +51,30 @@ struct TerminalTransportMigratorTests {
         func recordWake(_ id: UUID) { wakes.append(id) }
     }
 
+    /// Every tmux argv the dry-run manager was handed. `kill-window` is the
+    /// one this suite asks about: it is how the migration retires the window
+    /// the park kept.
+    private final class TmuxArgvRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var argvs: [[String]] = []
+        func record(_ argv: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            argvs.append(argv)
+        }
+        var all: [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return argvs
+        }
+        func count(_ subcommand: String) -> Int {
+            all.filter { $0.contains(subcommand) }.count
+        }
+    }
+
     private struct Fixture {
         let db: TBDDatabase
         let home: String
         let worktree: Worktree
+        let tmuxArgv: TmuxArgvRecorder
         let coordinator: HibernationCoordinator
         let recorder: CallRecorder
         /// The registry both the park and the wake reach. Its environment is
@@ -88,7 +108,9 @@ struct TerminalTransportMigratorTests {
             canSpawnHolder: Bool = true,
             parkOverride: [UUID: HibernateResult] = [:],
             wakeResult: WakeResult = .ok(sessionIncarnationID: nil),
-            parkAlsoUnparks: Bool = false
+            parkAlsoUnparks: Bool = false,
+            parkAlsoDeletesTheRow: Bool = false,
+            deleteTheRowBeforeTheRewrite: Bool = false
         ) -> TerminalTransportMigrator {
             let database = self.db
             let park = self.coordinator
@@ -107,11 +129,28 @@ struct TerminalTransportMigratorTests {
                             // compare-and-set exists to lose safely.
                             try? await database.terminals.clearHibernated(id: id)
                         }
+                        if parkAlsoDeletesTheRow, result == .ok {
+                            try? await database.terminals.delete(id: id)
+                        }
                         return result
                     },
                     wake: { id in
                         await calls.recordWake(id)
                         return wakeResult
+                    },
+                    // The real probe and the real retire: both are read-only
+                    // or dry-run against this fixture's tmux, so there is
+                    // nothing for a double to protect here. The probe is also
+                    // the last await before the rewrite, which is where a test
+                    // that needs the row to vanish mid-migration removes it.
+                    paneBusyRefusal: { terminal in
+                        if deleteTheRowBeforeTheRewrite {
+                            try? await database.terminals.delete(id: terminal.id)
+                        }
+                        return await park.transportMigrationPaneBusyRefusal(terminal: terminal)
+                    },
+                    retireWindow: {
+                        await park.retireTmuxWindowAfterTransportMigration(terminal: $0)
                     }))
         }
     }
@@ -124,16 +163,25 @@ struct TerminalTransportMigratorTests {
         HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
     }
 
+    /// `paneForegroundPID` is what the exit-stamped guard turns on: nil leaves
+    /// `FakeInspector` answering with the pane's own pid (an idle shell), and
+    /// a value different from `panePID` is something the person started.
     private static func makeFixture(
         holderSpawnable: Bool = true,
-        capturePane: @escaping @Sendable (String, String) -> String = { _, _ in "" }
+        capturePane: @escaping @Sendable (String, String) -> String = { _, _ in "" },
+        panePID: String = "4100",
+        paneForegroundPID: Int32? = nil
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdttm")
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
+        let tmuxArgv = TmuxArgvRecorder()
         let tmux = TmuxManager(
-            dryRun: true, dryRunCapturePane: capturePane)
+            dryRun: true,
+            dryRunRecorder: { tmuxArgv.record($0) },
+            dryRunCapturePane: capturePane,
+            dryRunPanePID: { _, _ in panePID })
 
         let repoPath = "\(home)/repo"
         try FileManager.default.createDirectory(
@@ -150,6 +198,8 @@ struct TerminalTransportMigratorTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
+            paneProcessInspector: FakeInspector(
+                claudePID: nil, foregroundPID: paneForegroundPID),
             actuationLog: makeTestActuationLog(tag: "transport-migration"))
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
@@ -159,7 +209,8 @@ struct TerminalTransportMigratorTests {
         await coordinator.setHolderRegistry(registry)
 
         return Fixture(
-            db: db, home: home, worktree: worktree, coordinator: coordinator,
+            db: db, home: home, worktree: worktree, tmuxArgv: tmuxArgv,
+            coordinator: coordinator,
             recorder: CallRecorder(), holderRegistry: registry)
     }
 
@@ -172,6 +223,8 @@ struct TerminalTransportMigratorTests {
         activityState: TerminalActivityState = .idle,
         kind: TerminalKind? = .claude,
         claudeSessionID: String? = sessionID,
+        parkReason: HibernateReason = .auto,
+        suspended: Bool = false,
         transcriptTail: String = #"{"type":"user","message":{"content":"move me"}}"#
     ) async throws -> Terminal {
         let transcript = "\(fixture.home)/\(UUID().uuidString).jsonl"
@@ -191,7 +244,14 @@ struct TerminalTransportMigratorTests {
             id: created.id, activityState: activityState, source: .derived)
         if parked, let claudeSessionID {
             try await fixture.db.terminals.setHibernated(
-                id: created.id, sessionID: claudeSessionID, reason: .auto)
+                id: created.id, sessionID: claudeSessionID, reason: parkReason)
+        }
+        // The legacy park column, which `isParked` still reads and
+        // `isManuallyHibernatable` still refuses on. The only way to build a
+        // row the two park policies answer differently about.
+        if suspended, let claudeSessionID {
+            try await fixture.db.terminals.setSuspended(
+                id: created.id, sessionID: claudeSessionID)
         }
         return try #require(try await fixture.db.terminals.get(id: created.id))
     }
@@ -257,6 +317,101 @@ struct TerminalTransportMigratorTests {
         // different session than the one addressed.
         #expect(after.tmuxWindowID.isEmpty && after.tmuxPaneID.isEmpty,
                 "the migrated row still names a tmux pane")
+    }
+
+    /// The window the park kept is retired by the rewrite.
+    ///
+    /// A tmux park respawns the window to a bare login shell and keeps it,
+    /// which is what makes a parked tab wakeable in place. Once the row reads
+    /// holder-backed nothing names that window, so leaving it would strand one
+    /// window and one shell per migrated session until a reconcile pass swept
+    /// it.
+    @Test("the rewrite retires the tmux window the park kept")
+    func theRewriteRetiresTheTmuxWindow() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true)
+        #expect(fixture.tmuxArgv.count("kill-window") == 0, "the fixture killed a window early")
+
+        #expect(await fixture.productionMigrator().migrate(terminalID: row.id) == .migrated)
+
+        #expect(fixture.tmuxArgv.count("kill-window") == 1,
+                "the rewrite left the parked window behind: \(fixture.tmuxArgv.all)")
+        #expect(fixture.tmuxArgv.all.contains { $0.contains(row.tmuxWindowID) },
+                "a window was killed, but not this row's: \(fixture.tmuxArgv.all)")
+    }
+
+    /// A running session's window is retired too — the park kept it, and after
+    /// the rewrite it belongs to nobody just the same.
+    @Test("a migrated running session's window is retired after the rewrite")
+    func aRunningSessionsWindowIsRetiredAfterTheRewrite() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        #expect(await fixture.recordingMigrator().migrate(terminalID: row.id) == .migrated)
+
+        #expect(fixture.tmuxArgv.count("kill-window") == 1,
+                "the migrated session's window was left behind: \(fixture.tmuxArgv.all)")
+    }
+
+    /// A rewrite that was refused must not take the window with it: the row is
+    /// still on tmux, and that window is still the tab a person wakes.
+    @Test("a refused rewrite leaves the tmux window alone")
+    func aRefusedRewriteLeavesTheWindowAlone() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        #expect(await fixture.recordingMigrator(parkAlsoUnparks: true)
+            .migrate(terminalID: row.id) == .skipped(reason: TerminalTransportMigrator.raceSkip))
+
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "a refused rewrite killed the row's window: \(fixture.tmuxArgv.all)")
+    }
+
+    // MARK: - The exit-stamped pane a person is using
+
+    /// `.exited` parks a row whose pane's SHELL stays alive and usable — that
+    /// is the whole point of the stamp — so the pane is the one the person was
+    /// sitting in when the agent left, and they may have started something in
+    /// it since. Rewriting the row would blank its coordinates and retire the
+    /// window, killing that process. Refuse instead, with the same text the
+    /// wake refuses its own `respawn-window -k` with.
+    @Test("an exit-stamped row whose pane is busy is skipped and keeps its window")
+    func anExitStampedRowWhosePaneIsBusyIsSkipped() async throws {
+        let fixture = try await Self.makeFixture(
+            panePID: "4100", paneForegroundPID: 4242)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true, parkReason: .exited)
+
+        let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(
+            reason: HibernationCoordinator.paneBusyRefusal(pid: 4242)))
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .tmux, "a busy exit-stamped row was rewritten anyway")
+        #expect(after.tmuxWindowID == row.tmuxWindowID && after.tmuxPaneID == row.tmuxPaneID,
+                "the row lost the coordinates of a pane someone is using")
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the migration killed a window someone was working in: \(fixture.tmuxArgv.all)")
+    }
+
+    /// The other leg: an exit-stamped row whose pane holds nothing but its own
+    /// idle shell migrates like any other parked row.
+    @Test("an exit-stamped row whose pane is idle migrates")
+    func anExitStampedRowWhosePaneIsIdleMigrates() async throws {
+        // `paneForegroundPID` nil leaves the inspector answering with the
+        // pane's own pid, which is what an idle interactive shell answers.
+        let fixture = try await Self.makeFixture(panePID: "4100")
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true, parkReason: .exited)
+
+        #expect(await fixture.productionMigrator().migrate(terminalID: row.id) == .migrated)
+
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder)
+        #expect(after.tmuxWindowID.isEmpty && after.tmuxPaneID.isEmpty)
     }
 
     // MARK: - The running path: park, rewrite, wake
@@ -365,8 +520,15 @@ struct TerminalTransportMigratorTests {
         #expect(!after.isParked, "a refused park left the row parked")
     }
 
-    /// The transcript-tail rail, which is the one `honoursLiveRails` gates —
-    /// so a migration under the swap's policy would not have asked.
+    /// The transcript-tail rail, the second of the two the park applies before
+    /// it takes the server lock.
+    ///
+    /// Neither this test nor the typed-input one above discriminates `.manual`
+    /// from `.profileSwap`: `honoursLiveRails` gates only the pre-lock reads,
+    /// and `performHibernateReplacementLocked` re-reads both the pane and the
+    /// transcript tail under the lock without consulting the policy, returning
+    /// the same strings. The policy itself is pinned by
+    /// `theMigrationParkRefusesASuspendedRowThatTheSwapPolicyWouldPark`.
     @Test("a transcript mid-write is reported as skipped with the rail's reason")
     func aTranscriptMidWriteIsReportedAsSkipped() async throws {
         let fixture = try await Self.makeFixture()
@@ -465,6 +627,43 @@ struct TerminalTransportMigratorTests {
         #expect(after.transport == .tmux, "the rewrite landed on a row that had moved")
     }
 
+    /// A write that failed is `refused`, not `skipped`: nothing about the
+    /// person's state has to change for the retry to work, and a skip would
+    /// put it in the column of sessions they are expected to act on.
+    @Test("a rewrite whose write fails is refused, not skipped")
+    func aRewriteWhoseWriteFailsIsRefused() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true)
+
+        let outcome = await fixture.recordingMigrator(deleteTheRowBeforeTheRewrite: true)
+            .migrate(terminalID: row.id)
+
+        guard case .refused(let reason) = outcome else {
+            Issue.record("a failed write was reported as \(outcome)")
+            return
+        }
+        #expect(reason.hasPrefix("The move could not be recorded"),
+                "the refusal did not name the failed write: \(reason)")
+    }
+
+    /// The one skip that follows a park which succeeded, so it is the one skip
+    /// that must not read as "nothing happened": the session's program has
+    /// already been stopped, and the reason has to say what becomes of it.
+    @Test("a row that parked and could not be read back says so, not not-found")
+    func aRowThatParkedAndCouldNotBeReadBackSaysSo() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        let outcome = await fixture.recordingMigrator(parkAlsoDeletesTheRow: true)
+            .migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(
+            reason: TerminalTransportMigrator.unreadableAfterParkSkip),
+                "a session whose agent was just killed was reported as \(outcome)")
+    }
+
     // MARK: - The fleet
 
     /// A session whose window is gone is reported and does not end the run.
@@ -536,6 +735,31 @@ struct TerminalTransportMigratorTests {
         let result = await fixture.coordinator.parkForTransportMigration(terminalID: row.id)
 
         #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
+    }
+
+    /// **The A/B that pins the policy.** `hibernationRefusal`'s `.manual` arm
+    /// requires `isManuallyHibernatable()`, which refuses a suspended row;
+    /// the `.profileSwap` arm checks only `hibernatedAt == nil` and parks it.
+    /// So one row, parked through the legacy `suspendedAt` column, gets two
+    /// different answers from the two policies — which is what makes
+    /// `parkForTransportMigration`'s choice of `.manual` an assertion rather
+    /// than a comment. Flipping that call to `.profileSwap` reds this test and
+    /// nothing else in the suite.
+    @Test("the migration park refuses a suspended row that the swap policy would park")
+    func theMigrationParkRefusesASuspendedRowThatTheSwapPolicyWouldPark() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let migrated = try await Self.tmuxRow(fixture, suspended: true)
+        let swapped = try await Self.tmuxRow(fixture, suspended: true)
+
+        let migrationResult = await fixture.coordinator
+            .parkForTransportMigration(terminalID: migrated.id)
+        let swapResult = await fixture.coordinator.parkForProfileSwap(terminalID: swapped.id)
+
+        #expect(migrationResult == .notEligible(reason: "Terminal is suspended"),
+                "the migration park did not honour the manual rails")
+        #expect(swapResult == .ok,
+                "the A/B pins nothing unless the swap policy parks the same row; got \(swapResult)")
     }
 
     /// `.auto` as the park reason, so a daemon that dies between the park and

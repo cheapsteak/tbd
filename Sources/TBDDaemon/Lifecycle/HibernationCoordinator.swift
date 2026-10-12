@@ -547,6 +547,97 @@ public actor HibernationCoordinator {
             terminal: terminal, reason: .auto, policy: .manual)
     }
 
+    /// The pid of whatever is running in an **exit-stamped** row's pane, or
+    /// nil when nothing is, when the row is not exit-stamped, or when the
+    /// question could not be asked.
+    ///
+    /// `.exited` parks the row while the pane's SHELL stays alive and usable —
+    /// that is the whole point of the stamp — so the pane is the one the person
+    /// was sitting in when the agent left, and they may have started something
+    /// in it since. Any action that would destroy that pane has to ask first.
+    ///
+    /// Asked of the process table, never the rendered screen. The pane's own
+    /// pid answering means an idle interactive shell; a different pid means
+    /// something is running under it. An unreadable pid answers nil: a pane
+    /// tmux cannot answer for is not evidence that a process is there, and
+    /// refusing on it would strand the row behind a probe failure with no way
+    /// back.
+    ///
+    /// tmux-only — a holder row's pane id is the empty string and names no
+    /// tmux coordinate.
+    func exitStampedPaneBusyPID(
+        terminal: Terminal, server: String, paneID: String
+    ) async -> Int32? {
+        guard terminal.isExitStamped, terminal.transport != .holder,
+              let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
+              let panePID = Int32(panePIDString), panePID > 0,
+              let foregroundPID = paneProcessInspector.paneForegroundPID(panePID: panePID),
+              foregroundPID != panePID else { return nil }
+        return foregroundPID
+    }
+
+    /// The refusal a transport migration owes a parked row whose pane still
+    /// has something running in it, or nil when the rewrite may proceed.
+    ///
+    /// The migration blanks the row's tmux coordinates, after which nothing
+    /// names that window and the reconcile pass kills it as untracked — so for
+    /// an exit-stamped row the migration would destroy whatever the person
+    /// started in the pane their agent left behind. This is the same question
+    /// `wake` asks before its `respawn-window -k`, with the same refusal text,
+    /// and it resolves the server itself because the migrator holds the row
+    /// rather than the worktree.
+    func transportMigrationPaneBusyRefusal(terminal: Terminal) async -> String? {
+        guard terminal.isExitStamped, terminal.transport != .holder else { return nil }
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            return nil
+        }
+        guard let busyPID = await exitStampedPaneBusyPID(
+            terminal: terminal,
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID) else { return nil }
+        logger.info("transport migration: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in its pane — refusing to move it rather than orphaning that window")
+        return Self.paneBusyRefusal(pid: busyPID)
+    }
+
+    /// Retire the tmux window a parked row leaves behind when its transport is
+    /// rewritten to the holder.
+    ///
+    /// The tmux park keeps the window and respawns it to a bare login shell,
+    /// which is what makes a parked tab wakeable in place. Once the row is
+    /// holder-backed that window belongs to nobody: the row no longer names it,
+    /// and one dangling window and shell per migrated session is a fleet run's
+    /// worth of residue. So the migration retires it, and the reconcile pass's
+    /// untracked-window sweep is the backstop rather than the mechanism.
+    ///
+    /// Must be called with a `terminal` that still carries the PRE-rewrite
+    /// coordinates, and only once the rewrite has landed — a window killed for
+    /// a row still recorded on tmux would be a tab the person loses for
+    /// nothing.
+    ///
+    /// Best-effort and never reported upward: the session is already on the
+    /// holder, and `paneOwnership` refuses outright if the coordinate has been
+    /// recycled, so the one failure this can have is leaving the window for the
+    /// sweep.
+    func retireTmuxWindowAfterTransportMigration(terminal: Terminal) async {
+        guard !terminal.tmuxWindowID.isEmpty,
+              let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            return
+        }
+        let server = worktree.tmuxServer
+        let ownership = await tmux.paneOwnership(
+            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID)
+        guard ownership.permitsTeardown else {
+            logger.warning("transport migration: leaving window \(terminal.tmuxWindowID, privacy: .public) untouched for terminal \(terminal.id, privacy: .public) — \(ownership.refusalDetail ?? "", privacy: .public)")
+            return
+        }
+        do {
+            try await tmux.killWindow(server: server, windowID: terminal.tmuxWindowID)
+            logger.info("transport migration: retired tmux window \(terminal.tmuxWindowID, privacy: .public) for terminal \(terminal.id, privacy: .public)")
+        } catch {
+            logger.warning("transport migration: could not retire tmux window \(terminal.tmuxWindowID, privacy: .public) for terminal \(terminal.id, privacy: .public); the reconcile pass will: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// The reason a manual hibernate was refused, for the RPC error string.
     private func manualBlockReason(_ terminal: Terminal) -> String {
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
@@ -1258,13 +1349,10 @@ public actor HibernationCoordinator {
         //
         // tmux-only, for the same reason the cwd assertion below is: a holder
         // row's pane id is the empty string and names no tmux coordinate.
-        if terminal.isExitStamped, terminal.transport != .holder,
-           let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
-           let panePID = Int32(panePIDString), panePID > 0,
-           let foregroundPID = paneProcessInspector.paneForegroundPID(panePID: panePID),
-           foregroundPID != panePID {
-            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(foregroundPID, privacy: .public) in pane \(paneID, privacy: .public) (pane pid \(panePID, privacy: .public)) — refusing the respawn rather than killing it")
-            return .paneBusy(pid: foregroundPID)
+        if let busyPID = await exitStampedPaneBusyPID(
+            terminal: terminal, server: server, paneID: paneID) {
+            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in pane \(paneID, privacy: .public) — refusing the respawn rather than killing it")
+            return .paneBusy(pid: busyPID)
         }
 
         // Assert that the process about to be resumed will run in THIS

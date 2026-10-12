@@ -152,9 +152,28 @@ without a daemon-initiated migration.
 This introduces no new kind of durable resource. The holder session a migration
 creates is created through the same spawn path every other holder session uses,
 and is therefore already covered: `HolderRegistry` adoption, the `AgentReaper`
-holder leg, the `OrphanGC` rendezvous arms, and the reconcile pass. The tmux
-window the park retires is retired by the park, and a window the park failed to
-retire is the reconcile pass's, as it is for every other park.
+holder leg, the `OrphanGC` rendezvous arms, and the reconcile pass.
+
+It does retire one resource of its own. A tmux park keeps the window and
+respawns it to a bare login shell, which is what makes a parked tab wakeable in
+place — so once the rewrite lands, that window belongs to nobody: the row no
+longer names it, and one dangling window and shell per migrated session is a
+fleet run's worth of residue. The migration therefore kills the window as the
+last step of the rewrite, and the reconcile pass's untracked-window sweep is the
+backstop rather than the mechanism. It kills a window only after the rewrite has
+landed and only when the pane still answers with this terminal's id, so a
+recycled coordinate costs a stranger nothing.
+
+**An exit-stamped row is refused rather than moved while its pane is in use.**
+`.exited` parks a row whose pane's shell is still alive and usable, which is the
+whole point of that stamp: the pane is the one the person was sitting in when
+the agent left, and they may have started something in it since. Moving the row
+would blank its coordinates and retire that window, taking their process with
+it. So the migration asks the process table the same question a wake asks before
+its own `respawn-window -k` — is the pane's foreground pid its own shell? — and
+reports the same refusal when it is not. An unreadable pid proceeds, exactly as
+it does for the wake: a pane tmux cannot answer for is not evidence that a
+process is there.
 
 ## Testing
 
@@ -165,6 +184,11 @@ retire is the reconcile pass's, as it is for every other park.
   spawn-counting double, because "no respawn" is the whole difference between
   the two paths.
 - A busy session is skipped and named, and its row is untouched.
+- A migrated session's tmux window is retired, and a window whose pane answers
+  with another terminal's id is left alone.
+- An exit-stamped session with something running in its pane is skipped with
+  the wake's own pane-busy refusal and keeps its window and coordinates, while
+  an exit-stamped session whose pane is idle migrates.
 - A session with unsent typed input is skipped with the rail's reason, proving
   the migration park honours the rails rather than overriding them.
 - An unspawnable holder refuses and leaves the row exactly as it was, in both

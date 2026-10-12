@@ -16,10 +16,16 @@ enum TransportMigrationOutcome: Sendable, Equatable {
     case migrated
     /// The row was already holder-backed. Nothing was read, parked or written.
     case alreadyHolder
-    /// The session was left exactly as it was, for a reason that names a
-    /// state a person can change — a busy turn, a rail refusing the park, a
-    /// concurrent wake winning the compare-and-set. Retrying later is the
+    /// The session did not move, for a reason that names a state a person can
+    /// change — a busy turn, a rail refusing the park, a concurrent wake
+    /// winning the compare-and-set. Retrying once that state changes is the
     /// remedy.
+    ///
+    /// **It does not promise that nothing happened.** Most skips are refusals
+    /// taken before anything was touched, but a park that succeeded and was
+    /// then overtaken skips with the session's program already stopped, and
+    /// such a session resumes on tmux when it is next woken. The reason says
+    /// which of the two it was.
     case skipped(reason: String)
     /// The migration could not be attempted or could not be finished. Carries
     /// the reason. Retrying does not help until the named fact changes.
@@ -75,6 +81,14 @@ actor TerminalTransportMigrator {
         /// other wake uses, and this composition has no spawn command of its
         /// own to compose or to get wrong.
         let wake: @Sendable (UUID) async -> WakeResult
+        /// The refusal owed to a parked row whose pane still has something
+        /// running in it, or nil when the rewrite may proceed. Only an
+        /// exit-stamped row can answer with a refusal.
+        let paneBusyRefusal: @Sendable (Terminal) async -> String?
+        /// Retire the tmux window the rewritten row leaves behind. Takes the
+        /// row as it was BEFORE the rewrite, because the rewrite blanks the
+        /// coordinates the window is named by.
+        let retireWindow: @Sendable (Terminal) async -> Void
 
         static func production(
             hibernation: HibernationCoordinator,
@@ -83,7 +97,13 @@ actor TerminalTransportMigrator {
             Operations(
                 canSpawnHolder: { holderRegistry?.canSpawn == true },
                 park: { await hibernation.parkForTransportMigration(terminalID: $0) },
-                wake: { await hibernation.wake(terminalID: $0) })
+                wake: { await hibernation.wake(terminalID: $0) },
+                paneBusyRefusal: {
+                    await hibernation.transportMigrationPaneBusyRefusal(terminal: $0)
+                },
+                retireWindow: {
+                    await hibernation.retireTmuxWindowAfterTransportMigration(terminal: $0)
+                })
         }
     }
 
@@ -105,6 +125,12 @@ actor TerminalTransportMigrator {
     /// process to interrupt.
     static let parkInFlightSkip =
         "Another pause of this session is in flight, or it was parked a moment ago; retry."
+
+    /// The skip for a row that parked and then could not be read back. The one
+    /// skip that says the session's program was stopped, so it has to say what
+    /// becomes of it.
+    static let unreadableAfterParkSkip =
+        "This session was paused, but its row could not be read back, so it was not moved; it resumes on tmux when woken."
 
     private let db: TBDDatabase
     private let operations: Operations
@@ -147,9 +173,22 @@ actor TerminalTransportMigrator {
         // nothing to park and nothing to respawn; its next ordinary wake lands
         // on the holder.
         if terminal.isParked {
-            if let skip = await rewriteToHolder(terminal) {
-                return .skipped(reason: skip)
+            // One parked row must not be rewritten: an exit-stamped one whose
+            // pane the person is using. The rewrite blanks the coordinates,
+            // after which the reconcile pass kills that window as untracked
+            // and takes whatever they started in it with it.
+            if let refusal = await operations.paneBusyRefusal(terminal) {
+                return .skipped(reason: refusal)
             }
+            switch await rewriteToHolder(terminal) {
+            case .written:
+                break
+            case .lostTheRace:
+                return .skipped(reason: Self.raceSkip)
+            case .failed(let reason):
+                return .refused(reason: reason)
+            }
+            await operations.retireWindow(terminal)
             logger.info("transport migration: parked terminal \(terminalID, privacy: .public) now reads holder-backed; nothing was spawned")
             return .migrated
         }
@@ -172,12 +211,27 @@ actor TerminalTransportMigrator {
         // The snapshot has to be taken AFTER the park: the park wrote the
         // row's park columns and rotated its incarnation, and
         // `setParkedTransport` additionally requires the row to read parked.
+        //
+        // A read that fails here gets its own reason rather than the
+        // not-found one, because the park above succeeded: this session's
+        // program has already been stopped, and a line saying the session was
+        // not found would describe a session whose agent was killed a moment
+        // ago as one nothing happened to.
         guard let parked = try? await db.terminals.get(id: terminalID) else {
-            return .skipped(reason: Self.notFoundSkip)
+            logger.error("transport migration: terminal \(terminalID, privacy: .public) was parked but could not be read back; it stays on tmux")
+            return .skipped(reason: Self.unreadableAfterParkSkip)
         }
-        if let skip = await rewriteToHolder(parked) {
-            return .skipped(reason: skip)
+        switch await rewriteToHolder(parked) {
+        case .written:
+            break
+        case .lostTheRace:
+            return .skipped(reason: Self.raceSkip)
+        case .failed(let reason):
+            return .refused(reason: reason)
         }
+        // The window the park kept, retired now that the row no longer names
+        // it. `parked` still carries the pre-rewrite coordinates.
+        await operations.retireWindow(parked)
 
         let woken = await operations.wake(terminalID)
         guard let failure = Self.wakeFailure(woken) else {
@@ -220,22 +274,37 @@ actor TerminalTransportMigrator {
 
     // MARK: - The rewrite
 
-    /// Rewrite one parked row's transport. nil when the row now reads
-    /// holder-backed; a skip reason otherwise.
-    private func rewriteToHolder(_ terminal: Terminal) async -> String? {
+    /// What the compare-and-set did.
+    ///
+    /// Three cases rather than an optional, because the two ways it does not
+    /// write mean opposite things to the person reading a report: a lost race
+    /// is a state they can retry out of, and a failed write is a fact that has
+    /// to change first.
+    private enum RewriteOutcome {
+        case written
+        case lostTheRace
+        case failed(String)
+    }
+
+    /// Rewrite one parked row's transport.
+    private func rewriteToHolder(_ terminal: Terminal) async -> RewriteOutcome {
         do {
             guard try await db.terminals.setParkedTransport(
                 id: terminal.id,
                 expectedState: TerminalReplacementSnapshot(terminal: terminal),
                 transport: .holder) != nil else {
                 logger.warning("transport migration: the rewrite was refused for \(terminal.id, privacy: .public) — the row changed under the migration")
-                return Self.raceSkip
+                return .lostTheRace
             }
-            return nil
+            return .written
         } catch {
-            let detail = error.localizedDescription
+            // `"\(error)"` rather than `localizedDescription`: a GRDB
+            // `DatabaseError` describes itself usefully and localizes into
+            // "The operation couldn't be completed", which is the half a
+            // person reading this reason does not need.
+            let detail = "\(error)"
             logger.error("transport migration: the rewrite failed for \(terminal.id, privacy: .public): \(detail, privacy: .public)")
-            return "the transport could not be recorded (\(detail))"
+            return .failed("The move could not be recorded (\(detail)).")
         }
     }
 
