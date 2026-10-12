@@ -52,11 +52,13 @@ struct DevServerRPCTests {
         toml: String,
         runner: FakeDevServerCommandRunner = FakeDevServerCommandRunner(),
         processes: [Int32: DevServerProcessInfo] = [:],
-        signalling: FakeDevServerSignalling = FakeDevServerSignalling()
+        signalling: FakeDevServerSignalling = FakeDevServerSignalling(),
+        paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdsrv")
         let recorder = ArgvRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) })
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: { recorder.record($0) }, dryRunPaneSendTarget: paneSendTarget)
         // An explicit history dir: stop closes tabs, and a tab close writes
         // Closed Terminals history, which must never resolve to the real store.
         let db = try TBDDatabase(inMemory: true, terminalHistoryDir: home + "/terminal-history")
@@ -184,6 +186,96 @@ struct DevServerRPCTests {
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
     }
 
+    /// `respawn-window -k` kills whatever the pane runs, so a reused exited
+    /// tab must prove its pane is still this terminal's first.
+    @Test func anExitedTabWhosePaneBelongsToAnotherTerminalIsNotRespawned() async throws {
+        let stranger = UUID().uuidString
+        let f = try await Self.makeFixture(
+            toml: Self.webTOML, paneSendTarget: { _, _ in .dead(terminalID: stranger) })
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Web app",
+            kind: .shell, serverName: "web")
+        f.inspector.set(.exited(code: 1), for: existing.id)
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .failed)
+        #expect(f.recorder.containing("respawn-window").isEmpty)
+        #expect(f.recorder.containing("new-window").isEmpty)
+    }
+
+    /// Answers from a script, one status per call, repeating the last.
+    private final class ScriptedTabInspector: DevServerTabInspecting, @unchecked Sendable {
+        private let lock = NSLock()
+        private var script: [DevServerTabStatus]
+        init(_ script: [DevServerTabStatus]) { self.script = script }
+        func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus { next() }
+        private func next() -> DevServerTabStatus {
+            lock.lock(); defer { lock.unlock() }
+            return script.count > 1 ? script.removeFirst() : script[0]
+        }
+    }
+
+    /// The snapshot that chose to reuse an exited tab can be a `status`
+    /// timeout old. Under the lock the pane is read again; one that is no
+    /// longer dead is not respawned over.
+    @Test func anExitedTabThatCameBackIsNotRespawnedOver() async throws {
+        let f = try await Self.makeFixture(toml: Self.webTOML)
+        defer { f.tearDown() }
+        _ = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Web app",
+            kind: .shell, serverName: "web")
+        f.router.devServerTabInspector = ScriptedTabInspector([
+            .exited(code: 1), .running(pid: 700, expectedStart: nil),
+        ])
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .failed)
+        #expect(f.recorder.containing("respawn-window").isEmpty)
+    }
+
+    /// A second start for a server whose start is still in flight does not
+    /// spawn a second tab.
+    @Test func aStartWhileAnotherStartIsInFlightSaysAlreadyStarting() async throws {
+        let f = try await Self.makeFixture(toml: Self.webTOML)
+        defer { f.tearDown() }
+        _ = await f.router.devServerClaims.claim(["web"], in: f.worktree.id, for: .start)
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes == [.init(name: "web", status: .alreadyRunning, message: "already starting")])
+        #expect(f.recorder.containing("new-window").isEmpty)
+        #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
+    }
+
+    @Test func aStopWhileAStartIsInFlightFailsAndSignalsNothing() async throws {
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(toml: Self.webTOML, signalling: signalling)
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 500, expectedStart: nil), for: existing.id)
+        _ = await f.router.devServerClaims.claim(["web"], in: f.worktree.id, for: .start)
+        let result = try await f.call(RPCMethod.serverStop,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .failed)
+        #expect(signalling.sentSignals.isEmpty)
+        #expect(try await f.db.terminals.get(id: existing.id) != nil)
+    }
+
+    /// A request releases its claims: the next start acts.
+    @Test func aFinishedStartReleasesItsClaim() async throws {
+        let f = try await Self.makeFixture(toml: Self.webTOML)
+        defer { f.tearDown() }
+        _ = try await f.call(RPCMethod.serverStart, DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+        let claim = await f.router.devServerClaims.claim(["web"], in: f.worktree.id, for: .start)
+        #expect(claim.claimed == ["web"])
+    }
+
     @Test func startingAnUndeclaredNameFails() async throws {
         let f = try await Self.makeFixture(toml: Self.webTOML)
         defer { f.tearDown() }
@@ -237,6 +329,42 @@ struct DevServerRPCTests {
         #expect(result.outcomes.first?.status == .failed)
         #expect(f.signalling.sentSignals.isEmpty)
         #expect(try await f.db.terminals.get(id: existing.id) != nil)
+    }
+
+    /// A status-only server (`docker compose up -d`) with no `stop` has no
+    /// process TBD may signal: the stop fails rather than claiming success.
+    @Test func stoppingAStatusOnlyServerWithoutAStopCommandFails() async throws {
+        let runner = FakeDevServerCommandRunner(outcomes: ["probe": .exited(0)])
+        let f = try await Self.makeFixture(
+            toml: "[servers.db]\ncommand = \"docker compose up -d\"\nstatus = \"probe\"\n", runner: runner)
+        defer { f.tearDown() }
+        let result = try await f.call(RPCMethod.serverStop,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["db"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .failed)
+        #expect(result.outcomes.first?.message?.contains("declare a `stop` command") == true)
+    }
+
+    /// The stop re-reads the tab rather than trusting the snapshot's pid.
+    @Test func stopSignalsThePidTheTabHasAtStopTime() async throws {
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(toml: Self.webTOML, signalling: signalling)
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 500, expectedStart: nil), for: existing.id)
+        let operations = f.router.devServerOperations()
+        let local = try #require(try await f.db.worktrees.getLocal(id: f.worktree.id))
+        let snapshot = await operations.snapshot(worktree: local, runStatusCommands: false)
+        f.inspector.set(.running(pid: 501, expectedStart: nil), for: existing.id)
+        let request = await operations.stopRequest(for: "web", in: snapshot, repoPath: nil)
+        #expect(request.killTargets == [.firstHand(pid: 501)])
+        f.inspector.set(.runningUnverifiable(pid: 502), for: existing.id)
+        let unverifiable = await operations.stopRequest(for: "web", in: snapshot, repoPath: nil)
+        #expect(unverifiable.killTargets.isEmpty)
+        #expect(unverifiable.unverifiable.count == 1)
+        #expect(!unverifiable.runningOnlyByStatus)
     }
 
     /// Review Focus 5: two worktrees, same server name, separate files.

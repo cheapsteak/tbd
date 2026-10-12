@@ -14,6 +14,7 @@ struct DevServerArchiveTests {
         var lifecycle: WorktreeLifecycle
         let signalling: FakeDevServerSignalling
         let inspector: FakeDevServerTabInspector
+        let runner: FakeDevServerCommandRunner
         let filesDir: URL
         let pathA: String
         let pathB: String
@@ -58,7 +59,7 @@ struct DevServerArchiveTests {
             runningFiles: DevServerRunningFileStore(directory: filesDir),
             probe: DevServerProcessProbe(info: { processes[$0] }), environment: [:])
         return Fixture(db: db, lifecycle: lifecycle, signalling: signalling, inspector: inspector,
-                       filesDir: filesDir, pathA: pathA, pathB: pathB, worktreeA: a, worktreeB: b)
+                       runner: runner, filesDir: filesDir, pathA: pathA, pathB: pathB, worktreeA: a, worktreeB: b)
     }
 
     private func report(_ f: Fixture, root: String, pid: Int32) throws -> String {
@@ -86,6 +87,36 @@ struct DevServerArchiveTests {
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(try await f.db.terminals.get(id: tab.id) == nil, "archive's teardown still removes the tab")
+    }
+
+    /// A holder server's exit is stamped as its last output while its row
+    /// exists — which includes the exit archive's own SIGTERM causes. After
+    /// archive no server may read Exited from such an entry.
+    @Test func archiveDetachesServerOutputsStampedDuringIt() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.exited(code: 143), for: tab.id)
+        await f.db.terminalHistory.recordServerExit(terminal: tab, serverName: "web", capture: nil, exitCode: 143)
+        #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktreeA.id)["web"] != nil)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktreeA.id).isEmpty)
+        #expect(try await f.db.terminalHistory.list(worktreeID: f.worktreeA.id).map(\.id) == [tab.id],
+                "the output stays in Closed Terminals")
+    }
+
+    /// A server that reads running only through its `status` command (a
+    /// detached container) is stopped too: archive runs status commands.
+    @Test func archiveStopsAStatusOnlyServerThroughItsStopCommand() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        try Data("""
+            [servers.db]
+            command = "docker compose up -d db"
+            status = "docker compose ps db"
+            stop = "docker compose stop db"
+            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.runner.runs.map(\.command) == ["docker compose ps db", "docker compose stop db"])
     }
 
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {

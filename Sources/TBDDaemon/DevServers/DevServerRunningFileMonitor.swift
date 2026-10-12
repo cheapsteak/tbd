@@ -124,7 +124,7 @@ actor DevServerRunningFileMonitor {
             guard let tmuxServer = tmuxServers[tab.worktreeID], let name = tab.serverName else { continue }
             let state: String
             switch await tabInspector.status(of: tab, tmuxServer: tmuxServer) {
-            case .running(let pid, _):
+            case .running(let pid, _), .runningUnverifiable(let pid):
                 next.insert(tab.worktreeID)
                 state = "running \(pid)"
             case .exited(let code):

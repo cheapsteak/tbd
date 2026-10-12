@@ -118,16 +118,34 @@ struct DevServerOperations: Sendable {
         return env
     }
 
-    /// Kill targets are the server's running TBD tab (pid read live) and the
-    /// pid of every live running file for it, each re-verified against its
-    /// recorded start time before the kill signals anything.
-    func stopRequest(for name: String, in snapshot: DevServerSnapshot, repoPath: String?) -> DevServerStopRequest {
+    /// Kill targets are the server's running TBD tab and the pid of every
+    /// live running file for it. The tab is read again here rather than
+    /// trusted from the snapshot, which can be a `status` timeout old: a
+    /// first-hand pid (a tmux pane, the holder registry's child) is then
+    /// anchored by the start time the kill reads at once, and a tab whose pid
+    /// cannot be tied to it is reported, never signalled. Running files are
+    /// anchored by the start time they recorded.
+    func stopRequest(for name: String, in snapshot: DevServerSnapshot, repoPath: String?) async -> DevServerStopRequest {
         let declared = snapshot.declared(name)
         var targets: [DevServerKillTarget] = []
-        if case .running(let pid, let expected)? = snapshot.tabs[name]?.status {
-            targets.append(DevServerKillTarget(
-                pid: pid, expectedStart: expected,
-                tolerance: expected == nil ? 0 : AgentReaper.defaultHolderIdentityWindow))
+        var unverifiable: [String] = []
+        var tabWasRunning = false
+        if let tab = snapshot.tabs[name], tab.status.runningPID != nil {
+            tabWasRunning = true
+            switch await tabInspector.status(of: tab.terminal, tmuxServer: snapshot.worktree.tmuxServer) {
+            case .running(let pid, let expected?):
+                targets.append(DevServerKillTarget(
+                    pid: pid, expectedStart: expected, tolerance: AgentReaper.defaultHolderIdentityWindow))
+            case .running(let pid, nil):
+                targets.append(.firstHand(pid: pid))
+            case .runningUnverifiable(let pid):
+                unverifiable.append("""
+                    pid \(pid) in the server's tab has no recorded start time, so it cannot be told \
+                    apart from a reused pid and was not signalled
+                    """)
+            case .exited, .gone:
+                break
+            }
         }
         let files = snapshot.liveFiles.filter { $0.file.server == name }
         for entry in files {
@@ -143,17 +161,22 @@ struct DevServerOperations: Sendable {
             commandEnvironment: declared.map {
                 commandEnvironment(server: $0, worktree: worktree, repoPath: repoPath)
             } ?? [:],
-            killTargets: targets, runningFilePaths: files.map(\.path))
+            killTargets: targets, unverifiable: unverifiable,
+            runningOnlyByStatus: !tabWasRunning && files.isEmpty,
+            runningFilePaths: files.map(\.path))
     }
 
-    /// Archive's half: stop every server TBD started (a running server tab)
-    /// or that a live running file reports, in parallel. Tabs are left for
-    /// archive's own teardown, which captures their scrollback.
+    /// Archive's half: stop every server that reads running — TBD's tab, a
+    /// live running file, or its declared `status` command (each bounded by
+    /// `statusTimeout`) — in parallel. Tabs are left for archive's own
+    /// teardown, which captures their scrollback.
     func stopAllForArchive(worktree: LocalWorktree) async -> [DevServerStopReport] {
-        let snapshot = await snapshot(worktree: worktree, runStatusCommands: false)
+        let snapshot = await snapshot(worktree: worktree, runStatusCommands: true)
         let repoPath = await repoPath(for: worktree)
-        let requests = snapshot.servers.filter { $0.state == .running }
-            .map { stopRequest(for: $0.name, in: snapshot, repoPath: repoPath) }
+        var requests: [DevServerStopRequest] = []
+        for server in snapshot.servers where server.state == .running {
+            requests.append(await stopRequest(for: server.name, in: snapshot, repoPath: repoPath))
+        }
         let stopper = self.stopper
         return await withTaskGroup(of: DevServerStopReport.self) { group in
             for request in requests { group.addTask { await stopper.stop(request) } }

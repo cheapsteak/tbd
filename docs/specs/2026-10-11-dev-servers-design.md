@@ -281,13 +281,25 @@ shows the output.
 - If the server declares `stop`, run it, with a 60-second budget. A `stop`
   that exits non-zero or runs out of time is a failed stop; TBD does not fall
   back to signalling.
-- Otherwise, signal the process group of the server — TBD's tab process, or the
-  live running file's `pid`: SIGTERM, then SIGKILL after 5 seconds. Before
-  signalling, re-verify the pid's start time. TBD refuses process group 0, 1
-  and its own process group: a server started with `pnpm dev &` from a shell
-  without job control shares that shell's group, which may be an agent's
-  session or TBD's own. A server should lead its own group (`setsid`, or
-  `set -m` in a start script) or declare `stop`.
+- Otherwise, signal the server's process — TBD's tab process, or the live
+  running file's `pid`: SIGTERM, then SIGKILL after 5 seconds. Before
+  signalling, re-verify the pid's identity: a running file's pid against the
+  start time it recorded; a tab's pid is read from the tab again at stop time
+  and its start time taken from the kernel at that moment, and a tab pid that
+  can be tied to the tab neither way — a holder session the daemon has not
+  adopted whose row recorded no start time — is reported as a failed stop and
+  not signalled.
+- The whole process group is signalled only when the pid leads it
+  (`getpgid(pid) == pid`). Otherwise only the pid itself is signalled, and the
+  stop report says so: a server started with `pnpm dev &` from a shell without
+  job control shares that shell's group, which may be an agent's session or
+  TBD's own, and only a group leader's group is the server's alone. TBD never
+  signals its own pid or a group it leads. A server whose children must stop
+  with it should lead its own group (`setsid`, or `set -m` in a start script)
+  or declare `stop`; TBD's own tab process always leads its group.
+- A server that reads running only through its `status` command — no running
+  tab, no live running file — and declares no `stop` gives TBD nothing to
+  signal. Stopping it is a failed stop that says to declare a `stop` command.
 - Close the server's tab, capturing its scrollback the way archive does, delete
   its running file, and detach its saved last output.
 
@@ -298,14 +310,17 @@ reads *Exited*.
 
 ### On archive
 
-Archive stops every server in the worktree that TBD started or that has a live
-running file, using the stop rules above. It does so in archive's first phase,
+Archive stops every server in the worktree that reads running — TBD's tab, a
+live running file, or its `status` command, which archive runs with the usual
+5-second timeout — using the stop rules above. It does so in archive's first phase,
 right after the worktree's status flips to archived — so a concurrent `server
 start` is refused — and before its tabs are torn down, so group kills reach
 live tab processes and a declared `stop` runs while the checkout still exists.
 This happens before the archive hook runs, and on forced archives too. A
 server that fails to stop is logged and the archive continues; the tab
-teardown still ends what TBD started.
+teardown still ends what TBD started. Once the tabs' rows are deleted, archive
+detaches every server's saved last output, so no exit — including the one its
+own stop caused — leaves a server reading *Exited* after a revive.
 
 ## CLI
 
@@ -366,11 +381,11 @@ once it writes running files. Nothing runs until someone clicks Start.
 ## Who reclaims what
 
 - **Server processes TBD started** are tab processes, so tab teardown and the
-  existing terminal reconcilers cover them, and stop and archive kill the
-  whole process group rather than the pane pid alone. A process that leaves its
-  group (`setsid`, a daemonizing server) escapes the group kill; a server like
-  that should write a running file for its real pid or declare a `stop`
-  command.
+  existing terminal reconcilers cover them, and stop and archive kill the tab
+  process's whole group, which it leads, rather than the pane pid alone. A
+  process that leaves its group (`setsid`, a daemonizing server) escapes the
+  group kill; a server like that should write a running file for its real pid
+  or declare a `stop` command.
 - **Running files** are a new durable resource. `OrphanGC` gains a leg that
   deletes files in the running-file directory that are stale (liveness above)
   and older than `gcGraceSeconds`, under `gcEnabled`. It never signals a
@@ -388,8 +403,14 @@ once it writes running files. Nothing runs until someone clicks Start.
   nothing is recorded.
 - **A `stop` command that exits non-zero or exceeds 60 seconds** is reported,
   and TBD does not fall back to signalling: the repo chose its stop path.
-- **A group kill aimed at group 0, 1 or TBD's own group** is refused and
+- **A kill aimed at TBD's own pid or a group TBD leads** is refused and
   reported; nothing is signalled.
+- **A pid that does not lead its process group** is signalled alone, and the
+  stop report names it.
+- **A tab pid that cannot be verified as the tab's** fails the stop; nothing is
+  signalled.
+- **A status-only server with no `stop`** fails the stop with "nothing to
+  stop".
 - **A group kill that leaves the process alive after SIGKILL** is reported with
   the pid.
 - **A malformed running file** is ignored and named in `tbd server list
@@ -407,16 +428,18 @@ once it writes running files. Nothing runs until someone clicks Start.
 - State derivation: each of the five states, and their precedence, including
   *Exited* read from a saved last output once the tab is gone.
 - Stop: the declared-`stop` path and its 60-second budget, the group-kill path
-  with an injected clock for the SIGKILL delay, and the refusal of group 0, 1
-  and TBD's own group.
+  with an injected clock for the SIGKILL delay, the pid-only path for a pid
+  that does not lead its group, the refusal of TBD's own pid and group, a tab
+  pid re-read at stop time, an unverifiable tab pid, and a status-only server
+  with no `stop`.
 - Last output: the holder registry calls its session-ended step before the
   release, with the established status; a server tab's exit saves its screen
   and code, an ordinary tab's exit saves nothing, and an exit whose tab is
   already gone records no server state; start and stop detach the saved entry;
   "Show last output" opens the entry on the holder transport and focuses the
   tab on tmux.
-- Archive stops TBD-started and file-reported servers and leaves other
-  worktrees' servers alone.
+- Archive stops TBD-started, file-reported and status-only servers, leaves
+  other worktrees' servers alone, and leaves no server reading *Exited*.
 - The OrphanGC leg deletes stale files only, and only under `gcEnabled`.
 - `scripts/test.sh` adds `DEV_SERVERS_DIR` to its fence, pointed at scratch, so
   no test reads or writes the real `~/.local/state/dev-servers/`.

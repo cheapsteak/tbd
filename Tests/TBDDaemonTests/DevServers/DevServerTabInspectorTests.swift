@@ -37,4 +37,32 @@ struct DevServerTabInspectorTests {
             tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
         #expect(await inspector.status(of: terminal, tmuxServer: "unused") == .exited(code: 3))
     }
+    private func holderInspector() -> ProductionDevServerTabInspector {
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-devtab-\(UUID().uuidString)"],
+            listTerminals: { [] }, spawner: nil)
+        return ProductionDevServerTabInspector(
+            tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
+    }
+
+    /// A live holder child with no recorded start time and no adopted
+    /// session cannot be tied to the tab. It reads running — never anchored
+    /// to the row's creation time, which a stop would then silently skip.
+    @Test func aLiveHolderChildWithNoRecordedStartIsUnverifiable() async {
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+                                childPID: getpid())
+        terminal.serverName = "web"
+        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused")
+            == .runningUnverifiable(pid: getpid()))
+    }
+
+    @Test func aLiveHolderChildIsAnchoredByItsRecordedStart() async {
+        let started = Date(timeIntervalSince1970: 1_760_190_000)
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+                                childPID: getpid(), holderChildStartedAt: started)
+        terminal.serverName = "web"
+        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused")
+            == .running(pid: getpid(), expectedStart: started))
+    }
 }

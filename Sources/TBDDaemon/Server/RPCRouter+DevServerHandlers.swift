@@ -6,9 +6,18 @@ private let devServerLogger = Logger(subsystem: "com.tbd.daemon", category: "dev
 
 enum DevServerStartError: LocalizedError {
     case cwdMissing(String)
+    /// The exited tab the start meant to reuse is no longer that tab.
+    case tabChanged(UUID)
+    /// The exited tab's pane could not be proved to be the server's.
+    case paneNotOwned(UUID, String)
     var errorDescription: String? {
         switch self {
-        case .cwdMissing(let path): return "working directory does not exist: \(path)"
+        case .cwdMissing(let path):
+            return "working directory does not exist: \(path)"
+        case .tabChanged(let id):
+            return "the server's tab \(id) changed while it was being started; try again"
+        case .paneNotOwned(let id, let detail):
+            return "the server's tab \(id) was left untouched: \(detail)"
         }
     }
 }
@@ -61,8 +70,14 @@ extension RPCRouter {
                 """)
         }
         let operations = devServerOperations()
-        let snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
-        let names = params.names.isEmpty ? snapshot.declarations.servers.map(\.name) : params.names
+        // The names come from the declarations alone, so each server can be
+        // claimed before its state is read: a state read before the claim
+        // could predate a concurrent start's spawn.
+        let names = Self.uniqued(params.names.isEmpty
+            ? DevServerDeclarationParser.load(
+                worktreePath: worktree.path, repoID: worktree.repoID, environment: devServerEnvironment
+            ).servers.map(\.name)
+            : params.names)
         guard !names.isEmpty else {
             return try RPCResponse(result: DevServerActionResult(outcomes: []))
         }
@@ -72,9 +87,17 @@ extension RPCRouter {
             .serverStart, actor: actor,
             target: .local(worktree: params.worktreeID, terminal: nil),
             agent: "dev-server")
+        let (claimed, busy) = await devServerClaims.claim(names, in: worktree.id, for: .start)
+        let snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
         let repoPath = await operations.repoPath(for: worktree)
         var outcomes: [DevServerActionOutcome] = []
         for name in names {
+            if let holder = busy[name] {
+                outcomes.append(holder == .start
+                    ? .init(name: name, status: .alreadyRunning, message: "already starting")
+                    : .init(name: name, status: .failed, message: "a stop of \(name) is in progress"))
+                continue
+            }
             guard let server = snapshot.declared(name) else {
                 outcomes.append(.init(name: name, status: .failed,
                                       message: "no declared server named \"\(name)\""))
@@ -88,7 +111,7 @@ extension RPCRouter {
             do {
                 let terminal = try await startDevServer(
                     server, worktree: worktree, reusing: snapshot.tabs[name],
-                    operations: operations, repoPath: repoPath, actuationID: actuationID)
+                    operations: operations, repoPath: repoPath)
                 outcomes.append(.init(name: name, status: .started, terminalID: terminal.id))
                 // A new run supersedes the last one's saved output: the entry
                 // stays in Closed Terminals but no longer speaks for the server.
@@ -101,9 +124,16 @@ extension RPCRouter {
                 outcomes.append(.init(name: name, status: .failed, message: error.localizedDescription))
             }
         }
+        await devServerClaims.release(claimed, in: worktree.id)
         await finishServerActuation(actuationID, outcomes: outcomes)
         await onDevServersChanged?()
         return try RPCResponse(result: DevServerActionResult(outcomes: outcomes))
+    }
+
+    /// Order-preserving de-duplication: a name given twice is acted on once.
+    static func uniqued(_ names: [String]) -> [String] {
+        var seen: Set<String> = []
+        return names.filter { seen.insert($0).inserted }
     }
 
     /// Opens (or, for an exited tmux tab, respawns in place) one server's tab.
@@ -112,8 +142,7 @@ extension RPCRouter {
         worktree: LocalWorktree,
         reusing existing: DevServerTabObservation?,
         operations: DevServerOperations,
-        repoPath: String?,
-        actuationID: String
+        repoPath: String?
     ) async throws -> Terminal {
         let cwd = DevServerDeclarationParser.resolvedCwd(server, worktreePath: worktree.path)
         var isDirectory: ObjCBool = false
@@ -129,17 +158,17 @@ extension RPCRouter {
             case .tmux:
                 var env = operations.commandEnvironment(server: server, worktree: worktree, repoPath: repoPath)
                 env["TBD_TERMINAL_ID"] = existing.terminal.id.uuidString
-                try await lifecycle.tmux.respawnWindow(
-                    server: worktree.tmuxServer, windowID: existing.terminal.tmuxWindowID,
-                    cwd: cwd, shellCommand: command, env: env)
+                try await respawnExitedServerTab(
+                    existing.terminal, serverName: server.name, worktree: worktree, cwd: cwd,
+                    command: command, env: env, tabInspector: operations.tabInspector)
                 await keepFinalScreen(tmuxServer: worktree.tmuxServer, windowID: existing.terminal.tmuxWindowID)
                 return existing.terminal
             case .holder:
                 // A holder session cannot be respawned in place: close the
                 // exited tab — its final output was saved when its child
-                // exited — then open a new one.
-                let (cleanupFailure, refusal) = try await closeTerminalTab(
-                    existing.terminal, actuationID: actuationID)
+                // exited — then open a new one. A failed close throws, which
+                // fails this server only.
+                let (cleanupFailure, refusal) = try await closeTerminalTab(existing.terminal, actuationID: nil)
                 logTabCloseProblems(existing.terminal, cleanupFailure, refusal)
             }
         }
@@ -172,6 +201,38 @@ extension RPCRouter {
         return terminal
     }
 
+    /// `respawn-window -k` on an exited server tab, under the worktree's tmux
+    /// server lock and the same guards every other window-destroying path
+    /// takes: the row is read again and must still be this server's tab at
+    /// the same coordinates, its pane must still be dead, and
+    /// `TmuxManager.paneOwnership` must prove the pane is this terminal's —
+    /// the snapshot that chose the tab can be a `status` timeout old, and `-k`
+    /// kills whatever the pane runs.
+    private func respawnExitedServerTab(
+        _ expected: Terminal, serverName: String, worktree: LocalWorktree, cwd: String,
+        command: String, env: [String: String], tabInspector: any DevServerTabInspecting
+    ) async throws {
+        try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+        ) { current -> Void in
+            guard let row = try await self.db.terminals.get(id: expected.id),
+                  row.serverName == serverName, row.transport == .tmux,
+                  row.tmuxWindowID == expected.tmuxWindowID, row.tmuxPaneID == expected.tmuxPaneID
+            else { throw DevServerStartError.tabChanged(expected.id) }
+            guard case .exited = await tabInspector.status(of: row, tmuxServer: current.tmuxServer) else {
+                throw DevServerStartError.tabChanged(expected.id)
+            }
+            let ownership = await self.tmux.paneOwnership(
+                terminalID: row.id, server: current.tmuxServer, paneID: row.tmuxPaneID)
+            guard ownership.permitsTeardown else {
+                throw DevServerStartError.paneNotOwned(row.id, ownership.refusalDetail ?? "ownership unknown")
+            }
+            try await self.tmux.respawnWindow(
+                server: current.tmuxServer, windowID: row.tmuxWindowID,
+                cwd: cwd, shellCommand: command, env: env)
+        }
+    }
+
     /// `remain-on-exit on`, so a crashed server's output stays readable and
     /// its exit status stays queryable (`#{pane_dead_status}`).
     private func keepFinalScreen(tmuxServer: String, windowID: String) async {
@@ -191,19 +252,47 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
         let operations = devServerOperations()
-        let snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
-        let names = params.names.isEmpty
-            ? snapshot.servers.filter { $0.state == .running || $0.state == .unknown }.map(\.name)
-            : params.names
-        guard !names.isEmpty else {
-            return try RPCResponse(result: DevServerActionResult(outcomes: []))
+        // Named servers are claimed before their state is read. "Stop all"
+        // has to read state to know which servers run, so it claims after;
+        // a start that lands in between is not stopped by this call, and
+        // each stop re-reads its server's tab before it signals anything.
+        let names: [String]
+        let snapshot: DevServerSnapshot
+        let claimed: [String]
+        let busy: [String: DevServerActionClaims.Action]
+        if params.names.isEmpty {
+            snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
+            names = snapshot.servers.filter { $0.state == .running || $0.state == .unknown }.map(\.name)
+            guard !names.isEmpty else {
+                return try RPCResponse(result: DevServerActionResult(outcomes: []))
+            }
+            let claim = await devServerClaims.claim(names, in: worktree.id, for: .stop)
+            claimed = claim.claimed
+            busy = claim.busy
+        } else {
+            names = Self.uniqued(params.names)
+            let claim = await devServerClaims.claim(names, in: worktree.id, for: .stop)
+            claimed = claim.claimed
+            busy = claim.busy
+            snapshot = await operations.snapshot(worktree: worktree, runStatusCommands: true)
         }
-        let actuationID = try await beginActuation(
-            .serverStop, actor: actor, target: .local(worktree: params.worktreeID, terminal: nil),
-            agent: "dev-server")
+        let actuationID: String
+        do {
+            actuationID = try await beginActuation(
+                .serverStop, actor: actor, target: .local(worktree: params.worktreeID, terminal: nil),
+                agent: "dev-server")
+        } catch {
+            await devServerClaims.release(claimed, in: worktree.id)
+            throw error
+        }
         let repoPath = await operations.repoPath(for: worktree)
         var outcomes: [DevServerActionOutcome] = []
         for name in names {
+            if let holder = busy[name] {
+                outcomes.append(.init(name: name, status: .failed, message: holder == .stop
+                    ? "already stopping" : "a start of \(name) is in progress"))
+                continue
+            }
             guard let info = snapshot.info(name) else {
                 outcomes.append(.init(name: name, status: .failed,
                                       message: "no declared or reported server named \"\(name)\""))
@@ -215,10 +304,12 @@ extension RPCRouter {
             // last output.
             if info.state != .running && info.state != .unknown && !info.hasStopCommand {
                 if let tab {
-                    let (cleanupFailure, refusal) = try await closeTerminalTab(
-                        tab.terminal, actuationID: actuationID)
-                    logTabCloseProblems(tab.terminal, cleanupFailure, refusal)
-                    outcomes.append(.init(name: name, status: .stopped, terminalID: tab.terminal.id))
+                    if let problem = await closeServerTab(tab.terminal) {
+                        outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
+                                              message: problem))
+                    } else {
+                        outcomes.append(.init(name: name, status: .stopped, terminalID: tab.terminal.id))
+                    }
                 } else if info.state == .exited {
                     // Only a saved last output says "exited" here; clearing it is the stop.
                     outcomes.append(.init(name: name, status: .stopped))
@@ -228,28 +319,53 @@ extension RPCRouter {
                 await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: name)
                 continue
             }
-            let report = await operations.stopper.stop(
-                operations.stopRequest(for: name, in: snapshot, repoPath: repoPath))
+            let request = await operations.stopRequest(for: name, in: snapshot, repoPath: repoPath)
+            let report = await operations.stopper.stop(request)
             guard report.succeeded else {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab?.terminal.id,
                                       message: report.message))
                 continue
             }
+            let closeProblem: String?
             if let tab {
-                let (cleanupFailure, refusal) = try await closeTerminalTab(
-                    tab.terminal, actuationID: actuationID)
-                logTabCloseProblems(tab.terminal, cleanupFailure, refusal)
+                closeProblem = await closeServerTab(tab.terminal)
+            } else {
+                closeProblem = nil
             }
             // After the tab close, never before: the close deletes the
             // terminal row, and `recordServerExit` stamps an entry only while
             // that row exists — so the exit this stop's own kill caused cannot
             // re-attach an entry after this detach.
             await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: name)
-            outcomes.append(.init(name: name, status: .stopped, terminalID: tab?.terminal.id))
+            if let closeProblem {
+                outcomes.append(.init(name: name, status: .failed, terminalID: tab?.terminal.id,
+                                      message: "the server stopped, but \(closeProblem)"))
+            } else {
+                outcomes.append(.init(name: name, status: .stopped, terminalID: tab?.terminal.id,
+                                      message: report.message))
+            }
         }
+        await devServerClaims.release(claimed, in: worktree.id)
         await finishServerActuation(actuationID, outcomes: outcomes)
         await onDevServersChanged?()
         return try RPCResponse(result: DevServerActionResult(outcomes: outcomes))
+    }
+
+    /// Closes a server's tab with no outcome row of its own (the call's one
+    /// row covers it). A throw — the row could not be read or deleted — is
+    /// returned as that server's failure rather than ending the request.
+    private func closeServerTab(_ terminal: Terminal) async -> String? {
+        do {
+            let (cleanupFailure, refusal) = try await closeTerminalTab(terminal, actuationID: nil)
+            logTabCloseProblems(terminal, cleanupFailure, refusal)
+            return nil
+        } catch {
+            devServerLogger.warning("""
+                closing dev server tab \(terminal.id.uuidString, privacy: .public) failed: \
+                \(String(describing: error), privacy: .public)
+                """)
+            return "closing its tab failed: \(error.localizedDescription)"
+        }
     }
 
     /// One outcome row per call: dispatched when every server succeeded,

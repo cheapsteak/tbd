@@ -58,7 +58,7 @@ enum DevServerStateDeriver {
             pid = file.file.pid
         } else if check == .running {
             state = .running
-        } else if case .running(let tabPID, _)? = tab?.status {
+        } else if let tabPID = tab?.status.runningPID {
             state = .running
             pid = tabPID
         } else if case .exited(let code)? = tab?.status {
@@ -77,7 +77,7 @@ enum DevServerStateDeriver {
         } else if check == .timedOut {
             state = .unknown
         }
-        if pid == nil, case .running(let tabPID, _)? = tab?.status { pid = tabPID }
+        if pid == nil, let tabPID = tab?.status.runningPID { pid = tabPID }
         return DevServerInfo(
             name: name, label: label, source: source, state: state, exitCode: exitCode,
             endpoints: endpoints, terminalID: tab?.terminal.id, pid: pid, hasStopCommand: hasStopCommand,

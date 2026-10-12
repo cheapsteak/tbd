@@ -11,9 +11,11 @@ final class FakeDevServerSignalling: DevServerSignalling, @unchecked Sendable {
     private var groups: [Int32: Int32] = [:]
     private var dieOn: [Int32: Set<Int32>] = [:]
     private var sent: [Sent] = []
+    private var sentAlone: [Sent] = []
     let own: Int32
+    let ownPID: Int32
 
-    init(own: Int32 = 4242) { self.own = own }
+    init(own: Int32 = 4242, ownPID: Int32 = 4243) { self.own = own; self.ownPID = ownPID }
 
     func add(pid: Int32, pgid: Int32, start: Date, zombie: Bool = false, diesOn signals: Set<Int32> = [SIGTERM]) {
         lock.lock(); defer { lock.unlock() }
@@ -22,11 +24,24 @@ final class FakeDevServerSignalling: DevServerSignalling, @unchecked Sendable {
         dieOn[pgid] = signals
     }
 
+    /// Signals sent to whole groups (`kill(-pgid, …)`).
     var sentSignals: [Sent] { lock.lock(); defer { lock.unlock() }; return sent }
+    /// Signals sent to single processes (`kill(pid, …)`); `pgid` holds the pid.
+    var sentToProcesses: [Sent] { lock.lock(); defer { lock.unlock() }; return sentAlone }
+    func isAlive(_ pid: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; return infos[pid] != nil }
 
     func processInfo(_ pid: Int32) -> DevServerProcessInfo? { lock.lock(); defer { lock.unlock() }; return infos[pid] }
     func processGroup(of pid: Int32) -> Int32? { lock.lock(); defer { lock.unlock() }; return groups[pid] }
     func ownProcessGroup() -> Int32 { own }
+    func ownProcessID() -> Int32 { ownPID }
+    /// The pid dies alone when its group is configured to die on `signal`.
+    func signalProcess(_ pid: Int32, _ signal: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        sentAlone.append(Sent(pgid: pid, signal: signal))
+        guard let group = groups[pid], dieOn[group]?.contains(signal) == true else { return }
+        groups.removeValue(forKey: pid)
+        infos.removeValue(forKey: pid)
+    }
     func groupExists(_ pgid: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; return groups.values.contains(pgid) }
     func signalGroup(_ pgid: Int32, _ signal: Int32) {
         lock.lock(); defer { lock.unlock() }

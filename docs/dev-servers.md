@@ -104,7 +104,7 @@ A file is live when a process with `pid` exists, is not a zombie, and its start 
 
 ### Process groups
 
-To stop a server, TBD signals the process group of `pid`. A server started with `pnpm dev &` from a shell without job control shares that shell's group, which may belong to an agent session. TBD refuses groups 0 and 1 and its own, but cannot tell any other shared group apart. So a server should lead its own group (`setsid`, or `set -m` in a start script), or declare a `stop` command.
+To stop a server, TBD signals the process group of `pid` only when `pid` leads that group (`getpgid(pid) == pid`). Otherwise it signals `pid` alone and says so in the stop report: a server started with `pnpm dev &` from a shell without job control shares that shell's group, which may belong to an agent session, so the group is not the server's to end. A server whose children must stop with it should lead its own group (`setsid`, or `set -m` in a start script), or declare a `stop` command.
 
 ## `tbd server report`
 
@@ -148,12 +148,13 @@ A server's state is the first of these that applies:
 ### Stopping
 
 - If the server declares `stop`, TBD runs it with a 60-second budget. A `stop` that exits non-zero or runs out of time is a failed stop; TBD does not fall back to signalling.
-- Otherwise TBD signals the server's process group, taken from its tab process or the live file's `pid`: SIGTERM, then SIGKILL after 5 seconds. It re-verifies the pid's start time before signalling.
+- Otherwise TBD signals the server's process, taken from its tab process (read again at stop time) or the live file's `pid`: SIGTERM, then SIGKILL after 5 seconds. It signals the whole process group only when the pid leads it, and the pid alone otherwise (see "Process groups"). It re-verifies the pid's start time before signalling, and a pid it cannot verify fails the stop instead of being signalled.
+- A server that reads running only through its `status` command, with no `stop` declared, has nothing TBD may signal; stopping it fails and asks for a `stop` command.
 - Then it closes the server's tab, keeping the scrollback the way archive does, and deletes the running file.
 
 `restart` is stop, then start. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
 
-Archiving a worktree stops its servers first, using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues.
+Archiving a worktree stops its running servers first — including those running only by their `status` command — using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
 
 ## Exited servers and their last output
 
@@ -180,6 +181,6 @@ Logs need no command: each server is an ordinary tab, read with `tbd terminal ou
 
 ## Who reclaims what
 
-- **Server processes TBD started** are tab processes, covered by tab teardown, archive and the terminal reconcilers. A process that leaves its group (`setsid`, a daemonizing server) escapes the group kill, so such a server should write a running file for its real pid or declare `stop`.
+- **Server processes TBD started** are tab processes, each leading its own group, covered by tab teardown, archive and the terminal reconcilers. A process that leaves its group (`setsid`, a daemonizing server) escapes the group kill, so such a server should write a running file for its real pid or declare `stop`.
 - **Stale running files** are deleted by `OrphanGC` under `gcEnabled`, when the process is gone and the file is older than `gcGraceSeconds`. It never signals a process, and keeps malformed or newer-version files. See [`orphan-gc.md`](orphan-gc.md).
 - **Saved last output** is an ordinary Closed Terminals entry, bounded by that store's limits.

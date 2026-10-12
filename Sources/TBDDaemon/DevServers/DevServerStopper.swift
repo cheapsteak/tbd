@@ -8,6 +8,13 @@ struct DevServerStopRequest: Sendable {
     let cwd: String
     let commandEnvironment: [String: String]
     let killTargets: [DevServerKillTarget]
+    /// Processes that look like the server's but could not be verified as
+    /// it; each fails a signalling stop.
+    let unverifiable: [String]
+    /// The server reads running (or unknown) only through its `status`
+    /// command: no running tab, no live running file. Without a declared
+    /// `stop` there is then nothing TBD may signal.
+    let runningOnlyByStatus: Bool
     /// Running files describing this server, deleted after a successful stop.
     let runningFilePaths: [String]
 }
@@ -40,6 +47,7 @@ struct DevServerStopper: Sendable {
     }
 
     func stop(_ request: DevServerStopRequest) async -> DevServerStopReport {
+        var notes: [String] = []
         if let stopCommand = request.declared?.stop {
             // The repo chose its stop path: a failure is reported, never
             // followed by a signal.
@@ -57,13 +65,26 @@ struct DevServerStopper: Sendable {
                 return failure(request, "stop command could not run: \(reason)")
             }
         } else {
-            var problems: [String] = []
+            if request.runningOnlyByStatus, request.killTargets.isEmpty, request.unverifiable.isEmpty {
+                return failure(request, """
+                    nothing to stop: \(request.name) reads running only through its `status` command \
+                    and TBD has no process for it; declare a `stop` command
+                    """)
+            }
+            var problems = request.unverifiable
             for target in request.killTargets {
                 switch await killer.kill(target) {
                 case .survived(let pid, let pgid):
                     problems.append("process \(pid) (group \(pgid)) is still alive after SIGKILL")
-                case .refused(_, let reason):
+                case .survivedAlone(let pid, _):
+                    problems.append("process \(pid) is still alive after SIGKILL")
+                case .refused(let reason):
                     problems.append(reason)
+                case .terminatedAlone(let pid, let pgid), .killedAlone(let pid, let pgid):
+                    notes.append("""
+                        pid \(pid) does not lead its own process group (it is in group \(pgid)), \
+                        so only that process was signalled
+                        """)
                 case .notRunning, .terminated, .killed:
                     break
                 }
@@ -73,7 +94,8 @@ struct DevServerStopper: Sendable {
         for path in request.runningFilePaths {
             try? FileManager.default.removeItem(atPath: path)
         }
-        return DevServerStopReport(name: request.name, succeeded: true, message: nil)
+        return DevServerStopReport(
+            name: request.name, succeeded: true, message: notes.isEmpty ? nil : notes.joined(separator: "; "))
     }
 
     private func failure(_ request: DevServerStopRequest, _ message: String) -> DevServerStopReport {

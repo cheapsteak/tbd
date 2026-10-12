@@ -23,13 +23,17 @@ struct DevServerStopperTests {
             commandRunner: r)
     }
 
-    private func request(stop: String?, targets: [DevServerKillTarget], files: [String]) -> DevServerStopRequest {
+    private func request(
+        stop: String?, targets: [DevServerKillTarget], files: [String],
+        unverifiable: [String] = [], runningOnlyByStatus: Bool = false
+    ) -> DevServerStopRequest {
         DevServerStopRequest(
             name: "localstack",
             declared: DeclaredDevServer(name: "localstack", command: "docker compose up localstack",
                                         stop: stop, source: .repoTOML),
             cwd: "/tmp/acme/w", commandEnvironment: ["DEV_SERVER_NAME": "localstack"],
-            killTargets: targets, runningFilePaths: files)
+            killTargets: targets, unverifiable: unverifiable, runningOnlyByStatus: runningOnlyByStatus,
+            runningFilePaths: files)
     }
 
     @Test func aDeclaredStopRunsInsteadOfSignalling() async throws {
@@ -72,7 +76,7 @@ struct DevServerStopperTests {
         s.add(pid: 501, pgid: 500, start: start)
         let r = FakeDevServerCommandRunner()
         let report = await stopper(s, r).stop(request(stop: nil, targets: [
-            DevServerKillTarget(pid: 500, expectedStart: nil, tolerance: 0),
+            .firstHand(pid: 500),
             DevServerKillTarget(pid: 501, expectedStart: start, tolerance: 1),
         ], files: []))
         #expect(report.succeeded)
@@ -82,11 +86,54 @@ struct DevServerStopperTests {
 
     @Test func aRefusedGroupFailsTheStopAndKeepsTheFile() async throws {
         let s = FakeDevServerSignalling(own: 777)
-        s.add(pid: 500, pgid: 777, start: start)
+        s.add(pid: 777, pgid: 777, start: start)
         let file = try tempFile(); defer { try? FileManager.default.removeItem(atPath: file) }
         let report = await stopper(s, FakeDevServerCommandRunner()).stop(request(
-            stop: nil, targets: [DevServerKillTarget(pid: 500, expectedStart: start, tolerance: 1)], files: [file]))
+            stop: nil, targets: [DevServerKillTarget(pid: 777, expectedStart: start, tolerance: 1)], files: [file]))
         #expect(!report.succeeded)
         #expect(FileManager.default.fileExists(atPath: file))
+    }
+
+    /// Running only through `status` (a detached container), no `stop`, and
+    /// no process TBD may signal: the stop fails and says what to declare.
+    @Test func aStatusOnlyServerWithoutAStopCommandFailsWithNothingToStop() async {
+        let r = FakeDevServerCommandRunner()
+        let report = await stopper(FakeDevServerSignalling(), r).stop(request(
+            stop: nil, targets: [], files: [], runningOnlyByStatus: true))
+        #expect(!report.succeeded)
+        #expect(report.message?.contains("declare a `stop` command") == true)
+        #expect(r.runs.isEmpty)
+    }
+
+    /// A server whose tab ended since the snapshot has nothing left to stop,
+    /// and that is a success.
+    @Test func aServerWithNoTargetsThatWasNotStatusOnlyStopsCleanly() async {
+        let report = await stopper(FakeDevServerSignalling(), FakeDevServerCommandRunner()).stop(request(
+            stop: nil, targets: [], files: [], runningOnlyByStatus: false))
+        #expect(report.succeeded)
+    }
+
+    @Test func anUnverifiableTargetFailsTheStop() async throws {
+        let s = FakeDevServerSignalling()
+        s.add(pid: 500, pgid: 500, start: start)
+        let file = try tempFile(); defer { try? FileManager.default.removeItem(atPath: file) }
+        let report = await stopper(s, FakeDevServerCommandRunner()).stop(request(
+            stop: nil, targets: [], files: [file], unverifiable: ["pid 500 cannot be verified"]))
+        #expect(!report.succeeded)
+        #expect(report.message?.contains("pid 500") == true)
+        #expect(s.sentSignals.isEmpty)
+        #expect(s.sentToProcesses.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
+    }
+
+    @Test func aPidSignalledAloneIsNamedInTheReport() async {
+        let s = FakeDevServerSignalling()
+        s.add(pid: 500, pgid: 500, start: start)
+        s.add(pid: 600, pgid: 500, start: start)
+        let report = await stopper(s, FakeDevServerCommandRunner()).stop(request(
+            stop: nil, targets: [DevServerKillTarget(pid: 600, expectedStart: start, tolerance: 1)], files: []))
+        #expect(report.succeeded)
+        #expect(report.message?.contains("does not lead its own process group") == true)
+        #expect(s.sentSignals.isEmpty)
     }
 }
