@@ -518,7 +518,8 @@ import Testing
                 .compactMap { $0["name"] as String? }
         }
         #expect(Set(columns) == Set([
-            "id", "worktreeID", "label", "kind", "closedAt", "claudeSessionID", "lineCount"
+            "id", "worktreeID", "label", "kind", "closedAt", "claudeSessionID", "lineCount",
+            "serverName", "exitCode"
         ]))
     }
 }
