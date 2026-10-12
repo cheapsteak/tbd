@@ -204,6 +204,10 @@ public final class Daemon: Sendable {
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+    /// Keeps the sidebar's "dev server running" set current
+    /// (docs/specs/2026-10-11-dev-servers-design.md, "Sidebar dot"). `nil` in
+    /// mock mode. Internal because the type is.
+    nonisolated(unsafe) var devServerMonitor: DevServerRunningFileMonitor?
     /// Logs the holder transport's reader census — the double-reader violation
     /// count — once at startup and then hourly. `nil` in mock mode.
     ///
@@ -1048,7 +1052,35 @@ public final class Daemon: Sendable {
         // tab's Closed Terminals entry carries the screen the person was
         // looking at rather than the one frozen at their attach.
         lifecycle.holderScreenResolver = holderScreenResolver
+        // Dev servers' last output on the holder transport
+        // (docs/specs/2026-10-11-dev-servers-design.md, "Exited servers keep
+        // their last output"): the registry hands an ended session to the
+        // recorder before releasing its reader. Installed before startup
+        // adoption (step 8e) so a server that ended during an outage, whose
+        // status rides the hand-over, is seen too. The recorder ignores every
+        // tab that is not a dev server's. Nil registry in mock mode.
+        if let holderRegistry {
+            let recorder = DevServerFinalOutputRecorder(db: database, resolver: holderScreenResolver)
+            await holderRegistry.setSessionEndedObserver { terminalID, status, reader in
+                await recorder.sessionEnded(terminalID: terminalID, status: status) {
+                    await reader.closedTerminalCapture()
+                }
+            }
+        }
         lifecycle.modelProxySupervisor = modelProxySupervisor
+        // Dev servers (docs/specs/2026-10-11-dev-servers-design.md). The
+        // lifecycle gets its operations before it is copied into the router
+        // below, so archive stops servers through the same collaborators
+        // `server.stop` uses. Skipped in mock mode.
+        let devServerTabInspector = ProductionDevServerTabInspector(
+            tmux: tmux, holderRegistry: holderRegistry, signaller: ProductionProcessSignaller())
+        if mockMode == nil {
+            lifecycle.devServerOperations = DevServerOperations(
+                db: database, tabInspector: devServerTabInspector,
+                commandRunner: ProductionDevServerCommandRunner(), stopper: DevServerStopper(),
+                runningFiles: DevServerRunningFileStore(), probe: .live,
+                environment: ProcessInfo.processInfo.environment)
+        }
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed
         // here — before `lifecycle` is copied by value into the RPC router
@@ -1226,6 +1258,7 @@ public final class Daemon: Sendable {
         // `proxy.lock`, and `daemon.capabilities` would report a proxy no
         // spawn was routed through.
         rpcRouter.modelProxySupervisor = modelProxySupervisor
+        rpcRouter.devServerTabInspector = devServerTabInspector
         await rpcRouter.hibernationCoordinator.setModelProxySupervisor(modelProxySupervisor)
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
@@ -1646,6 +1679,18 @@ public final class Daemon: Sendable {
                     await reaper.sweepHolderChildren()
                 }
             }
+
+            // 11a-dev-servers. Keep the sidebar's "server running" set
+            // current: a watch on the running-file directory plus a 10 s
+            // liveness recheck. Reads only.
+            let devServerMonitor = DevServerRunningFileMonitor(
+                db: database, runningFiles: DevServerRunningFileStore(),
+                tabInspector: devServerTabInspector,
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            self.devServerMonitor = devServerMonitor
+            rpcRouter.onDevServersChanged = { [devServerMonitor] in await devServerMonitor.refresh() }
+            rpcRouter.devServerSummaryProvider = { [devServerMonitor] in await devServerMonitor.runningWorktreeIDs() }
+            await devServerMonitor.start()
 
             // 11a-reader-census. Record the holder transport's double-reader
             // violation count where a human can read it back. The detector is
@@ -2235,6 +2280,9 @@ public final class Daemon: Sendable {
         // thread and the pty descriptor it owns, because after end of file that
         // thread parks on its wake pipe rather than exiting.
         await holderRegistry?.releaseAll()
+
+        // Stop the dev server running-file watch and its recheck loop.
+        await devServerMonitor?.stop()
 
         // Take the watch away, and leave the proxy running. That is deliberate
         // and it is not the same gesture as turning the feature off: a proxy

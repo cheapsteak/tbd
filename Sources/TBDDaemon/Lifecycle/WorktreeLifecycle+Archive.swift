@@ -122,6 +122,23 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
+        // Dev servers stop first, while their tabs' processes are alive to be
+        // signalled and the checkout still exists for a declared `stop` to
+        // run in. After the status flip, so a concurrent `server.start` is
+        // refused rather than racing the teardown. A failure is logged and
+        // the archive continues: the tab teardown below still ends what TBD
+        // started.
+        if let devServerOperations {
+            for report in await devServerOperations.stopAllForArchive(worktree: worktree)
+            where !report.succeeded {
+                archiveLogger.warning("""
+                    archive: dev server \(report.name, privacy: .public) in \
+                    \(worktreeID, privacy: .public) did not stop: \
+                    \(report.message ?? "unknown", privacy: .public)
+                    """)
+            }
+        }
+
         // Capture each terminal's scrollback into Closed Terminals history,
         // then kill its tmux window, reaping any wedged agent that survives
         // kill-window's SIGHUP. The archived worktree row and its history rows
