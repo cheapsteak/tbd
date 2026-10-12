@@ -989,6 +989,16 @@ final class AppState {
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     var prBindings: [UUID: [PRBinding]] = [:]
+    /// Each worktree's dev servers as last fetched (`server.list`). Fetched
+    /// for the selected worktree on selection (with `status` commands) and
+    /// after every Start/Stop/Restart. See `AppState+DevServers.swift`.
+    var devServerLists: [UUID: DevServerListResult] = [:]
+    /// Worktrees with a dev server running by a live running file or a live
+    /// TBD server tab (`server.summary`) — the sidebar's green dot.
+    var devServerRunningWorktreeIDs: Set<UUID> = []
+    /// Failures from the last Start/Stop/Restart per worktree, shown at the
+    /// bottom of the Servers menu.
+    var devServerActionMessages: [UUID: [String]] = [:]
     /// How many of each worktree's bindings are tombstoned, for the worktrees
     /// that have any (a worktree with none is absent, not zero). Refreshed in
     /// the same call as `prBindings` and kept separately because it outlives
@@ -2181,6 +2191,26 @@ final class AppState {
     /// without a daemon.
     @ObservationIgnored lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
+    @ObservationIgnored lazy var devServerListFetcher: @MainActor (UUID, Bool) async throws -> DevServerListResult =
+        { [daemonClient] id, runStatus in
+            try await daemonClient.listDevServers(worktreeID: id, runStatusCommands: runStatus) }
+    @ObservationIgnored lazy var devServerSummaryFetcher: @MainActor () async throws -> DevServerSummaryResult =
+        { [daemonClient] in try await daemonClient.devServerSummary() }
+    @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
+        { [daemonClient] action, id, names in
+            switch action {
+            case .start: return try await daemonClient.startDevServers(worktreeID: id, names: names)
+            case .stop: return try await daemonClient.stopDevServers(worktreeID: id, names: names)
+            }
+        }
+    /// "Show last output" routes through these two, so tests can see which
+    /// one a server's state chose without a daemon or a window.
+    @ObservationIgnored lazy var devServerLastOutputOpener: @MainActor (UUID, UUID) async -> Void =
+        { [weak self] worktreeID, entryID in
+            await self?.openClosedTerminalEntry(worktreeID: worktreeID, entryID: entryID) }
+    @ObservationIgnored lazy var devServerTabFocuser: @MainActor (UUID, UUID) -> Void =
+        { [weak self] worktreeID, terminalID in
+            self?.focusDevServerTab(worktreeID: worktreeID, terminalID: terminalID) }
     /// How `detachPR` untracks one PR — injectable for the same reason as
     /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
     /// outcomes can be driven without a daemon.
@@ -2980,6 +3010,8 @@ final class AppState {
                 suggestedProfileID: d.suggestedProfileID,
                 receivedAt: Date()
             )
+        case .devServersChanged:
+            Task { [weak self] in await self?.refreshDevServersAfterChange() }
         default:
             break
         }
@@ -3641,6 +3673,7 @@ final class AppState {
                     self.pollCycle += 1
                     if self.pollCycle % 15 == 0 {
                         await self.refreshPRStatuses()
+                        await self.refreshDevServerSummary()
                     }
                     // ~every 150 executed cycles (~5 minutes at the ~2s tick).
                     // The daemon's checker runs hourly, so polling it faster
@@ -3687,6 +3720,7 @@ final class AppState {
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
+            await refreshDevServerSummary()
             pushClaudeSpawnPreferences()
             pushForegroundState()
         } else {
