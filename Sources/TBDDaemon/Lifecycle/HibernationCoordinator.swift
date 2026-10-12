@@ -337,6 +337,12 @@ public actor HibernationCoordinator {
     /// row there would double-count every manual park.
     private let actuationLog: ActuationLog
 
+    /// What a person is told when a tmux-backed session cannot be woken because
+    /// tmux cannot serve. Names the gesture that moves the session.
+    static let tmuxWakeUnavailableReason =
+        "This session still runs on the tmux transport, and tmux is not available here. "
+        + "Run `tbd terminal migrate <id>` (or `tbd terminal migrate --all`) to move it to the pty holder, then wake it again."
+
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
@@ -1306,6 +1312,15 @@ public actor HibernationCoordinator {
             return await classifyUnparkedHolderWake(terminal)
         }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
+        // The backstop for a tmux row whose leg cannot serve the wake. Refusing
+        // here, before anything is touched, leaves the row parked with its
+        // session id, so a wake after `tbd terminal migrate` succeeds on the
+        // holder. Today the leg cannot serve when tmux is not installed; once
+        // the tmux path is deleted it can never serve and this is the answer.
+        if terminal.transport != .holder, !tmux.canServeTmux {
+            logger.error("wake: terminal \(terminal.id, privacy: .public) is on the tmux transport and tmux is unavailable; refusing and leaving it parked")
+            return .respawnFailed(reason: Self.tmuxWakeUnavailableReason)
+        }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
