@@ -83,7 +83,7 @@ struct ServerCommand: ParsableCommand {
         for info in list.servers {
             lines.append(tableRow([
                 (info.name, 16), (describe(info), 28),
-                (info.source ?? "undeclared (running file)", 0),
+                (info.source ?? "undeclared", 0),
             ]))
             for endpoint in info.endpoints { lines.append("    \(endpoint.name): \(endpoint.url)") }
             if let terminalID = info.terminalID { lines.append("    tab: \(terminalID.uuidString)") }
@@ -182,24 +182,39 @@ struct ServerRestart: AsyncParsableCommand {
     mutating func run() async throws {
         let client = SocketClient()
         let id = try target.resolve(client: client)
+        // With no names, the declarations decide what the start half may
+        // start; read them before the stop, which clears what it stops.
+        var declared: Set<String> = []
+        if names.isEmpty {
+            let list = try fetchList(client, id, runStatusCommands: false)
+            declared = Set(list.servers.filter { $0.isDeclared }.map { $0.name })
+        }
         let stopped = try act(RPCMethod.serverStop, client, id, names)
         guard stopped.allSucceeded else {
             if json { printJSON(stopped) } else { print(ServerCommand.render(stopped, verb: "stop")) }
             throw ExitCode(1)
         }
-        guard let toStart = Self.namesToStart(requested: names, stopped: stopped) else {
+        let plan = Self.restartPlan(requested: names, stopped: stopped, declared: declared)
+        let skippedNote = plan.skipped.map {
+            "\($0): not started again — it has no declaration to start it from"
+        }
+        guard !plan.start.isEmpty else {
             if json {
                 printJSON(stopped)
-            } else {
+            } else if plan.skipped.isEmpty {
                 print("No server is running; nothing to restart.")
+            } else {
+                print(ServerCommand.render(stopped, verb: "stop"))
+                skippedNote.forEach { print($0) }
             }
             return
         }
-        let started = try act(RPCMethod.serverStart, client, id, toStart)
+        let started = try act(RPCMethod.serverStart, client, id, plan.start)
         if json {
             printJSON(DevServerActionResult(outcomes: stopped.outcomes + started.outcomes))
         } else {
             print(ServerCommand.render(stopped, verb: "stop"))
+            skippedNote.forEach { print($0) }
             print(ServerCommand.render(started, verb: "start"))
         }
         if !started.allSucceeded { throw ExitCode(1) }
@@ -207,12 +222,16 @@ struct ServerRestart: AsyncParsableCommand {
 
     /// What the start half of a restart starts. Named servers are started
     /// as named. With no names the stop half stopped every running server,
-    /// and exactly those are started again — not every declared one; nil
-    /// when none was running, so nothing is started.
-    static func namesToStart(requested: [String], stopped: DevServerActionResult) -> [String]? {
-        guard requested.isEmpty else { return requested }
-        let names = stopped.outcomes.filter { $0.status == .stopped }.map(\.name)
-        return names.isEmpty ? nil : names
+    /// and those of them that are declared are started again — not every
+    /// declared one. A server known only from a running file or from a tab
+    /// whose declaration is gone has nothing to start it from: it is
+    /// stopped, reported in `skipped`, and left stopped.
+    static func restartPlan(
+        requested: [String], stopped: DevServerActionResult, declared: Set<String>
+    ) -> (start: [String], skipped: [String]) {
+        guard requested.isEmpty else { return (requested, []) }
+        let names = stopped.outcomes.filter { $0.status == .stopped }.map { $0.name }
+        return (names.filter { declared.contains($0) }, names.filter { !declared.contains($0) })
     }
 }
 

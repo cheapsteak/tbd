@@ -43,16 +43,37 @@ struct ServerCommandsTests {
         #expect((try? ServerReport.parse(["web", "--clear"])) != nil)
     }
 
-    /// `restart` with no names restarts the servers its stop stopped —
-    /// never every declared server — and nothing when none was running.
+    /// `restart` with no names restarts the declared servers its stop
+    /// stopped — never every declared server — and nothing when none was
+    /// running.
     @Test func restartWithNoNamesStartsOnlyWhatItStopped() {
         let stopped = DevServerActionResult(outcomes: [
             .init(name: "web", status: .stopped),
             .init(name: "api", status: .stopped),
+            .init(name: "db", status: .notRunning),
         ])
-        #expect(ServerRestart.namesToStart(requested: [], stopped: stopped) == ["web", "api"])
-        #expect(ServerRestart.namesToStart(requested: [], stopped: DevServerActionResult(outcomes: [])) == nil)
-        #expect(ServerRestart.namesToStart(requested: ["db"], stopped: DevServerActionResult(outcomes: [])) == ["db"])
+        let all = ServerRestart.restartPlan(requested: [], stopped: stopped, declared: ["web", "api", "db"])
+        #expect(all.start == ["web", "api"])
+        #expect(all.skipped.isEmpty)
+        let none = ServerRestart.restartPlan(
+            requested: [], stopped: DevServerActionResult(outcomes: []), declared: ["web"])
+        #expect(none.start.isEmpty)
+        let named = ServerRestart.restartPlan(
+            requested: ["db"], stopped: DevServerActionResult(outcomes: []), declared: [])
+        #expect(named.start == ["db"])
+    }
+
+    /// A stopped server with no declaration (a running file's, or a tab
+    /// whose declaration is gone) cannot be started: it is skipped, not
+    /// handed to `server.start` to fail.
+    @Test func restartWithNoNamesSkipsUndeclaredServers() {
+        let stopped = DevServerActionResult(outcomes: [
+            .init(name: "web", status: .stopped),
+            .init(name: "storybook", status: .stopped),
+        ])
+        let plan = ServerRestart.restartPlan(requested: [], stopped: stopped, declared: ["web"])
+        #expect(plan.start == ["web"])
+        #expect(plan.skipped == ["storybook"])
     }
 
     private func list(_ servers: [DevServerInfo], errors: [DevServerParseError] = []) -> DevServerListResult {
