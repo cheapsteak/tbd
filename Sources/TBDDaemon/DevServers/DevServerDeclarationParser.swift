@@ -99,6 +99,10 @@ enum DevServerDeclarationParser {
             if let envValue = entry["env"] {
                 if let envTable = envValue.table {
                     for key in envTable.keys {
+                        guard isValidEnvironmentKey(key) else {
+                            fail("[servers.\(name)] env key \"\(key)\" is not a valid variable name; ignored")
+                            continue
+                        }
                         if let value = envTable[key]?.string {
                             server.env[key] = value
                         } else {
@@ -180,6 +184,13 @@ enum DevServerDeclarationParser {
             }
             if let env = config["env"] as? [String: Any] {
                 for key in env.keys.sorted() {
+                    guard isValidEnvironmentKey(key) else {
+                        fail("""
+                            configurations[\(index)] "\(rawName)" env key "\(key)" is not a valid variable \
+                            name; ignored
+                            """)
+                        continue
+                    }
                     if let value = env[key] as? String {
                         server.env[key] = substitute(value)
                     } else {
@@ -193,6 +204,17 @@ enum DevServerDeclarationParser {
     }
 
     // MARK: - Helpers
+
+    /// A shell identifier, `[A-Za-z_][A-Za-z0-9_]*`: the only names a
+    /// server's environment can carry through `sh` and tmux's `-e`.
+    static func isValidEnvironmentKey(_ key: String) -> Bool {
+        guard let first = key.unicodeScalars.first else { return false }
+        func isLetterOrUnderscore(_ c: Unicode.Scalar) -> Bool {
+            ("a"..."z").contains(c) || ("A"..."Z").contains(c) || c == "_"
+        }
+        return isLetterOrUnderscore(first)
+            && key.unicodeScalars.allSatisfy { isLetterOrUnderscore($0) || ("0"..."9").contains($0) }
+    }
 
     static func resolvedCwd(_ server: DeclaredDevServer, worktreePath: String) -> String {
         guard let cwd = server.cwd, !cwd.isEmpty, cwd != "." else { return worktreePath }

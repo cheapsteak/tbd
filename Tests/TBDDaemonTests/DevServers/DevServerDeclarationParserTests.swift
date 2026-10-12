@@ -80,6 +80,35 @@ struct DevServerDeclarationParserTests {
         #expect(parsed.errors.count == 1)
     }
 
+    /// TOML quoted keys can hold anything; only a shell identifier can be a
+    /// variable in the server's environment.
+    @Test func anEnvKeyThatIsNotAShellIdentifierIsReportedAndDropped() {
+        let parsed = DevServerDeclarationParser.parseTOML(
+            "[servers.web]\ncommand = \"x\"\nenv = { GOOD_1 = \"1\", \"BAD-KEY\" = \"2\", \"1ST\" = \"3\" }\n",
+            source: .repoTOML, path: "p")
+        #expect(parsed.servers.first?.env == ["GOOD_1": "1"])
+        #expect(parsed.errors.count == 2)
+        #expect(parsed.errors.contains { $0.message.contains("BAD-KEY") })
+        #expect(parsed.errors.contains { $0.message.contains("1ST") })
+    }
+
+    @Test func aLaunchJSONEnvKeyThatIsNotAShellIdentifierIsReportedAndDropped() {
+        let text = """
+            {"configurations": [{"name": "web", "runtimeExecutable": "pnpm",
+              "env": {"OK": "1", "NOT OK": "2"}}]}
+            """
+        let parsed = DevServerDeclarationParser.parseLaunchJSON(text, worktreeRoot: "/tmp/acme/w", path: "p")
+        #expect(parsed.servers.first?.env == ["OK": "1"])
+        #expect(parsed.errors.count == 1)
+        #expect(parsed.errors.first?.message.contains("NOT OK") == true)
+    }
+
+    @Test(arguments: [("A", true), ("_x9", true), ("PATH", true), ("", false), ("9A", false),
+                      ("A-B", false), ("A B", false), ("A=B", false), ("É", false)])
+    func environmentKeysAreShellIdentifiers(_ key: String, _ valid: Bool) {
+        #expect(DevServerDeclarationParser.isValidEnvironmentKey(key) == valid)
+    }
+
     // MARK: launch.json
 
     @Test func launchJSONWithCommentsTrailingCommasAndWorkspaceFolderTranslates() throws {
