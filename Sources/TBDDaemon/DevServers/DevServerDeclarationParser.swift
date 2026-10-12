@@ -63,7 +63,17 @@ enum DevServerDeclarationParser {
         var errors: [DevServerParseError] = []
         func fail(_ message: String) { errors.append(DevServerParseError(path: path, message: message)) }
 
-        for name in serversTable.keys {
+        // TOMLKit hands keys back sorted; servers keep the file's order.
+        let order = tomlServerOrder(text)
+        let names = serversTable.keys.sorted { lhs, rhs in
+            switch (order[lhs], order[rhs]) {
+            case let (l?, r?): return l < r
+            case (.some, nil): return true
+            case (nil, .some): return false
+            case (nil, nil): return lhs < rhs
+            }
+        }
+        for name in names {
             guard DeclaredDevServer.isValidName(name) else {
                 fail("server name \"\(name)\" must use only lowercase letters, digits and -")
                 continue
@@ -118,6 +128,68 @@ enum DevServerDeclarationParser {
         return (servers, errors)
     }
 
+    /// Each server name's rank by where the file first names it: a
+    /// `[servers.<name>]` header, a key inside `[servers]`, or a top-level
+    /// `servers.<name>` dotted key. A line scan, not a parse — the parse has
+    /// already succeeded, and a name this misses sorts after the found ones.
+    static func tomlServerOrder(_ text: String) -> [String: Int] {
+        var order: [String: Int] = [:]
+        func note(_ name: Substring) {
+            let key = String(name)
+            if order[key] == nil { order[key] = order.count }
+        }
+        func isBlank(_ c: Character) -> Bool { c == " " || c == "\t" }
+        /// The bare or quoted key `s` starts with.
+        func firstKey(_ s: Substring) -> Substring? {
+            var rest = s.drop(while: isBlank)
+            if rest.first == "\"" || rest.first == "'" {
+                let quote = rest.removeFirst()
+                guard let end = rest.firstIndex(of: quote) else { return nil }
+                return rest[..<end]
+            }
+            let key = rest.prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+            return key.isEmpty ? nil : key
+        }
+        /// What follows `servers` in `s`, blanks skipped; nil when `s` does
+        /// not start with `servers`.
+        func afterServers(_ s: Substring) -> Substring? {
+            let trimmed = s.drop(while: isBlank)
+            guard trimmed.hasPrefix("servers") else { return nil }
+            return trimmed.dropFirst("servers".count).drop(while: isBlank)
+        }
+        /// `servers.<key>` → `<key>`.
+        func serverKey(_ s: Substring) -> Substring? {
+            guard let rest = afterServers(s), rest.first == "." else { return nil }
+            return firstKey(rest.dropFirst())
+        }
+        enum Table { case root, servers, other }
+        var table = Table.root
+        for rawLine in text.split(whereSeparator: { $0.isNewline }) {
+            let line = rawLine.drop(while: isBlank)
+            if line.hasPrefix("[") {
+                let header = line.drop { $0 == "[" }
+                if let name = serverKey(header) {
+                    note(name)
+                    table = .other
+                } else if afterServers(header)?.first == "]" {
+                    table = .servers
+                } else {
+                    table = .other
+                }
+                continue
+            }
+            switch table {
+            case .servers:
+                if let name = firstKey(line) { note(name) }
+            case .root:
+                if let name = serverKey(line) { note(name) }
+            case .other:
+                break
+            }
+        }
+        return order
+    }
+
     // MARK: - .claude/launch.json
 
     static func parseLaunchJSON(_ text: String, worktreeRoot: String, path: String) -> Parsed {
@@ -163,15 +235,19 @@ enum DevServerDeclarationParser {
             func strings(_ key: String) -> [String] {
                 ((config[key] as? [Any]) ?? []).compactMap { $0 as? String }.map(substitute)
             }
-            let parts: [String]
-            if let executable = config["runtimeExecutable"] as? String, !executable.isEmpty {
-                parts = [substitute(executable)] + strings("runtimeArgs")
-            } else if let program = config["program"] as? String, !program.isEmpty {
-                parts = ["node", substitute(program)] + strings("args")
-            } else {
+            // VS Code's order: runtime, its arguments, the program, the
+            // program's arguments. Without a `runtimeExecutable` the runtime
+            // is `node`.
+            let executable = (config["runtimeExecutable"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let program = (config["program"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            guard executable != nil || program != nil else {
                 fail("configurations[\(index)] \"\(rawName)\" has neither `runtimeExecutable` nor `program`")
                 continue
             }
+            var parts: [String] = [substitute(executable ?? "node")]
+            parts += strings("runtimeArgs")
+            if let program { parts.append(substitute(program)) }
+            parts += strings("args")
             var server = DeclaredDevServer(
                 name: name, command: parts.map(shellQuote).joined(separator: " "), source: .launchJSON)
             if rawName != name { server.label = rawName }

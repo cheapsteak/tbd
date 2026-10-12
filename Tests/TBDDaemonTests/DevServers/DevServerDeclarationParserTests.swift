@@ -51,6 +51,35 @@ struct DevServerDeclarationParserTests {
         #expect(parsed.errors.first?.path == "/tmp/acme/tbd.toml")
     }
 
+    /// TOMLKit's keys come back sorted; the servers keep the file's order.
+    @Test func tomlServersKeepTheirDeclarationOrder() {
+        let text = """
+            [servers.web]
+            command = "pnpm dev"
+            [servers.api]
+            command = "go run ."
+            [servers."storybook"]
+            command = "pnpm storybook"
+            [servers.db]
+            command = "docker compose up"
+            """
+        let parsed = DevServerDeclarationParser.parseTOML(text, source: .repoTOML, path: "p")
+        let names: [String] = parsed.servers.map { $0.name }
+        #expect(parsed.errors.isEmpty)
+        #expect(names == ["web", "api", "storybook", "db"])
+    }
+
+    @Test func inlineTableServersKeepTheirDeclarationOrder() {
+        let text = """
+            [servers]
+            web = { command = "pnpm dev" }
+            api = { command = "go run ." }
+            """
+        let parsed = DevServerDeclarationParser.parseTOML(text, source: .repoTOML, path: "p")
+        let names: [String] = parsed.servers.map { $0.name }
+        #expect(names == ["web", "api"])
+    }
+
     @Test func anInvalidServerNameIsReported() {
         let parsed = DevServerDeclarationParser.parseTOML(
             "[servers.Web_App]\ncommand = \"x\"\n", source: .repoTOML, path: "p")
@@ -145,6 +174,24 @@ struct DevServerDeclarationParserTests {
         let text = #"{"configurations":[{"name":"api","program":"server.js","args":["--name","it's mine"]}]}"#
         let parsed = DevServerDeclarationParser.parseLaunchJSON(text, worktreeRoot: "/tmp/acme/w", path: "p")
         #expect(parsed.servers.first?.command == #"node server.js --name 'it'\''s mine'"#)
+    }
+
+    /// VS Code's order with a runtime: the runtime and its arguments, then
+    /// the program (its `${workspaceFolder}` resolved) and its arguments.
+    @Test func aRuntimeExecutableKeepsTheProgramAndItsArguments() {
+        let text = #"""
+            {"configurations":[{"name":"api","runtimeExecutable":"tsx","runtimeArgs":["--watch"],
+             "program":"${workspaceFolder}/src/server.ts","args":["--port","8004"]}]}
+            """#
+        let parsed = DevServerDeclarationParser.parseLaunchJSON(text, worktreeRoot: "/tmp/acme/w", path: "p")
+        #expect(parsed.errors.isEmpty)
+        #expect(parsed.servers.first?.command == "tsx --watch /tmp/acme/w/src/server.ts --port 8004")
+    }
+
+    @Test func aProgramWithoutARuntimeRunsUnderNodeWithItsRuntimeArguments() {
+        let text = #"{"configurations":[{"name":"api","runtimeArgs":["--inspect"],"program":"a b.js"}]}"#
+        let parsed = DevServerDeclarationParser.parseLaunchJSON(text, worktreeRoot: "/tmp/acme/w", path: "p")
+        #expect(parsed.servers.first?.command == "node --inspect 'a b.js'")
     }
 
     /// Review Focus 2: real launch.json names are display names.
