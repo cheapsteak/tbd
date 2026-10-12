@@ -122,4 +122,23 @@ struct DevServerStateDeriverTests {
         #expect(all.last?.source == nil)
         #expect(all.last?.state == .running)
     }
+
+    /// TBD started it, then its declaration went away: its tab still runs
+    /// the command, so it is listed — undeclared, with the tab's state.
+    @Test func aServerTabWhoseDeclarationIsGoneIsListedAsUndeclared() {
+        var t = Terminal(worktreeID: UUID(), tmuxWindowID: "@2", tmuxPaneID: "%2")
+        t.serverName = "old"
+        let all = DevServerStateDeriver.derive(DevServerDerivationInput(
+            declared: [web], liveFiles: [],
+            tabs: ["old": DevServerTabObservation(terminal: t, status: .running(pid: 77, expectedStart: nil))],
+            statusChecks: [:]))
+        let names: [String] = all.map { $0.name }
+        #expect(names == ["web", "old"])
+        let old = all.last
+        #expect(old?.source == nil)
+        #expect(old?.state == .running)
+        #expect(old?.pid == 77)
+        #expect(old?.terminalID == t.id)
+        #expect(old?.hasStopCommand == false)
+    }
 }

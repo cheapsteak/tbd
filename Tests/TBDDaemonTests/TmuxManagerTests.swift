@@ -90,6 +90,25 @@ import Testing
     #expect(args.contains("claude --dangerously-skip-permissions"))
 }
 
+/// A dev server's tab keeps its final screen from its first instant: the
+/// option is a second command in the `new-window` invocation itself (a lone
+/// `;` argument), after the shell command, so nothing can reap the window
+/// in between. Off by default.
+@Test func newWindowCommandChainsRemainOnExitOnlyWhenAsked() {
+    let env: [String: String] = ["SHELL": "/bin/zsh"]
+    let plain = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/worktree", shellCommand: "exec x",
+        environment: env)
+    let kept = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/worktree", shellCommand: "exec x",
+        remainOnExit: true, environment: env)
+    let chain: [String] = [";", "set-option", "-w", "remain-on-exit", "on"]
+    #expect(!plain.contains(";"))
+    #expect(plain.last == "exec x")
+    #expect(Array(kept.dropLast(chain.count)) == plain)
+    #expect(Array(kept.suffix(chain.count)) == chain)
+}
+
 @Test func testShellFlagsPerShellFamily() {
     // Each branch of the flag choice, with hardcoded expectations: csh and
     // tcsh reject -l when combined with -c (measured: "Unknown option: `-l'"),

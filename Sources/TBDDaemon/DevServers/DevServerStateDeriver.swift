@@ -24,7 +24,9 @@ struct DevServerDerivationInput: Sendable {
 /// The spec's state order: running with URLs (live running file) → running
 /// (`status` exit 0, or TBD's tab still running the command) → exited (TBD's
 /// tab ended, or — once the tab is gone — a saved last output) → unknown
-/// (TBD's tab could not be read, or `status` timed out) → stopped.
+/// (TBD's tab could not be read, or `status` timed out) → stopped. A server
+/// with no declaration is listed when a live running file reports it or TBD
+/// still has its tab.
 enum DevServerStateDeriver {
     static func derive(_ input: DevServerDerivationInput) -> [DevServerInfo] {
         let declaredNames = Set(input.declared.map(\.name))
@@ -32,7 +34,11 @@ enum DevServerStateDeriver {
             info(name: server.name, label: server.displayLabel, source: server.source.rawValue,
                  hasStopCommand: server.stop != nil, input: input)
         }
-        let undeclared = Set(input.liveFiles.map(\.file.server)).subtracting(declaredNames).sorted()
+        // Undeclared: a live running file names it, or TBD started it and its
+        // declaration has since gone — its tab still runs (or ran) the
+        // command, so it stays listed and stoppable like any other.
+        let reported = Set(input.liveFiles.map(\.file.server)).union(input.tabs.keys)
+        let undeclared = reported.subtracting(declaredNames).sorted()
         for name in undeclared {
             result.append(info(name: name, label: name, source: nil, hasStopCommand: false, input: input))
         }

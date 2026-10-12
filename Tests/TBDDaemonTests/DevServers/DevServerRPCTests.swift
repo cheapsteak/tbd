@@ -1,5 +1,6 @@
 import Clocks
 import Foundation
+import GRDB
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
@@ -10,7 +11,18 @@ struct DevServerRPCTests {
     private final class ArgvRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var argvs: [[String]] = []
-        func record(_ argv: [String]) { lock.lock(); defer { lock.unlock() }; argvs.append(argv) }
+        private var hook: (@Sendable ([String]) -> Void)?
+        /// Runs synchronously inside the tmux call that records `argv`.
+        func onRecord(_ body: @escaping @Sendable ([String]) -> Void) {
+            lock.lock(); defer { lock.unlock() }; hook = body
+        }
+        func record(_ argv: [String]) {
+            lock.lock()
+            argvs.append(argv)
+            let body = hook
+            lock.unlock()
+            body?(argv)
+        }
         var all: [[String]] { lock.lock(); defer { lock.unlock() }; return argvs }
         func containing(_ word: String) -> [[String]] { all.filter { $0.contains(word) } }
     }
@@ -133,7 +145,7 @@ struct DevServerRPCTests {
         #expect(row.label == "Web app")
         #expect(row.kind == .shell)
         let newWindow = try #require(f.recorder.containing("new-window").first)
-        let shellCommand = try #require(newWindow.last)
+        let shellCommand = try #require(newWindow.first { $0.contains("exec /bin/sh") })
         #expect(shellCommand.contains("exec /bin/sh -c 'pnpm dev'"))
         #expect(shellCommand.contains("export DEV_SERVER_NAME='web'"))
         #expect(shellCommand.contains("export DEV_SERVERS_DIR='\(f.runningFilesDir.path)'"))
@@ -142,17 +154,21 @@ struct DevServerRPCTests {
         #expect(f.changes.value == 1)
     }
 
-    /// Review Focus 3: a server that dies at once keeps its screen.
-    @Test func startRequestsRemainOnExitForTmuxTabs() async throws {
+    /// Review Focus 3: a server that dies at once keeps its screen. The
+    /// option rides the `new-window` invocation itself, so a command that
+    /// exits before a second tmux call could land still leaves its window.
+    @Test func startCreatesTmuxTabsWithRemainOnExitInTheSameInvocation() async throws {
         let f = try await Self.makeFixture(toml: Self.webTOML)
         defer { f.tearDown() }
         let result = try await f.call(RPCMethod.serverStart,
                                       DevServerActionParams(worktreeID: f.worktree.id, names: []))
             .decodeResult(DevServerActionResult.self)
-        let terminalID = try #require(result.outcomes.first?.terminalID)
-        let row = try #require(try await f.db.terminals.get(id: terminalID))
-        #expect(f.recorder.all.contains(
-            ["-L", "tbd-srv-test", "set-option", "-wt", row.tmuxWindowID, "remain-on-exit", "on"]))
+        #expect(result.outcomes.first?.status == .started)
+        let newWindow = try #require(f.recorder.containing("new-window").first)
+        let chain: [String] = [";", "set-option", "-w", "remain-on-exit", "on"]
+        #expect(Array(newWindow.suffix(chain.count)) == chain)
+        let remainCalls = f.recorder.containing("remain-on-exit")
+        #expect(remainCalls.count == 1, "no separate remain-on-exit call races the command")
     }
 
     @Test func startingARunningServerDoesNothingAndSaysSo() async throws {
@@ -189,6 +205,22 @@ struct DevServerRPCTests {
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
     }
 
+    /// A `status` command that timed out leaves the server Unknown: it may
+    /// be running, so a start refuses rather than risk a duplicate.
+    @Test func startRefusesWhenTheStatusCommandTimesOut() async throws {
+        let runner = FakeDevServerCommandRunner(outcomes: ["probe": .timedOut])
+        let f = try await Self.makeFixture(
+            toml: "[servers.web]\ncommand = \"pnpm dev\"\nstatus = \"probe\"\n", runner: runner)
+        defer { f.tearDown() }
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes == [.init(name: "web", status: .failed,
+                                          message: RPCRouter.statusTimedOutMessage)])
+        #expect(f.recorder.containing("new-window").isEmpty)
+        #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
+    }
+
     /// Start runs only the named servers' `status` commands.
     @Test func startRunsOnlyTheNamedServersStatusCommands() async throws {
         let runner = FakeDevServerCommandRunner(outcomes: ["probe-web": .exited(1), "probe-api": .exited(1)])
@@ -222,6 +254,39 @@ struct DevServerRPCTests {
         let respawn = try #require(f.recorder.containing("respawn-window").first)
         #expect(respawn.contains("@5"))
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
+    }
+
+    /// The previous run's saved output is detached before the new run is
+    /// spawned: an exit the new run records while it starts — a command that
+    /// dies at once — is its own, and survives the start.
+    @Test func anExitRecordedDuringTheSpawnSurvivesTheStart() async throws {
+        let f = try await Self.makeFixture(toml: Self.webTOML)
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Web app",
+            kind: .shell, serverName: "web")
+        f.inspector.set(.exited(code: 1), for: existing.id)
+        // An entry for the tab, not yet attached to the server.
+        await f.db.terminalHistory.recordOnClose(terminal: existing, capture: "BOOM\n")
+        let writer = f.db.writerForTests
+        let entryID = existing.id.uuidString
+        f.recorder.onRecord { argv in
+            guard argv.contains("respawn-window") else { return }
+            // The new run's exit, stamped while the spawn is in flight.
+            try? writer.write { conn in
+                try conn.execute(
+                    sql: "UPDATE terminal_history SET serverName = 'web', exitCode = 7 WHERE id = ?",
+                    arguments: [entryID])
+            }
+        }
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .started)
+        let saved = try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktree.id)
+        #expect(saved["web"]?.id == existing.id)
+        #expect(saved["web"]?.exitCode == 7)
+        #expect(f.recorder.containing("remain-on-exit").isEmpty, "the respawned window keeps its option")
     }
 
     /// `respawn-window -k` kills whatever the pane runs, so a reused exited
@@ -448,6 +513,56 @@ struct DevServerRPCTests {
         #expect(unreadable.killTargets.isEmpty)
         #expect(unreadable.unverifiable.count == 1)
         #expect(!unreadable.runningOnlyByStatus)
+    }
+
+    /// TBD started `old`, then its declaration was removed. Its tab still
+    /// runs the command: listed as undeclared, stoppable by name (a group
+    /// kill of its tab — there is no declared `stop`), and part of Stop all.
+    @Test func aServerTabWhoseDeclarationIsGoneIsListedAndStoppable() async throws {
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(toml: Self.webTOML, signalling: signalling)
+        defer { f.tearDown() }
+        let orphan = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Old",
+            kind: .shell, serverName: "old")
+        f.inspector.set(.running(pid: 500, expectedStart: nil), for: orphan.id)
+
+        let list = try await f.call(RPCMethod.serverList,
+                                    DevServerListParams(worktreeID: f.worktree.id, runStatusCommands: false))
+            .decodeResult(DevServerListResult.self)
+        let names: [String] = list.servers.map { $0.name }
+        #expect(names == ["web", "old"])
+        let old = try #require(list.servers.last)
+        #expect(old.source == nil)
+        #expect(old.state == .running)
+        #expect(old.terminalID == orphan.id)
+
+        let result = try await f.call(RPCMethod.serverStop,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: []))
+            .decodeResult(DevServerActionResult.self)
+        let stoppedNames: [String] = result.outcomes.map { $0.name }
+        #expect(stoppedNames == ["old"])
+        #expect(result.outcomes.first?.status == .stopped)
+        #expect(signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
+        #expect(try await f.db.terminals.get(id: orphan.id) == nil)
+    }
+
+    @Test func aServerTabWhoseDeclarationIsGoneStopsByName() async throws {
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(toml: Self.webTOML, signalling: signalling)
+        defer { f.tearDown() }
+        let orphan = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", kind: .shell, serverName: "old")
+        f.inspector.set(.running(pid: 500, expectedStart: nil), for: orphan.id)
+        let result = try await f.call(RPCMethod.serverStop,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["old"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .stopped)
+        #expect(signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
+        #expect(f.runner.runs.isEmpty)
+        #expect(try await f.db.terminals.get(id: orphan.id) == nil)
     }
 
     /// Review Focus 5: two worktrees, same server name, separate files.

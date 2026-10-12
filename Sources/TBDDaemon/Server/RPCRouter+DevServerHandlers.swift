@@ -109,11 +109,17 @@ extension RPCRouter {
                                       terminalID: info.terminalID, message: "already running"))
                 continue
             }
-            // Its tab could not be read, so its command may still run: a
-            // second tab would be a duplicate server.
+            // Unknown — its tab could not be read, or its `status` command
+            // timed out — means its command may still run: a second start
+            // would be a duplicate server.
             if let tab = snapshot.tabs[name], case .unknown(let reason) = tab.status {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
                                       message: Self.unreadableTabMessage(reason)))
+                continue
+            }
+            if let info = snapshot.info(name), info.state == .unknown {
+                outcomes.append(.init(name: name, status: .failed, terminalID: info.terminalID,
+                                      message: Self.statusTimedOutMessage))
                 continue
             }
             do {
@@ -121,9 +127,6 @@ extension RPCRouter {
                     server, worktree: worktree, reusing: snapshot.tabs[name],
                     operations: operations, repoPath: repoPath)
                 outcomes.append(.init(name: name, status: .started, terminalID: terminal.id))
-                // A new run supersedes the last one's saved output: the entry
-                // stays in Closed Terminals but no longer speaks for the server.
-                await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: name)
             } catch {
                 devServerLogger.warning("""
                     server.start \(name, privacy: .public) in \(worktree.id.uuidString, privacy: .public) \
@@ -159,6 +162,11 @@ extension RPCRouter {
         }
         let command = Self.devServerShellCommand(server.command)
         let label = TerminalLabel.userSupplied(server.displayLabel) ?? server.name
+        // A new run supersedes the last one's saved output: the entry stays
+        // in Closed Terminals but no longer speaks for the server. Before
+        // the spawn, never after: a run that dies at once has its own exit
+        // recorded by then, and a detach after the spawn would erase it.
+        await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: server.name)
 
         // A server whose tab exited is started again in that same tab.
         if let existing, case .exited = existing.status {
@@ -169,7 +177,8 @@ extension RPCRouter {
                 try await respawnExitedServerTab(
                     existing.terminal, serverName: server.name, worktree: worktree, cwd: cwd,
                     command: command, env: env, tabInspector: operations.tabInspector)
-                await keepFinalScreen(tmuxServer: worktree.tmuxServer, windowID: existing.terminal.tmuxWindowID)
+                // The window was created with `remain-on-exit on` (that is
+                // what kept its dead pane), and a respawn keeps the option.
                 return existing.terminal
             case .holder:
                 // A holder session cannot be respawned in place: close the
@@ -200,9 +209,6 @@ extension RPCRouter {
                 cols: cols, rows: rows, label: label, claudeSessionID: nil, profileID: nil,
                 kind: .shell, transport: transport, attachment: nil,
                 modelProxySupervisor: self.modelProxySupervisor, serverName: serverName)
-        }
-        if terminal.transport == .tmux {
-            await keepFinalScreen(tmuxServer: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
         }
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label)))
@@ -238,19 +244,6 @@ extension RPCRouter {
             try await self.tmux.respawnWindow(
                 server: current.tmuxServer, windowID: row.tmuxWindowID,
                 cwd: cwd, shellCommand: command, env: env)
-        }
-    }
-
-    /// `remain-on-exit on`, so a crashed server's output stays readable and
-    /// its exit status stays queryable (`#{pane_dead_status}`).
-    private func keepFinalScreen(tmuxServer: String, windowID: String) async {
-        do {
-            try await lifecycle.tmux.setRemainOnExit(server: tmuxServer, windowID: windowID)
-        } catch {
-            devServerLogger.warning("""
-                server.start: remain-on-exit failed for \(windowID, privacy: .public): \
-                \(String(describing: error), privacy: .public)
-                """)
         }
     }
 
@@ -367,6 +360,8 @@ extension RPCRouter {
         await onDevServersChanged?()
         return try RPCResponse(result: DevServerActionResult(outcomes: outcomes))
     }
+
+    static let statusTimedOutMessage = "state unknown (status command timed out); try again or stop it first"
 
     static func unreadableTabMessage(_ reason: String) -> String {
         "the state of its tab could not be read, so it may still be running; try again (\(reason))"

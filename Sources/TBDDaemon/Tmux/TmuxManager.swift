@@ -620,7 +620,7 @@ public struct TmuxManager: Sendable {
         return [userShell] + shellFlags(forShell: userShell) + [fullCommand]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
         // Spawn `shell <flags> <cmd>` (via shellInvocation) so commands with
         // arguments work (e.g. "claude --dangerously-skip-permissions").
         // -i keeps it interactive, -l makes it a login shell, -c runs the
@@ -662,7 +662,17 @@ public struct TmuxManager: Sendable {
             + eFlags
             + ["-PF", "#{window_id} #{pane_id}"]
             + shellInvocation(fullCommand, environment: environment)
+            + (remainOnExit ? remainOnExitChain : [])
     }
+
+    /// `remainOnExit`'s tail: a second command in the same tmux invocation.
+    /// A lone `;` argument separates tmux commands, and the server runs one
+    /// invocation's commands back to back, so the option is on before the
+    /// event loop can reap a command that exits at once — a separate
+    /// `set-option` call races it, and loses the window. With no `-t`,
+    /// `set-option -w` targets the window `new-window` just made current
+    /// (it is not `-d`), never another session's current window.
+    static let remainOnExitChain = [";", "set-option", "-w", "remain-on-exit", "on"]
 
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
@@ -1200,16 +1210,18 @@ public struct TmuxManager: Sendable {
         try await runTmux(["-L", server, "kill-server"])
     }
 
-    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) async throws -> (windowID: String, paneID: String) {
+    /// `remainOnExit` keeps the pane, dead, when its command exits — set in
+    /// the same tmux invocation as the window (`newWindowCommand`).
+    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false) async throws -> (windowID: String, paneID: String) {
         let result: (windowID: String, paneID: String)
         if dryRun {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows, remainOnExit: remainOnExit)
             dryRunRecorder?(args)
             if let error = dryRunCreateWindowError?(server) { throw error }
             let n = counter.next()
             result = (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         } else {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows, remainOnExit: remainOnExit)
             let output = try await runTmux(args)
             let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
             guard parts.count == 2 else {

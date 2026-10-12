@@ -174,7 +174,9 @@ extension WorktreeLifecycle {
                 env: env,
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
-                rows: rows
+                rows: rows,
+                // A server's tab keeps its final screen and exit status.
+                remainOnExit: serverName != nil
             )
         }
         do {
