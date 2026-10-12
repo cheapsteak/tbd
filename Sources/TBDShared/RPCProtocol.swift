@@ -213,6 +213,7 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let terminalSwapProfile = "terminal.swapProfile"
+    public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalSessionEnded = "terminal.sessionEnded"
@@ -722,6 +723,62 @@ public struct NightwatchSetModeParams: Codable, Sendable {
 public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
     case inPlace
     case fork
+}
+
+/// `terminal.migrateTransport` — move a session from the tmux transport to the
+/// pty holder in place.
+public struct TerminalMigrateTransportParams: Codable, Sendable {
+    /// The session to move. `nil` means every session TBD tracks.
+    public let terminalID: UUID?
+    public init(terminalID: UUID?) {
+        self.terminalID = terminalID
+    }
+}
+
+/// One session a migration did not move, and why.
+public struct TerminalMigrationSkip: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let reason: String
+    public init(terminalID: UUID, reason: String) {
+        self.terminalID = terminalID
+        self.reason = reason
+    }
+}
+
+/// What a `terminal.migrateTransport` call came to, one list per outcome.
+///
+/// `skipped` and `refused` are separate on purpose: a skip names a state the
+/// person can change and retry (a busy turn, a rail refusing the pause), while
+/// a refusal does not help until the named fact changes (no holder can be
+/// started). A fleet run reports every session it considered, including the
+/// ones already on the holder.
+public struct TerminalMigrateTransportResult: Codable, Sendable, Equatable {
+    public let migrated: [UUID]
+    public let skipped: [TerminalMigrationSkip]
+    public let refused: [TerminalMigrationSkip]
+    /// Sessions that were already holder-backed; nothing was done to them.
+    public let alreadyHolder: [UUID]
+    public init(
+        migrated: [UUID],
+        skipped: [TerminalMigrationSkip],
+        refused: [TerminalMigrationSkip],
+        alreadyHolder: [UUID] = []
+    ) {
+        self.migrated = migrated
+        self.skipped = skipped
+        self.refused = refused
+        self.alreadyHolder = alreadyHolder
+    }
+    private enum CodingKeys: String, CodingKey {
+        case migrated, skipped, refused, alreadyHolder
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        migrated = try c.decode([UUID].self, forKey: .migrated)
+        skipped = try c.decode([TerminalMigrationSkip].self, forKey: .skipped)
+        refused = try c.decode([TerminalMigrationSkip].self, forKey: .refused)
+        alreadyHolder = try c.decodeIfPresent([UUID].self, forKey: .alreadyHolder) ?? []
+    }
 }
 
 public struct TerminalSwapProfileParams: Codable, Sendable {

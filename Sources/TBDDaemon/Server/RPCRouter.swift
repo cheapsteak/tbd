@@ -292,6 +292,11 @@ public final class RPCRouter: Sendable {
     /// reader rather than crashing.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
 
+    /// Replaces the production operations of `terminal.migrateTransport`'s
+    /// migrator. Tests only: the production wiring needs a live pty to wake.
+    nonisolated(unsafe) var transportMigratorOperationsOverride:
+        TerminalTransportMigrator.Operations?
+
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
     /// Two things read it: `daemon.capabilities`, which reports whether this
@@ -755,6 +760,9 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalDelete(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
+            case RPCMethod.terminalMigrateTransport:
+                return try await handleTerminalMigrateTransport(
+                    request.paramsData, actor: request.actor)
             case RPCMethod.terminalSwapProfile:
                 return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSessionEvent:

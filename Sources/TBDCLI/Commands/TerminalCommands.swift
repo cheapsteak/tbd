@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalContinueInClaude.self, TerminalCompletions.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalMigrate.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalContinueInClaude.self, TerminalCompletions.self]
     )
 }
 
@@ -303,6 +303,77 @@ struct TerminalWake: AsyncParsableCommand {
                 ? "Terminal woken."
                 : "Terminal already awake (no-op)\(prompt != nil ? " — prompt NOT delivered" : "").")
         }
+    }
+}
+
+// MARK: - terminal migrate
+
+struct TerminalMigrate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "migrate",
+        abstract: "Move a session from the tmux transport to the pty holder, in place.",
+        discussion: """
+            Same tab, label, pin and Claude session id. A running session is
+            paused and resumed on the holder, so typed-but-unsent input is
+            lost; a session that is mid-turn or waiting on a permission prompt
+            is skipped, and can be retried once it settles.
+
+            Prints one line per session: the outcome, and the reason for any
+            session that did not move. Exits non-zero if any session was
+            refused.
+            """
+    )
+
+    @Argument(help: "Terminal ID to move")
+    var terminal: String?
+
+    @Flag(name: .long, help: "Move every session TBD tracks")
+    var all = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let terminalID: UUID?
+        switch (terminal, all) {
+        case (nil, false):
+            throw CLIError.invalidArgument("Pass a terminal ID or --all")
+        case (.some, true):
+            throw CLIError.invalidArgument("Pass a terminal ID or --all, not both")
+        case (let raw?, false):
+            guard let parsed = UUID(uuidString: raw) else {
+                throw CLIError.invalidArgument("Invalid terminal ID: \(raw)")
+            }
+            terminalID = parsed
+        case (nil, true):
+            terminalID = nil
+        }
+
+        let client = SocketClient()
+        let result: TerminalMigrateTransportResult = try client.call(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: terminalID),
+            resultType: TerminalMigrateTransportResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            for line in Self.reportLines(result) { print(line) }
+        }
+        if !result.refused.isEmpty { throw ExitCode(1) }
+    }
+
+    /// One line per session, grouped by outcome. A skip or refusal carries its
+    /// reason: what did not move, and why, is the point of a fleet run.
+    static func reportLines(_ result: TerminalMigrateTransportResult) -> [String] {
+        var lines: [String] = []
+        lines += result.migrated.map { "\($0.uuidString)  migrated" }
+        lines += result.alreadyHolder.map { "\($0.uuidString)  already on the holder" }
+        lines += result.skipped.map { "\($0.terminalID.uuidString)  skipped: \($0.reason)" }
+        lines += result.refused.map { "\($0.terminalID.uuidString)  refused: \($0.reason)" }
+        if lines.isEmpty { lines.append("No sessions.") }
+        return lines
     }
 }
 

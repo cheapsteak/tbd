@@ -2187,6 +2187,66 @@ extension RPCRouter {
         }.value
     }
 
+    /// `terminal.migrateTransport` — move one session (or, with no id, every
+    /// session) from the tmux transport to the pty holder in place.
+    ///
+    /// Deliberately no pre-filter: the migrator decides eligibility, and a
+    /// shell is as migratable as a Claude session. A shell has no
+    /// `claudeSessionID`, so the guards `handleTerminalSwapProfile` applies
+    /// would wrongly refuse it.
+    ///
+    /// Park and wake broadcast their own hibernation deltas, and neither
+    /// carries the `transport` column, so every migrated row is re-read and
+    /// published whole as `.terminalReplaced`, which the app adopts in place.
+    func handleTerminalMigrateTransport(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
+        let target: ActuationTarget
+        if let id = params.terminalID {
+            target = await resolvedTerminalTarget(id)
+        } else {
+            target = ActuationTarget()
+        }
+        let actuationID = try await beginActuation(
+            .terminalMigrateTransport, actor: actor, target: target)
+
+        let operations = transportMigratorOperationsOverride ?? .production(
+            hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
+        let migrator = TerminalTransportMigrator(db: db, operations: operations)
+
+        let report: [(terminalID: UUID, outcome: TransportMigrationOutcome)]
+        if let id = params.terminalID {
+            report = [(terminalID: id, outcome: await migrator.migrate(terminalID: id))]
+        } else {
+            report = await migrator.migrateAll()
+        }
+
+        var migrated: [UUID] = []
+        var skipped: [TerminalMigrationSkip] = []
+        var refused: [TerminalMigrationSkip] = []
+        var alreadyHolder: [UUID] = []
+        for entry in report {
+            switch entry.outcome {
+            case .migrated:
+                migrated.append(entry.terminalID)
+                if let row = try? await db.terminals.get(id: entry.terminalID) {
+                    subscriptions.broadcast(delta: .terminalReplaced(row))
+                }
+            case .alreadyHolder:
+                alreadyHolder.append(entry.terminalID)
+            case .skipped(let reason):
+                skipped.append(TerminalMigrationSkip(terminalID: entry.terminalID, reason: reason))
+            case .refused(let reason):
+                refused.append(TerminalMigrationSkip(terminalID: entry.terminalID, reason: reason))
+            }
+        }
+        await finishActuation(actuationID, .dispatched)
+        return try RPCResponse(result: TerminalMigrateTransportResult(
+            migrated: migrated, skipped: skipped, refused: refused,
+            alreadyHolder: alreadyHolder))
+    }
+
     func handleTerminalSwapProfile(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
