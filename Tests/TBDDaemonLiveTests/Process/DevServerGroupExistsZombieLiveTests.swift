@@ -59,8 +59,8 @@ struct DevServerGroupExistsZombieLiveTests {
         _ = kill(pid, SIGKILL)
         guard case .satisfied = await pollUntilTrue(timeout: TestDeadlines.saturatedPass, { isUnreapedZombie(pid) })
         else { throw NeverBecameAZombie(pid: pid) }
-        // The condition the fix is about: the kernel still answers for the group.
-        #expect(kill(-pid, 0) == 0, "kill(-pgid, 0) succeeds for a zombie-only group")
+        // Darwin answers ESRCH to kill(-pgid, 0) for a zombie-only group, so
+        // the membership read must agree with it rather than outlive it.
         #expect(!signalling.groupExists(pid), "a zombie-only group must read as gone")
 
         var status: Int32 = 0
