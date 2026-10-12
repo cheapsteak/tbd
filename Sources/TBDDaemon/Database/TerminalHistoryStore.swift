@@ -286,6 +286,23 @@ public struct TerminalHistoryStore: Sendable {
         }
     }
 
+    /// Detaches every server's saved outputs in a worktree; archive calls
+    /// this once the worktree's terminal rows are gone, so no exit archive
+    /// itself caused — nor any earlier one — makes a server read *Exited*
+    /// after a revive. NEVER throws.
+    public func detachAllServerOutputs(worktreeID: UUID) async {
+        do {
+            try await writer.write { db in
+                try db.execute(sql: """
+                    UPDATE terminal_history SET serverName = NULL, exitCode = NULL
+                    WHERE worktreeID = ? AND serverName IS NOT NULL
+                    """, arguments: [worktreeID.uuidString])
+            }
+        } catch {
+            logger.warning("failed to detach dev server outputs for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Queries
 
     /// List capture metadata for a worktree, newest first.

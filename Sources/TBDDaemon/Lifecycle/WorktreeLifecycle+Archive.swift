@@ -167,6 +167,13 @@ extension WorktreeLifecycle {
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
+        // Archive stopped every server, so none may read *Exited* afterwards.
+        // A holder server's exit — including the one archive's own stop
+        // caused — is stamped only while its terminal row exists, so after
+        // the delete above nothing can re-attach an entry this clears.
+        if devServerOperations != nil {
+            await db.terminalHistory.detachAllServerOutputs(worktreeID: worktreeID)
+        }
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)
             await subscriptions?.broadcastPendingPrompts(
