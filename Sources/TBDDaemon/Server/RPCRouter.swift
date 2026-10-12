@@ -318,6 +318,9 @@ public final class RPCRouter: Sendable {
     nonisolated(unsafe) var onDevServersChanged: (@Sendable () async -> Void)?
     /// `server.summary`'s answer; the daemon points it at the monitor.
     nonisolated(unsafe) var devServerSummaryProvider: (@Sendable () async -> [UUID])?
+    /// The servers a `server.start` or `server.stop` is acting on, so two
+    /// requests for one server never both act.
+    let devServerClaims = DevServerActionClaims()
 
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
