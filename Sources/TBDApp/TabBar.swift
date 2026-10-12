@@ -1019,6 +1019,18 @@ private struct TabBarItem: View {
 
         Divider()
 
+        // Shells move too, so this sits outside the Claude-only block.
+        if TransportMigrationMenu.isOffered(for: terminal) {
+            Button {
+                guard let terminalID = terminal?.id else { return }
+                Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
+            } label: {
+                Label(TransportMigrationMenu.title, systemImage: "arrow.right.square")
+            }
+
+            Divider()
+        }
+
         if isClaudeTerminal {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)

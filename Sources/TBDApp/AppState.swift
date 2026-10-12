@@ -1918,6 +1918,15 @@ final class AppState {
                 terminalID: terminalID, newProfileID: newProfileID,
                 mode: mode, cols: cols, rows: rows)
         }
+    /// How the transport-migration actions reach the daemon — injectable for the
+    /// same reason as `terminalProfileSwapper`: the veil's lifetime and the
+    /// result's presentation are testable without a running daemon.
+    @ObservationIgnored
+    lazy var terminalTransportMigrator:
+        @MainActor (UUID?) async throws -> TerminalMigrateTransportResult =
+        { [daemonClient] terminalID in
+            try await daemonClient.migrateTerminalTransport(terminalID: terminalID)
+        }
     /// How the composer's wake reaches the daemon — the result-returning sibling
     /// of `terminalWakeSender`, injectable for the same reason, so the wake's
     /// three replies are statable in a test without a running daemon.

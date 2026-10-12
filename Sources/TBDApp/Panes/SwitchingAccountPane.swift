@@ -17,8 +17,23 @@ struct SwitchingAccount: Equatable, Sendable {
     /// a profile the app has not loaded, which it cannot name).
     let profileName: String?
 
+    /// Replaces the account-switch wording when the same park, re-home and wake
+    /// is doing something else: a session moving to the pty holder rides this
+    /// veil because its blink is the same blink.
+    let captionOverride: String?
+
+    init(profileName: String?, captionOverride: String? = nil) {
+        self.profileName = profileName
+        self.captionOverride = captionOverride
+    }
+
+    /// The record for a session moving from tmux to the pty holder.
+    static let transportMove = SwitchingAccount(
+        profileName: nil, captionOverride: "Moving session off tmux…")
+
     /// What the pane says while the switch runs.
     var caption: String {
+        if let captionOverride { return captionOverride }
         if let profileName { return "Switching account to \(profileName)…" }
         return "Switching account…"
     }

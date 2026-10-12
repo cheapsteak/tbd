@@ -1141,3 +1141,99 @@ extension Terminal {
         return currentPresentationOrderObservedAt
     }
 }
+
+// MARK: - Moving sessions to the pty holder
+
+/// Pure decisions behind the transport-migration gestures, so each branch is
+/// testable without SwiftUI (same pattern as `SwapProfileMenu`).
+enum TransportMigrationMenu {
+    static let title = "Move to Holder (No tmux)"
+
+    /// Offered for any row that is not already holder-backed.
+    static func isOffered(for terminal: Terminal?) -> Bool {
+        guard let terminal else { return false }
+        return terminal.transport != .holder
+    }
+
+    /// One line per session the run left alone.
+    struct Line: Equatable {
+        let label: String
+        let reason: String
+    }
+
+    /// What a run came to, in the order a person acts on it. A skip names a
+    /// state the person can change and retry; a refusal does not help until
+    /// the named fact changes, so the two are kept apart and worded apart.
+    struct Report: Equatable {
+        let headline: String
+        let skippedHeading = "Not moved — change this and try again"
+        let refusedHeading = "Can't be moved until this changes"
+        let skipped: [Line]
+        let refused: [Line]
+    }
+
+    static func report(
+        _ result: TerminalMigrateTransportResult, label: (UUID) -> String
+    ) -> Report {
+        var parts = ["Moved \(result.migrated.count)"]
+        if !result.alreadyHolder.isEmpty {
+            parts.append("\(result.alreadyHolder.count) already on the holder")
+        }
+        if !result.skipped.isEmpty { parts.append("\(result.skipped.count) not moved") }
+        if !result.refused.isEmpty { parts.append("\(result.refused.count) can't be moved") }
+        func lines(_ list: [TerminalMigrationSkip]) -> [Line] {
+            list.map { Line(label: label($0.terminalID), reason: $0.reason) }
+        }
+        return Report(
+            headline: parts.joined(separator: " · "),
+            skipped: lines(result.skipped), refused: lines(result.refused))
+    }
+}
+
+extension AppState {
+    /// A short name for a session in a result list.
+    func transportMigrationLabel(for terminalID: UUID) -> String {
+        let row = terminals.values.lazy.flatMap { $0 }.first(where: { $0.id == terminalID })
+        return row?.label ?? "Session \(terminalID.uuidString.prefix(8))"
+    }
+
+    /// Move one session to the holder. The veil of an account switch covers the
+    /// park and wake; the refreshed row arrives as `.terminalReplaced`, which
+    /// `adoptRecreatedTerminal` overwrites in place, so nothing is refreshed here.
+    /// A session that did not move says why in an alert.
+    func migrateTerminalToHolder(terminalID: UUID) async {
+        let cached = terminals.values.lazy.flatMap { $0 }.first(where: { $0.id == terminalID })
+        let ownsRecord = switchingAccountTerminals[terminalID] == nil
+            && cached.map { $0.transport != .holder && !$0.isParked } == true
+        if ownsRecord { switchingAccountTerminals[terminalID] = .transportMove }
+        defer { if ownsRecord { switchingAccountTerminals[terminalID] = nil } }
+        do {
+            let result = try await terminalTransportMigrator(terminalID)
+            let reasons = (result.skipped + result.refused).map(\.reason)
+            if !reasons.isEmpty {
+                showAlert("Could not move this session off tmux: " + reasons.joined(separator: " "), isError: true)
+            }
+        } catch {
+            logger.error("Failed to move terminal to the holder: \(error, privacy: .public)")
+            showAlert("Failed to move this session off tmux: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Move every session to the holder. Returns the result so the caller can
+    /// show what did not move and why; nil when the call itself failed.
+    @discardableResult
+    func migrateAllTerminalsToHolder() async -> TerminalMigrateTransportResult? {
+        let candidates = terminals.values.flatMap { $0 }
+            .filter { $0.transport != .holder && !$0.isParked && switchingAccountTerminals[$0.id] == nil }
+            .map(\.id)
+        for id in candidates { switchingAccountTerminals[id] = .transportMove }
+        defer { for id in candidates { switchingAccountTerminals[id] = nil } }
+        do {
+            return try await terminalTransportMigrator(nil)
+        } catch {
+            logger.error("Failed to move sessions to the holder: \(error, privacy: .public)")
+            showAlert("Failed to move sessions off tmux: \(error.localizedDescription)", isError: true)
+            return nil
+        }
+    }
+}
