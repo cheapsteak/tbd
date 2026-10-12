@@ -28,7 +28,8 @@ struct DevServerGroupExistsZombieLiveTests {
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
         posix_spawnattr_setpgroup(&attributes, 0)
         var pid: pid_t = 0
-        var argv: [UnsafeMutablePointer<CChar>?] = ["/bin/sleep", "60"].map { strdup($0) }
+        let arguments: [String] = ["/bin/sleep", "60"]
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
         argv.append(nil)
         defer { for arg in argv { free(arg) } }
         let code = posix_spawn(&pid, "/bin/sleep", nil, &attributes, &argv, nil)
