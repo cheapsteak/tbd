@@ -340,15 +340,17 @@ struct DevServerRPCTests {
     }
 
     /// A second start for a server whose start is still in flight does not
-    /// spawn a second tab.
-    @Test func aStartWhileAnotherStartIsInFlightSaysAlreadyStarting() async throws {
+    /// spawn a second tab, and fails: the first start may still fail, so
+    /// the caller must not read success (the CLI exits non-zero).
+    @Test func aStartWhileAnotherStartIsInFlightFailsAsAlreadyStarting() async throws {
         let f = try await Self.makeFixture(toml: Self.webTOML)
         defer { f.tearDown() }
         _ = await f.router.devServerClaims.claim(["web"], in: f.worktree.id, for: .start)
         let result = try await f.call(RPCMethod.serverStart,
                                       DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
             .decodeResult(DevServerActionResult.self)
-        #expect(result.outcomes == [.init(name: "web", status: .alreadyRunning, message: "already starting")])
+        #expect(result.outcomes == [.init(name: "web", status: .failed, message: "already starting; try again")])
+        #expect(!result.allSucceeded)
         #expect(f.recorder.containing("new-window").isEmpty)
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
     }

@@ -93,10 +93,12 @@ extension RPCRouter {
         let repoPath = await operations.repoPath(for: worktree)
         var outcomes: [DevServerActionOutcome] = []
         for name in names {
+            // Losing the claim to another start is a failure, not "already
+            // running": that start may still fail, and the caller cannot
+            // tell from here whether the server ever comes up.
             if let holder = busy[name] {
-                outcomes.append(holder == .start
-                    ? .init(name: name, status: .alreadyRunning, message: "already starting")
-                    : .init(name: name, status: .failed, message: "a stop of \(name) is in progress"))
+                outcomes.append(.init(name: name, status: .failed, message: holder == .start
+                    ? "already starting; try again" : "a stop of \(name) is in progress"))
                 continue
             }
             guard let server = snapshot.declared(name) else {
