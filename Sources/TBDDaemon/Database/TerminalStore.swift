@@ -1498,6 +1498,80 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Move a RUNNING session that has no conversation to resume onto the pty
+    /// holder, in one guarded write: the transport, the blanked tmux
+    /// coordinates, the holder's processes and the dead process's session and
+    /// activity facts all land in the same statement. nil means the snapshot
+    /// was stale and nothing was written.
+    ///
+    /// **Why one write rather than a prepare-then-record pair.** The caller
+    /// mints the incarnation, so the replacement program is already carrying it
+    /// before any column moves. This write is therefore the single moment at
+    /// which the row stops describing a dead tmux pane and starts describing a
+    /// live holder, and a caller that fails anywhere before it leaves the row
+    /// untouched — still `tmux`, still awake, naming a window that is now dead,
+    /// which is the ordinary window-died state `terminal.recreateWindow`
+    /// repairs.
+    ///
+    /// **The guard is the complement of `setParkedTransport`'s.** That one
+    /// requires the row to read parked; this one requires it to read awake and
+    /// not already holder-backed, so neither can be used for the other's case
+    /// by mistake. Between the caller's kill and this write the app may notice
+    /// the dead window and recreate it, which rotates the row's incarnation:
+    /// the snapshot then fails to match, nothing is written, and the caller
+    /// abandons the holder it started.
+    ///
+    /// The session and activity columns are cleared through the same helper
+    /// `replaceRecreatedShellWindow` uses, because this is the same event — a
+    /// dead process's facts must not make the replacement's first hook look
+    /// like a resume. The incarnation that helper mints is overwritten with the
+    /// caller's, which is the one the live job actually carries.
+    ///
+    /// **Two of that helper's columns are put back: the label and the kind.**
+    /// The recreate path turns a dead agent tab INTO a shell tab, so relabelling
+    /// and re-kinding the row is its job. This move is not that event — the tab
+    /// is already whatever it was, and a session that moves transport is meant
+    /// to come back as the same tab. A hook tab the person can still read the
+    /// name of would otherwise be renamed `shell` by a gesture that promised to
+    /// change nothing but where the session runs.
+    ///
+    /// `startedAt` doubles as the activity observation's timestamp: it is the
+    /// moment the replacement job started, which is when this row's `unknown`
+    /// activity was observed.
+    func moveRunningShellToHolder(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        incarnationID: UUID,
+        holderPID: Int32,
+        childPID: Int32,
+        startedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.transport != TerminalTransport.holder.rawValue,
+                  record.hibernatedAt == nil, record.suspendedAt == nil else {
+                return nil
+            }
+            let label = record.label
+            let kind = record.kind
+            _ = resetRecreatedShellLifecycle(record: &record, at: startedAt)
+            record.label = label
+            record.kind = kind
+            record.sessionIncarnationID = incarnationID.uuidString
+            record.transport = TerminalTransport.holder.rawValue
+            record.tmuxWindowID = ""
+            record.tmuxPaneID = ""
+            record.holder_pid = holderPID
+            record.child_pid = childPID
+            record.holder_child_started_at = startedAt
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
     /// Update the tmux window and pane IDs for a terminal.
     public func updateTmuxIDs(id: UUID, windowID: String, paneID: String) async throws {
         try await writer.write { db in

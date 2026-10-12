@@ -40,6 +40,12 @@ enum TransportMigrationOutcome: Sendable, Equatable {
 /// rewritten. Nothing is extracted from a running tmux server; the session's
 /// program is killed and started again on the holder, which is why this is
 /// only ever reached from a gesture.
+///
+/// A running session with no conversation to resume takes a fourth verb
+/// instead of those three: there is nothing a park could preserve, so its
+/// program is stopped and a fresh login shell starts on the holder in the same
+/// working directory, recorded in one guarded write
+/// (`HibernationCoordinator.moveRunningShellToHolder`).
 /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`.
 ///
 /// **Claim-free but ordered.** No lock or claim spans the composition. Every
@@ -89,6 +95,12 @@ actor TerminalTransportMigrator {
         /// row as it was BEFORE the rewrite, because the rewrite blanks the
         /// coordinates the window is named by.
         let retireWindow: @Sendable (Terminal) async -> Void
+        /// Move a RUNNING session that has no conversation to resume: stop its
+        /// program, start a fresh login shell on a holder in the same working
+        /// directory, and record the move in one guarded write. Nothing is
+        /// parked and nothing is woken — a park exists to carry a conversation
+        /// across a respawn, and this row names none.
+        let moveRunningShell: @Sendable (Terminal) async -> ShellTransportMoveOutcome
 
         static func production(
             hibernation: HibernationCoordinator,
@@ -103,6 +115,9 @@ actor TerminalTransportMigrator {
                 },
                 retireWindow: {
                     await hibernation.retireTmuxWindowAfterTransportMigration(terminal: $0)
+                },
+                moveRunningShell: {
+                    await hibernation.moveRunningShellToHolder(terminal: $0)
                 })
         }
     }
@@ -167,6 +182,38 @@ actor TerminalTransportMigrator {
         guard operations.canSpawnHolder() else {
             logger.warning("transport migration: refusing \(terminalID, privacy: .public) — no holder can be started")
             return .refused(reason: Self.holderUnspawnableRefusal)
+        }
+
+        // A running session with nothing to resume cannot take the park at
+        // all: its program would be stopped with no way to bring it back, so
+        // the park refuses it and the whole composition would skip. Such a
+        // session moves plainly instead — its program is stopped and a fresh
+        // login shell starts on the holder in the same working directory.
+        //
+        // The test is the row's own `claudeSessionID`, not `isClaudeResumable`,
+        // because `performHibernate`'s refusal reads exactly this column: this
+        // branch therefore takes precisely the rows the park would turn away,
+        // and no others. `isClaudeResumable` is a wider question — it also
+        // answers false for a Codex row and for a non-agent kind that *does*
+        // name a conversation — and a running Claude session must still go
+        // park, rewrite, wake.
+        //
+        // The `isParked` half is belt-and-braces rather than a case that
+        // arises: every park writes the session id it parks (`setHibernated`,
+        // `setSuspended`), and nothing clears that column while leaving a row
+        // parked, so a parked row always names a conversation. It is kept so
+        // this branch states on its own that it takes a RUNNING row, rather
+        // than depending on the branch below it to have claimed the others.
+        if !terminal.isParked, terminal.claudeSessionID == nil {
+            switch await operations.moveRunningShell(terminal) {
+            case .moved:
+                logger.info("transport migration: running terminal \(terminalID, privacy: .public) was restarted as a shell on the pty holder")
+                return .migrated
+            case .lostTheRace:
+                return .skipped(reason: Self.raceSkip)
+            case .refused(let reason):
+                return .refused(reason: reason)
+            }
         }
 
         // A parked session is only rewritten. Nothing is running, so there is

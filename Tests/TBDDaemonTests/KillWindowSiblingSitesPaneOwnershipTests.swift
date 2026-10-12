@@ -8,8 +8,9 @@ import Testing
 /// every other call site that tears down a tmux window by DB-recorded
 /// coordinate — `terminal.delete` (`TerminalDeletePaneOwnershipTests`) was
 /// the first, but `forgetWorktree`, `scratch.delete`'s teardown,
-/// `terminal.recreateWindow`'s non-Claude-resumable branch and the transport
-/// migration's window retire all `kill-window`
+/// `terminal.recreateWindow`'s non-Claude-resumable branch, the transport
+/// migration's window retire and the running-shell move's program stop all
+/// `kill-window`
 /// the exact same way and share the exact same hazard: a tmux server restart
 /// resets window/pane numbering, and several worktrees of one repo share a
 /// server, so a stale row's coordinate can collide with an unrelated live
@@ -86,7 +87,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
 
     // MARK: - the transport migration's window retire
 
-    /// The sixth site. Moving a session to the pty holder blanks the row's
+    /// The sixth site. Moving a PARKED session to the pty holder blanks the row's
     /// tmux coordinates, so the window the park kept belongs to nobody
     /// afterwards and the migration retires it — through the same guard, for
     /// the same reason. The hazard is sharper here than for the others
@@ -153,6 +154,117 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
 
         #expect(recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@2") },
                 "a pane confirmed as this row's own must still be killed: \(recorder.snapshot())")
+    }
+
+    // MARK: - the running shell move's kill
+
+    /// The seventh site. A session with nothing to resume moves by having its
+    /// program stopped and a fresh login shell started on a holder — and the
+    /// stop is a `kill-window` by DB-recorded coordinate, so it goes through
+    /// the same guard. It is the sharpest of the seven: this kill is not
+    /// reclaiming a window somebody has finished with, it is *ending a running
+    /// program*, so a recycled coordinate would kill a stranger's live session
+    /// rather than an idle leftover.
+    ///
+    /// A refusal must write nothing: the row keeps its transport, its
+    /// coordinates and its awake state, so the session the person is using
+    /// carries on.
+    @Test(arguments: RefusingPaneAnswer.allCases)
+    func theShellMoveLeavesAWindowUntouchedWhenItsPaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
+        let fixture = try await ShellMoveSiteFixture.make(
+            tag: "kwss-shellmove-\(refusal.rawValue)", paneAnswer: .refusing(refusal))
+        defer { fixture.tearDown() }
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(
+            terminal: fixture.terminal)
+
+        #expect(outcome != .moved, "an unverified pane's session was moved anyway")
+        #expect(!fixture.recorder.snapshot().contains { $0.contains("kill-window") },
+                "a pane not provably this terminal's must never be kill-windowed: \(fixture.recorder.snapshot())")
+        let unchanged = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(unchanged.transport == .tmux, "a refused move rewrote the row anyway")
+        #expect(unchanged.tmuxWindowID == "@2" && unchanged.tmuxPaneID == "%2",
+                "a refused move must write nothing to the row")
+    }
+
+    /// The positive control: a pane answering with the row's own id is the
+    /// program the move is there to stop. The spawn that follows cannot
+    /// succeed in this fixture, which is beside the point — the kill is what
+    /// this site is about.
+    @Test func theShellMoveStopsAWindowWhosePaneAnswersWithItsOwnID() async throws {
+        let fixture = try await ShellMoveSiteFixture.make(
+            tag: "kwss-shellmove-ok", paneAnswer: .ownID)
+        defer { fixture.tearDown() }
+
+        _ = await fixture.coordinator.moveRunningShellToHolder(terminal: fixture.terminal)
+
+        #expect(fixture.recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@2") },
+                "a pane confirmed as this row's own must still be stopped: \(fixture.recorder.snapshot())")
+    }
+
+    /// Everything the shell-move site needs: a row with a tmux coordinate, a
+    /// recording dry-run tmux, and a registry that reports it can spawn — the
+    /// pane consultation happens before any spawn, so a registry that refused
+    /// up front would hide the guard entirely.
+    private struct ShellMoveSiteFixture {
+        let db: TBDDatabase
+        let home: String
+        let terminal: Terminal
+        let recorder: RecordedTmuxArgs
+        let coordinator: HibernationCoordinator
+
+        func tearDown() {
+            try? FileManager.default.removeItem(atPath: home)
+        }
+
+        /// What the pane consultation answers. `ownID` can only be built once
+        /// the row exists, which is why it is named rather than passed as a
+        /// closure.
+        enum PaneAnswer: Sendable {
+            case refusing(RefusingPaneAnswer)
+            case ownID
+        }
+
+        static func make(
+            tag: String, paneAnswer: PaneAnswer
+        ) async throws -> ShellMoveSiteFixture {
+            let home = fencedScratchRoot(prefix: "tbdkwsssm")
+            try FileManager.default.createDirectory(
+                atPath: home, withIntermediateDirectories: true)
+            let db = try TBDDatabase(inMemory: true)
+            let repo = try await db.repos.create(
+                path: "\(home)/repo", displayName: "R", defaultBranch: "main")
+            let wt = try await db.worktrees.create(
+                repoID: repo.id, name: "wt", branch: "b",
+                path: "\(home)/wt", tmuxServer: "tbd-kwss-shellmove")
+            let created = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
+            let ownID = created.id.uuidString
+            let recorder = RecordedTmuxArgs()
+            let tmux = TmuxManager(
+                dryRun: true,
+                dryRunRecorder: { recorder.append($0) },
+                dryRunPaneSendTarget: { _, _ in
+                    switch paneAnswer {
+                    case .refusing(let refusal): return try refusal.answer()
+                    case .ownID: return .live(terminalID: ownID)
+                    }
+                })
+            let coordinator = HibernationCoordinator(
+                db: db, tmux: tmux,
+                configDirManager: makeIsolatedConfigDirManager(tag: tag),
+                actuationLog: makeTestActuationLog())
+            await coordinator.setHolderRegistry(HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
+                listTerminals: { [] },
+                spawner: HolderSpawner(
+                    executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))))
+            return ShellMoveSiteFixture(
+                db: db, home: home,
+                terminal: try #require(try await db.terminals.get(id: created.id)),
+                recorder: recorder, coordinator: coordinator)
+        }
     }
 
     // MARK: - forgetWorktree

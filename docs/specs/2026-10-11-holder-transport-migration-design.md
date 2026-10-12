@@ -54,6 +54,12 @@ session id — is the same shape with a different column rewritten
 - **A parked session** is only rewritten. Nothing is running, so there is
   nothing to park and nothing to respawn; its next ordinary wake lands on the
   holder.
+- **A running session with nothing to resume** — a shell — takes a fourth verb
+  instead of those three. There is no conversation for a park to preserve, so
+  its program is stopped, a fresh login shell is started on the holder in the
+  same working directory, and the move is recorded in one guarded write. See
+  "What migrates, and what is skipped" for the mechanic and "Failure, and why
+  nothing rolls back" for the two states a failure leaves.
 
 ### The rewrite is a compare-and-set, not a lock
 
@@ -85,8 +91,23 @@ leg's typed-input rail is left exactly as it is.
   and named, from the activity state it already tracks; a run reports them so a
   person can retry or move them one at a time.
 - **Shells migrate plainly** — a fresh program in the same working directory.
+  A running session with no conversation to resume cannot be parked at all: a
+  park exists to carry a conversation across a respawn, and this row names
+  none. So its program is stopped and a fresh login shell starts on the holder
+  in the worktree's own directory, recorded in one guarded write that moves the
+  transport, blanks the tmux coordinates, records the holder's processes and
+  clears the dead process's session and activity facts together. The
+  replacement carries a freshly minted incarnation, so a hook from it is
+  attributable to it rather than to what was killed.
 - **Agents migrate through `--resume`** on the session id the row records, the
   same argv a wake builds.
+- **A Codex tab is skipped, with its own reason.** It names no resumable
+  session either, so without a reason of its own it would take the shell move
+  and be silently replaced by a bare shell. Moving it properly needs Codex's
+  own launch preparation — the executable resolver, the home ensurer and the
+  merged environment overrides — which lives on the RPC router rather than on
+  this path. The skip names what to do instead: close the tab and open a new
+  one.
 - **The row keeps its identity**: id, label, pin, profile, Claude session id,
   transcript path, and history entries all survive, because only the transport
   column changes.
@@ -112,6 +133,28 @@ Each session's migration is claim-free but ordered: park, rewrite, wake.
   holder-backed, which the ordinary wake path already handles: its next wake
   spawns a holder and resumes the session. The worst case is a session that
   comes back on the holder later rather than now.
+
+A shell's move is the one that stops a program before it writes anything, so it
+is worth saying which states it can leave behind. There are two, and no third.
+
+- **The spawn failed.** The row is untouched: still `tmux`, still awake, naming
+  a window that is now dead. That is the ordinary window-died state the app's
+  recovery banner already owns, and `terminal.recreateWindow` can still repair
+  it precisely because the row was not rewritten.
+- **The write lost its compare-and-set.** The holder that was started is
+  abandoned — a holder and a job no row names would be reclaimable by nothing —
+  and the row is in the same state as above. The race this loses is a
+  window-died recovery recreating the row's window in the gap, which rotates
+  the row's incarnation; the person keeps the fresh tmux window the recovery
+  gave them.
+
+Killing before the write is the opposite of the parked path's order, and it is
+safe for a different reason: the write is a compare-and-set, so a recovery that
+notices the dead window first makes this write a no-op. Both outcomes are
+consistent, and nothing can leave a row naming a transport its live process is
+not on. Refusals taken *before* the kill — no holder can be started, an
+unreadable worktree row, a pane that cannot be proven to be this terminal's, a
+kill tmux would not perform — leave the session the program it has.
 
 Nothing unwinds an earlier success. A fleet-wide run migrates sessions
 sequentially — so a machine with a large fleet is not asked for many
@@ -170,7 +213,13 @@ has recycled onto a stranger's pane costs that stranger nothing, while a pane
 that answers *without* an identity is still retired — the ordinary state of one
 whose stamp and start command are both unreadable, and not evidence of anybody
 else. A consultation that failed outright is "we do not know" rather than
-"gone", so it refuses; that is the stance all six sites take.
+"gone", so it refuses; that is the stance all seven sites take.
+
+**The running-shell move's stop is one of those sites too, and the sharpest of
+them.** Every other kill reclaims a window somebody has finished with; this one
+ends a running program, so a recycled coordinate would take a stranger's live
+session rather than an idle leftover. It asks the same question through the same
+guard, and a refusal writes nothing at all.
 
 **An exit-stamped row is refused rather than moved while its pane is in use.**
 `.exited` parks a row whose pane's shell is still alive and usable, which is the
@@ -194,7 +243,7 @@ process is there.
 - A busy session is skipped and named, and its row is untouched.
 - A migrated session's tmux window is retired, on the parked path and the
   running one, while a rewrite that was refused leaves the window alone.
-- The retire's pane-ownership guard is enumerated beside the other five
+- The retire's pane-ownership guard is enumerated beside the other six
   teardown-by-coordinate sites: it refuses both a pane naming a different
   terminal and a consultation that could not be run, writing nothing to the row
   in either case, and proceeds for a pane that answers with the row's own id. A
@@ -203,6 +252,21 @@ process is there.
 - An exit-stamped session with something running in its pane is skipped with
   the wake's own pane-busy refusal and keeps its window and coordinates, while
   an exit-stamped session whose pane is idle migrates.
+- A running shell moves: the transport flips, the tmux coordinates are blanked,
+  the holder's processes and its child's start time are recorded, the row keeps
+  its id, label, pin and kind, its window is stopped exactly once, and neither
+  the park nor the wake is called at all. The launch carries the worktree's path
+  as its working directory, the login shell as its program, and the incarnation
+  the row ends up naming. A running Claude session still parks and wakes, which
+  is the regression this branch most needs guarded.
+- Each state a failed shell move can land in: a spawn that fails leaves the row
+  on `tmux` with its coordinates intact, and a write that loses its
+  compare-and-set abandons the holder and reports the race skip. Its kill joins
+  the pane-ownership enumeration, refusing both a stranger's pane and an
+  unanswerable consultation while writing nothing.
+- A Codex tab is skipped with its own reason, by kind and by label, before the
+  activity rails and after the already-holder answer — and nothing is killed,
+  spawned or written for it.
 - A session with unsent typed input is skipped with the rail's reason, proving
   the migration park honours the rails rather than overriding them.
 - An unspawnable holder refuses and leaves the row exactly as it was, in both

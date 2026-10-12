@@ -58,7 +58,19 @@ struct TerminalMigrateTransportRPCTests {
             },
             wake: { _ in .ok(sessionIncarnationID: nil) },
             paneBusyRefusal: { _ in nil },
-            retireWindow: { _ in })
+            retireWindow: { _ in },
+            // The move's own composition is proved in
+            // `RunningShellTransportMoveTests`; here it only has to land the
+            // row on the holder, which is what the handler reads back and
+            // broadcasts.
+            moveRunningShell: { terminal in
+                _ = try? await db.terminals.moveRunningShellToHolder(
+                    id: terminal.id,
+                    expectedState: TerminalReplacementSnapshot(terminal: terminal),
+                    incarnationID: UUID(),
+                    holderPID: 9201, childPID: 9202, startedAt: Date())
+                return .moved
+            })
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")

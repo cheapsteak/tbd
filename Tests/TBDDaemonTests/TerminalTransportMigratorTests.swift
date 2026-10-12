@@ -46,9 +46,11 @@ struct TerminalTransportMigratorTests {
     private actor CallRecorder {
         private(set) var parks: [UUID] = []
         private(set) var wakes: [UUID] = []
+        private(set) var shellMoves: [UUID] = []
 
         func recordPark(_ id: UUID) { parks.append(id) }
         func recordWake(_ id: UUID) { wakes.append(id) }
+        func recordShellMove(_ id: UUID) { shellMoves.append(id) }
     }
 
     /// Every tmux argv the dry-run manager was handed. `kill-window` is the
@@ -88,6 +90,7 @@ struct TerminalTransportMigratorTests {
 
         var parks: [UUID] { get async { await recorder.parks } }
         var wakes: [UUID] { get async { await recorder.wakes } }
+        var shellMoves: [UUID] { get async { await recorder.shellMoves } }
 
         /// The migrator wired to the real park and the real wake.
         func productionMigrator() -> TerminalTransportMigrator {
@@ -110,7 +113,8 @@ struct TerminalTransportMigratorTests {
             wakeResult: WakeResult = .ok(sessionIncarnationID: nil),
             parkAlsoUnparks: Bool = false,
             parkAlsoDeletesTheRow: Bool = false,
-            deleteTheRowBeforeTheRewrite: Bool = false
+            deleteTheRowBeforeTheRewrite: Bool = false,
+            shellMoveOutcome: ShellTransportMoveOutcome = .moved
         ) -> TerminalTransportMigrator {
             let database = self.db
             let park = self.coordinator
@@ -151,6 +155,22 @@ struct TerminalTransportMigratorTests {
                     },
                     retireWindow: {
                         await park.retireTmuxWindowAfterTransportMigration(terminal: $0)
+                    },
+                    // Substituted like the wake, and for the same reason: its
+                    // own composition needs a holder a fixture cannot start.
+                    // `RunningShellTransportMoveTests` proves it; what is
+                    // proved here is which rows reach it and how its three
+                    // answers are reported.
+                    moveRunningShell: { terminal in
+                        await calls.recordShellMove(terminal.id)
+                        if shellMoveOutcome == .moved {
+                            _ = try? await database.terminals.moveRunningShellToHolder(
+                                id: terminal.id,
+                                expectedState: TerminalReplacementSnapshot(terminal: terminal),
+                                incarnationID: UUID(),
+                                holderPID: 9201, childPID: 9202, startedAt: Date())
+                        }
+                        return shellMoveOutcome
                     }))
         }
     }
@@ -224,6 +244,7 @@ struct TerminalTransportMigratorTests {
         parked: Bool = false,
         activityState: TerminalActivityState = .idle,
         kind: TerminalKind? = .claude,
+        label: String = TerminalLabel.claudeCode,
         claudeSessionID: String? = sessionID,
         parkReason: HibernateReason = .auto,
         suspended: Bool = false,
@@ -234,7 +255,7 @@ struct TerminalTransportMigratorTests {
         let created = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id,
             tmuxWindowID: "@7", tmuxPaneID: "%7",
-            label: TerminalLabel.claudeCode,
+            label: label,
             claudeSessionID: claudeSessionID,
             kind: kind,
             transport: .tmux)
@@ -364,7 +385,7 @@ struct TerminalTransportMigratorTests {
     ///
     /// Both refusal arms and the identity-matched proceed arm are enumerated
     /// against the coordinator in `KillWindowSiblingSitesPaneOwnershipTests`,
-    /// with the other five sites that tear a window down by DB-recorded
+    /// with the other six sites that tear a window down by DB-recorded
     /// coordinate. This is the one that proves the migration reaches the guard
     /// at all; the fixture's other retire tests pass through its
     /// no-identity-to-read arm, which is what a dry-run pane answers.
@@ -588,25 +609,158 @@ struct TerminalTransportMigratorTests {
         #expect(after == row)
     }
 
-    /// A running shell is skipped by the park, with the park's own reason.
+    // MARK: - The running shell path: stop and restart
+
+    /// A running shell moves plainly: its program is stopped and a fresh login
+    /// shell starts on the holder in the same working directory.
     ///
-    /// `TransportMigrationEligibility` deliberately does not require a
-    /// resumable session — so shells reach the park rather than being refused
-    /// up front — and the park then refuses a row with no conversation to
-    /// resume. The outcome is a named skip, which is the point: the migration
-    /// never kills a program it cannot bring back.
-    @Test("a running shell is skipped because nothing could resume it")
-    func aRunningShellIsSkippedBecauseNothingCouldResumeIt() async throws {
+    /// It takes neither of the other two paths, and that is the assertion. A
+    /// park exists to carry a conversation across a respawn and this row names
+    /// none — which is exactly why `performHibernate` refuses it — so a
+    /// composition that parked it would stop a program nothing could bring
+    /// back.
+    @Test("a running shell is restarted on the holder, with no park and no wake")
+    func aRunningShellIsRestartedWithNoParkAndNoWake() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
+
+        let outcome = await fixture.recordingMigrator().migrate(terminalID: row.id)
+
+        #expect(outcome == .migrated)
+        #expect(await fixture.shellMoves == [row.id])
+        #expect(await fixture.parks.isEmpty,
+                "a session with nothing to resume was parked anyway")
+        #expect(await fixture.wakes.isEmpty,
+                "a session that was never parked was woken")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder)
+        #expect(after.tmuxWindowID.isEmpty && after.tmuxPaneID.isEmpty)
+        #expect(after.id == row.id && after.label == row.label && after.kind == row.kind)
+    }
+
+    /// The move's lost compare-and-set is reported as the same race skip the
+    /// parked path's is: nothing was written, and the row is consistent
+    /// whichever way the race went.
+    @Test("a shell move that loses its race is reported as the race skip")
+    func aShellMoveThatLosesItsRaceIsReportedAsTheRaceSkip() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
         let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
 
-        let outcome = await fixture.recordingMigrator().migrate(terminalID: row.id)
+        let outcome = await fixture.recordingMigrator(shellMoveOutcome: .lostTheRace)
+            .migrate(terminalID: row.id)
 
-        #expect(outcome == .skipped(reason: "No session id to resume later"))
+        #expect(outcome == .skipped(reason: TerminalTransportMigrator.raceSkip))
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .tmux)
-        #expect(!after.isParked)
+    }
+
+    /// A refusal is reported as a refusal, carrying the move's own reason: it
+    /// names a fact that has to change before a retry can work, which is a
+    /// different column of a fleet run's report than a skip.
+    @Test("a shell move's refusal is carried through verbatim")
+    func aShellMovesRefusalIsCarriedThroughVerbatim() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
+
+        let outcome = await fixture.recordingMigrator(
+            shellMoveOutcome: .refused(reason: "no holder for you"))
+            .migrate(terminalID: row.id)
+
+        #expect(outcome == .refused(reason: "no holder for you"))
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .tmux)
+    }
+
+    /// The regression guard the new branch most needs: a running Claude
+    /// session still goes park, rewrite, wake. The branch tests the row's own
+    /// `claudeSessionID`, which is the fact the park refuses on, so a session
+    /// that *can* be resumed must never be restarted as a bare shell.
+    @Test("a running Claude session still parks and wakes rather than restarting as a shell")
+    func aRunningClaudeSessionStillParksAndWakes() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        #expect(await fixture.recordingMigrator().migrate(terminalID: row.id) == .migrated)
+
+        #expect(await fixture.shellMoves.isEmpty,
+                "a resumable session was restarted as a bare shell")
+        #expect(await fixture.parks == [row.id])
+        #expect(await fixture.wakes == [row.id])
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.claudeSessionID == row.claudeSessionID, "identity did not survive")
+    }
+
+    /// A parked row is still only rewritten, and the shell move is not reached
+    /// on its way there. Every park writes the session id it parks, so a
+    /// parked row always names one — which is the fact that keeps the two
+    /// paths apart.
+    @Test("a parked row is rewritten without reaching the shell move")
+    func aParkedRowIsRewrittenWithoutReachingTheShellMove() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true)
+
+        #expect(await fixture.recordingMigrator().migrate(terminalID: row.id) == .migrated)
+
+        #expect(await fixture.shellMoves.isEmpty,
+                "a parked row's program was stopped and restarted")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder)
+        #expect(after.isParked, "the rewrite woke a parked row")
+    }
+
+    /// A Codex tab names no resumable session either, so without its own skip
+    /// it would fall into the shell move and be silently replaced by a bare
+    /// shell. Moving it properly needs Codex's own launch preparation, which
+    /// this path does not have.
+    @Test("a Codex tab is skipped with its own reason and nothing is touched")
+    func aCodexTabIsSkippedWithItsOwnReason() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, kind: .codex, label: TerminalLabel.codex, claudeSessionID: nil)
+
+        let outcome = await fixture.recordingMigrator().migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(reason: TransportMigrationEligibility.codexSkip))
+        #expect(await fixture.shellMoves.isEmpty,
+                "a Codex session was restarted as a bare shell")
+        #expect(await fixture.parks.isEmpty)
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the migration killed a Codex tab's window: \(fixture.tmuxArgv.all)")
+        #expect(try await fixture.db.terminals.get(id: row.id) == row,
+                "a skipped Codex row was changed")
+    }
+
+    /// The production wiring's running-shell arm, end to end: this fixture's
+    /// registry reports that it can spawn and then cannot, which is a holder
+    /// that could not be started. The program is already stopped by then, so
+    /// the refusal has to say what state the session is in — and the row must
+    /// keep the coordinates its window-died recovery needs.
+    @Test("a running shell whose holder cannot be started is refused with its row intact")
+    func aRunningShellWhoseHolderCannotBeStartedIsRefused() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, kind: .shell, claudeSessionID: nil)
+
+        let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
+
+        guard case .refused(let reason) = outcome else {
+            Issue.record("a failed shell move was reported as \(outcome)")
+            return
+        }
+        #expect(reason.contains("starting a holder"),
+                "the refusal did not name the failed spawn: \(reason)")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .tmux, "a failed move rewrote the row anyway")
+        #expect(after.tmuxWindowID == row.tmuxWindowID && after.tmuxPaneID == row.tmuxPaneID,
+                "the row lost the coordinates its recovery needs")
+        #expect(!after.isParked, "a session with nothing to resume was left parked")
     }
 
     // MARK: - Already there, and gone
