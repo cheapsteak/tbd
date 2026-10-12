@@ -140,13 +140,43 @@ import Testing
         #expect(TransportMigrationEligibility.decide(t) == .alreadyHolder)
     }
 
-    /// A `setup` hook tab is deliberately NOT skipped here: it is a parallel
-    /// tab nothing waits on, so it moves like any other shell, and the
-    /// coordinator's busy rail is what protects it while its hook is still
-    /// running.
-    @Test func aSetupHookTabIsEligible() {
+    /// A `setup` hook tab gets the same unconditional skip, for a case the
+    /// process-table busy rail cannot see: a setup hook that FAILED has
+    /// `exec $SHELL`'d, so the tab somebody kept open to read the failure holds
+    /// an idle shell. The rail finds nothing running, the row looks eligible,
+    /// and the move kills its window with no Closed Terminals capture —
+    /// destroying exactly the output the tab exists to show.
+    @Test func aSetupHookTabIsSkippedWithItsOwnReason() {
         let t = makeTerminal(
             kind: .shell, label: TerminalLabel.setup, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.setupSkip))
+    }
+
+    /// Unconditional, like the pre-session skip: an idle one is the very case
+    /// the skip exists for — a failed hook's shell is indistinguishable from an
+    /// idle tab from the row alone.
+    @Test func anIdleSetupHookTabIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.setup,
+            claudeSessionID: nil, activityState: .idle)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.setupSkip))
+    }
+
+    /// And `.alreadyHolder` still comes first for it.
+    @Test func aSetupHookTabOnTheHolderIsAlreadyWhereItBelongs() {
+        let t = makeTerminal(
+            transport: .holder, kind: .shell,
+            label: TerminalLabel.setup, claudeSessionID: nil)
+        #expect(TransportMigrationEligibility.decide(t) == .alreadyHolder)
+    }
+
+    /// The skip is the LABEL's, not every shell's: a plain shell tab with no
+    /// conversation still moves, which is the whole feature.
+    @Test func aPlainShellTabIsStillEligible() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.shell, claudeSessionID: nil)
         #expect(TransportMigrationEligibility.decide(t) == .eligible)
     }
 }

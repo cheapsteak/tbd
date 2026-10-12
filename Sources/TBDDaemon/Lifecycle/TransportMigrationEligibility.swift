@@ -7,11 +7,12 @@ import TBDShared
 /// profile swap and manual hibernate: a shell has no conversation to resume
 /// and must still be migratable, or tmux rows would live forever.
 ///
-/// Three rows are turned away for having nothing to resume, because the only
+/// Four rows are turned away for having nothing to resume, because the only
 /// move available to each of them would start a bare login shell where
 /// something else belongs: a Codex tab, a Claude tab whose session has not
-/// begun, and a pre-session hook tab. Each gets its own reason, because each
-/// has a different thing for the person to do about it.
+/// begun, and a hook tab of either kind — `pre-session` or `setup`. Each gets
+/// its own reason, because each has a different thing for the person to do
+/// about it.
 ///
 /// It also makes no judgement a later rail will make. The park's own rails
 /// refuse typed input; repeating them here would give one question two answers.
@@ -38,6 +39,11 @@ enum TransportMigrationEligibility: Equatable {
         "TBD created this tab to run the worktree's pre-session hook; it closes itself when the "
         + "hook finishes, so there is nothing to move."
 
+    /// The skip a setup hook tab gets.
+    static let setupSkip =
+        "TBD created this tab to run the worktree's setup hook; close the tab when you are done "
+        + "reading it, so there is nothing to move."
+
     static func decide(_ terminal: Terminal) -> TransportMigrationEligibility {
         if terminal.transport == .holder { return .alreadyHolder }
         // A pre-session hook tab is a shell with no session id, so without this
@@ -51,6 +57,21 @@ enum TransportMigrationEligibility: Equatable {
         // cannot see whether the creation flow is still waiting on it.
         if terminal.label == TerminalLabel.preSession {
             return .skip(reason: preSessionSkip)
+        }
+        // A `setup` hook tab is skipped for a reason the process-table busy
+        // rail cannot see. A setup hook that FAILED has `exec $SHELL`'d, so the
+        // tab somebody deliberately kept open to read the failure holds an idle
+        // shell: the rail finds nothing running, the row is eligible, and the
+        // move kills its window with no Closed Terminals capture — destroying
+        // exactly the output the tab exists to show.
+        //
+        // Unconditional, like the pre-session skip, and for a cheaper reason:
+        // the tab is TBD-created and closing it is what one does with it, so
+        // skipping it costs nothing. `finishAutoCloseSetup` is a live observer
+        // whenever `auto_close_setup_enabled` is on, which the row alone cannot
+        // see either.
+        if terminal.label == TerminalLabel.setup {
+            return .skip(reason: setupSkip)
         }
         // A Codex tab carries no resumable session and must not be recreated as
         // a bare shell, which would discard the Codex session in place. Moving
