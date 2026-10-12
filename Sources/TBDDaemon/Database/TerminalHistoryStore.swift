@@ -64,7 +64,8 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
 /// (`TBDConstants.terminalHistoryPath`); the DB row keeps display metadata.
 /// Empty/whitespace-only captures store nothing (no file, no row) on the
 /// tmux path (`captureOnClose`); the holder path (`recordOnClose`) writes the
-/// row without a file instead.
+/// row without a file instead. Entries for a dev server's saved last output
+/// carry `serverName` and `exitCode` (`recordServerExit`).
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
     // config knob only if someone actually asks for more retention.
@@ -190,7 +191,17 @@ public struct TerminalHistoryStore: Sendable {
                    try TerminalHistoryRecord.exists(db, key: record.id) {
                     return []
                 }
-                try record.save(db)
+                // A re-save (a later close of the same tab) carries no server
+                // fields — they are stamped only by `recordServerExit`. Keep
+                // the stored ones, or closing an exited server's tab would
+                // silently clear its saved last output.
+                var saved = record
+                if saved.serverName == nil,
+                   let existing = try TerminalHistoryRecord.fetchOne(db, key: saved.id) {
+                    saved.serverName = existing.serverName
+                    saved.exitCode = existing.exitCode
+                }
+                try saved.save(db)
                 // Prune to the newest N; rowid breaks closedAt ties (insertion order).
                 let stale = try String.fetchAll(db, sql: """
                     SELECT id FROM terminal_history WHERE worktreeID = ?
@@ -208,6 +219,70 @@ public struct TerminalHistoryStore: Sendable {
             }
         } catch {
             logger.warning("failed to store closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Dev server last output
+
+    /// A dev server's final output, saved when its holder-backed command
+    /// exits (docs/specs/2026-10-11-dev-servers-design.md, "Exited servers
+    /// keep their last output"). Writes the entry exactly as `recordOnClose`
+    /// does, then stamps the server's name and exit code on it — only while
+    /// the terminal row still exists. A stop closes the server's tab, which
+    /// deletes the row, before it detaches the server's entries, so an exit
+    /// the stop itself caused can never leave the server reading *Exited*.
+    /// NEVER throws.
+    public func recordServerExit(
+        terminal: Terminal, serverName: String, capture: String?, exitCode: Int32?
+    ) async {
+        await recordOnClose(terminal: terminal, capture: capture)
+        let id = terminal.id.uuidString
+        do {
+            try await writer.write { db in
+                try db.execute(sql: """
+                    UPDATE terminal_history SET serverName = ?, exitCode = ?
+                    WHERE id = ? AND EXISTS (SELECT 1 FROM terminal WHERE id = ?)
+                    """, arguments: [serverName, exitCode, id, id])
+            }
+        } catch {
+            logger.warning("failed to stamp dev server output for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// The newest entry still attached to each dev server in a worktree,
+    /// keyed by server name. Ties on `closedAt` break by insertion order, as
+    /// the prune does.
+    public func latestServerOutputs(worktreeID: UUID) async throws -> [String: TerminalHistoryEntry] {
+        try await writer.read { db in
+            let records = try TerminalHistoryRecord.fetchAll(db, sql: """
+                SELECT * FROM terminal_history
+                WHERE worktreeID = ? AND serverName IS NOT NULL
+                ORDER BY closedAt DESC, rowid DESC
+                """, arguments: [worktreeID.uuidString])
+            var latest: [String: TerminalHistoryEntry] = [:]
+            for record in records {
+                guard let name = record.serverName, latest[name] == nil,
+                      let entry = record.toModel() else { continue }
+                latest[name] = entry
+            }
+            return latest
+        }
+    }
+
+    /// Detaches a server's saved outputs from it; `server.start` and
+    /// `server.stop` call this. The entries stay in Closed Terminals as
+    /// ordinary entries but no longer make the server read *Exited*.
+    /// NEVER throws.
+    public func detachServerOutput(worktreeID: UUID, serverName: String) async {
+        do {
+            try await writer.write { db in
+                try db.execute(sql: """
+                    UPDATE terminal_history SET serverName = NULL, exitCode = NULL
+                    WHERE worktreeID = ? AND serverName = ?
+                    """, arguments: [worktreeID.uuidString, serverName])
+            }
+        } catch {
+            logger.warning("failed to detach dev server output for \(serverName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

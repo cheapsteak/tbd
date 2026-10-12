@@ -446,6 +446,22 @@ actor HolderRegistry {
     /// would mean racing a single `await` on an actor. Nil in production.
     private var cancelBarrier: (@Sendable () async -> Void)?
 
+    /// Told about a session whose job has ended: after its exit status is
+    /// established and before its reader is released — the last moment the
+    /// daemon's emulator holds the session's final screen. Dev servers save
+    /// that screen through it (docs/specs/2026-10-11-dev-servers-design.md,
+    /// "Exited servers keep their last output").
+    ///
+    /// It observes and nothing more: an observer can delay a reclaim but never
+    /// prevent one. The release that follows skips only when the slot no
+    /// longer holds the observed reader — somebody else already released it,
+    /// or a re-adoption replaced it. An actor re-entrancy note: while it runs,
+    /// a second `reclaimIfSessionEnded` for the same session can pass the same
+    /// guards and call it again; the dev-server recorder's writes are
+    /// idempotent per terminal id, so that costs one redundant save. Nil until
+    /// the daemon wires it, and in every test that does not.
+    private var sessionEndedObserver: (@Sendable (UUID, HolderChildStatus, HolderReader) async -> Void)?
+
     init(
         owner: HolderOwnerToken,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -489,6 +505,15 @@ actor HolderRegistry {
     /// never calls it.
     func setCancelBarrier(_ barrier: (@Sendable () async -> Void)?) {
         cancelBarrier = barrier
+    }
+
+    /// Installs the session-ended observer described above. The daemon calls
+    /// it once at startup, before adoption, so a session that ended during an
+    /// outage — its status riding the hand-over — is seen too.
+    func setSessionEndedObserver(
+        _ observer: (@Sendable (UUID, HolderChildStatus, HolderReader) async -> Void)?
+    ) {
+        sessionEndedObserver = observer
     }
 
     // MARK: - Reading
@@ -2320,6 +2345,14 @@ actor HolderRegistry {
         guard case .adopted(let current) = slots[terminalID], current === reader else { return }
 
         statuses[terminalID] = status
+        if let sessionEndedObserver {
+            await sessionEndedObserver(terminalID, status, reader)
+            // Re-read after the observer's suspension: a concurrent release
+            // may have emptied the slot, or a re-adoption filled it with a
+            // reader this reclaim knows nothing about. Either way this
+            // reader is no longer the one to release here.
+            guard case .adopted(let after) = slots[terminalID], after === reader else { return }
+        }
         await release(terminalID: terminalID)
         Self.logger.info(
             """
