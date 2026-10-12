@@ -1503,6 +1503,25 @@ public final class Daemon: Sendable {
             deferredHolderAdoptions = await holderRegistry.adoptAll()
         }
 
+        // 8f. Build the dev-server monitor and install the router's hooks
+        // into it BEFORE the socket and HTTP servers serve (steps 9, 10): the
+        // hooks are plain `nonisolated(unsafe)` vars a request handler reads,
+        // so assigning them while requests run would race, and a
+        // `server.start`/`server.stop` served before the assignment would
+        // skip its refresh. `refresh()` works before `start()` (step
+        // 11a-dev-servers); until then the summary is empty.
+        var devServerMonitor: DevServerRunningFileMonitor?
+        if mockMode == nil {
+            let monitor = DevServerRunningFileMonitor(
+                db: database, runningFiles: DevServerRunningFileStore(),
+                tabInspector: devServerTabInspector,
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            devServerMonitor = monitor
+            self.devServerMonitor = monitor
+            rpcRouter.onDevServersChanged = { [monitor] in await monitor.refresh() }
+            rpcRouter.devServerSummaryProvider = { [monitor] in await monitor.runningWorktreeIDs() }
+        }
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -1680,17 +1699,11 @@ public final class Daemon: Sendable {
                 }
             }
 
-            // 11a-dev-servers. Keep the sidebar's "server running" set
-            // current: a watch on the running-file directory plus a 10 s
-            // liveness recheck. Reads only.
-            let devServerMonitor = DevServerRunningFileMonitor(
-                db: database, runningFiles: DevServerRunningFileStore(),
-                tabInspector: devServerTabInspector,
-                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
-            self.devServerMonitor = devServerMonitor
-            rpcRouter.onDevServersChanged = { [devServerMonitor] in await devServerMonitor.refresh() }
-            rpcRouter.devServerSummaryProvider = { [devServerMonitor] in await devServerMonitor.runningWorktreeIDs() }
-            await devServerMonitor.start()
+            // 11a-dev-servers. Start the monitor step 8f built and wired: its
+            // initial read, the running-file directory watch and the 10 s
+            // liveness recheck. Reads only. Started after the bind rather
+            // than before it, so its tab reads never delay the socket.
+            await devServerMonitor?.start()
 
             // 11a-reader-census. Record the holder transport's double-reader
             // violation count where a human can read it back. The detector is
