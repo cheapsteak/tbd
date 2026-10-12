@@ -78,7 +78,12 @@ status = "scripts/dev/localstack-status"   # optional; exit 0 = running
 - **`stop`** and **`status`** are shell commands run with `sh -c` in the
   server's `cwd`. `status` answers only *running or not*, by exit code, within
   5 seconds; `stop` has 60 seconds. URLs come only from the running file, so
-  `status` and the file can never disagree.
+  `status` and the file can never disagree. Both run with the daemon's `PATH`
+  plus the common package-manager directories appended (`~/.local/bin`,
+  Homebrew, `/usr/local/bin` and the like), because a daemon relaunched by
+  LaunchServices can inherit launchd's bare `PATH`.
+- **`env`** keys must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); any
+  other key is a parse error naming it, and that key is dropped.
 - Server names are the TOML keys: lowercase letters, digits and `-`.
 - Unknown keys are ignored, so later versions can add fields without breaking
   older TBD builds.
@@ -99,6 +104,7 @@ of `configurations[]` becomes a declared server:
 - `runtimeExecutable` + `runtimeArgs`, or `node <program> <args…>`, → `command`,
   each argument shell-quoted.
 - `cwd` and `env` carry over; `${workspaceFolder}` resolves to the worktree root.
+  `env` keys follow the same identifier rule as in `tbd.toml`.
 - `port`, `url` and `autoPort` are ignored: the repo owns ports and reports URLs
   through the running file.
 
@@ -217,7 +223,11 @@ declared servers, started side by side) do the same thing per server:
 - The terminal row records the server's name in a new nullable `server_name`
   column on `terminal`, linking tab to server. That is a migration plus the GRDB
   record plus `Terminal` in `TBDShared/Models.swift`, in one commit.
-- Starting a server that is already running does nothing and says so. A server
+- Starting a server that is already running does nothing and says so. A
+  server whose tab's state cannot be read — a tmux query that timed out or
+  failed without saying the pane is gone — is not started: its command may
+  still be running, so the start fails and says to try again rather than open
+  a second tab. A server
   whose tmux tab exited is started again in that same tab, so tabs do not pile
   up; a holder session cannot be respawned, so its exited tab is closed and a
   new one opened.
@@ -232,7 +242,10 @@ Each server's state is derived, in this order:
 3. **Exited (code N)** – the command TBD last started for it ended: its tab
    still shows the ended command, or its saved last output records the exit.
    The code is omitted when the transport could not observe it.
-4. **Unknown** – the `status` command timed out and nothing above applies.
+4. **Unknown** – TBD's tab for it could not be read (a tmux query that timed
+   out or failed without tmux saying the pane is gone), or the `status`
+   command timed out, and nothing above applies. Only tmux's own answer that
+   the pane or its server is absent makes a tab gone.
 5. **Stopped** – none of the above.
 
 `status` commands run with a 5-second timeout, and only on demand: by `tbd
@@ -282,7 +295,9 @@ shows the output.
   that exits non-zero or runs out of time is a failed stop; TBD does not fall
   back to signalling.
 - Otherwise, signal the server's process — TBD's tab process, or the live
-  running file's `pid`: SIGTERM, then SIGKILL after 5 seconds. Before
+  running file's `pid`: SIGTERM, then SIGKILL after 5 seconds. The grace runs
+  to the end even when the request that started the stop is cancelled, and a
+  group whose only remaining members are zombies counts as gone. Before
   signalling, re-verify the pid's identity: a running file's pid against the
   start time it recorded; a tab's pid is read from the tab again at stop time
   and its start time taken from the kernel at that moment, and a tab pid that
@@ -303,7 +318,13 @@ shows the output.
 - Close the server's tab, capturing its scrollback the way archive does, delete
   its running file, and detach its saved last output.
 
-Stop on an exited server closes its tab and clears its *Exited* state.
+Stop on an exited server closes its tab and clears its *Exited* state; it
+neither signals anything nor runs a declared `stop`, since nothing is running
+to stop. Stop on a server whose tab's state cannot be read fails and says to
+try again, without signalling, running `stop` or closing the tab.
+
+A start, and a stop of named servers, run only those servers' `status`
+commands.
 `restart` is stop, then start. Pressing Ctrl+C in a server's tab is not a stop
 through TBD: the command exits on its own, so the tab stays open and the server
 reads *Exited*.
@@ -312,7 +333,7 @@ reads *Exited*.
 
 Archive stops every server in the worktree that reads running — TBD's tab, a
 live running file, or its `status` command, which archive runs with the usual
-5-second timeout — using the stop rules above. It does so in archive's first phase,
+5-second timeout — or *Unknown*, using the stop rules above. It does so in archive's first phase,
 right after the worktree's status flips to archived — so a concurrent `server
 start` is refused — and before its tabs are torn down, so group kills reach
 live tab processes and a declared `stop` runs while the checkout still exists.
@@ -332,7 +353,9 @@ own stop caused — leaves a server reading *Exited* after a revive.
 - **`start [name…]`** – no name starts all declared servers. Prints each tab's
   terminal ID.
 - **`stop [name…]`** – no name stops all.
-- **`restart [name…]`**
+- **`restart [name…]`** – no name restarts every running server: it stops
+  them, then starts exactly those. When none is running it says so and starts
+  nothing.
 - **`status <name>`** – exits 0 when the server is running and prints its URLs,
   so a script or an agent can wait on it.
 - **`open [name] [--endpoint <name>]`** – opens the main URL, or a named
@@ -409,6 +432,8 @@ once it writes running files. Nothing runs until someone clicks Start.
   stop report names it.
 - **A tab pid that cannot be verified as the tab's** fails the stop; nothing is
   signalled.
+- **A tab whose state cannot be read** fails a start or a stop with "try
+  again"; nothing is spawned, signalled or closed.
 - **A status-only server with no `stop`** fails the stop with "nothing to
   stop".
 - **A group kill that leaves the process alive after SIGKILL** is reported with

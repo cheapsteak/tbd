@@ -42,10 +42,11 @@ status = "scripts/dev/localstack-status"   # optional; exit 0 = running
 
 - **`command`** – required, and non-empty. Run with `sh -c`.
 - **`cwd`** – optional. Must be relative and stay inside the worktree; an absolute path, or one that escapes through `..`, is a parse error for that server.
-- **`env`** – optional table of strings. The file is usually committed, so never put secrets in it.
+- **`env`** – optional table of strings. Keys must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); any other key is a parse error naming it, and is dropped. The file is usually committed, so never put secrets in it.
 - **`label`** – optional display name; defaults to the server name.
 - **`stop`** – optional shell command, run in the server's `cwd`. It replaces TBD's process-group kill and has a 60-second budget.
 - **`status`** – optional shell command, run in the server's `cwd`. Exit 0 means running. It has a 5-second budget and only answers running or not; it is never parsed for URLs.
+- `stop` and `status` run with TBD's `PATH` plus the common package-manager directories (`~/.local/bin`, Homebrew, `/usr/local/bin` and the like), so they find tools even when TBD was relaunched with a bare system `PATH`.
 - **Names** – the TOML keys: lowercase letters, digits and `-`.
 - **Unknown keys** are ignored, so a newer file works with an older TBD.
 
@@ -131,7 +132,7 @@ A start opens a terminal tab titled with the server's label, running `exec /bin/
 - `TBD_WORKTREE_ID`, `TBD_WORKTREE_NAME`, `TBD_WORKTREE_PATH`
 - `TBD_REPO_PATH`, `TBD_TERMINAL_ID`
 
-Starting a server that is already running does nothing and says so. Start with no name starts every declared server.
+Starting a server that is already running does nothing and says so. Start with no name starts every declared server. When TBD cannot read the state of a server's tab — a tmux query that timed out or failed without saying the pane is gone — the start fails and asks you to try again, rather than open a second copy of a server that may still be running.
 
 ### States
 
@@ -140,7 +141,7 @@ A server's state is the first of these that applies:
 1. **Running, with URLs** – a live running file for this worktree and server.
 2. **Running** – its `status` command exits 0, or TBD's tab is still running the command. No Open button, since no URL was reported.
 3. **Exited (code N)** – the command TBD last started has ended. The code is omitted when the terminal transport could not observe it.
-4. **Unknown** – the `status` command timed out and nothing above applies.
+4. **Unknown** – TBD could not read its tab's state, or the `status` command timed out, and nothing above applies.
 5. **Stopped** – none of the above.
 
 `status` commands run only on demand: by `tbd server list` and `tbd server status`, and in the app when a worktree is selected, after each Start, Stop or Restart, and when the daemon reports a change for the selected worktree. They never run on a timer or for the sidebar dot. TBD watches the running-file directory and, every 10 seconds, re-checks the liveness of known files and of its own server tabs, so a server that died without cleaning up drops out of the sidebar dot.
@@ -148,13 +149,15 @@ A server's state is the first of these that applies:
 ### Stopping
 
 - If the server declares `stop`, TBD runs it with a 60-second budget. A `stop` that exits non-zero or runs out of time is a failed stop; TBD does not fall back to signalling.
-- Otherwise TBD signals the server's process, taken from its tab process (read again at stop time) or the live file's `pid`: SIGTERM, then SIGKILL after 5 seconds. It signals the whole process group only when the pid leads it, and the pid alone otherwise (see "Process groups"). It re-verifies the pid's start time before signalling, and a pid it cannot verify fails the stop instead of being signalled.
+- Otherwise TBD signals the server's process, taken from its tab process (read again at stop time) or the live file's `pid`: SIGTERM, then SIGKILL after 5 seconds; the grace runs out in full even if the request that asked for the stop goes away. It signals the whole process group only when the pid leads it, and the pid alone otherwise (see "Process groups"). It re-verifies the pid's start time before signalling, and a pid it cannot verify fails the stop instead of being signalled.
 - A server that reads running only through its `status` command, with no `stop` declared, has nothing TBD may signal; stopping it fails and asks for a `stop` command.
 - Then it closes the server's tab, keeping the scrollback the way archive does, and deletes the running file.
 
-`restart` is stop, then start. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
+Stopping an exited server closes its tab and clears its Exited state without signalling anything or running its `stop`, since nothing is running. Stopping a server whose tab's state cannot be read fails and asks you to try again; nothing is signalled, run or closed.
 
-Archiving a worktree stops its running servers first — including those running only by their `status` command — using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
+`restart` is stop, then start; with no name it restarts exactly the servers that were running. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
+
+Archiving a worktree stops its running and Unknown servers first — including those running only by their `status` command — using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
 
 ## Exited servers and their last output
 
@@ -172,7 +175,7 @@ Every command takes `--worktree` (a name, display name or UUID; defaults to `TBD
 - **`tbd server list`** – every declared or reported server with its state, URLs and source, plus any source that failed to parse.
 - **`tbd server start [name...]`** – start the named servers, or all declared ones.
 - **`tbd server stop [name...]`** – stop the named servers, or every running one.
-- **`tbd server restart [name...]`** – stop, then start.
+- **`tbd server restart [name...]`** – stop, then start. With no name, restarts every running server; when none is running it says so and starts nothing.
 - **`tbd server status <name>`** – print the server's state and URLs; exits 0 only when it is running, so a script can wait on it.
 - **`tbd server open [name] [--endpoint <name>]`** – open the main URL, or a named endpoint, in the default browser. Without a name, the first running server with a URL.
 - **`tbd server report <name> ...`** – write or `--clear` a running file, as above.
