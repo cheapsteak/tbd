@@ -13,6 +13,14 @@ import TestSupport
 @Suite("terminal.migrateTransport RPC")
 struct TerminalMigrateTransportRPCTests {
 
+    /// What each row saw already published when its own move began.
+    private actor PublicationObservations {
+        private(set) var all: [UUID: [UUID]] = [:]
+        func record(_ terminalID: UUID, _ publishedIDs: [UUID]) {
+            all[terminalID] = publishedIDs
+        }
+    }
+
     /// Collects every delta the router publishes.
     private final class DeltaBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -261,24 +269,25 @@ struct TerminalMigrateTransportRPCTests {
     /// Per row, inside the loop. A fleet run's broadcasts landing only after
     /// the whole run leaves every mounted pane attached to a window the
     /// migration already killed, for the length of the run.
+    ///
+    /// Observed from inside each row's own move, and stated without assuming
+    /// which row the list order puts first: whichever one goes second must
+    /// already see the other's replacement published, and must not see its own.
     @Test("a fleet run publishes each row before it moves the next one")
     func aFleetRunPublishesEachRowAsItFinishes() async throws {
         let f = try await makeFixture()
-        let first = try await tmuxRow(f, parked: true)
-        let second = try await tmuxRow(f, parked: true)
-        // Observed from inside the second row's own park: if the handler
-        // broadcast after the loop, nothing would have been published yet.
-        let seen = DeltaBox()
+        _ = try await tmuxRow(f, parked: true)
+        _ = try await tmuxRow(f, parked: true)
+        let observations = PublicationObservations()
         let published = f.deltas
-        let secondID = second.id
         f.router.transportMigratorOperationsOverride = TerminalTransportMigrator.Operations(
             canSpawnHolder: { true },
             park: { _ in .ok },
             wake: { _ in .ok(sessionIncarnationID: nil) },
             paneBusyRefusal: { terminal in
-                if terminal.id == secondID {
-                    for delta in published.all { seen.append(delta) }
-                }
+                await observations.record(terminal.id, published.all.compactMap {
+                    if case .terminalReplaced(let t) = $0 { return t.id } else { return nil }
+                })
                 return nil
             },
             retireWindow: { _ in },
@@ -286,11 +295,14 @@ struct TerminalMigrateTransportRPCTests {
 
         _ = try await call(f, terminalID: nil)
 
-        let publishedBeforeTheSecond: [UUID] = seen.all.compactMap {
-            if case .terminalReplaced(let t) = $0 { return t.id } else { return nil }
+        let seen = await observations.all
+        #expect(seen.count == 2, "the run did not reach both rows: \(seen)")
+        #expect(seen.values.map(\.count).sorted() == [0, 1],
+                "the publications did not land one per row, in the loop: \(seen)")
+        for (terminalID, alreadyPublished) in seen {
+            #expect(!alreadyPublished.contains(terminalID),
+                    "a row saw its own replacement published before it moved")
         }
-        #expect(publishedBeforeTheSecond == [first.id],
-                "the first row was not published until the run ended: \(publishedBeforeTheSecond)")
     }
 
     // MARK: - The record

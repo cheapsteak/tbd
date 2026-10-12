@@ -162,9 +162,9 @@ struct RunningShellTransportMoveTests {
             paneProcessInspector: FakeInspector(
                 claudePID: nil, foregroundPID: paneForegroundPID),
             actuationLog: makeTestActuationLog(tag: "running-shell-move"))
-        // The registry is wired in every arm: its `environment` is what the
-        // launch's own shell invocation is resolved from, and it must never be
-        // the developer's.
+        // The registry is wired in every arm but the one that asserts its
+        // absence: its `environment` is what the launch's own shell invocation
+        // is resolved from, and it must never be the developer's.
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
