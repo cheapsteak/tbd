@@ -16,7 +16,7 @@ TBD reads three sources, each fresh from the worktree being acted on:
 - **`tbd.toml`** at the worktree root, committed by the repo.
 - **`~/tbd/repos/<repoID>/servers.toml`**, the user's personal file, for repos they cannot or do not want to commit to. It honors `TBD_HOME`.
 
-Sources layer by server name, in that order. A server in a later source replaces the same-named server from an earlier one as a whole, with no field-level merge. Servers with other names are kept from every source. Declared servers keep the order in which their names first appear; a replaced server keeps its original position.
+Sources layer by server name, in that order. A server in a later source replaces the same-named server from an earlier one as a whole, with no field-level merge. Servers with other names are kept from every source. Declared servers keep the order in which their names first appear — within a TOML file, the order of its `[servers.<name>]` sections; a replaced server keeps its original position.
 
 A source that fails to parse is named, with its error, in `tbd server list` and at the bottom of the toolbar menu. It contributes nothing and never hides servers from the other sources.
 
@@ -57,7 +57,7 @@ There are no `port`, `url`, `dependsOn` or `autostart` fields. Ports and URLs be
 Many repos already carry this file for Claude Code's preview. Each entry of `configurations[]` becomes a declared server:
 
 - **`name`** becomes the server name as a slug: lowercased, each run of characters outside `a-z0-9` collapsed to one `-`, leading and trailing `-` trimmed. The original `name` is kept as the label, so "Web App" is the server `web-app`, shown as "Web App". An entry whose slug is empty, or that repeats an earlier slug, is a parse error.
-- **`runtimeExecutable`** plus `runtimeArgs`, or `program` plus `args` (run as `node <program> <args>`), become the `command`, each argument shell-quoted.
+- **`runtimeExecutable`**, `runtimeArgs`, `program` and `args` become the `command` in VS Code's order — runtime (`node` when `runtimeExecutable` is absent), runtime arguments, program, program arguments — each argument shell-quoted.
 - **`cwd` and `env`** carry over. `${workspaceFolder}` resolves to the worktree root. A `cwd` outside the worktree is a parse error for that entry.
 - **`port`, `url` and `autoPort`** are ignored.
 
@@ -91,7 +91,7 @@ One JSON file per running server, with a name ending in `.json`:
 
 - **`version`** – `1`. A file with a higher version is not read.
 - **`root`** – the absolute worktree path. This attributes the file to a worktree; a file whose `root` matches no known worktree is not shown.
-- **`server`** – the server name. If it matches a declared server, the file reports that server's state; otherwise the server is listed as undeclared, with its URLs and a Stop item.
+- **`server`** – the server name. If it matches a declared server, the file reports that server's state; otherwise the server is listed as undeclared, with its URLs and a Stop item. A server TBD started whose declaration was later removed is also listed as undeclared while its tab exists; stopping it signals its tab's process group.
 - **`endpoints`** – one or more named, absolute URLs; full URLs, because scheme and host matter. The first is the main URL.
 - **`pid`** and **`startTime`** – the server process, and its start time in Unix seconds. Both are required.
 
@@ -132,7 +132,7 @@ A start opens a terminal tab titled with the server's label, running `exec /bin/
 - `TBD_WORKTREE_ID`, `TBD_WORKTREE_NAME`, `TBD_WORKTREE_PATH`
 - `TBD_REPO_PATH`, `TBD_TERMINAL_ID`
 
-Starting a server that is already running does nothing and says so. Start with no name starts every declared server. When TBD cannot read the state of a server's tab — a tmux query that timed out or failed without saying the pane is gone — the start fails and asks you to try again, rather than open a second copy of a server that may still be running.
+Starting a server that is already running does nothing and says so. Start with no name starts every declared server. A server that reads Unknown is not started, rather than risk a second copy of a server that may still be running: when TBD cannot read the state of its tab — a tmux query that timed out or failed without saying the pane is gone — the start fails and asks you to try again, and when its `status` command timed out the start fails with "state unknown (status command timed out); try again or stop it first".
 
 ### States
 
@@ -155,7 +155,7 @@ A server's state is the first of these that applies:
 
 Stopping an exited server closes its tab and clears its Exited state without signalling anything or running its `stop`, since nothing is running. Stopping a server whose tab's state cannot be read fails and asks you to try again; nothing is signalled, run or closed.
 
-`restart` is stop, then start; with no name it restarts exactly the servers that were running. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
+`restart` is stop, then start; with no name it restarts exactly the declared servers that were running. An undeclared server is stopped and not started again, since nothing declares how to start it. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
 
 Archiving a worktree stops its running and Unknown servers first — including those running only by their `status` command — using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
 
@@ -163,7 +163,7 @@ Archiving a worktree stops its running and Unknown servers first — including t
 
 A crashed server's final screen is usually the only explanation of the crash, so it stays readable.
 
-- **tmux transport** – TBD sets `remain-on-exit` on the server's window right after spawning it, so the tab keeps its final screen and exit code. "Show last output" focuses that tab. One race is accepted: a command that dies before the option lands, within milliseconds of the login shell's startup, loses its window.
+- **tmux transport** – TBD sets `remain-on-exit` on the server's window in the same tmux invocation that creates it, so the tab keeps its final screen and exit code even when the command dies at once. "Show last output" focuses that tab.
 - **holder transport** (`pty_holder_enabled`) – when the command exits, the daemon saves the final screen and scrollback into Session History, Closed Terminals, with the exit code. Both survive a daemon restart. "Show last output" opens that entry.
 
 Start opens a fresh tab, and Start or Stop detaches the saved entry from the server; it stays in Closed Terminals as an ordinary entry. An exit caused by Stop is never recorded as the server's last output.
@@ -175,7 +175,7 @@ Every command takes `--worktree` (a name, display name or UUID; defaults to `TBD
 - **`tbd server list`** – every declared or reported server with its state, URLs and source, plus any source that failed to parse.
 - **`tbd server start [name...]`** – start the named servers, or all declared ones.
 - **`tbd server stop [name...]`** – stop the named servers, or every running one.
-- **`tbd server restart [name...]`** – stop, then start. With no name, restarts every running server; when none is running it says so and starts nothing.
+- **`tbd server restart [name...]`** – stop, then start. With no name, restarts every running declared server (undeclared ones are stopped and left stopped); when none is running it says so and starts nothing.
 - **`tbd server status <name>`** – print the server's state and URLs; exits 0 only when it is running, so a script can wait on it.
 - **`tbd server open [name] [--endpoint <name>]`** – open the main URL, or a named endpoint, in the default browser. Without a name, the first running server with a URL.
 - **`tbd server report <name> ...`** – write or `--clear` a running file, as above.

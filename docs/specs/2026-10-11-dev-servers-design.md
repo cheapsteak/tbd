@@ -101,8 +101,10 @@ of `configurations[]` becomes a declared server:
   outside `a-z0-9` collapsed to one `-`, leading and trailing `-` trimmed. The
   original `name` becomes the `label`, so "Web App" is the server `web-app`
   shown as "Web App". An entry whose slug is empty is a parse error.
-- `runtimeExecutable` + `runtimeArgs`, or `node <program> <args…>`, → `command`,
-  each argument shell-quoted.
+- `command` is built in VS Code's order: the runtime (`runtimeExecutable`,
+  else `node`), `runtimeArgs`, `program` (when present), then `args`, each
+  argument shell-quoted. An entry with neither `runtimeExecutable` nor
+  `program` is a parse error.
 - `cwd` and `env` carry over; `${workspaceFolder}` resolves to the worktree root.
   `env` keys follow the same identifier rule as in `tbd.toml`.
 - `port`, `url` and `autoPort` are ignored: the repo owns ports and reports URLs
@@ -112,7 +114,8 @@ The file is JSON with comments and trailing commas, as VS Code writes it; TBD
 strips both before decoding.
 
 Declared servers keep the order in which their names first appear across the
-three sources; a server replaced by a later source keeps its original
+three sources — within a TOML file, the order of its `[servers.<name>]`
+sections — and a server replaced by a later source keeps its original
 position.
 
 ## The running file
@@ -158,7 +161,10 @@ One JSON file per running server, with any file name ending in `.json`:
   to a worktree. A file whose `root` matches no known worktree is not shown.
 - **`server`** – the server name. If it matches a declared server, the file
   reports that server's state; otherwise the server is shown as *undeclared*,
-  with its URLs and a Stop item.
+  with its URLs and a Stop item. A server TBD started whose declaration has
+  since been removed is likewise shown as undeclared for as long as its tab
+  exists, with the tab's state, and is stopped like any other: a signal to its
+  tab's process group, since no declared `stop` remains.
 - **`endpoints`** – one or more named, absolute URLs. The first is the server's
   main URL. Full URLs rather than ports, because scheme and host matter.
 - **`pid`** and **`startTime`** – the server process and its start time in Unix
@@ -212,11 +218,12 @@ declared servers, started side by side) do the same thing per server:
 - The exit status is read from the terminal transport, never from a wrapper
   around the command: tmux's `#{pane_dead_status}`, or the holder's report of
   its child's exit.
-- On the tmux transport TBD sets `remain-on-exit` on the server's window right
-  after spawning it, so the pane outlives the command and keeps its final
-  screen and its exit status. A command that dies before that option lands —
-  sub-millisecond, after the login shell's startup — loses its window; that
-  race is accepted.
+- On the tmux transport TBD sets `remain-on-exit` on the server's window in
+  the same tmux invocation that creates it (`new-window … ; set-option -w
+  remain-on-exit on`), so the pane outlives the command — however fast it
+  dies — and keeps its final screen and its exit status. tmux runs one
+  invocation's commands back to back, before its event loop can reap the
+  pane; a respawned exited tab keeps the option it was created with.
 - On the holder transport the tab does not keep a dead screen, so TBD saves
   the server's final output instead (see "Exited servers keep their last
   output").
@@ -224,10 +231,12 @@ declared servers, started side by side) do the same thing per server:
   column on `terminal`, linking tab to server. That is a migration plus the GRDB
   record plus `Terminal` in `TBDShared/Models.swift`, in one commit.
 - Starting a server that is already running does nothing and says so. A
-  server whose tab's state cannot be read — a tmux query that timed out or
-  failed without saying the pane is gone — is not started: its command may
-  still be running, so the start fails and says to try again rather than open
-  a second tab. A server
+  server that reads *Unknown* is not started, since its command may still be
+  running: one whose tab's state cannot be read — a tmux query that timed out
+  or failed without saying the pane is gone — fails and says to try again,
+  and one whose `status` command timed out fails with "state unknown (status
+  command timed out); try again or stop it first". Neither opens a second
+  tab. A server
   whose tmux tab exited is started again in that same tab, so tabs do not pile
   up; a holder session cannot be respawned, so its exited tab is closed and a
   new one opened.
@@ -325,7 +334,8 @@ try again, without signalling, running `stop` or closing the tab.
 
 A start, and a stop of named servers, run only those servers' `status`
 commands.
-`restart` is stop, then start. Pressing Ctrl+C in a server's tab is not a stop
+`restart` is stop, then start; a server with no declaration has nothing to
+start it from, so a restart stops it and leaves it stopped. Pressing Ctrl+C in a server's tab is not a stop
 through TBD: the command exits on its own, so the tab stays open and the server
 reads *Exited*.
 
@@ -354,8 +364,9 @@ own stop caused — leaves a server reading *Exited* after a revive.
   terminal ID.
 - **`stop [name…]`** – no name stops all.
 - **`restart [name…]`** – no name restarts every running server: it stops
-  them, then starts exactly those. When none is running it says so and starts
-  nothing.
+  them, then starts exactly the declared ones among them; an undeclared one
+  is stopped and reported as not started again. When none is running it says
+  so and starts nothing.
 - **`status <name>`** – exits 0 when the server is running and prints its URLs,
   so a script or an agent can wait on it.
 - **`open [name] [--endpoint <name>]`** – opens the main URL, or a named
