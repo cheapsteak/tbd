@@ -324,7 +324,13 @@ struct TransportMigrationRaceTests {
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
             await clock.waitForSuspension()
             #expect(state.switchingAccountTerminals[row.id] == .transportMove)
-            await clock.advanceWhenSuspended(by: .seconds(5))
+            // The wait re-arms every 100 ms, so step it until the bound (5 s of
+            // virtual time) clears the veil; a single large advance can outrun
+            // the re-arm.
+            let id = row.id
+            await clock.advanceUntil("the bound clears the veil", by: .milliseconds(100)) {
+                await MainActor.run { state.switchingAccountTerminals[id] == nil }
+            }
             await task.value
             #expect(state.switchingAccountTerminals[row.id] == nil)
         }
