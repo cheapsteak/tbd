@@ -1190,6 +1190,14 @@ enum TransportMigrationMenu {
         NightwatchHolderGate.refusesHolder(enabling: true, currentMode: mode)
     }
 
+    /// Fleet-run reasons that are app-local report concerns, not wire outcomes.
+    static let paneBusyReason =
+        "Another operation is using this session's pane right now. Try again once it finishes."
+    static let outcomeUnknownReason =
+        "The app stopped waiting for an answer about this session, so where it ended up is unknown. Check it before moving it again."
+    static let runStoppedReason =
+        "The run stopped before reaching this session, so nothing was attempted for it."
+
     /// Prefix for a single-session alert, by group.
     static let skippedAlertPrefix = "Not moved — change this and try again: "
     static let refusedAlertPrefix = "Can't be moved until this changes: "
@@ -1359,8 +1367,9 @@ extension AppState {
     /// mostly migrated already that would be a round trip per row for an answer
     /// the app can read off what it is displaying.
     ///
-    /// A throw stops the run and names that row as refused rather than
-    /// discarding everything: the rows already moved are finished sessions, and
+    /// A throw stops the run and names that row as skipped with an unknown
+    /// outcome, and every row after it as untried, rather than discarding
+    /// everything: the rows already moved are finished sessions, and
     /// their report is what the person asked for.
     @discardableResult
     func migrateAllTerminalsToHolder() async -> TerminalMigrateTransportResult {
@@ -1368,10 +1377,22 @@ extension AppState {
         var accumulated = TerminalMigrateTransportResult(
             migrated: [], skipped: [], refused: [],
             alreadyHolder: rows.filter { $0.transport == .holder }.map(\.id))
-        let candidates = rows
-            .filter { $0.transport != .holder && switchingAccountTerminals[$0.id] == nil }
-            .map(\.id)
-        for id in candidates {
+        let nonHolder = rows.filter { $0.transport != .holder }.map(\.id)
+        // A row another operation has veiled is not safe to move while that
+        // operation owns its pane, but it is still a considered session: it is
+        // named rather than left out of every list.
+        let busy = nonHolder.filter { switchingAccountTerminals[$0] != nil }
+        accumulated = TransportMigrationMenu.merging(
+            accumulated,
+            TerminalMigrateTransportResult(
+                migrated: [],
+                skipped: busy.map {
+                    TerminalMigrationSkip(
+                        terminalID: $0, reason: TransportMigrationMenu.paneBusyReason)
+                },
+                refused: []))
+        let candidates = nonHolder.filter { switchingAccountTerminals[$0] == nil }
+        for (index, id) in candidates.enumerated() {
             if Task.isCancelled { break }
             do {
                 accumulated = TransportMigrationMenu.merging(
@@ -1379,12 +1400,19 @@ extension AppState {
             } catch {
                 logger.error("Failed to move sessions to the holder: \(error, privacy: .public)")
                 showAlert("Failed to move sessions off tmux: \(error.localizedDescription)", isError: true)
+                // The thrown row's outcome is unknown (a receive deadline means
+                // the app stopped waiting, not that the daemon stopped), so it
+                // is not reported as still on tmux; the tail was never tried.
+                let unknown = TerminalMigrationSkip(
+                    terminalID: id, reason: TransportMigrationMenu.outcomeUnknownReason)
+                let untried = candidates[(index + 1)...].map {
+                    TerminalMigrationSkip(
+                        terminalID: $0, reason: TransportMigrationMenu.runStoppedReason)
+                }
                 return TransportMigrationMenu.merging(
                     accumulated,
                     TerminalMigrateTransportResult(
-                        migrated: [], skipped: [],
-                        refused: [TerminalMigrationSkip(
-                            terminalID: id, reason: error.localizedDescription)]))
+                        migrated: [], skipped: [unknown] + untried, refused: []))
             }
         }
         return accumulated

@@ -147,31 +147,61 @@ struct TransportMigrationActionTests {
         }
     }
 
-    /// A throw stops the run and names that row — it does not discard the
-    /// report, because the rows already moved are finished sessions and the
-    /// report is what the person asked for.
+    /// A throw stops the run: the thrown row is named with an unknown outcome
+    /// (not "still on tmux"), every later row is named as untried, and the rows
+    /// that moved before it stay in the report.
     @Test func theFleetActionKeepsTheReportWhenACallFails() async {
         struct Boom: LocalizedError {
             var errorDescription: String? { "daemon went away" }
         }
         await withAppState { state in
             let wt = UUID()
-            let first = Self.row(transport: .tmux, parked: true, worktreeID: wt)
-            let second = Self.row(transport: .tmux, parked: true, worktreeID: wt)
-            state.terminals[wt] = [first, second]
+            let rows = (0..<5).map { _ in
+                Self.row(transport: .tmux, parked: true, worktreeID: wt)
+            }
+            state.terminals[wt] = rows
+            let order = state.terminals[wt]!.map(\.id)
             state.terminalTransportMigrator = { @MainActor id in
-                if id == first.id {
+                if order.firstIndex(of: id)! < 2 {
                     return TerminalMigrateTransportResult(
                         migrated: [id], skipped: [], refused: [])
                 }
                 throw Boom()
             }
             let result = await state.migrateAllTerminalsToHolder()
-            #expect(result.migrated == [first.id],
-                    "the finished session vanished from the report")
-            #expect(result.refused.map(\.terminalID) == [second.id])
+            #expect(result.migrated == Array(order[0..<2]),
+                    "the finished sessions vanished from the report")
+            #expect(result.refused.isEmpty)
+            let reasons = Dictionary(
+                uniqueKeysWithValues: result.skipped.map { ($0.terminalID, $0.reason) })
+            #expect(reasons[order[2]] == TransportMigrationMenu.outcomeUnknownReason)
+            #expect(reasons[order[3]] == TransportMigrationMenu.runStoppedReason)
+            #expect(reasons[order[4]] == TransportMigrationMenu.runStoppedReason)
+            #expect(reasons.count == 3)
             #expect(state.switchingAccountTerminals.isEmpty)
             #expect(state.alertMessage != nil)
+        }
+    }
+
+    /// A row another operation has veiled gets no RPC, but is still named.
+    @Test func theFleetActionNamesARowAnotherOperationHasVeiled() async {
+        await withAppState { state in
+            let wt = UUID()
+            let veiled = Self.row(transport: .tmux, worktreeID: wt)
+            let plain = Self.row(transport: .tmux, parked: true, worktreeID: wt)
+            state.terminals[wt] = [veiled, plain]
+            state.switchingAccountTerminals[veiled.id] = .transportMove
+            var sent: [UUID] = []
+            state.terminalTransportMigrator = { @MainActor id in
+                sent.append(id)
+                return TerminalMigrateTransportResult(
+                    migrated: [id], skipped: [], refused: [])
+            }
+            let result = await state.migrateAllTerminalsToHolder()
+            #expect(sent == [plain.id], "the veiled row was sent: \(sent)")
+            #expect(result.skipped.map(\.terminalID) == [veiled.id])
+            #expect(result.skipped.first?.reason == TransportMigrationMenu.paneBusyReason)
+            #expect(result.migrated == [plain.id])
         }
     }
 

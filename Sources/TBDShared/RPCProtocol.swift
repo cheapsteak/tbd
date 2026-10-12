@@ -747,7 +747,7 @@ public struct TerminalMigrationSkip: Codable, Sendable, Equatable {
 
 /// What a `terminal.migrateTransport` call came to, one list per outcome.
 ///
-/// Four outcomes rather than two, because they ask different things of the
+/// Five outcomes rather than two, because they ask different things of the
 /// person. A **skip** names a state they can change and retry (a busy turn, a
 /// rail refusing the pause) and the session is still on tmux. A **refusal**
 /// does not help until the named fact changes (no holder can be started) and
