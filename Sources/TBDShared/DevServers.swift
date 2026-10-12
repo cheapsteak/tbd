@@ -127,7 +127,7 @@ public struct DevServerRunningFileScan: Sendable, Equatable {
     }
 }
 
-public enum DevServerRunningFileProblem: Error, Sendable, Equatable {
+public enum DevServerRunningFileProblem: LocalizedError, Sendable, Equatable {
     case malformed(String)
     case unsupportedVersion(Int)
 
@@ -137,6 +137,8 @@ public enum DevServerRunningFileProblem: Error, Sendable, Equatable {
         case .unsupportedVersion(let v): return "unsupported version \(v)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// What the kernel says about a pid.
@@ -244,6 +246,10 @@ public struct DevServerRunningFileStore: Sendable {
         guard file.root.hasPrefix("/") else { return .failure(.malformed("root is not absolute")) }
         guard !file.server.isEmpty else { return .failure(.malformed("server is empty")) }
         guard !file.endpoints.isEmpty else { return .failure(.malformed("no endpoints")) }
+        var seenNames: Set<String> = []
+        for endpoint in file.endpoints where !seenNames.insert(endpoint.name).inserted {
+            return .failure(.malformed("duplicate endpoint name \(endpoint.name)"))
+        }
         for endpoint in file.endpoints {
             guard let url = URL(string: endpoint.url), url.scheme != nil, url.host != nil else {
                 return .failure(.malformed("endpoint \(endpoint.name) is not an absolute URL"))

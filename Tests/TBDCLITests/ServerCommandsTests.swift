@@ -27,6 +27,14 @@ struct ServerCommandsTests {
         #expect(throws: (any Error).self) { try ServerCommand.parseEndpoints([raw], server: "web") }
     }
 
+    @Test(arguments: [
+        ["api=http://localhost:1", "api=http://localhost:2"],
+        ["main=http://localhost:1", "http://localhost:2"],
+    ])
+    func duplicateEndpointNamesAreRejected(_ raw: [String]) {
+        #expect(throws: (any Error).self) { try ServerCommand.parseEndpoints(raw, server: "web") }
+    }
+
     @Test func reportNeedsAPidAndAURLUnlessClearing() {
         #expect(throws: (any Error).self) { try ServerReport.parse(["web"]) }
         #expect(throws: (any Error).self) { try ServerReport.parse(["web", "--pid", "12"]) }

@@ -77,6 +77,7 @@ struct DevServerRunningFileTests {
         #"{"version":1,"root":"/tmp/x","server":"web","endpoints":[],"pid":1,"startTime":1}"#,
         #"{"version":1,"root":"relative","server":"web","endpoints":[{"name":"a","url":"http://localhost:1"}],"pid":1,"startTime":1}"#,
         #"{"version":1,"root":"/tmp/x","server":"web","endpoints":[{"name":"a","url":"localhost:1"}],"pid":1,"startTime":1}"#,
+        #"{"version":1,"root":"/tmp/x","server":"web","endpoints":[{"name":"a","url":"http://localhost:1"},{"name":"a","url":"http://localhost:2"}],"pid":1,"startTime":1}"#,
     ])
     func malformedFilesAreRejected(_ text: String) {
         guard case .failure(.malformed) = DevServerRunningFileStore.decode(Data(text.utf8)) else {

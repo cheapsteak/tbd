@@ -35,6 +35,9 @@ struct ServerCommand: ParsableCommand {
             guard let parsed = URL(string: url), parsed.scheme != nil, parsed.host != nil else {
                 throw CLIError.invalidArgument("--url \(value): not an absolute URL (include the scheme, e.g. http://localhost:3000)")
             }
+            guard !endpoints.contains(where: { $0.name == name }) else {
+                throw CLIError.invalidArgument("--url \(value): endpoint name \(name) is used twice; give each --url a distinct name")
+            }
             endpoints.append(DevServerEndpoint(name: name, url: url))
         }
         return endpoints
