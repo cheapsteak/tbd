@@ -148,38 +148,73 @@ public struct DevServerProcessInfo: Sendable, Equatable {
     public init(startTime: Date, isZombie: Bool) { self.startTime = startTime; self.isZombie = isZombie }
 }
 
+/// One kernel read of a pid. `gone` is the kernel's own answer that no such
+/// process exists; `unreadable` is a read that failed, after which the
+/// process may still be running.
+public enum DevServerProcessRead: Sendable, Equatable {
+    case process(DevServerProcessInfo)
+    case gone
+    case unreadable(String)
+}
+
 /// Injection seam over the kernel read, so liveness is testable without real
 /// processes. Production uses `.live`.
 public struct DevServerProcessProbe: Sendable {
-    public let info: @Sendable (Int32) -> DevServerProcessInfo?
-    public init(info: @escaping @Sendable (Int32) -> DevServerProcessInfo?) { self.info = info }
+    public let read: @Sendable (Int32) -> DevServerProcessRead
+    public init(read: @escaping @Sendable (Int32) -> DevServerProcessRead) { self.read = read }
+    /// A probe whose reads never fail: nil means the process is gone.
+    public init(info: @escaping @Sendable (Int32) -> DevServerProcessInfo?) {
+        self.read = { pid in info(pid).map(DevServerProcessRead.process) ?? .gone }
+    }
 
-    public static let live = DevServerProcessProbe(info: { DevServerProcessProbe.kernelInfo(pid: $0) })
+    public static let live = DevServerProcessProbe(read: { DevServerProcessProbe.kernelRead(pid: $0) })
 
     /// `SZOMB` from <sys/proc.h>. Spelled as a literal because the macro's
     /// import into Swift is not guaranteed.
     public static let zombieState: Int32 = 5
 
     /// Start time and zombie state from `sysctl(KERN_PROC_PID)` — the same
-    /// read `ProcessStartTime.startTime(pid:)` makes, plus `p_stat`.
-    public static func kernelInfo(pid: Int32) -> DevServerProcessInfo? {
-        guard pid > 0 else { return nil }
+    /// read `ProcessStartTime.startTime(pid:)` makes, plus `p_stat`. Only
+    /// ESRCH or an empty answer reads as gone; any other failure, or a live
+    /// process whose start time comes back unset, is `unreadable`.
+    public static func kernelRead(pid: Int32) -> DevServerProcessRead {
+        guard pid > 0 else { return .gone }
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
-        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0 else {
+            let code = errno
+            return code == ESRCH ? .gone : .unreadable("sysctl failed: \(String(cString: strerror(code)))")
+        }
+        guard size > 0 else { return .gone }
+        let isZombie = Int32(info.kp_proc.p_stat) == zombieState
         let started = info.kp_proc.p_un.__p_starttime
-        guard started.tv_sec > 0 else { return nil }
+        guard started.tv_sec > 0 else {
+            // A zombie is gone whatever its start time; anything else may
+            // still be the recorded process.
+            return isZombie
+                ? .process(DevServerProcessInfo(startTime: Date(timeIntervalSince1970: 0), isZombie: true))
+                : .unreadable("process \(pid) has no readable start time")
+        }
         let date = Date(timeIntervalSince1970:
             TimeInterval(started.tv_sec) + TimeInterval(started.tv_usec) / 1_000_000)
-        return DevServerProcessInfo(
-            startTime: date, isZombie: Int32(info.kp_proc.p_stat) == zombieState)
+        return .process(DevServerProcessInfo(startTime: date, isZombie: isZombie))
+    }
+
+    /// `kernelRead`'s process, or nil whether the pid is gone or unreadable.
+    public static func kernelInfo(pid: Int32) -> DevServerProcessInfo? {
+        if case .process(let info) = kernelRead(pid: pid) { return info }
+        return nil
     }
 }
 
+/// `stale` is definite: the pid is gone, a zombie, or now names a process
+/// with another start time. `unknown` is a failed read — the process may
+/// still run — and is never treated as stale.
 public enum DevServerLiveness: Sendable, Equatable {
     case live
     case stale(String)
+    case unknown(String)
 }
 
 /// Reads and writes the shared running-file directory.
@@ -260,16 +295,27 @@ public struct DevServerRunningFileStore: Sendable {
 
     /// Live when a process with `pid` exists, is not a zombie, and started
     /// within one second of `startTime`. The start-time check is what makes a
-    /// reused pid harmless.
+    /// reused pid harmless. A read that fails is `unknown`, never stale.
     public static func liveness(of file: DevServerRunningFile, probe: DevServerProcessProbe) -> DevServerLiveness {
         guard file.pid > 0 else { return .stale("pid \(file.pid) is not a process id") }
-        guard let info = probe.info(file.pid) else { return .stale("no process \(file.pid)") }
-        guard !info.isZombie else { return .stale("process \(file.pid) is a zombie") }
-        let delta = abs(info.startTime.timeIntervalSince1970 - file.startTime)
-        guard delta <= startTimeTolerance else {
-            return .stale("process \(file.pid) started \(Int(delta))s away from the recorded start")
+        return liveness(pid: file.pid, startTime: file.startTime, read: probe.read(file.pid))
+    }
+
+    /// The same rule over a read already made.
+    public static func liveness(pid: Int32, startTime: TimeInterval, read: DevServerProcessRead) -> DevServerLiveness {
+        switch read {
+        case .gone:
+            return .stale("no process \(pid)")
+        case .unreadable(let reason):
+            return .unknown("process \(pid) could not be read: \(reason)")
+        case .process(let info):
+            guard !info.isZombie else { return .stale("process \(pid) is a zombie") }
+            let delta = abs(info.startTime.timeIntervalSince1970 - startTime)
+            guard delta <= startTimeTolerance else {
+                return .stale("process \(pid) started \(Int(delta))s away from the recorded start")
+            }
+            return .live
         }
-        return .live
     }
 
     /// Groups entries by the worktree whose path matches their `root`, both

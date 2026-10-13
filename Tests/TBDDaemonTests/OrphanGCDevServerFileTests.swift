@@ -20,6 +20,14 @@ struct OrphanGCDevServerFileTests: ~Copyable {
     deinit { try? FileManager.default.removeItem(at: home) }
 
     private func makeGC(db: TBDDatabase, live: Set<Int32> = []) -> OrphanGC {
+        makeGC(db: db, probe: DevServerProcessProbe(info: { pid in
+            live.contains(pid)
+                ? DevServerProcessInfo(startTime: Date(timeIntervalSince1970: 1_000), isZombie: false)
+                : nil
+        }))
+    }
+
+    private func makeGC(db: TBDDatabase, probe: DevServerProcessProbe) -> OrphanGC {
         let fixed = clock
         let environment = ["TBD_HOME": home.path]
         return OrphanGC(
@@ -37,11 +45,7 @@ struct OrphanGCDevServerFileTests: ~Copyable {
             remoteTranscriptsEnvironment: environment,
             reposBase: TBDConstants.reposDir(environment: environment),
             devServersBase: filesDir,
-            devServerProbe: DevServerProcessProbe(info: { pid in
-                live.contains(pid)
-                    ? DevServerProcessInfo(startTime: Date(timeIntervalSince1970: 1_000), isZombie: false)
-                    : nil
-            }))
+            devServerProbe: probe)
     }
 
     private func writeFile(_ name: String, pid: Int32, age: TimeInterval, body: String? = nil) throws -> String {
@@ -65,6 +69,17 @@ struct OrphanGCDevServerFileTests: ~Copyable {
         let path = try writeFile("web-a.json", pid: 500, age: 30 * 24 * 3600)
         _ = await makeGC(db: db, live: [500]).sweep()
         #expect(fm.fileExists(atPath: path))
+    }
+
+    /// A probe that fails is not a dead process: the file is kept however
+    /// old, so a server that may still run keeps its record.
+    @Test func aFileWhoseProcessCannotBeProbedIsKeptHoweverOld() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let path = try writeFile("web-a.json", pid: 500, age: 30 * 24 * 3600)
+        let result = await makeGC(db: db, probe: DevServerProcessProbe(read: { _ in .unreadable("sysctl failed") }))
+            .sweep()
+        #expect(fm.fileExists(atPath: path))
+        #expect(result.planned.contains("KEEP unknown \(path)"))
     }
 
     @Test func aStaleFileInsideTheGraceIsKept() async throws {

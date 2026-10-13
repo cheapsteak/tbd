@@ -22,13 +22,17 @@ struct DevServerDerivationInput: Sendable {
     /// TBD's tab rows for the worktree could not be read, so `tabs` is empty
     /// for want of an answer rather than because no tab exists.
     var tabsUnreadable = false
+    /// Running files attributed to this worktree whose process could not be
+    /// read: the server may still run, so it reads *Unknown*, never Stopped.
+    var unprobedFiles: [DevServerRunningFileEntry] = []
 }
 
 /// The spec's state order: running with URLs (live running file) → running
 /// (`status` exit 0, or TBD's tab still running the command) → exited (TBD's
 /// tab ended, or — once the tab is gone — a saved last output) → unknown
 /// (TBD's tab could not be read, the worktree's tab rows could not be read,
-/// or `status` timed out) → stopped. A server
+/// a running file's process could not be read, or `status` timed out) →
+/// stopped. A server
 /// with no declaration is listed when a live running file reports it or TBD
 /// still has its tab.
 enum DevServerStateDeriver {
@@ -41,7 +45,9 @@ enum DevServerStateDeriver {
         // Undeclared: a live running file names it, or TBD started it and its
         // declaration has since gone — its tab still runs (or ran) the
         // command, so it stays listed and stoppable like any other.
-        let reported = Set(input.liveFiles.map(\.file.server)).union(input.tabs.keys)
+        let reported = Set(input.liveFiles.map(\.file.server))
+            .union(input.unprobedFiles.map(\.file.server))
+            .union(input.tabs.keys)
         let undeclared = reported.subtracting(declaredNames).sorted()
         for name in undeclared {
             result.append(info(name: name, label: name, source: nil, hasStopCommand: false,
@@ -87,6 +93,10 @@ enum DevServerStateDeriver {
         } else if input.tabsUnreadable {
             // No tab row could be read, so a tab may still run the command:
             // neither Stopped nor an Exited taken from a saved output.
+            state = .unknown
+        } else if input.unprobedFiles.contains(where: { $0.file.server == name }) {
+            // A running file names a process that could not be read: it may
+            // still run.
             state = .unknown
         } else if tab == nil, let saved {
             // An ended holder tab's row does not outlive reconcile; its saved

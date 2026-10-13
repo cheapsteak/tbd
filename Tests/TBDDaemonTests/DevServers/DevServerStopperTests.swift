@@ -36,6 +36,35 @@ struct DevServerStopperTests {
             runningFiles: files.map { DevServerStopRunningFile(path: $0, pid: filePID, startTime: start) })
     }
 
+    /// A pid whose process cannot be read is not known to be gone: a stop
+    /// keeps its running file rather than deleting it.
+    @Test func aStopKeepsTheFileOfAProcessThatCannotBeRead() async throws {
+        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
+        s.makeUnreadable(500)
+        let r = FakeDevServerCommandRunner()
+        let file = try tempFile()
+        defer { try? FileManager.default.removeItem(atPath: file) }
+        let report = await stopper(s, r).stop(request(
+            stop: "docker compose stop localstack", targets: [], files: [file]))
+        #expect(report.succeeded)
+        #expect(FileManager.default.fileExists(atPath: file), "a failed read is not a dead process")
+        #expect(report.message?.contains("could not be read") == true)
+    }
+
+    /// A kill target that cannot be read is neither signalled nor taken for
+    /// stopped: the stop fails and the file stays.
+    @Test func aSignallingStopRefusesAProcessThatCannotBeRead() async throws {
+        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
+        s.makeUnreadable(500)
+        let file = try tempFile()
+        defer { try? FileManager.default.removeItem(atPath: file) }
+        let report = await stopper(s, FakeDevServerCommandRunner()).stop(request(
+            stop: nil, targets: [DevServerKillTarget(pid: 500, expectedStart: start, tolerance: 1)], files: [file]))
+        #expect(!report.succeeded)
+        #expect(s.sentSignals.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
+    }
+
     @Test func aDeclaredStopRunsInsteadOfSignalling() async throws {
         let s = FakeDevServerSignalling()
         let r = FakeDevServerCommandRunner()

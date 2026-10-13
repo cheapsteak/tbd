@@ -30,7 +30,16 @@ final class FakeDevServerSignalling: DevServerSignalling, @unchecked Sendable {
     var sentToProcesses: [Sent] { lock.lock(); defer { lock.unlock() }; return sentAlone }
     func isAlive(_ pid: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; return infos[pid] != nil }
 
-    func processInfo(_ pid: Int32) -> DevServerProcessInfo? { lock.lock(); defer { lock.unlock() }; return infos[pid] }
+    private var unreadable: Set<Int32> = []
+
+    /// Reads of `pid` fail from now on, as a failed `sysctl` would.
+    func makeUnreadable(_ pid: Int32) { lock.lock(); defer { lock.unlock() }; unreadable.insert(pid) }
+
+    func processRead(_ pid: Int32) -> DevServerProcessRead {
+        lock.lock(); defer { lock.unlock() }
+        if unreadable.contains(pid) { return .unreadable("sysctl failed") }
+        return infos[pid].map(DevServerProcessRead.process) ?? .gone
+    }
     func processGroup(of pid: Int32) -> Int32? { lock.lock(); defer { lock.unlock() }; return groups[pid] }
     func ownProcessGroup() -> Int32 { own }
     func ownProcessID() -> Int32 { ownPID }

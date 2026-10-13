@@ -7,6 +7,9 @@ struct DevServerSnapshot: Sendable {
     let worktree: LocalWorktree
     let declarations: DevServerDeclarations
     let liveFiles: [DevServerRunningFileEntry]
+    /// Running files whose process could not be read: neither live nor
+    /// stale. Their servers read *Unknown*, and the files are kept.
+    let unprobedFiles: [DevServerRunningFileEntry]
     let diagnostics: [DevServerRunningFileDiagnostic]
     /// The newest non-gone server tab per server name.
     let tabs: [String: DevServerTabObservation]
@@ -61,8 +64,14 @@ struct DevServerOperations: Sendable {
         let scan = runningFiles.scan()
         let attributed = DevServerRunningFileStore.attribute(
             scan.entries, worktreePaths: [worktree.id: worktree.path])[worktree.id] ?? []
-        let liveFiles = attributed.filter {
-            DevServerRunningFileStore.liveness(of: $0.file, probe: probe) == .live
+        var liveFiles: [DevServerRunningFileEntry] = []
+        var unprobedFiles: [DevServerRunningFileEntry] = []
+        for entry in attributed {
+            switch DevServerRunningFileStore.liveness(of: entry.file, probe: probe) {
+            case .live: liveFiles.append(entry)
+            case .unknown: unprobedFiles.append(entry)
+            case .stale: break
+            }
         }
         // `list(worktreeID:)` orders by createdAt ascending, so the newest
         // non-gone tab for a name wins — what the deriver expects.
@@ -114,9 +123,9 @@ struct DevServerOperations: Sendable {
         }
         let servers = DevServerStateDeriver.derive(DevServerDerivationInput(
             declared: declarations.servers, liveFiles: liveFiles, tabs: tabs, statusChecks: checks,
-            lastOutputs: lastOutputs, tabsUnreadable: tabsUnreadable != nil))
+            lastOutputs: lastOutputs, tabsUnreadable: tabsUnreadable != nil, unprobedFiles: unprobedFiles))
         return DevServerSnapshot(
-            worktree: worktree, declarations: declarations, liveFiles: liveFiles,
+            worktree: worktree, declarations: declarations, liveFiles: liveFiles, unprobedFiles: unprobedFiles,
             diagnostics: scan.diagnostics, tabs: tabs, tabsUnreadable: tabsUnreadable, servers: servers)
     }
 
@@ -141,7 +150,8 @@ struct DevServerOperations: Sendable {
     /// holder job by the start time its row recorded, and a tab whose pid
     /// cannot be tied to it — or whose state cannot be read at all — is
     /// reported, never signalled. Running files are anchored by the start
-    /// time they recorded.
+    /// time they recorded; one whose process could not be read is a target
+    /// too, which the kill refuses unless a fresh read now succeeds.
     ///
     /// Archive passes `signalRunningFiles: false`: anything can write a
     /// running file, so only a user gesture may signal the pid one names.
@@ -181,7 +191,7 @@ struct DevServerOperations: Sendable {
                 break
             }
         }
-        let files = snapshot.liveFiles.filter { $0.file.server == name }
+        let files = (snapshot.liveFiles + snapshot.unprobedFiles).filter { $0.file.server == name }
         for entry in files where signalRunningFiles {
             targets.append(DevServerKillTarget(
                 pid: entry.file.pid, expectedStart: Date(timeIntervalSince1970: entry.file.startTime),

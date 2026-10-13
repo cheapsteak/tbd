@@ -109,9 +109,20 @@ actor DevServerRunningFileMonitor {
         var nextFingerprints: [UUID: [String]] = [:]
         let attributed = DevServerRunningFileStore.attribute(runningFiles.scan().entries, worktreePaths: paths)
         for (id, entries) in attributed {
-            for entry in entries where DevServerRunningFileStore.liveness(of: entry.file, probe: probe) == .live {
-                next.insert(id)
-                nextFingerprints[id, default: []].append(Self.fingerprint(of: entry.file))
+            for entry in entries {
+                switch DevServerRunningFileStore.liveness(of: entry.file, probe: probe) {
+                case .live:
+                    next.insert(id)
+                    nextFingerprints[id, default: []].append(Self.fingerprint(of: entry.file))
+                case .unknown:
+                    // A process that could not be read has not stopped: a
+                    // worktree the dot already shows keeps it, as for a tab
+                    // that could not be read.
+                    if running.contains(id) { next.insert(id) }
+                    nextFingerprints[id, default: []].append("unknown " + Self.fingerprint(of: entry.file))
+                case .stale:
+                    break
+                }
             }
         }
 

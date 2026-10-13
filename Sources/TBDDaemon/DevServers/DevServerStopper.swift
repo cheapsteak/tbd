@@ -24,8 +24,9 @@ struct DevServerStopRequest: Sendable {
     /// `stop` there is then nothing TBD may signal.
     let runningOnlyByStatus: Bool
     /// Running files describing this server. A successful stop deletes each
-    /// once the process it names is gone; one whose process outlives the stop
-    /// is kept, for the liveness check and OrphanGC's stale-file sweep.
+    /// once the process it names is definitely gone; one whose process
+    /// outlives the stop, or cannot be read, is kept, for the liveness check
+    /// and OrphanGC's stale-file sweep.
     let runningFiles: [DevServerStopRunningFile]
 }
 
@@ -117,21 +118,23 @@ struct DevServerStopper: Sendable {
         }
         // A declared `stop` that exits 0 proves nothing about the process
         // (it may only ask a supervisor to stop it), so each file goes only
-        // once the pid it names is gone or now names another process.
+        // once the pid it names is definitely gone or now names another
+        // process. A pid that cannot be read keeps its file.
         for file in request.runningFiles {
-            if isRunning(file) {
+            switch DevServerRunningFileStore.liveness(
+                pid: file.pid, startTime: file.startTime.timeIntervalSince1970,
+                read: killer.signalling.processRead(file.pid))
+            {
+            case .live:
                 notes.append("pid \(file.pid) named by the running file is still alive, so the file was kept")
-            } else {
+            case .unknown(let reason):
+                notes.append("\(reason), so the running file was kept")
+            case .stale:
                 try? FileManager.default.removeItem(atPath: file.path)
             }
         }
         return DevServerStopReport(
             name: request.name, succeeded: true, message: notes.isEmpty ? nil : notes.joined(separator: "; "))
-    }
-
-    private func isRunning(_ file: DevServerStopRunningFile) -> Bool {
-        guard let info = killer.signalling.processInfo(file.pid), !info.isZombie else { return false }
-        return abs(info.startTime.timeIntervalSince(file.startTime)) <= DevServerRunningFileStore.startTimeTolerance
     }
 
     private func failure(_ request: DevServerStopRequest, _ message: String) -> DevServerStopReport {

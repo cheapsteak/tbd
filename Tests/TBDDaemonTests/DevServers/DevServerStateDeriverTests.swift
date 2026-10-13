@@ -55,6 +55,16 @@ struct DevServerStateDeriverTests {
         #expect(derive(files: [file()], tab: tab(.unknown(reason: "timed out")))?.state == .running)
     }
 
+    /// A running file whose process could not be read may still name a
+    /// running server: Unknown, never Stopped — and listed even undeclared.
+    @Test func aRunningFileWhoseProcessCannotBeReadReadsUnknown() {
+        let servers = DevServerStateDeriver.derive(DevServerDerivationInput(
+            declared: [web], liveFiles: [], tabs: [:], statusChecks: ["web": .notRunning],
+            unprobedFiles: [file(), file("api")]))
+        #expect(servers.first { $0.name == "web" }?.state == .unknown)
+        #expect(servers.first { $0.name == "api" }?.state == .unknown)
+    }
+
     /// The worktree's tab rows could not be read, so a tab may still run the
     /// command: Unknown, never Stopped or a saved Exited — unless a live file
     /// or the `status` command says running.

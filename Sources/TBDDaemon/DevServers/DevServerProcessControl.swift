@@ -5,7 +5,8 @@ import TBDShared
 /// Injection seam over the kernel calls the stop kill makes, so the stop
 /// rules are testable without signalling real processes.
 protocol DevServerSignalling: Sendable {
-    func processInfo(_ pid: Int32) -> DevServerProcessInfo?
+    /// One kernel read of `pid`; `unreadable` when the read itself failed.
+    func processRead(_ pid: Int32) -> DevServerProcessRead
     /// `getpgid(pid)`, nil when the pid is gone.
     func processGroup(of pid: Int32) -> Int32?
     /// The daemon's own group, which is never signalled.
@@ -21,7 +22,7 @@ protocol DevServerSignalling: Sendable {
 }
 
 struct ProductionDevServerSignalling: DevServerSignalling {
-    func processInfo(_ pid: Int32) -> DevServerProcessInfo? { DevServerProcessProbe.kernelInfo(pid: pid) }
+    func processRead(_ pid: Int32) -> DevServerProcessRead { DevServerProcessProbe.kernelRead(pid: pid) }
 
     func processGroup(of pid: Int32) -> Int32? {
         guard pid > 0 else { return nil }
@@ -153,7 +154,18 @@ struct DevServerGroupKiller: Sendable {
 
     private func killSequence(_ target: DevServerKillTarget) async -> DevServerKillOutcome {
         guard target.pid > 1 else { return .refused(reason: "pid \(target.pid) is never signalled") }
-        guard let info = signalling.processInfo(target.pid), !info.isZombie else { return .notRunning }
+        let info: DevServerProcessInfo
+        switch signalling.processRead(target.pid) {
+        case .gone:
+            return .notRunning
+        case .unreadable(let reason):
+            // It may still run, and nothing ties it to the target: neither
+            // signalled nor taken for stopped.
+            return .refused(reason: "process \(target.pid) could not be read (\(reason)), so it was not signalled")
+        case .process(let read):
+            guard !read.isZombie else { return .notRunning }
+            info = read
+        }
         if case .recorded(let expected, let tolerance) = target.anchor,
            abs(info.startTime.timeIntervalSince(expected)) > tolerance {
             return .notRunning
@@ -181,8 +193,16 @@ struct DevServerGroupKiller: Sendable {
     /// a pid reused during the grace is never signalled.
     private func killAlone(pid: Int32, pgid: Int32, started: Date) async -> DevServerKillOutcome {
         let alive: @Sendable () -> Bool = { [signalling] in
-            guard let info = signalling.processInfo(pid), !info.isZombie else { return false }
-            return abs(info.startTime.timeIntervalSince(started)) <= Self.sameProcessTolerance
+            switch signalling.processRead(pid) {
+            case .gone, .unreadable:
+                // A read that fails cannot tie the pid to the process first
+                // seen, so it is never signalled on that read. The stopper's
+                // own check keeps a running file naming it.
+                return false
+            case .process(let info):
+                guard !info.isZombie else { return false }
+                return abs(info.startTime.timeIntervalSince(started)) <= Self.sameProcessTolerance
+            }
         }
         signalling.signalProcess(pid, SIGTERM)
         guard await waitOut(until: { !alive() }) else { return .terminatedAlone(pid: pid, pgid: pgid) }

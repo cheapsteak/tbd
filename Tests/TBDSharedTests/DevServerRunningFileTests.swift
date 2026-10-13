@@ -53,6 +53,20 @@ struct DevServerRunningFileTests {
         }
     }
 
+    /// A failed read says nothing about the process: unknown, never stale,
+    /// so nothing deletes the file on its account.
+    @Test func aProbeThatFailsReadsUnknownNotStale() {
+        let p = DevServerProcessProbe(read: { _ in .unreadable("sysctl failed") })
+        guard case .unknown = DevServerRunningFileStore.liveness(of: file(), probe: p) else {
+            Issue.record("a failed probe read live or stale"); return
+        }
+    }
+
+    @Test func theRealKernelProbeReadsAPidWithNoProcessAsGone() {
+        // pid_max on darwin is 99999; this pid cannot exist.
+        #expect(DevServerProcessProbe.kernelRead(pid: 999_999) == .gone)
+    }
+
     @Test func theRealKernelProbeSeesThisProcess() throws {
         let me = getpid()
         let info = try #require(DevServerProcessProbe.kernelInfo(pid: me))

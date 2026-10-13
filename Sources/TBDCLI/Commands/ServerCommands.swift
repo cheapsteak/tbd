@@ -325,12 +325,19 @@ struct ServerReport: AsyncParsableCommand {
 
     /// The reported process's start time, read the way the daemon's
     /// liveness check reads it (`DevServerProcessProbe`), or a refusal: no
-    /// such process, or a zombie — one that has exited and waits to be
-    /// reaped, which the daemon reads as stale, so its file would never show
-    /// the server as running.
+    /// such process, a zombie — one that has exited and waits to be reaped,
+    /// which the daemon reads as stale, so its file would never show the
+    /// server as running — or a read that failed, which leaves no start time
+    /// to record.
     static func reportedStartTime(pid: Int32, probe: DevServerProcessProbe = .live) throws -> Date {
-        guard let info = probe.info(pid) else {
+        let info: DevServerProcessInfo
+        switch probe.read(pid) {
+        case .gone:
             throw CLIError.invalidArgument("No process with pid \(pid) is running.")
+        case .unreadable(let reason):
+            throw CLIError.invalidArgument("Process \(pid) could not be read (\(reason)); try again.")
+        case .process(let read):
+            info = read
         }
         guard !info.isZombie else {
             throw CLIError.invalidArgument(

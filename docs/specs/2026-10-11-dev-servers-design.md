@@ -186,9 +186,13 @@ committed or written by the user.
 
 A running file is **live** when a process with `pid` exists, is not a zombie,
 and its start time (read from the kernel) matches `startTime` within one
-second. Any other file is **stale** and ignored. The start-time check is what
-makes a reused pid harmless, and it keeps the record correct even when the
-writer was SIGKILLed and never cleaned up — no heartbeat is needed.
+second. It is **stale**, and ignored, when the kernel says no process has that
+pid, the process is a zombie, or its start time is read and does not match. A
+probe that fails — the kernel read errors, or returns no start time — makes the
+file **unknown**, never stale: its server reads *Unknown*, and no stop or sweep
+deletes the file on that read. The start-time check is what makes a reused pid
+harmless, and it keeps the record correct even when the writer was SIGKILLed
+and never cleaned up — no heartbeat is needed.
 
 `pid` must be the server, not a launcher. A launcher that backgrounds the
 server and exits leaves a file that reads stale while the server runs.
@@ -264,8 +268,9 @@ Each server's state is derived, in this order:
 4. **Unknown** – TBD's tab for it could not be read (a tmux query that timed
    out or failed without tmux saying the pane is gone), or the `status`
    command timed out, and nothing above applies. Only tmux's own answer that
-   the pane or its server is absent makes a tab gone. When the worktree's tab
-   rows cannot be read from the database at all, every server not shown
+   the pane or its server is absent makes a tab gone. A running file whose
+   process cannot be read (liveness above) likewise reads *Unknown*. When the
+   worktree's tab rows cannot be read from the database at all, every server not shown
    running by a live file or its `status` command reads *Unknown* — not
    *Stopped*, and not an *Exited* taken from a saved output, since TBD cannot
    tell whether a tab still runs it — and a start or stop fails with "try

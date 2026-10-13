@@ -475,7 +475,8 @@ public actor OrphanGC {
     // MARK: - Dev server running files
 
     /// Deletes running files in the shared dev-server directory whose
-    /// process is gone (`DevServerRunningFileStore.liveness`) and whose
+    /// process is definitely gone (`DevServerRunningFileStore.liveness`
+    /// reads stale; a probe that fails reads unknown and keeps the file) and whose
     /// modification date is at least `gcGraceSeconds` old
     /// (docs/specs/2026-10-11-dev-servers-design.md, "Who reclaims what").
     ///
@@ -487,8 +488,15 @@ public actor OrphanGC {
     ) {
         let asOf = now()
         for entry in devServersStore.scan().entries {
-            guard case .stale = DevServerRunningFileStore.liveness(of: entry.file, probe: devServerProbe) else {
+            switch DevServerRunningFileStore.liveness(of: entry.file, probe: devServerProbe) {
+            case .stale:
+                break
+            case .live:
                 planned.append("KEEP live \(entry.path)")
+                continue
+            case .unknown:
+                // A failed probe is not a dead process: keep the file.
+                planned.append("KEEP unknown \(entry.path)")
                 continue
             }
             guard let modified = entry.modifiedAt,

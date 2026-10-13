@@ -69,6 +69,13 @@ struct ServerCommandsTests {
         #expect(error?.description == "No process with pid 42 is running.")
     }
 
+    /// A failed read is not "no such process": say it could not be read.
+    @Test func reportRefusesAnUnreadablePidWithoutCallingItMissing() {
+        let probe = DevServerProcessProbe(read: { _ in .unreadable("sysctl failed") })
+        let error = #expect(throws: CLIError.self) { try ServerReport.reportedStartTime(pid: 42, probe: probe) }
+        #expect(error?.description == "Process 42 could not be read (sysctl failed); try again.")
+    }
+
     @Test func restartWithNoNamesStartsOnlyWhatItStopped() {
         let stopped = DevServerActionResult(outcomes: [
             .init(name: "web", status: .stopped),
