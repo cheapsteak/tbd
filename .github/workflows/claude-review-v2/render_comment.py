@@ -8,8 +8,10 @@ PR's earlier v2 reviews as outdated — stays in the workflow shell.
 
 The body it renders is one review comment carrying its own machine-read state:
 the three marker lines, the model's `comment_body` prose (or a machine-rendered
-fallback when that prose is missing), then the attribution line. The next run's
-prepare step reads its markers back off the newest such comment.
+fallback when that prose is missing), a workflow-written note when the
+orchestrator declared that it skipped the specialist fan-out, then the
+attribution line. The next run's prepare step reads its markers back off the
+newest such comment.
 
 Invariants every rendered body holds:
 
@@ -182,6 +184,36 @@ def findings_of(result: dict | None) -> list[dict]:
     return [item for item in findings if isinstance(item, dict)]
 
 
+def skip_note(result: dict | None) -> str:
+    """A workflow-written line recording a declared specialist skip, or "".
+
+    The orchestrator may review a diff it judges too small for the specialist
+    fan-out by itself, and must then declare that in review-result.json as
+    `specialists_skipped: {"reason": ...}`. Its prose is asked to say so too,
+    but the prose is the model's; this line is the workflow's, so a one-agent
+    review is visible on the PR whatever the prose did or did not mention. The
+    reason is model-written, like the prose posted beside it, and is collapsed
+    to one line.
+
+    The shape checks mirror validate.py's reader: anything but an object with a
+    non-blank string `reason` renders nothing, because validate.py would not
+    have accepted it as a declaration either.
+    """
+    if not isinstance(result, dict):
+        return ""
+    declaration = result.get("specialists_skipped")
+    if not isinstance(declaration, dict):
+        return ""
+    reason = declaration.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return ""
+    return (
+        "_This review ran without the specialist fan-out: the reviewer judged "
+        "the change too small to need it and reviewed the diff itself. Stated "
+        f"reason: {' '.join(reason.split())}_"
+    )
+
+
 def render_review_body(
     patch_id: str,
     verdict: str,
@@ -206,9 +238,10 @@ def render_review_body(
             "markers with a note in place of the review",
         )
 
+    skip = skip_note(result)
     prose = prose_of(result)
     if prose:
-        return _join_sections([markers, prose, attribution]), None
+        return _join_sections([markers, prose, skip, attribution]), None
 
     findings = findings_of(result)
     warning = (
@@ -219,7 +252,7 @@ def render_review_body(
         "— posted the verdict markers with a note"
     )
     return (
-        _join_sections([markers, fallback_body(findings, verdict), attribution]),
+        _join_sections([markers, fallback_body(findings, verdict), skip, attribution]),
         warning,
     )
 

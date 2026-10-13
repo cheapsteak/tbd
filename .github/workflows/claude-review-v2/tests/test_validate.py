@@ -2349,3 +2349,218 @@ def test_a_blank_infra_field_reads_as_absence_in_schema_and_reader_alike(
     data = validate_findings_file(path)
     assert len(data["findings"]) == 1
     assert infrastructure_failure_message(data) is None
+
+
+# --- declared specialist skip ------------------------------------------------
+#
+# The orchestrator may judge a diff too small for the specialist fan-out and
+# review it itself. It must then declare that in review-result.json as
+# `specialists_skipped: {"reason": ...}`, and that declaration is the ONLY
+# thing that lets missing specialist files pass: without it a never-spawned
+# lens and a crashed one leave the same absence on disk. The orchestrator's own
+# findings go through the same verdict computation as merged findings.
+
+_SKIP_REASON = "one-file test tweak; two lenses would add nothing"
+_NO_DECLARATION = object()
+
+
+def _write_skip_result(
+    tmp_path: Path,
+    findings: list[dict] | None = None,
+    disposition: list[dict] | None = None,
+    declaration: object = _NO_DECLARATION,
+) -> None:
+    result: dict = {
+        "findings": findings or [],
+        "disposition": disposition or [],
+        "comment_body": "## Review\nReviewed directly.",
+        "specialists_skipped": (
+            {"reason": _SKIP_REASON}
+            if declaration is _NO_DECLARATION
+            else declaration
+        ),
+    }
+    _write(tmp_path / "review-result.json", result)
+
+
+def test_skip_reason_reads_a_well_formed_declaration() -> None:
+    result = {"specialists_skipped": {"reason": "  tiny\n  diff  "}}
+    assert validate.specialists_skip_reason(result) == "tiny diff"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        {},
+        {"specialists_skipped": None},
+        {"specialists_skipped": {}},
+        {"specialists_skipped": {"reason": ""}},
+        {"specialists_skipped": {"reason": " \n\t"}},
+        {"specialists_skipped": {"reason": 7}},
+        {"specialists_skipped": "too small"},
+        {"specialists_skipped": True},
+    ],
+)
+def test_skip_reason_reads_nothing_else_as_a_declaration(result: object) -> None:
+    assert validate.specialists_skip_reason(result) is None
+
+
+def test_the_schema_accepts_a_well_formed_declaration(tmp_path: Path) -> None:
+    result = _valid_result()
+    result["specialists_skipped"] = {"reason": _SKIP_REASON}
+    data = validate_result_file(_write(tmp_path / "review-result.json", result))
+    assert data["specialists_skipped"] == {"reason": _SKIP_REASON}
+
+
+def test_main_declared_skip_with_no_specialist_files_computes_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_skip_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "APPROVE"
+    out = capsys.readouterr().out
+    # Visible on a green run, as an annotation carrying the stated reason.
+    notice = [line for line in out.splitlines() if line.startswith("::notice::")]
+    assert len(notice) == 1
+    assert "specialists_skipped" in notice[0]
+    assert _SKIP_REASON in notice[0]
+
+
+@pytest.mark.parametrize("severity", ["HIGH", "MEDIUM"])
+def test_main_declared_skip_still_rejects_on_the_orchestrators_own_finding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, severity: str
+) -> None:
+    # A skip changes who reviewed, never how the verdict is computed.
+    _write_skip_result(
+        tmp_path, findings=[_finding(id="orchestrator-1", severity=severity)]
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+
+
+def test_main_missing_specialists_without_a_declaration_still_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A valid, approve-shaped result and no specialist files, with no
+    # declaration: this must read as a crashed fan-out, with the same error.
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert (
+        "expected specialist(s) produced no findings file: correctness, conventions"
+        in err
+    )
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {},
+        {"reason": ""},
+        {"reason": "   \n"},
+        {"reason": 7},
+        {"why": "too small"},
+        "too small",
+        True,
+        [],
+    ],
+)
+def test_main_malformed_declaration_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    declaration: object,
+) -> None:
+    _write_skip_result(tmp_path, declaration=declaration)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    # The schema rejects the result file, and with no valid declaration the
+    # missing lenses are reported exactly as they would be without one.
+    assert "specialists_skipped" in captured.err
+    assert "produced no findings file" in captured.err
+    assert "::notice::" not in captured.out
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_null_declaration_declares_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_skip_result(tmp_path, declaration=None)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert "produced no findings file" in capsys.readouterr().err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_declared_skip_still_requires_dispositions_for_a_present_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The declaration excuses an ABSENT lens, never a present one: a specialist
+    # file that exists is validated and its findings must be accounted for.
+    _write(tmp_path / "findings-correctness.json", _valid_findings())
+    _write_skip_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "disposition list does not account for" in err
+    assert "correctness-1" in err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_main_declared_skip_accepts_a_present_file_that_is_dispositioned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path / "findings-correctness.json", _valid_findings())
+    _write_skip_result(
+        tmp_path,
+        findings=[_finding(id="correctness-1", severity="HIGH")],
+        disposition=[
+            {"id": "correctness-1", "action": "kept"},
+            {"id": "correctness-2", "action": "merged"},
+        ],
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+    assert "present anyway" in capsys.readouterr().out
+
+
+def test_main_declared_skip_does_not_excuse_a_rejected_specialist_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "findings-correctness.json").write_text("{not json", encoding="utf-8")
+    _write_skip_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert "not readable as JSON" in capsys.readouterr().err
+    assert not (tmp_path / "verdict.txt").exists()
+
+
+def test_a_forged_skip_reason_cannot_split_the_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The reason is model-written and printed on a green run's annotation line.
+    _write_skip_result(tmp_path, declaration={"reason": "tiny\r\n::error::forged"})
+    assert _run_main(monkeypatch, tmp_path, "correctness,conventions") == 0
+    out = capsys.readouterr().out
+    assert not any(line.startswith("::error::") for line in out.splitlines())

@@ -24,7 +24,12 @@ Deterministic bookend that runs AFTER the model review session
   findings file nor a review-result.json — whether the session stalled before
   reviewing anything. Omitting the flag requests no such
   check; supplying it while naming no specialist is a broken invocation and
-  fails closed rather than skipping the check,
+  fails closed rather than skipping the check. The one excuse for an absent
+  lens is the orchestrator's explicit, schema-validated
+  `specialists_skipped: {"reason": ...}` declaration in the result file — it
+  judged the diff too small for the fan-out and reviewed it itself — which is
+  annotated with its reason; a present specialist file is validated and
+  dispositioned whether or not a skip was declared,
 - checks the disposition list COVERS every specialist finding ID (presence only —
   the disposition's judgment is never evaluated here, spec §3.4),
 - computes the verdict from the merged findings' severities (the model never
@@ -566,6 +571,36 @@ def infrastructure_failure_message(data: dict) -> str | None:
     return " ".join(value.split())[:500]
 
 
+def specialists_skip_reason(result: dict | None) -> str | None:
+    """The orchestrator's declared reason for skipping the fan-out, or None.
+
+    The orchestrator may judge a PR too small to benefit from the specialist
+    fan-out and review the diff itself. When it does, it records that decision
+    in review-result.json as `"specialists_skipped": {"reason": "<why>"}`, and
+    that declaration — nothing else — is what lets a missing specialist file
+    pass. Without it, a lens that was never spawned and a lens that crashed
+    leave the same absence on disk, and the absence fails closed.
+
+    Takes the SCHEMA-VALIDATED result (None when the result file was missing
+    or rejected), so a malformed declaration never reaches here: it failed the
+    whole result file, and with no valid result the missing-lens checks run
+    exactly as they would without a declaration. The shape checks below repeat
+    the schema's on purpose, so this function alone can never read a junk value
+    as permission. Returned whitespace-collapsed and capped, like the
+    infrastructure-failure message, because it is printed on one annotation
+    line.
+    """
+    if not isinstance(result, dict):
+        return None
+    declaration = result.get("specialists_skipped")
+    if not isinstance(declaration, dict):
+        return None
+    reason = declaration.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return " ".join(reason.split())[:500]
+
+
 # --- main (the only I/O shell) ----------------------------------------------
 
 
@@ -693,6 +728,28 @@ def main() -> int:
     except SchemaValidationError as exc:
         result_error = str(exc)
 
+    # Read from the VALIDATED result only: a declaration in a file the schema
+    # rejected excuses nothing, so the missing-lens checks below run as if no
+    # declaration had been made, alongside the schema error naming the defect.
+    skip_reason = specialists_skip_reason(result)
+    if skip_reason is not None:
+        # An annotation, not a log line: this prints on runs that go on to
+        # pass, and a one-agent review of a diff that deserved the fan-out is
+        # exactly what an operator scanning green runs needs to be able to see.
+        present = (
+            f" {len(seen_specialists)} specialist findings file(s) are present "
+            "anyway and were validated and dispositioned as usual."
+            if seen_specialists
+            else ""
+        )
+        print(
+            _sanitize_log_text(
+                "::notice::the orchestrator declared specialists_skipped and "
+                f"reviewed the diff itself: {skip_reason} — missing specialist "
+                f"findings files are accepted on that declaration.{present}"
+            )
+        )
+
     if is_session_stall(
         expected,
         seen_specialists,
@@ -709,7 +766,12 @@ def main() -> int:
         print(f"error: {STALL_REPORT}", file=sys.stderr)
         failed = True
     else:
-        if glob_empty:
+        # Both absence checks stand down on an explicit skip declaration, and
+        # on nothing else. A specialist file that IS present was validated in
+        # the loop above regardless, so a rejected one has already failed the
+        # run and its findings still need disposition entries below: the
+        # declaration excuses an absent lens, never a present one.
+        if glob_empty and skip_reason is None:
             # Fail closed: specialists that never wrote files is
             # indistinguishable from a session that died mid-fan-out.
             print(
@@ -720,7 +782,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             failed = True
-        if expected:
+        if expected and skip_reason is None:
             missing = missing_specialists(expected, seen_specialists)
             if missing:
                 # Fail closed either way: a specialist that contributed no

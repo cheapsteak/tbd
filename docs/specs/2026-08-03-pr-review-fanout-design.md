@@ -43,6 +43,10 @@ A single-session reviewer — one model session that types its own verdict into
 - **Skip-if-unchanged** — **patch-id skip only.** Skip the re-review when
   `git patch-id` over the diff matches the patch-id recorded in the prior run's
   review comment (§3.5). No discussion-content fingerprint in the first version (§6).
+- **Diffs too small for the fan-out** — **orchestrator judgement, declared.** The
+  orchestrator may review a change itself when it judges the fan-out would add
+  nothing, with no size threshold, and must record that decision machine-readably in
+  its result (§3.3).
 - **PR discussion context** — **yes, trimmed.** Fetch human discussion once, render
   it into a sanitized, fenced, untrusted-data block the reviewer weighs but may not
   take instructions from (§3.6).
@@ -158,6 +162,46 @@ dedup (same file within a few lines = same finding), severity reconciliation, an
 summary prose for the review comment. Output is one `review-result.json` holding the
 final findings array, the disposition list, and the comment body.
 
+**Skipping the fan-out on a small diff.** Before fanning out, the orchestrator reads
+the diff and may decide — on its own judgement, with no size threshold — that the
+change is too small to benefit from two lenses, and review it itself, applying both
+specialists' briefs. Tiny diffs do not benefit from the fan-out: two specialists
+reading a one-file, eleven-line change spend ten minutes and a session's turns
+restating what one reader finds. On a skip it spawns no specialists and writes
+`review-result.json` with its own findings in `findings` (the specialists' finding
+shape), an empty `disposition`, the comment body, and a declaration:
+
+```json
+"specialists_skipped": {"reason": "<one sentence>"}
+```
+
+The declaration keeps a missing lens distinguishable from a crashed one. Both leave
+the same absence on disk; without a machine-readable statement of intent, the
+validate script cannot tell a deliberate one-agent review from a fan-out that died,
+and must fail closed on both. So the rules are:
+
+- The validate script accepts missing specialist findings files only when the result
+  file passes the schema carrying the declaration with a reason that is not blank.
+  Missing files without it, or with a malformed one, fail closed with the same
+  diagnostic as a partial fan-out (§3.5). `null` declares nothing.
+- The verdict is computed from `findings` by the same rule as always, so a HIGH or
+  MEDIUM the orchestrator reports on a skip rejects. A skip changes who reviewed, never
+  how the verdict is reached.
+- A specialist file present alongside a declaration is validated and must be
+  dispositioned as usual. The declaration excuses an absent lens, never a present
+  one; a schema-rejected file still fails the run.
+- The skip is visible: the comment's Review diagnostics section states it and its
+  reason, the validate script annotates the run with a `::notice::` carrying the
+  reason, and the renderer adds a workflow-written line under the prose saying the
+  review ran without the fan-out.
+
+The accepted cost is that a one-agent review of a large PR would pass the gate; the
+declaration and its reason, in the diagnostics, the annotation, and the posted
+comment, make that case visible to a human. **Rejected: a fixed size cap computed by
+`prepare.py`.** It would close that case mechanically, but whether a diff needs a
+second lens is a judgement a line count does not capture, and the human answer was
+to leave that judgement to the orchestrator and require it to be declared.
+
 ### 3.4 Disposition list (the prose accounting rule)
 
 The merge step is a model call, and model calls can silently lose findings — the failure
@@ -222,7 +266,9 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   The validate script also enforces specialist-set completeness
   (`--expected-specialists`): if any named
   specialist contributed no *valid* findings file it fails closed with no verdict
-  written. The diagnostic distinguishes the two causes, because they send an
+  written — unless the result file carries the orchestrator's `specialists_skipped`
+  declaration (§3.3), which excuses an absent lens and nothing else. The diagnostic
+  distinguishes the two causes, because they send an
   operator to different places: a lens that produced nothing (e.g. the orchestrator
   merged before all background specialists completed) versus one that ran and had
   its file rejected by schema validation a moment earlier. Reporting the second as
