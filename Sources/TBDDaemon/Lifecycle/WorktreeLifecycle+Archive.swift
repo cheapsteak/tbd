@@ -123,8 +123,9 @@ extension WorktreeLifecycle {
         )
 
         // Dev servers stop first, while their tabs' processes are alive to be
-        // signalled and the checkout still exists for a declared `stop` to
-        // run in. After the status flip, so a concurrent `server.start` is
+        // signalled. Archive can fire with no user gesture, so this only
+        // signals: no declared `stop` or `status` command runs. After the
+        // status flip, so a concurrent `server.start` is
         // refused rather than racing the teardown. A failure is logged and
         // the archive continues: the tab teardown below still ends what TBD
         // started.

@@ -176,10 +176,12 @@ struct DevServerOperations: Sendable {
     }
 
     /// Archive's half: stop every server TBD can see without running repo
-    /// code — a running or unreadable TBD tab, or a live running file — as
-    /// `server.stop` does, in parallel. Archive can run with no user gesture
-    /// (auto-archive on merge), so it never runs a declared `status`
-    /// command: a server that reads running only through one is left
+    /// code — a running or unreadable TBD tab, or a live running file — in
+    /// parallel. Archive can run with no user gesture (auto-archive on
+    /// merge), and repo code runs only on one, so archive never runs a
+    /// declared `status` or `stop` command: each server is stopped through
+    /// TBD's own signal path (the tab's process group, the running file's
+    /// verified pid), and a server only its declared `stop` could end is left
     /// running. Tabs are left for archive's own teardown, which captures
     /// their scrollback.
     func stopAllForArchive(worktree: LocalWorktree) async -> [DevServerStopReport] {
@@ -191,7 +193,7 @@ struct DevServerOperations: Sendable {
         }
         let stopper = self.stopper
         return await withTaskGroup(of: DevServerStopReport.self) { group in
-            for request in requests { group.addTask { await stopper.stop(request) } }
+            for request in requests { group.addTask { await stopper.stop(request, allowRepoCommands: false) } }
             var reports: [DevServerStopReport] = []
             for await report in group { reports.append(report) }
             return reports.sorted { $0.name < $1.name }

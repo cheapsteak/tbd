@@ -420,6 +420,25 @@ struct DevServerRPCTests {
         #expect(try await f.db.terminals.get(id: existing.id) == nil)
     }
 
+    /// `server.stop` is a user gesture, so a declared `stop` runs there —
+    /// unlike archive, which only signals — and nothing is signalled.
+    @Test func aGestureStopRunsTheDeclaredStopCommand() async throws {
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(
+            toml: "[servers.web]\ncommand = \"pnpm dev\"\nstop = \"make stop\"\n", signalling: signalling)
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 500, expectedStart: nil), for: existing.id)
+        let result = try await f.call(RPCMethod.serverStop,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+        #expect(result.outcomes.first?.status == .stopped)
+        #expect(f.runner.runs.map(\.command) == ["make stop"])
+        #expect(signalling.sentSignals.isEmpty)
+    }
+
     @Test func aFailingDeclaredStopIsReportedAndTheTabStays() async throws {
         let runner = FakeDevServerCommandRunner(outcomes: ["make stop": .exited(2)])
         let f = try await Self.makeFixture(

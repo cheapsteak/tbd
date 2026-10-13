@@ -51,6 +51,36 @@ struct DevServerStopperTests {
         #expect(!FileManager.default.fileExists(atPath: file))
     }
 
+    /// Archive's mode: repo code runs only on a user gesture, so a declared
+    /// `stop` is skipped and the verified process is signalled instead.
+    @Test func withoutRepoCommandsADeclaredStopIsSkippedAndTheTargetSignalled() async throws {
+        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
+        let r = FakeDevServerCommandRunner()
+        let file = try tempFile()
+        let report = await stopper(s, r).stop(request(
+            stop: "docker compose stop localstack",
+            targets: [DevServerKillTarget(pid: 500, expectedStart: start, tolerance: 1)], files: [file]),
+            allowRepoCommands: false)
+        #expect(report.succeeded)
+        #expect(r.runs.isEmpty)
+        #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
+        #expect(!FileManager.default.fileExists(atPath: file))
+    }
+
+    /// A server only its declared `stop` could end, with no process TBD may
+    /// signal, is left running in archive's mode — and says why.
+    @Test func withoutRepoCommandsAServerOnlyItsStopCanEndIsLeftRunning() async {
+        let r = FakeDevServerCommandRunner()
+        let s = FakeDevServerSignalling()
+        let report = await stopper(s, r).stop(request(
+            stop: "docker compose stop localstack", targets: [], files: [], runningOnlyByStatus: true),
+            allowRepoCommands: false)
+        #expect(!report.succeeded)
+        #expect(report.message?.contains("left running") == true)
+        #expect(r.runs.isEmpty)
+        #expect(s.sentSignals.isEmpty)
+    }
+
     @Test func aFailingStopCommandDoesNotFallBackToSignals() async throws {
         let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
         let r = FakeDevServerCommandRunner(outcomes: ["docker compose stop localstack": .exited(3)])

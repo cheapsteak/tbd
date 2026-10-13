@@ -28,8 +28,13 @@ struct DevServerStopReport: Sendable, Equatable {
 /// The spec's stop rules, shared by `server.stop` and archive. Closing the
 /// server's tab is the caller's job: `server.stop` closes it, archive's own
 /// teardown already does.
+///
+/// Repo code runs only on a user gesture. `server.stop` is one and runs a
+/// declared `stop`; archive can fire unattended (auto-archive on merge), so
+/// it passes `allowRepoCommands: false` and stops only through TBD's own
+/// signal path.
 struct DevServerStopper: Sendable {
-    /// The archive hook's budget. The spec bounds only `status`.
+    /// The same 60-second budget the archive hook gets.
     static let stopCommandTimeout: Duration = .seconds(60)
 
     let killer: DevServerGroupKiller
@@ -46,9 +51,12 @@ struct DevServerStopper: Sendable {
         self.stopCommandTimeout = stopCommandTimeout
     }
 
-    func stop(_ request: DevServerStopRequest) async -> DevServerStopReport {
+    /// `allowRepoCommands` false never runs a declared `stop`: the server's
+    /// tab and running-file processes are signalled as if none were declared,
+    /// and a server with nothing TBD may signal is left running.
+    func stop(_ request: DevServerStopRequest, allowRepoCommands: Bool = true) async -> DevServerStopReport {
         var notes: [String] = []
-        if let stopCommand = request.declared?.stop {
+        if allowRepoCommands, let stopCommand = request.declared?.stop {
             // The repo chose its stop path: a failure is reported, never
             // followed by a signal.
             switch await commandRunner.run(
@@ -66,6 +74,12 @@ struct DevServerStopper: Sendable {
             }
         } else {
             if request.runningOnlyByStatus, request.killTargets.isEmpty, request.unverifiable.isEmpty {
+                if request.declared?.stop != nil {
+                    return failure(request, """
+                        left running: \(request.name) can be stopped only by its declared `stop` command, \
+                        and TBD runs repo commands only on a user gesture
+                        """)
+                }
                 return failure(request, """
                     nothing to stop: \(request.name) reads running only through its `status` command \
                     and TBD has no process for it; declare a `stop` command

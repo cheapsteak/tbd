@@ -81,7 +81,9 @@ status = "scripts/dev/localstack-status"   # optional; exit 0 = running
   `status` and the file can never disagree. Both run with the daemon's `PATH`
   plus the common package-manager directories appended (`~/.local/bin`,
   Homebrew, `/usr/local/bin` and the like), because a daemon relaunched by
-  LaunchServices can inherit launchd's bare `PATH`.
+  LaunchServices can inherit launchd's bare `PATH`. Both are repo-authored
+  shell that a branch can change, so they run only on a user gesture: archive,
+  which can fire with no click, runs neither (see "On archive").
 - **`env`** keys must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); any
   other key is a parse error naming it, and that key is dropped.
 - Server names are the TOML keys: lowercase letters, digits and `-`.
@@ -384,26 +386,47 @@ reads *Exited*.
 
 ### On archive
 
+Archive can run with no user gesture — auto-archive fires when a pull request
+merges — and repo code runs only on a gesture, so archive never runs a declared
+`status` or `stop` command. A branch that edits either would otherwise get its
+own shell run without anyone clicking anything.
+
 Archive stops every server in the worktree that TBD can see without running
-repo code — a TBD tab still running the command, a TBD tab whose state cannot
-be read (*Unknown*), or a live running file — using the stop rules above,
-including a declared `stop`. Archive can run with no user gesture (auto-archive
-when a pull request merges), so it never runs a `status` command: a branch
-could otherwise get its own shell run without anyone clicking anything. A
-server known only through its `status` command is therefore not stopped by
-archive and keeps running; stop it before archiving, or let the repo's own
-tooling clean it up. That includes a server TBD started whose command detached
-— `docker compose up -d` exits at once, so its tab has ended and nothing but
-the `status` command knows the container runs.
-Archive does this in its first phase,
-right after the worktree's status flips to archived — so a concurrent `server
-start` is refused — and before its tabs are torn down, so group kills reach
-live tab processes and a declared `stop` runs while the checkout still exists.
-This happens before the archive hook runs, and on forced archives too. A
-server that fails to stop is logged and the archive continues; the tab
-teardown still ends what TBD started. Once the tabs' rows are deleted, archive
-detaches every server's saved last output, so no exit — including the one its
-own stop caused — leaves a server reading *Exited* after a revive.
+repo code, and only through TBD's own signal path:
+
+- **A TBD tab still running the command, or whose state cannot be read
+  (*Unknown*)** – its process group gets SIGTERM, then SIGKILL after 5
+  seconds, under the group-kill rules in "Stopping". A tab whose pid cannot be
+  verified, or whose state cannot be read, is not signalled; the tab teardown
+  that follows ends it.
+- **A live running file** – the pid it names is signalled under the same
+  rules: re-verified against the start time the file recorded, and its whole
+  group signalled only when the pid leads it.
+
+That holds whether or not the server declares `stop`. Signalling is acceptable
+here where running repo code is not, for three reasons. A running file is the
+server's own report of being this worktree's server, and its pid is verified
+against the recorded start time before any signal, so a reused pid is never
+hit. The worktree the server serves is being removed, so the server has
+nothing left to serve. And TBD never signals its own pid or a group it leads,
+whatever a running file names.
+
+A server whose only stop mechanism is its declared `stop` command, and whose
+process archive cannot otherwise identify, keeps running; archive logs it.
+That covers a server known only through its `status` command, including one
+TBD started whose command detached — `docker compose up -d` exits at once, so
+its tab has ended and nothing but the `status` command knows the container
+runs. Stop such a server before archiving, or let the repo's own tooling clean
+it up.
+
+Archive does this in its first phase, right after the worktree's status flips
+to archived — so a concurrent `server start` is refused — and before its tabs
+are torn down, so group kills reach live tab processes. This happens before
+the archive hook runs, and on forced archives too. A server that fails to stop
+is logged and the archive continues; the tab teardown still ends what TBD
+started. Once the tabs' rows are deleted, archive detaches every server's
+saved last output, so no exit — including the one its own stop caused — leaves
+a server reading *Exited* after a revive.
 
 ## CLI
 
@@ -468,8 +491,11 @@ A repo that has only `.claude/launch.json` counts as opted in: it gains the
 Servers button and Start/Stop/logs with no extra setup, and gains open buttons
 once it writes running files. Nothing runs until someone clicks Start, and
 no repo `status` command runs until someone starts, stops, restarts or
-refreshes the servers, or runs `tbd server list` or `tbd server status`.
-Archive never runs one.
+refreshes the servers, or runs `tbd server list` or `tbd server status`, and a
+declared `stop` runs only when someone stops the server. Archive, the one path
+that can signal with no click, never runs repo code: it signals only TBD's own
+tabs and the verified pids running files name, for the reasons in "On
+archive".
 
 ## Who reclaims what
 
@@ -506,6 +532,8 @@ Archive never runs one.
   again"; nothing is spawned, signalled or closed.
 - **A status-only server with no `stop`** fails the stop with "nothing to
   stop".
+- **A server archive can end only through its declared `stop`** is left
+  running, and archive logs that it did.
 - **A group kill that leaves the process alive after SIGKILL** is reported with
   the pid.
 - **A malformed running file** is ignored and named in `tbd server list
@@ -534,7 +562,10 @@ Archive never runs one.
   "Show last output" opens the entry on the holder transport and focuses the
   tab on tmux.
 - Archive stops servers with a live running file or a TBD tab still running
-  (or unreadable), runs no `status` command and leaves a server known only
+  (or unreadable) by signalling them, runs no `status` or `stop` command —
+  a running-file server and a tab server that each declare `stop` are
+  signalled, while a gesture Stop of the same server still runs its `stop` —
+  and leaves a server known only
   through its `status` command running — including one TBD started whose
   command detached and whose tab has exited — leaves other worktrees' servers
   alone, and leaves no server reading *Exited*.

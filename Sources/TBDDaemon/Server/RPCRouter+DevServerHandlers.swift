@@ -332,7 +332,7 @@ extension RPCRouter {
                 continue
             }
             let request = await operations.stopRequest(for: name, in: snapshot, repoPath: repoPath)
-            let report = await operations.stopper.stop(request)
+            let report = await operations.stopper.stop(request, allowRepoCommands: true)
             guard report.succeeded else {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab?.terminal.id,
                                       message: report.message))

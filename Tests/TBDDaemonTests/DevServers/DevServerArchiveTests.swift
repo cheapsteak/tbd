@@ -122,10 +122,9 @@ struct DevServerArchiveTests {
     }
 
     /// Servers archive can see without repo code — a live running file and a
-    /// running TBD tab — are still stopped through the normal stop path
-    /// (a declared `stop` included), while no `status` command runs and a
-    /// status-only server is left alone.
-    @Test func archiveStopsVisibleServersWithoutRunningStatusCommands() async throws {
+    /// running TBD tab — are stopped through TBD's own signal path, while no
+    /// `status` or `stop` command runs and a status-only server is left alone.
+    @Test func archiveStopsVisibleServersWithoutRunningRepoCommands() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
         try Data("""
             [servers.web]
@@ -145,9 +144,45 @@ struct DevServerArchiveTests {
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "api")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
-        #expect(f.runner.runs.map(\.command) == ["make stop-api"])
+        #expect(f.runner.runs.isEmpty)
+        #expect(f.signalling.sentSignals.map(\.pgid).sorted() == [500, 700])
+        #expect(f.signalling.sentSignals.allSatisfy { $0.signal == SIGTERM })
+        #expect(!FileManager.default.fileExists(atPath: file))
+    }
+
+    /// Repo code runs only on a user gesture, and archive can fire without
+    /// one: a running-file server's declared `stop` is not run, and the pid
+    /// its running file names is signalled instead.
+    @Test func archiveSignalsARunningFileServerInsteadOfRunningItsDeclaredStop() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        try Data("""
+            [servers.web]
+            command = "pnpm dev"
+            stop = "make stop-web"
+            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        let file = try report(f, root: f.pathA, pid: 500)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.runner.runs.isEmpty)
         #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
         #expect(!FileManager.default.fileExists(atPath: file))
+    }
+
+    /// The TBD-tab half of the same rule: the tab's process group is killed
+    /// and the declared `stop` never runs.
+    @Test func archiveKillsATabServersGroupInsteadOfRunningItsDeclaredStop() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        try Data("""
+            [servers.web]
+            command = "pnpm dev"
+            stop = "make stop-web"
+            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.runner.runs.isEmpty)
+        #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
+        #expect(try await f.db.terminals.get(id: tab.id) == nil)
     }
 
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {
