@@ -198,7 +198,11 @@ server and exits leaves a file that reads stale while the server runs.
 - `tbd server report <name> --pid <pid> --url <url> [--url <name>=<url>…]`
   writes a correct file (reading `startTime` from the kernel, `root` from the
   worktree) with one line in a start script. `--pid` is required, so the caller
-  names the server process deliberately rather than inheriting a launcher's.
+  names the server process deliberately rather than inheriting a launcher's:
+  Stop, and archive, signal the pid a running file names (its group when it
+  leads one), checked only against the start time the file recorded. TBD
+  cannot tell whether that pid is really the server, so a file naming some
+  other live process gets that process signalled.
   `--url <name>=<url>` names an endpoint; an unnamed `--url` is called `main`,
   and further unnamed ones `main-2`, `main-3`.
 - `tbd server report <name> --clear` deletes it.

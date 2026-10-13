@@ -109,7 +109,7 @@ To stop a server, TBD signals the process group of `pid` only when `pid` leads t
 
 ## `tbd server report`
 
-`tbd server report <name> --pid <pid> --url <url> [--url <name>=<url> ...]` writes a correct file, reading `startTime` from the kernel and `root` from the worktree. `--pid` is required so the caller names the server process deliberately. A `--url name=url` names an endpoint; an unnamed `--url` is called `main`, and further unnamed ones `main-2`, `main-3`. The first endpoint is the main URL. `tbd server report <name> --clear` deletes the file.
+`tbd server report <name> --pid <pid> --url <url> [--url <name>=<url> ...]` writes a correct file, reading `startTime` from the kernel and `root` from the worktree. `--pid` is required so the caller names the server process deliberately: Stop, and archive, signal the pid a running file names (its whole group when it leads one), checking only that its start time matches the file's. TBD cannot tell whether that pid is really your server, so name the server's own process — a file naming some other live process gets that process signalled. A `--url name=url` names an endpoint; an unnamed `--url` is called `main`, and further unnamed ones `main-2`, `main-3`. The first endpoint is the main URL. `tbd server report <name> --clear` deletes the file.
 
 An example start script:
 
