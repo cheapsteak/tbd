@@ -119,6 +119,10 @@ extension RPCRouter {
                                       message: Self.unreadableTabMessage(reason)))
                 continue
             }
+            if let reason = snapshot.tabsUnreadable {
+                outcomes.append(.init(name: name, status: .failed, message: Self.unreadableTabMessage(reason)))
+                continue
+            }
             if let info = snapshot.info(name), info.state == .unknown {
                 outcomes.append(.init(name: name, status: .failed, terminalID: info.terminalID,
                                       message: Self.statusTimedOutMessage))
@@ -308,6 +312,10 @@ extension RPCRouter {
             if let tab, case .unknown(let reason) = tab.status {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
                                       message: Self.unreadableTabMessage(reason)))
+                continue
+            }
+            if let reason = snapshot.tabsUnreadable {
+                outcomes.append(.init(name: name, status: .failed, message: Self.unreadableTabMessage(reason)))
                 continue
             }
             // An exited server has nothing running, so neither a signal nor

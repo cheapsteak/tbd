@@ -55,6 +55,24 @@ struct DevServerStateDeriverTests {
         #expect(derive(files: [file()], tab: tab(.unknown(reason: "timed out")))?.state == .running)
     }
 
+    /// The worktree's tab rows could not be read, so a tab may still run the
+    /// command: Unknown, never Stopped or a saved Exited — unless a live file
+    /// or the `status` command says running.
+    @Test func unreadableTabRowsReadUnknown() {
+        func deriveUnread(files: [DevServerRunningFileEntry] = [], check: DevServerStatusCheck = .notRun,
+                    saved: TerminalHistoryEntry? = nil, unreadable: Bool) -> DevServerInfo? {
+            DevServerStateDeriver.derive(DevServerDerivationInput(
+                declared: [web], liveFiles: files, tabs: [:], statusChecks: ["web": check],
+                lastOutputs: saved.map { ["web": $0] } ?? [:], tabsUnreadable: unreadable)).first
+        }
+        #expect(deriveUnread(unreadable: true)?.state == .unknown)
+        #expect(deriveUnread(unreadable: false)?.state == .stopped)
+        #expect(deriveUnread(saved: savedOutput(code: 0), unreadable: true)?.state == .unknown)
+        #expect(deriveUnread(saved: savedOutput(code: 0), unreadable: false)?.state == .exited)
+        #expect(deriveUnread(files: [file()], unreadable: true)?.state == .running)
+        #expect(deriveUnread(check: .running, unreadable: true)?.state == .running)
+    }
+
     /// Review Focus 3.
     @Test func anExitedTabWithACodeReadsExited() {
         let info = derive(tab: tab(.exited(code: 127)))

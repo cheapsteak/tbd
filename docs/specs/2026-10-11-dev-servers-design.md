@@ -256,7 +256,12 @@ Each server's state is derived, in this order:
 4. **Unknown** – TBD's tab for it could not be read (a tmux query that timed
    out or failed without tmux saying the pane is gone), or the `status`
    command timed out, and nothing above applies. Only tmux's own answer that
-   the pane or its server is absent makes a tab gone.
+   the pane or its server is absent makes a tab gone. When the worktree's tab
+   rows cannot be read from the database at all, every server not shown
+   running by a live file or its `status` command reads *Unknown* — not
+   *Stopped*, and not an *Exited* taken from a saved output, since TBD cannot
+   tell whether a tab still runs it — and a start or stop fails with "try
+   again" as for an unreadable tab.
 5. **Stopped** – none of the above.
 
 `status` commands run with a 5-second timeout, and only on a user's explicit

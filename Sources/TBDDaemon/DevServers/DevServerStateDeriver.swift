@@ -19,12 +19,16 @@ struct DevServerDerivationInput: Sendable {
     /// The newest saved last output still attached to each server. Defaulted
     /// so a caller with no history store passes nothing.
     var lastOutputs: [String: TerminalHistoryEntry] = [:]
+    /// TBD's tab rows for the worktree could not be read, so `tabs` is empty
+    /// for want of an answer rather than because no tab exists.
+    var tabsUnreadable = false
 }
 
 /// The spec's state order: running with URLs (live running file) → running
 /// (`status` exit 0, or TBD's tab still running the command) → exited (TBD's
 /// tab ended, or — once the tab is gone — a saved last output) → unknown
-/// (TBD's tab could not be read, or `status` timed out) → stopped. A server
+/// (TBD's tab could not be read, the worktree's tab rows could not be read,
+/// or `status` timed out) → stopped. A server
 /// with no declaration is listed when a live running file reports it or TBD
 /// still has its tab.
 enum DevServerStateDeriver {
@@ -79,6 +83,10 @@ enum DevServerStateDeriver {
             lastOutputID = own?.id
         } else if case .unknown? = tab?.status {
             // TBD's tab could not be read: its command may still run.
+            state = .unknown
+        } else if input.tabsUnreadable {
+            // No tab row could be read, so a tab may still run the command:
+            // neither Stopped nor an Exited taken from a saved output.
             state = .unknown
         } else if tab == nil, let saved {
             // An ended holder tab's row does not outlive reconcile; its saved

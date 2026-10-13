@@ -10,6 +10,10 @@ struct DevServerSnapshot: Sendable {
     let diagnostics: [DevServerRunningFileDiagnostic]
     /// The newest non-gone server tab per server name.
     let tabs: [String: DevServerTabObservation]
+    /// Why the worktree's tab rows could not be read; nil when they were.
+    /// Every server not shown running by a live file or `status` then reads
+    /// *Unknown*, and a start or stop refuses as for an unreadable tab.
+    let tabsUnreadable: String?
     let servers: [DevServerInfo]
 
     func declared(_ name: String) -> DeclaredDevServer? { declarations.servers.first { $0.name == name } }
@@ -62,7 +66,14 @@ struct DevServerOperations: Sendable {
         }
         // `list(worktreeID:)` orders by createdAt ascending, so the newest
         // non-gone tab for a name wins — what the deriver expects.
-        let terminals = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
+        let terminals: [Terminal]
+        var tabsUnreadable: String?
+        do {
+            terminals = try await db.terminals.list(worktreeID: worktree.id)
+        } catch {
+            terminals = []
+            tabsUnreadable = "the worktree's terminals could not be read: \(error)"
+        }
         var tabs: [String: DevServerTabObservation] = [:]
         for terminal in terminals {
             guard let name = terminal.serverName else { continue }
@@ -103,10 +114,10 @@ struct DevServerOperations: Sendable {
         }
         let servers = DevServerStateDeriver.derive(DevServerDerivationInput(
             declared: declarations.servers, liveFiles: liveFiles, tabs: tabs, statusChecks: checks,
-            lastOutputs: lastOutputs))
+            lastOutputs: lastOutputs, tabsUnreadable: tabsUnreadable != nil))
         return DevServerSnapshot(
             worktree: worktree, declarations: declarations, liveFiles: liveFiles,
-            diagnostics: scan.diagnostics, tabs: tabs, servers: servers)
+            diagnostics: scan.diagnostics, tabs: tabs, tabsUnreadable: tabsUnreadable, servers: servers)
     }
 
     /// The environment a server's tab, `stop` and `status` commands run with:
@@ -135,6 +146,12 @@ struct DevServerOperations: Sendable {
         var targets: [DevServerKillTarget] = []
         var unverifiable: [String] = []
         var tabWasRunning = false
+        if let reason = snapshot.tabsUnreadable {
+            // A tab may still run the command; it is not signalled, and the
+            // stop is not reported as done.
+            tabWasRunning = true
+            unverifiable.append("the server's tab could not be looked up (\(reason))")
+        }
         if let tab = snapshot.tabs[name], tab.status.runningPID != nil || tab.status.isUnknown {
             tabWasRunning = true
             switch await tabInspector.status(of: tab.terminal, tmuxServer: snapshot.worktree.tmuxServer) {
