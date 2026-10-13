@@ -370,7 +370,11 @@ shows the output.
   tab, no live running file — and declares no `stop` gives TBD nothing to
   signal. Stopping it is a failed stop that says to declare a `stop` command.
 - Close the server's tab, capturing its scrollback the way archive does, delete
-  its running file, and detach its saved last output.
+  its running file once the process the file names is gone, and detach its
+  saved last output. A declared `stop` that exits 0 proves nothing about that
+  process — it may only ask a supervisor to stop it — so a file whose process
+  is still alive is kept, the server keeps reading running, and the
+  stale-file sweep removes the file once the process exits.
 
 Stop on an exited server closes its tab and clears its *Exited* state; it
 neither signals anything nor runs a declared `stop`, since nothing is running

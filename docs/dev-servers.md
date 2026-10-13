@@ -151,7 +151,7 @@ A server's state is the first of these that applies:
 - If the server declares `stop`, TBD runs it with a 60-second budget. A `stop` that exits non-zero or runs out of time is a failed stop; TBD does not fall back to signalling.
 - Otherwise TBD signals the server's process, taken from its tab process (read again at stop time) or the live file's `pid`: SIGTERM, then SIGKILL after 5 seconds; the grace runs out in full even if the request that asked for the stop goes away. It signals the whole process group only when the pid leads it, and the pid alone otherwise (see "Process groups"). It re-verifies the pid's start time before signalling, and a pid it cannot verify fails the stop instead of being signalled.
 - A server that reads running only through its `status` command, with no `stop` declared, has nothing TBD may signal; stopping it fails and asks for a `stop` command.
-- Then it closes the server's tab, keeping the scrollback the way archive does, and deletes the running file.
+- Then it closes the server's tab, keeping the scrollback the way archive does, and deletes the running file once the process it names is gone. If a `stop` command exits 0 but that process is still alive, the file is kept and the server still reads Running until the process exits; the stale-file sweep then removes it.
 
 Stopping an exited server closes its tab and clears its Exited state without signalling anything or running its `stop`, since nothing is running. Stopping a server whose tab's state cannot be read fails and asks you to try again; nothing is signalled, run or closed.
 

@@ -172,7 +172,10 @@ struct DevServerOperations: Sendable {
             } ?? [:],
             killTargets: targets, unverifiable: unverifiable,
             runningOnlyByStatus: !tabWasRunning && files.isEmpty,
-            runningFilePaths: files.map(\.path))
+            runningFiles: files.map {
+                DevServerStopRunningFile(
+                    path: $0.path, pid: $0.file.pid, startTime: Date(timeIntervalSince1970: $0.file.startTime))
+            })
     }
 
     /// Archive's half: stop every server TBD can see without running repo

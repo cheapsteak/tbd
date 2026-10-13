@@ -1,6 +1,14 @@
 import Foundation
 import TBDShared
 
+/// A running file a stop may delete, with the process it names.
+struct DevServerStopRunningFile: Sendable, Equatable {
+    let path: String
+    let pid: Int32
+    /// The start time the file recorded.
+    let startTime: Date
+}
+
 struct DevServerStopRequest: Sendable {
     let name: String
     let declared: DeclaredDevServer?
@@ -15,8 +23,10 @@ struct DevServerStopRequest: Sendable {
     /// command: no running tab, no live running file. Without a declared
     /// `stop` there is then nothing TBD may signal.
     let runningOnlyByStatus: Bool
-    /// Running files describing this server, deleted after a successful stop.
-    let runningFilePaths: [String]
+    /// Running files describing this server. A successful stop deletes each
+    /// once the process it names is gone; one whose process outlives the stop
+    /// is kept, for the liveness check and OrphanGC's stale-file sweep.
+    let runningFiles: [DevServerStopRunningFile]
 }
 
 struct DevServerStopReport: Sendable, Equatable {
@@ -105,11 +115,23 @@ struct DevServerStopper: Sendable {
             }
             if !problems.isEmpty { return failure(request, problems.joined(separator: "; ")) }
         }
-        for path in request.runningFilePaths {
-            try? FileManager.default.removeItem(atPath: path)
+        // A declared `stop` that exits 0 proves nothing about the process
+        // (it may only ask a supervisor to stop it), so each file goes only
+        // once the pid it names is gone or now names another process.
+        for file in request.runningFiles {
+            if isRunning(file) {
+                notes.append("pid \(file.pid) named by the running file is still alive, so the file was kept")
+            } else {
+                try? FileManager.default.removeItem(atPath: file.path)
+            }
         }
         return DevServerStopReport(
             name: request.name, succeeded: true, message: notes.isEmpty ? nil : notes.joined(separator: "; "))
+    }
+
+    private func isRunning(_ file: DevServerStopRunningFile) -> Bool {
+        guard let info = killer.signalling.processInfo(file.pid), !info.isZombie else { return false }
+        return abs(info.startTime.timeIntervalSince(file.startTime)) <= DevServerRunningFileStore.startTimeTolerance
     }
 
     private func failure(_ request: DevServerStopRequest, _ message: String) -> DevServerStopReport {

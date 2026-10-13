@@ -25,7 +25,7 @@ struct DevServerStopperTests {
 
     private func request(
         stop: String?, targets: [DevServerKillTarget], files: [String],
-        unverifiable: [String] = [], runningOnlyByStatus: Bool = false
+        unverifiable: [String] = [], runningOnlyByStatus: Bool = false, filePID: Int32 = 500
     ) -> DevServerStopRequest {
         DevServerStopRequest(
             name: "localstack",
@@ -33,11 +33,11 @@ struct DevServerStopperTests {
                                         stop: stop, source: .repoTOML),
             cwd: "/tmp/acme/w", commandEnvironment: ["DEV_SERVER_NAME": "localstack"],
             killTargets: targets, unverifiable: unverifiable, runningOnlyByStatus: runningOnlyByStatus,
-            runningFilePaths: files)
+            runningFiles: files.map { DevServerStopRunningFile(path: $0, pid: filePID, startTime: start) })
     }
 
     @Test func aDeclaredStopRunsInsteadOfSignalling() async throws {
-        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
+        let s = FakeDevServerSignalling()
         let r = FakeDevServerCommandRunner()
         let file = try tempFile()
         let report = await stopper(s, r).stop(request(
@@ -48,6 +48,33 @@ struct DevServerStopperTests {
         #expect(r.runs.first?.cwd == "/tmp/acme/w")
         #expect(r.runs.first?.timeout == .seconds(60))
         #expect(s.sentSignals.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: file), "the process it names is gone")
+    }
+
+    /// A `stop` that exits 0 while the process its running file names is
+    /// still alive (it only asked a supervisor, say) keeps the file: the
+    /// server still reads running, and the stale-file sweep removes the file
+    /// once the process is gone.
+    @Test func aDeclaredStopKeepsTheFileOfAProcessThatOutlivesIt() async throws {
+        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start)
+        let r = FakeDevServerCommandRunner()
+        let file = try tempFile(); defer { try? FileManager.default.removeItem(atPath: file) }
+        let report = await stopper(s, r).stop(request(
+            stop: "docker compose stop localstack", targets: [], files: [file]))
+        #expect(report.succeeded)
+        #expect(report.message?.contains("still alive") == true)
+        #expect(s.sentSignals.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
+    }
+
+    /// The pid is now someone else's (the start time differs): the file is
+    /// stale, so it goes.
+    @Test func aDeclaredStopDeletesTheFileOfAReusedPid() async throws {
+        let s = FakeDevServerSignalling(); s.add(pid: 500, pgid: 500, start: start.addingTimeInterval(60))
+        let file = try tempFile()
+        let report = await stopper(s, FakeDevServerCommandRunner()).stop(request(
+            stop: "docker compose stop localstack", targets: [], files: [file]))
+        #expect(report.succeeded)
         #expect(!FileManager.default.fileExists(atPath: file))
     }
 
