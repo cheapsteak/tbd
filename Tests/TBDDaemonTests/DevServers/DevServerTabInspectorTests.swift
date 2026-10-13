@@ -65,11 +65,15 @@ struct DevServerTabInspectorTests {
             tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
         #expect(await inspector.status(of: terminal, tmuxServer: "unused") == .exited(code: 3))
     }
-    private func holderInspector() -> ProductionDevServerTabInspector {
-        let registry = HolderRegistry(
+    private func holderRegistry() -> HolderRegistry {
+        HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/tmp/tbd-devtab-\(UUID().uuidString)"],
             listTerminals: { [] }, spawner: nil)
+    }
+
+    private func holderInspector(_ registry: HolderRegistry? = nil) -> ProductionDevServerTabInspector {
+        let registry = registry ?? holderRegistry()
         return ProductionDevServerTabInspector(
             tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
     }
@@ -102,5 +106,34 @@ struct DevServerTabInspectorTests {
                                 childPID: getpid(), holderChildStartedAt: actual.addingTimeInterval(-86_400))
         terminal.serverName = "web"
         #expect(await holderInspector().status(of: terminal, tmuxServer: "unused") == .exited(code: nil))
+    }
+
+    /// The registry's adopted child carries no start time of its own, so a
+    /// live adopted pid the row recorded none for is anchored only by its
+    /// liveness, which a reused pid also has. It reads running but is never
+    /// signalled: a stop, gesture or archive, refuses it.
+    @Test func anAdoptedHolderChildWithNoRecordedStartIsUnverifiable() async {
+        let registry = holderRegistry()
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+                                childPID: getpid())
+        terminal.serverName = "web"
+        await registry.recordAdoptedProcessForTesting(
+            .init(holderPID: nil, childPID: getpid()), for: terminal.id)
+        #expect(await holderInspector(registry).status(of: terminal, tmuxServer: "unused")
+            == .runningUnverifiable(pid: getpid()))
+    }
+
+    /// The same adopted child with the row's recorded start time is anchored
+    /// by it, and reads running with that anchor.
+    @Test func anAdoptedHolderChildIsAnchoredByItsRecordedStart() async throws {
+        let registry = holderRegistry()
+        let started = try #require(DevServerProcessProbe.kernelInfo(pid: getpid())).startTime
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+                                childPID: getpid(), holderChildStartedAt: started)
+        terminal.serverName = "web"
+        await registry.recordAdoptedProcessForTesting(
+            .init(holderPID: nil, childPID: getpid()), for: terminal.id)
+        #expect(await holderInspector(registry).status(of: terminal, tmuxServer: "unused")
+            == .running(pid: getpid(), expectedStart: started))
     }
 }

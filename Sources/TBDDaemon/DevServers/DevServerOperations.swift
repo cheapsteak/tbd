@@ -133,15 +133,23 @@ struct DevServerOperations: Sendable {
         return env
     }
 
-    /// Kill targets are the server's running TBD tab and the pid of every
-    /// live running file for it. The tab is read again here rather than
-    /// trusted from the snapshot, which can be a `status` timeout old: a
-    /// first-hand pid (a tmux pane, the holder registry's child) is then
-    /// anchored by the start time the kill reads at once, and a tab whose pid
+    /// Kill targets are the server's running TBD tab and, when
+    /// `signalRunningFiles` is true, the pid of every live running file for
+    /// it. The tab is read again here rather than trusted from the snapshot,
+    /// which can be a `status` timeout old: a first-hand pid (a live tmux
+    /// pane) is then anchored by the start time the kill reads at once, a
+    /// holder job by the start time its row recorded, and a tab whose pid
     /// cannot be tied to it — or whose state cannot be read at all — is
-    /// reported, never signalled. Running files are
-    /// anchored by the start time they recorded.
-    func stopRequest(for name: String, in snapshot: DevServerSnapshot, repoPath: String?) async -> DevServerStopRequest {
+    /// reported, never signalled. Running files are anchored by the start
+    /// time they recorded.
+    ///
+    /// Archive passes `signalRunningFiles: false`: anything can write a
+    /// running file, so only a user gesture may signal the pid one names.
+    /// The files are still listed, so a stop that ends the tab's job deletes
+    /// a file naming it.
+    func stopRequest(
+        for name: String, in snapshot: DevServerSnapshot, repoPath: String?, signalRunningFiles: Bool = true
+    ) async -> DevServerStopRequest {
         let declared = snapshot.declared(name)
         var targets: [DevServerKillTarget] = []
         var unverifiable: [String] = []
@@ -163,7 +171,7 @@ struct DevServerOperations: Sendable {
             case .runningUnverifiable(let pid):
                 unverifiable.append("""
                     pid \(pid) in the server's tab has no recorded start time, so it cannot be told \
-                    apart from a reused pid and was not signalled
+                    apart from a reused pid and was not signalled; closing the tab ends it
                     """)
             case .unknown(let reason):
                 // Its command may still run: neither signalled nor taken
@@ -174,7 +182,7 @@ struct DevServerOperations: Sendable {
             }
         }
         let files = snapshot.liveFiles.filter { $0.file.server == name }
-        for entry in files {
+        for entry in files where signalRunningFiles {
             targets.append(DevServerKillTarget(
                 pid: entry.file.pid, expectedStart: Date(timeIntervalSince1970: entry.file.startTime),
                 tolerance: DevServerRunningFileStore.startTimeTolerance))
@@ -195,26 +203,40 @@ struct DevServerOperations: Sendable {
             })
     }
 
-    /// Archive's half: stop every server TBD can see without running repo
-    /// code — a running or unreadable TBD tab, or a live running file — in
-    /// parallel. Archive can run with no user gesture (auto-archive on
-    /// merge), and repo code runs only on one, so archive never runs a
-    /// declared `status` or `stop` command: each server is stopped through
-    /// TBD's own signal path (the tab's process group, the running file's
-    /// verified pid), and a server only its declared `stop` could end is left
-    /// running. Tabs are left for archive's own teardown, which captures
-    /// their scrollback.
+    /// Archive's half: stop the servers TBD started in its own tabs, in
+    /// parallel, and nothing else. Archive can run with no user gesture
+    /// (auto-archive on merge), so it never runs a declared `status` or
+    /// `stop` command, and it never signals a pid just because a running
+    /// file names it: any same-user process can write one, naming any
+    /// process. A server is stopped only when its TBD tab still runs the
+    /// command or cannot be read (the tab's process group, SIGTERM then
+    /// SIGKILL); a server known only through a running file or its `status`
+    /// command is reported left running, its running file kept for
+    /// OrphanGC once the process ends. Teardown for those belongs in the
+    /// repo's archive hook. Tabs are left for archive's own teardown, which
+    /// captures their scrollback.
     func stopAllForArchive(worktree: LocalWorktree) async -> [DevServerStopReport] {
         let snapshot = await snapshot(worktree: worktree, runStatusCommands: false)
         let repoPath = await repoPath(for: worktree)
         var requests: [DevServerStopRequest] = []
+        var leftRunning: [DevServerStopReport] = []
         for server in snapshot.servers where server.state == .running || server.state == .unknown {
-            requests.append(await stopRequest(for: server.name, in: snapshot, repoPath: repoPath))
+            let tabMayRun = snapshot.tabsUnreadable != nil
+                || snapshot.tabs[server.name].map { $0.status.runningPID != nil || $0.status.isUnknown } == true
+            if tabMayRun {
+                requests.append(await stopRequest(
+                    for: server.name, in: snapshot, repoPath: repoPath, signalRunningFiles: false))
+            } else {
+                leftRunning.append(DevServerStopReport(name: server.name, succeeded: false, message: """
+                    left running: no TBD tab is running \(server.name), and archive stops only servers \
+                    running in TBD's tabs; stop it from the repo's archive hook
+                    """))
+            }
         }
         let stopper = self.stopper
         return await withTaskGroup(of: DevServerStopReport.self) { group in
             for request in requests { group.addTask { await stopper.stop(request, allowRepoCommands: false) } }
-            var reports: [DevServerStopReport] = []
+            var reports = leftRunning
             for await report in group { reports.append(report) }
             return reports.sorted { $0.name < $1.name }
         }

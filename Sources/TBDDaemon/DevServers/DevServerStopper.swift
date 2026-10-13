@@ -41,8 +41,8 @@ struct DevServerStopReport: Sendable, Equatable {
 ///
 /// Repo code runs only on a user gesture. `server.stop` is one and runs a
 /// declared `stop`; archive can fire unattended (auto-archive on merge), so
-/// it passes `allowRepoCommands: false` and stops only through TBD's own
-/// signal path.
+/// it passes `allowRepoCommands: false`, and its requests carry only the
+/// server's TBD tab as a kill target, never a running file's pid.
 struct DevServerStopper: Sendable {
     /// The same 60-second budget the archive hook gets.
     static let stopCommandTimeout: Duration = .seconds(60)
@@ -61,9 +61,9 @@ struct DevServerStopper: Sendable {
         self.stopCommandTimeout = stopCommandTimeout
     }
 
-    /// `allowRepoCommands` false never runs a declared `stop`: the server's
-    /// tab and running-file processes are signalled as if none were declared,
-    /// and a server with nothing TBD may signal is left running.
+    /// `allowRepoCommands` false never runs a declared `stop`: the request's
+    /// kill targets are signalled as if none were declared, and a server with
+    /// nothing TBD may signal is left running.
     func stop(_ request: DevServerStopRequest, allowRepoCommands: Bool = true) async -> DevServerStopReport {
         var notes: [String] = []
         if allowRepoCommands, let stopCommand = request.declared?.stop {

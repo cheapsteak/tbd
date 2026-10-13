@@ -3,15 +3,15 @@ import TBDShared
 
 enum DevServerTabStatus: Sendable, Equatable {
     /// The command is still the tab's live process. `expectedStart` anchors
-    /// the pid against reuse when the row recorded one (holder). nil means
-    /// the pid was read first-hand — a live tmux pane, the holder registry's
-    /// adopted child — so a stop re-reads the tab and takes the start time
-    /// at the kill.
+    /// the pid against reuse: a holder job always carries the start time its
+    /// row recorded. nil means the pid was read first-hand from a live tmux
+    /// pane, so a stop re-reads the tab and takes the start time at the kill.
     case running(pid: Int32, expectedStart: Date?)
-    /// The tab's process is alive but nothing first-hand or recorded ties
-    /// the pid to it: a holder session the registry has not adopted, whose
-    /// row recorded no child start time. Reads as running; a stop refuses
-    /// to signal it and reports so.
+    /// The tab's process is alive but no recorded start time ties the pid
+    /// to it: a holder job whose row recorded none for that pid, adopted by
+    /// the registry or not. Liveness alone cannot tell it from a reused pid.
+    /// Reads as running; a stop — gesture or archive — refuses to signal it
+    /// and reports so, and closing the tab ends the job.
     case runningUnverifiable(pid: Int32)
     /// The command ended; `code` is nil when the transport could not say.
     /// `pid` is the process that ended, when the transport still reports it
@@ -81,15 +81,17 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
                 case .exitedStatusUnknown: return .exited(code: nil)
                 }
             }
-            // The registry's adopted child is first-hand: it came from the
-            // hand-over that produced the session's reader.
+            // The registry's adopted child came from the hand-over that
+            // produced the session's reader, but the registry keeps no start
+            // time for it: only the row's recorded one anchors the pid
+            // against reuse, so without it the job is never signalled.
             if let adopted = await holderRegistry?.adoptedProcess(for: terminal.id) {
                 guard signaller.isAlive(adopted.childPID) else { return .exited(code: nil) }
                 if adopted.childPID == terminal.childPID, let started = terminal.holderChildStartedAt {
                     guard isSameProcess(adopted.childPID, startedAt: started) else { return .exited(code: nil) }
                     return .running(pid: adopted.childPID, expectedStart: started)
                 }
-                return .running(pid: adopted.childPID, expectedStart: nil)
+                return .runningUnverifiable(pid: adopted.childPID)
             }
             guard let pid = terminal.childPID, signaller.isAlive(pid) else { return .exited(code: nil) }
             guard let started = terminal.holderChildStartedAt else { return .runningUnverifiable(pid: pid) }

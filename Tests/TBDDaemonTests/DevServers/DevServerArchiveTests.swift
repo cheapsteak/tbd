@@ -68,15 +68,71 @@ struct DevServerArchiveTests {
             pid: pid, startTime: Self.start.timeIntervalSince1970))
     }
 
-    /// Review Focus 5.
+    /// Review Focus 5: archiving one worktree stops its own tab server and
+    /// leaves the other worktree's server and running file alone.
     @Test func archiveLeavesOtherWorktreesServersAlone() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
-        let mine = try report(f, root: f.pathA, pid: 500)
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         let theirs = try report(f, root: f.pathB, pid: 600)
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
-        #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
-        #expect(!FileManager.default.fileExists(atPath: mine))
+        #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(FileManager.default.fileExists(atPath: theirs))
+    }
+
+    /// Any same-user process can write a running file naming any pid, and
+    /// archive can run unattended: a server known only through a running
+    /// file is left running. Nothing is signalled, its declared `stop` does
+    /// not run, and its file stays for OrphanGC once the process ends.
+    @Test func archiveNeverSignalsARunningFileOnlyServer() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        try Data("""
+            [servers.web]
+            command = "pnpm dev"
+            stop = "make stop-web"
+            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        let file = try report(f, root: f.pathA, pid: 500)
+        let local = try #require(try await f.db.worktrees.getLocal(id: f.worktreeA.id))
+        let operations = try #require(f.lifecycle.devServerOperations)
+        let reports = await operations.stopAllForArchive(worktree: local)
+        #expect(reports.map(\.name) == ["web"])
+        #expect(reports.first?.succeeded == false)
+        #expect(reports.first?.message?.hasPrefix("left running:") == true)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.runner.runs.isEmpty)
+        #expect(f.signalling.sentSignals.isEmpty)
+        #expect(f.signalling.sentToProcesses.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
+    }
+
+    /// A server with both a TBD tab and a running file is stopped through
+    /// the tab only: the pid the file names is never signalled, even when it
+    /// is not the tab's job. The file is kept while that pid lives.
+    @Test func archiveStopsATabServerThroughItsTabOnlyNotItsRunningFilesPid() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
+        let file = try report(f, root: f.pathA, pid: 500)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
+        #expect(f.signalling.sentToProcesses.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
+    }
+
+    /// A holder tab whose job has no recorded start time cannot be told
+    /// apart from a reused pid: archive does not signal it and leaves it to
+    /// the tab teardown.
+    @Test func archiveDoesNotSignalAHolderJobWithNoRecordedStartTime() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.runningUnverifiable(pid: 700), for: tab.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        #expect(f.signalling.sentSignals.isEmpty)
+        #expect(f.signalling.sentToProcesses.isEmpty)
+        #expect(try await f.db.terminals.get(id: tab.id) == nil, "archive's teardown still removes the tab")
     }
 
     @Test func archiveStopsAServerTBDStarted() async throws {
@@ -121,9 +177,9 @@ struct DevServerArchiveTests {
         #expect(f.signalling.sentSignals.isEmpty)
     }
 
-    /// Servers archive can see without repo code — a live running file and a
-    /// running TBD tab — are stopped through TBD's own signal path, while no
-    /// `status` or `stop` command runs and a status-only server is left alone.
+    /// Only the running TBD tab is stopped, through its process group. No
+    /// `status` or `stop` command runs, the running-file server's pid is not
+    /// signalled, and a status-only server is left alone.
     @Test func archiveStopsVisibleServersWithoutRunningRepoCommands() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
         try Data("""
@@ -145,30 +201,14 @@ struct DevServerArchiveTests {
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
         #expect(f.runner.runs.isEmpty)
-        #expect(f.signalling.sentSignals.map(\.pgid).sorted() == [500, 700])
-        #expect(f.signalling.sentSignals.allSatisfy { $0.signal == SIGTERM })
-        #expect(!FileManager.default.fileExists(atPath: file))
+        #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
+        #expect(f.signalling.sentToProcesses.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
     }
 
     /// Repo code runs only on a user gesture, and archive can fire without
-    /// one: a running-file server's declared `stop` is not run, and the pid
-    /// its running file names is signalled instead.
-    @Test func archiveSignalsARunningFileServerInsteadOfRunningItsDeclaredStop() async throws {
-        let f = try await Self.makeFixture(); defer { f.tearDown() }
-        try Data("""
-            [servers.web]
-            command = "pnpm dev"
-            stop = "make stop-web"
-            """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
-        let file = try report(f, root: f.pathA, pid: 500)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
-        #expect(f.runner.runs.isEmpty)
-        #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
-        #expect(!FileManager.default.fileExists(atPath: file))
-    }
-
-    /// The TBD-tab half of the same rule: the tab's process group is killed
-    /// and the declared `stop` never runs.
+    /// one: a TBD tab server's process group is killed and its declared
+    /// `stop` never runs.
     @Test func archiveKillsATabServersGroupInsteadOfRunningItsDeclaredStop() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
         try Data("""
@@ -186,10 +226,12 @@ struct DevServerArchiveTests {
     }
 
     /// Reconcile archives a worktree whose checkout has vanished and runs
-    /// archive's dev-server steps: a server known only through a running file
-    /// (its `root` still names the vanished path) is signalled, no repo
-    /// command runs, and the worktree's saved server output is detached.
-    @Test func reconcileArchiveOfAVanishedWorktreeStopsServersAndDetachesOutputs() async throws {
+    /// archive's dev-server steps: a server running in a TBD tab has its
+    /// group killed, a server known only through a running file (its `root`
+    /// still names the vanished path; its own tab has exited) is left
+    /// running with its file kept, no repo command runs, and the worktree's
+    /// saved server output is detached.
+    @Test func reconcileArchiveOfAVanishedWorktreeStopsTabServersAndDetachesOutputs() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -204,21 +246,27 @@ struct DevServerArchiveTests {
         f.inspector.set(.exited(code: 143), for: tab.id)
         await f.db.terminalHistory.recordServerExit(terminal: tab, serverName: "web", capture: nil, exitCode: 143)
         #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: wt.id)["web"] != nil)
+        let apiTab = try await f.db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell, serverName: "api")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: apiTab.id)
 
         try await f.lifecycle.reconcile(
             repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         #expect(try await f.db.worktrees.get(id: wt.id)?.status == .archived)
         #expect(f.runner.runs.isEmpty)
-        #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
-        #expect(!FileManager.default.fileExists(atPath: file))
+        #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
+        #expect(f.signalling.sentToProcesses.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file))
         #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: wt.id).isEmpty)
     }
 
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {
         var f = try await Self.makeFixture(); defer { f.tearDown() }
         f.lifecycle.devServerOperations = nil
-        _ = try report(f, root: f.pathA, pid: 500)
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
         #expect(f.signalling.sentSignals.isEmpty)
     }

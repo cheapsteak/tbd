@@ -27,6 +27,9 @@ open a running server in the browser.
   file, and a scan would be a second, unreliable contract.
 - **Nothing starts on its own.** Every start is a gesture: a click, or a `tbd
   server start` from a person or an agent.
+- **Unattended stops touch only what TBD started.** Archive, which can run
+  with no gesture, stops servers running in TBD's own tabs and nothing else;
+  the repo's archive hook tears down the rest.
 
 ## Declaring servers
 
@@ -199,10 +202,11 @@ server and exits leaves a file that reads stale while the server runs.
   writes a correct file (reading `startTime` from the kernel, `root` from the
   worktree) with one line in a start script. `--pid` is required, so the caller
   names the server process deliberately rather than inheriting a launcher's:
-  Stop, and archive, signal the pid a running file names (its group when it
+  Stop and Restart signal the pid a running file names (its group when it
   leads one), checked only against the start time the file recorded. TBD
   cannot tell whether that pid is really the server, so a file naming some
-  other live process gets that process signalled.
+  other live process gets that process signalled when someone stops the
+  server. Archive never signals it (see "On archive").
   `--url <name>=<url>` names an endpoint; an unnamed `--url` is called `main`,
   and further unnamed ones `main-2`, `main-3`.
 - `tbd server report <name> --clear` deletes it.
@@ -362,11 +366,12 @@ shows the output.
   to the end even when the request that started the stop is cancelled, and a
   group whose only remaining members are zombies counts as gone. Before
   signalling, re-verify the pid's identity: a running file's pid against the
-  start time it recorded; a tab's pid is read from the tab again at stop time
-  and its start time taken from the kernel at that moment, and a tab pid that
-  can be tied to the tab neither way — a holder session the daemon has not
-  adopted whose row recorded no start time — is reported as a failed stop and
-  not signalled.
+  start time it recorded; a tab's pid is read from the tab again at stop time.
+  A tmux pane's start time is taken from the kernel at that moment. A holder
+  tab's job is verified against the start time its terminal row recorded for
+  that pid; a job with none recorded — whether or not the daemon has adopted
+  the session — cannot be told apart from a reused pid, so it is reported as a
+  failed stop and not signalled, and closing the tab ends it.
 - The whole process group is signalled only when the pid leads it
   (`getpgid(pid) == pid`). Otherwise only the pid itself is signalled, and the
   stop report says so: a server started with `pnpm dev &` from a shell without
@@ -399,38 +404,42 @@ reads *Exited*.
 
 ### On archive
 
-Archive can run with no user gesture — auto-archive fires when a pull request
-merges — and repo code runs only on a gesture, so archive never runs a declared
-`status` or `stop` command. A branch that edits either would otherwise get its
-own shell run without anyone clicking anything.
+Archive stops only the servers TBD started in its own tabs. It never runs a
+declared `status` or `stop` command, and it never signals a pid because a
+running file names it. Two facts decide this:
 
-Archive stops every server in the worktree that TBD can see without running
-repo code, and only through TBD's own signal path:
+- **Archive can run with no user gesture.** Auto-archive fires when a pull
+  request merges, and reconcile archives a worktree whose checkout has
+  vanished. A declared `stop` or `status` is repo shell that a branch can
+  change, so running it there would run a branch's code without anyone
+  clicking anything.
+- **Anything can write a running file.** Any process running as the user can
+  write one naming any pid — the repo's tmux server, another worktree's
+  shell. The start-time check stops a reused pid from being hit, but not a
+  file that names the wrong live process on purpose or by mistake. A stop
+  someone asks for accepts that risk; an unattended archive does not.
 
-- **A TBD tab still running the command, or whose state cannot be read
-  (*Unknown*)** – its process group gets SIGTERM, then SIGKILL after 5
-  seconds, under the group-kill rules in "Stopping". A tab whose pid cannot be
-  verified, or whose state cannot be read, is not signalled; the tab teardown
-  that follows ends it.
-- **A live running file** – the pid it names is signalled under the same
-  rules: re-verified against the start time the file recorded, and its whole
-  group signalled only when the pid leads it.
+So archive does this, per server that reads running or *Unknown*:
 
-That holds whether or not the server declares `stop`. Signalling is acceptable
-here where running repo code is not, for three reasons. A running file is the
-server's own report of being this worktree's server, and its pid is verified
-against the recorded start time before any signal, so a reused pid is never
-hit. The worktree the server serves is being removed, so the server has
-nothing left to serve. And TBD never signals its own pid or a group it leads,
-whatever a running file names.
+- **A TBD tab still running the command, or whose state cannot be read** –
+  its process group gets SIGTERM, then SIGKILL after 5 seconds, under the
+  group-kill rules in "Stopping". A tab pid that cannot be verified — a holder
+  job with no recorded start time — or a tab whose state cannot be read is not
+  signalled; the tab teardown that follows ends it.
+- **A server with both a TBD tab and a running file** is stopped through its
+  tab only. The pid the running file names is not signalled, even when it is
+  not the tab's job; if it is in the tab's process group, the group kill ends
+  it anyway. The file is deleted once the pid it names is gone, and kept
+  otherwise.
+- **A server known only through a running file, or only through its `status`
+  command** – nothing is signalled and no command runs. Archive logs it as
+  left running. Its running file stays; the OrphanGC leg deletes it once the
+  process is gone.
 
-A server whose only stop mechanism is its declared `stop` command, and whose
-process archive cannot otherwise identify, keeps running; archive logs it.
-That covers a server known only through its `status` command, including one
-TBD started whose command detached — `docker compose up -d` exits at once, so
-its tab has ended and nothing but the `status` command knows the container
-runs. Stop such a server before archiving, or let the repo's own tooling clean
-it up.
+That holds whether or not the server declares `stop`. Signalling a tab's group
+is safe where signalling a running file's pid is not: TBD spawned that
+process itself, it leads its own group, and its pid comes from tmux or from
+the holder's recorded start time rather than from a file anyone could write.
 
 Archive does this in its first phase, right after the worktree's status flips
 to archived — so a concurrent `server start` is refused — and before its tabs
@@ -442,9 +451,21 @@ saved last output, so no exit — including the one its own stop caused — leav
 a server reading *Exited* after a revive.
 
 Reconcile's archive of a worktree whose checkout has vanished takes the same
-two steps in the same order — stopping servers before its tab teardown and
-detaching saved outputs once the tabs' rows are deleted — with a running file
-whose `root` names the vanished path still identifying the worktree.
+two steps in the same order — stopping tab servers before its tab teardown
+and detaching saved outputs once the tabs' rows are deleted.
+
+#### Teardown belongs in the archive hook
+
+Teardown for servers TBD did not start in a tab — a `docker compose` stack, a
+server known only through a running file, one TBD started whose command
+detached — belongs in the repo's archive hook (`.worktree-hooks/archive`, or
+the per-repo hook under `~/tbd/repos/<repoID>/hooks/`; see
+[`docs/worktree-hooks.md`](../worktree-hooks.md)). The order is: TBD stops its
+tab servers, then the hook runs, then the worktree's directory is removed. A
+forced archive skips the hook. The hook should be idempotent, because a
+server may already be stopped. `tbd server stop` from the hook is a stop like
+any other: it runs declared `stop` commands and signals running-file pids,
+because the repo chose to run it.
 
 ## CLI
 
@@ -501,9 +522,9 @@ feature ships without one, on purpose. Declaring servers is the opt-in: a repo
 with no `tbd.toml`, no personal `servers.toml` and no `.claude/launch.json` sees
 no button, no dot and no behavior change. Every process TBD signals has a
 consent source — a server someone started through TBD, or a server whose repo
-wrote a running file claiming it. The background parts touch no process: the
-liveness re-check reads, and the stale-file sweep deletes only files whose
-process is gone.
+wrote a running file claiming it, stopped by someone who asked. The background
+parts touch no process: the liveness re-check reads, and the stale-file sweep
+deletes only files whose process is gone.
 
 A repo that has only `.claude/launch.json` counts as opted in: it gains the
 Servers button and Start/Stop/logs with no extra setup, and gains open buttons
@@ -511,9 +532,11 @@ once it writes running files. Nothing runs until someone clicks Start, and
 no repo `status` command runs until someone starts, stops, restarts or
 refreshes the servers, or runs `tbd server list` or `tbd server status`, and a
 declared `stop` runs only when someone stops the server. Archive, the one path
-that can signal with no click, never runs repo code: it signals only TBD's own
-tabs and the verified pids running files name, for the reasons in "On
-archive".
+that can signal with no click, adds no repo code of its own and signals only
+the process groups of servers TBD started in its own tabs — never a pid a
+running file names — for the reasons in "On archive". The archive hook is
+repo code and does run, but it is the repo's existing, opted-in teardown, not
+something this feature adds.
 
 ## Who reclaims what
 
@@ -522,7 +545,8 @@ archive".
   process's whole group, which it leads, rather than the pane pid alone. A
   process that leaves its group (`setsid`, a daemonizing server) escapes the
   group kill; a server like that should write a running file for its real pid
-  or declare a `stop` command.
+  or declare a `stop` command, and the repo's archive hook should stop it,
+  since archive signals only tab process groups.
 - **Running files** are a new durable resource. `OrphanGC` gains a leg that
   deletes files in the running-file directory that are stale (liveness above)
   and older than `gcGraceSeconds`, under `gcEnabled`. It never signals a
@@ -550,8 +574,8 @@ archive".
   again"; nothing is spawned, signalled or closed.
 - **A status-only server with no `stop`** fails the stop with "nothing to
   stop".
-- **A server archive can end only through its declared `stop`** is left
-  running, and archive logs that it did.
+- **A server archive does not stop** — one known only through a running file
+  or its `status` command — is left running, and archive logs that it did.
 - **A group kill that leaves the process alive after SIGKILL** is reported with
   the pid.
 - **A malformed running file** is ignored and named in `tbd server list
@@ -579,14 +603,19 @@ archive".
   already gone records no server state; start and stop detach the saved entry;
   "Show last output" opens the entry on the holder transport and focuses the
   tab on tmux.
-- Archive stops servers with a live running file or a TBD tab still running
-  (or unreadable) by signalling them, runs no `status` or `stop` command —
-  a running-file server and a tab server that each declare `stop` are
-  signalled, while a gesture Stop of the same server still runs its `stop` —
-  and leaves a server known only
-  through its `status` command running — including one TBD started whose
-  command detached and whose tab has exited — leaves other worktrees' servers
-  alone, and leaves no server reading *Exited*.
+- Archive, and reconcile's archive, kill the process group of a TBD tab still
+  running its command and run no `status` or `stop` command — a tab server
+  that declares `stop` is signalled, while a gesture Stop of the same server
+  still runs its `stop`. A live running-file-only server is not signalled,
+  no command runs and its file stays, while a gesture Stop of it still
+  signals its pid. A server with both a tab and a running file is signalled
+  through the tab only. A holder job with no recorded start time is not
+  signalled. Archive leaves a server known only through its `status` command
+  running, including one TBD started whose command detached and whose tab
+  has exited, leaves other worktrees' servers alone, and leaves no server
+  reading *Exited*.
+- The tab inspector reads a holder job the daemon adopted but whose row
+  recorded no start time as unverifiable, so no stop signals it.
 - The daemon marks a state the `status` command decided, and whether a server
   declares a `status` command, and reports an ended tab with its process id.
   The app keeps a remembered answer over a stopped server and over an exited

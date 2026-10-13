@@ -586,7 +586,9 @@ struct DevServerRPCTests {
         #expect(try await f.db.terminals.get(id: orphan.id) == nil)
     }
 
-    /// Review Focus 5: two worktrees, same server name, separate files.
+    /// Review Focus 5: two worktrees, same server name, separate files. Also
+    /// pins that a gesture stop still signals the pid a running file names,
+    /// which archive never does.
     @Test func stoppingOneWorktreeLeavesTheOtherWorktreesFile() async throws {
         let signalling = FakeDevServerSignalling()
         signalling.add(pid: 500, pgid: 500, start: Self.start)

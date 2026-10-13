@@ -574,6 +574,14 @@ actor HolderRegistry {
         statuses[terminalID] = status
     }
 
+    /// Records the processes behind a session as an adoption's publish
+    /// would, without a reader. Test-facing; production never calls it. It
+    /// exists for the same reason as `recordStatusForTesting`: an adopted
+    /// process is otherwise reachable only through a live holder hand-over.
+    func recordAdoptedProcessForTesting(_ process: HolderAdoptedProcess?, for terminalID: UUID) {
+        adoptedProcesses[terminalID] = process
+    }
+
     // MARK: - The reader-count assertion
 
     /// Who the daemon's explicit reader state says is on a session's pty right

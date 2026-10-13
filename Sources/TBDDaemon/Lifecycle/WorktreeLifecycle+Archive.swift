@@ -122,9 +122,11 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
-        // Dev servers stop first, while their tabs' processes are alive to be
-        // signalled. Archive can fire with no user gesture, so this only
-        // signals: no declared `stop` or `status` command runs. After the
+        // Dev servers TBD started in its tabs stop first, while those tabs'
+        // processes are alive to be signalled, and before the archive hook
+        // runs. Archive can fire with no user gesture, so this only signals
+        // tab process groups: no declared `stop` or `status` command runs,
+        // and no pid a running file names is signalled. After the
         // status flip, so a concurrent `server.start` is
         // refused rather than racing the teardown. A failure is logged and
         // the archive continues: the tab teardown below still ends what TBD
@@ -159,8 +161,7 @@ extension WorktreeLifecycle {
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
-        // Archive stopped every server it could see, so none may read *Exited*
-        // afterwards.
+        // No server may read *Exited* after archive.
         // A holder server's exit — including the one archive's own stop
         // caused — is stamped only while its terminal row exists, so after
         // the delete above nothing can re-attach an entry this clears.
@@ -175,9 +176,11 @@ extension WorktreeLifecycle {
     }
 
     /// Archive's dev-server stop, shared by `beginArchiveWorktree` and
-    /// reconcile's archive of a vanished worktree: signals only (no repo
-    /// command runs), and a server that did not stop is logged while the
-    /// archive continues. A no-op when no operations are wired.
+    /// reconcile's archive of a vanished worktree: signals the process groups
+    /// of servers running in TBD tabs only (no repo command runs, no running
+    /// file's pid is signalled), and a server that did not stop or was left
+    /// running is logged while the archive continues. A no-op when no
+    /// operations are wired.
     func stopDevServersForArchive(worktree: LocalWorktree) async {
         guard let devServerOperations else { return }
         for report in await devServerOperations.stopAllForArchive(worktree: worktree)
