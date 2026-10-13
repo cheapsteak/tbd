@@ -32,7 +32,7 @@ enum DevServerStateDeriver {
         let declaredNames = Set(input.declared.map(\.name))
         var result = input.declared.map { server in
             info(name: server.name, label: server.displayLabel, source: server.source.rawValue,
-                 hasStopCommand: server.stop != nil, input: input)
+                 hasStopCommand: server.stop != nil, hasStatusCommand: server.status != nil, input: input)
         }
         // Undeclared: a live running file names it, or TBD started it and its
         // declaration has since gone — its tab still runs (or ran) the
@@ -40,13 +40,14 @@ enum DevServerStateDeriver {
         let reported = Set(input.liveFiles.map(\.file.server)).union(input.tabs.keys)
         let undeclared = reported.subtracting(declaredNames).sorted()
         for name in undeclared {
-            result.append(info(name: name, label: name, source: nil, hasStopCommand: false, input: input))
+            result.append(info(name: name, label: name, source: nil, hasStopCommand: false,
+                               hasStatusCommand: false, input: input))
         }
         return result
     }
 
     private static func info(
-        name: String, label: String, source: String?, hasStopCommand: Bool,
+        name: String, label: String, source: String?, hasStopCommand: Bool, hasStatusCommand: Bool,
         input: DevServerDerivationInput
     ) -> DevServerInfo {
         let file = input.liveFiles.filter { $0.file.server == name }.sorted { $0.path < $1.path }.first
@@ -58,12 +59,14 @@ enum DevServerStateDeriver {
         var pid: Int32?
         var endpoints: [DevServerEndpoint] = []
         var lastOutputID: UUID?
+        var fromStatus = false
         if let file {
             state = .running
             endpoints = file.file.endpoints
             pid = file.file.pid
         } else if check == .running {
             state = .running
+            fromStatus = true
         } else if let tabPID = tab?.status.runningPID {
             state = .running
             pid = tabPID
@@ -85,11 +88,13 @@ enum DevServerStateDeriver {
             lastOutputID = saved.id
         } else if check == .timedOut {
             state = .unknown
+            fromStatus = true
         }
         if pid == nil, let tabPID = tab?.status.runningPID { pid = tabPID }
         return DevServerInfo(
             name: name, label: label, source: source, state: state, exitCode: exitCode,
             endpoints: endpoints, terminalID: tab?.terminal.id, pid: pid, hasStopCommand: hasStopCommand,
-            lastOutputID: lastOutputID)
+            lastOutputID: lastOutputID, stateFromStatusCommand: fromStatus ? true : nil,
+            hasStatusCommand: hasStatusCommand)
     }
 }

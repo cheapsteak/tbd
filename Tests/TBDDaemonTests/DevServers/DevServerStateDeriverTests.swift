@@ -108,6 +108,32 @@ struct DevServerStateDeriverTests {
         #expect(derive(check: .timedOut)?.state == .unknown)
     }
 
+    /// The app remembers a state only when the `status` command decided it,
+    /// so the field must be set exactly then.
+    @Test func theStatusCommandIsNamedOnlyWhenItDecidedTheState() {
+        #expect(derive(check: .running)?.stateFromStatusCommand == true)
+        #expect(derive(tab: tab(.exited(code: 0)), check: .running)?.stateFromStatusCommand == true)
+        #expect(derive(check: .timedOut)?.stateFromStatusCommand == true)
+        // Something ranked above the status command decided it.
+        #expect(derive(files: [file()], check: .running)?.stateFromStatusCommand != true)
+        #expect(derive(tab: tab(.exited(code: 1)), check: .timedOut)?.stateFromStatusCommand != true)
+        let runningTab = derive(tab: tab(.running(pid: 42, expectedStart: nil)), check: .timedOut)
+        #expect(runningTab?.stateFromStatusCommand != true)
+        // Not run, or said not running.
+        #expect(derive()?.stateFromStatusCommand != true)
+        #expect(derive(check: .notRunning)?.stateFromStatusCommand != true)
+        #expect(derive(tab: tab(.running(pid: 42, expectedStart: nil)))?.stateFromStatusCommand != true)
+    }
+
+    @Test func aServerSaysWhetherItDeclaresAStatusCommand() {
+        let db = DeclaredDevServer(name: "db", command: "docker compose up -d db",
+                                   status: "docker compose ps db", source: .repoTOML)
+        let all = DevServerStateDeriver.derive(DevServerDerivationInput(
+            declared: [web, db], liveFiles: [file("storybook")], tabs: [:], statusChecks: [:]))
+        #expect(all.map(\.name) == ["web", "db", "storybook"])
+        #expect(all.map(\.hasStatusCommand) == [false, true, false])
+    }
+
     @Test func nothingAtAllIsStopped() {
         let info = derive(check: .notRunning)
         #expect(info?.state == .stopped)

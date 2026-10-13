@@ -31,6 +31,14 @@ enum DevServerRefreshTrigger: Sendable {
     }
 }
 
+/// What a `status`-command run decided for one server, remembered across
+/// refreshes that do not run `status` commands.
+struct DevServerRememberedStatus: Sendable, Equatable {
+    var state: DevServerStateKind
+    /// The server's TBD tab when the run answered, if it had one.
+    var terminalID: UUID?
+}
+
 extension AppState {
     func refreshDevServerSummary() async {
         do {
@@ -44,7 +52,8 @@ extension AppState {
     /// Fetches a worktree's server list. Repo-authored `status` commands run
     /// only when `trigger` is a user gesture on the servers
     /// (`DevServerRefreshTrigger.runsStatusCommands`); otherwise the servers
-    /// known only through one keep the state its last run found.
+    /// whose state a `status` command decided keep the answer its last run
+    /// found (`withLastKnownStatus`).
     func refreshDevServers(worktreeID: UUID, trigger: DevServerRefreshTrigger) async {
         let runStatus = trigger.runsStatusCommands
         let generation = (devServerListGenerations[worktreeID] ?? 0) &+ 1
@@ -62,8 +71,12 @@ extension AppState {
             logger.debug("server.list failed for \(worktreeID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
         }
-        if let statusGeneration, devServerStatusGenerations[worktreeID] == statusGeneration {
-            devServerLastStatus[worktreeID] = Self.statusOnlyStates(in: result)
+        // Compared against the newest run that answered, not the newest
+        // started: a newer run that failed leaves an older one's answers
+        // standing.
+        if let statusGeneration, statusGeneration > (devServerLandedStatusGenerations[worktreeID] ?? 0) {
+            devServerLandedStatusGenerations[worktreeID] = statusGeneration
+            devServerLastStatus[worktreeID] = Self.statusCommandStates(in: result)
         }
         if devServerListGenerations[worktreeID] == generation {
             devServerFetchedLists[worktreeID] = result
@@ -74,8 +87,21 @@ extension AppState {
         // A superseded `status` run still updates the last-known answers,
         // laid over the newest list.
         guard let fetched = devServerFetchedLists[worktreeID] else { return }
-        let shown = Self.withLastKnownStatus(fetched, lastKnown: devServerLastStatus[worktreeID] ?? [:])
+        let remembered = Self.prunedLastKnownStatus(devServerLastStatus[worktreeID] ?? [:], for: fetched)
+        devServerLastStatus[worktreeID] = remembered.isEmpty ? nil : remembered
+        let shown = Self.withLastKnownStatus(fetched, lastKnown: remembered)
         if devServerLists[worktreeID] != shown { devServerLists[worktreeID] = shown }
+    }
+
+    /// Drops what the app holds about a worktree's dev servers, when the
+    /// worktree leaves app state.
+    func forgetDevServerState(worktreeID: UUID) {
+        devServerFetchedLists.removeValue(forKey: worktreeID)
+        devServerLastStatus.removeValue(forKey: worktreeID)
+        devServerStatusGenerations.removeValue(forKey: worktreeID)
+        devServerLandedStatusGenerations.removeValue(forKey: worktreeID)
+        devServerLists.removeValue(forKey: worktreeID)
+        devServerActionMessages.removeValue(forKey: worktreeID)
     }
 
     /// The Servers menu's "Refresh status": runs the worktree's `status`
@@ -94,32 +120,61 @@ extension AppState {
         }
     }
 
-    /// The servers a `status`-command run found running or unknown by their
-    /// `status` command alone: declared, with no TBD tab, no pid and no
-    /// running-file URLs. Given how the daemon derives states, such a server
-    /// reads running only when its `status` command exited 0 and unknown
-    /// only when it timed out.
-    nonisolated static func statusOnlyStates(in list: DevServerListResult) -> [String: DevServerStateKind] {
-        var states: [String: DevServerStateKind] = [:]
-        for server in list.servers
-        where server.isDeclared && server.terminalID == nil && server.pid == nil && server.endpoints.isEmpty
-            && (server.state == .running || server.state == .unknown) {
-            states[server.name] = server.state
+    /// The servers whose state a `status`-command run decided — the daemon
+    /// marks them `stateFromStatusCommand` — with the TBD tab each had then.
+    /// Such a server reads running when its `status` command exited 0 and
+    /// unknown when it timed out, with nothing ranked above it.
+    nonisolated static func statusCommandStates(in list: DevServerListResult) -> [String: DevServerRememberedStatus] {
+        var states: [String: DevServerRememberedStatus] = [:]
+        for server in list.servers where server.stateFromStatusCommand == true {
+            states[server.name] = DevServerRememberedStatus(state: server.state, terminalID: server.terminalID)
         }
         return states
     }
 
-    /// A list fetched without `status` commands reads a status-only server
-    /// as stopped; show the state its last `status` run found instead. Any
-    /// other state comes from a running file or a TBD tab, which are live,
-    /// and wins.
+    /// The remembered answers still worth keeping against the newest list: a
+    /// server that is gone, or whose declaration no longer has a `status`
+    /// command, has nothing left to answer for it.
+    nonisolated static func prunedLastKnownStatus(
+        _ lastKnown: [String: DevServerRememberedStatus], for list: DevServerListResult
+    ) -> [String: DevServerRememberedStatus] {
+        guard !lastKnown.isEmpty else { return lastKnown }
+        var servers: [String: DevServerInfo] = [:]
+        for server in list.servers { servers[server.name] = server }
+        return lastKnown.filter { name, _ in
+            guard let server = servers[name] else { return false }
+            return server.hasStatusCommand != false
+        }
+    }
+
+    /// A list fetched without `status` commands cannot see what only a
+    /// `status` command can: a server known only through one reads stopped,
+    /// and one whose command detached (`docker compose up -d`) reads exited
+    /// by its finished TBD tab. Show the state the last `status` run found
+    /// instead — over a stopped server, or over an exited one whose tab is
+    /// the one that run saw. A newer exited tab, and every other state (a
+    /// running file, a running or unreadable TBD tab), is live and wins.
     nonisolated static func withLastKnownStatus(
-        _ list: DevServerListResult, lastKnown: [String: DevServerStateKind]
+        _ list: DevServerListResult, lastKnown: [String: DevServerRememberedStatus]
     ) -> DevServerListResult {
         guard !lastKnown.isEmpty else { return list }
         var merged = list
-        for index in merged.servers.indices where merged.servers[index].state == .stopped {
-            if let known = lastKnown[merged.servers[index].name] { merged.servers[index].state = known }
+        for index in merged.servers.indices {
+            let server = merged.servers[index]
+            guard let known = lastKnown[server.name] else { continue }
+            switch server.state {
+            case .stopped:
+                merged.servers[index].state = known.state
+            case .exited:
+                // Once the tab's row is gone, its saved output carries the
+                // tab's id.
+                guard let seen = known.terminalID, (server.terminalID ?? server.lastOutputID) == seen else { continue }
+                merged.servers[index].state = known.state
+                merged.servers[index].exitCode = nil
+                merged.servers[index].lastOutputID = nil
+            default:
+                continue
+            }
         }
         return merged
     }

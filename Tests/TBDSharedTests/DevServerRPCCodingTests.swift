@@ -41,6 +41,23 @@ struct DevServerRPCCodingTests {
         #expect(try JSONDecoder().decode(DevServerInfo.self, from: data).lastOutputID == nil)
     }
 
+    /// An older daemon sends neither status-command key; both decode nil.
+    @Test func aServerWithoutTheStatusCommandKeysDecodesNil() throws {
+        let info = DevServerInfo(
+            name: "db", label: "db", source: "tbd.toml", state: .running, exitCode: nil,
+            endpoints: [], terminalID: nil, pid: nil, hasStopCommand: false,
+            stateFromStatusCommand: true, hasStatusCommand: true)
+        #expect(try roundTrip(info) == info)
+        var object = try #require(try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(info)) as? [String: Any])
+        object.removeValue(forKey: "stateFromStatusCommand")
+        object.removeValue(forKey: "hasStatusCommand")
+        let decoded = try JSONDecoder().decode(
+            DevServerInfo.self, from: try JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.stateFromStatusCommand == nil)
+        #expect(decoded.hasStatusCommand == nil)
+    }
+
     /// A newer daemon's state must not fail an older app's whole decode.
     @Test func anUnknownStateDecodesAsUnknown() throws {
         let state = try JSONDecoder().decode(DevServerStateKind.self, from: Data(#""warming""#.utf8))

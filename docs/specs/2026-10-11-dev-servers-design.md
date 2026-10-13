@@ -267,13 +267,34 @@ daemon reports a dev-server change for it — fetch the list without `status`
 commands. They never run on a timer, never for the sidebar dot, and never
 during archive, which can happen with no click at all (see "On archive").
 
-Between those requests the app shows, for each server known only through its
-`status` command, the state that command's last run in the app found: running,
-or unknown when it timed out. Running files and TBD's tabs are read on every
-refresh and always win over a remembered answer. A server whose `status`
-command has not run in the app since it launched reads stopped until someone
-starts, stops, restarts or refreshes it. The remembered answers live in the
-app's memory only.
+Between those requests the app shows the answers of the last run in the app.
+In each server it lists, the daemon marks whether the `status` command decided
+the state — it exited 0 (running) or timed out (unknown) and nothing ranked
+above it — and whether the declaration has a `status` command at all. The app
+remembers each answer the `status` command decided, together with the server's
+TBD tab at that moment, and lays it over a list fetched without `status`
+commands in two cases:
+
+- **Stopped** – the server is known only through its `status` command, which
+  that list did not run.
+- **Exited, same tab** – the server's TBD tab has ended and is the tab the
+  remembered answer saw (or, once the tab's row is gone, its saved last output
+  is that tab's). This is a command that detaches: `docker compose up -d db`
+  exits at once and its tab reads exited, while `docker compose ps db` keeps
+  answering running. An exited tab from a later start is a new fact and wins.
+
+Every other state comes from a running file or a running or unreadable TBD tab,
+which are read on every refresh and always win. Each run replaces what the app
+remembers for the worktree; a run that fails replaces nothing, and an older run
+that answers after a newer one has answered is discarded. The app drops a
+remembered answer once the newest list no longer has that server or its
+declaration no longer has a `status` command, and drops everything it holds for
+a worktree when the worktree leaves the app (archived or removed). A server
+whose `status` command has not run in the app since it launched reads stopped,
+or exited by its tab, until someone starts, stops, restarts or refreshes it.
+The remembered answers live in the app's memory only, so a stop from the CLI of
+a server known only through its `status` command shows in the app at its next
+`status` run.
 
 TBD watches the running-file directory for changes and every 10 seconds
 re-checks the liveness of known running files and of its own server tabs, so a
@@ -354,13 +375,16 @@ reads *Exited*.
 ### On archive
 
 Archive stops every server in the worktree that TBD can see without running
-repo code — a running TBD tab, a TBD tab whose state cannot be read
-(*Unknown*), or a live running file — using the stop rules above, including a
-declared `stop`. Archive can run with no user gesture (auto-archive when a pull
-request merges), so it never runs a `status` command: a branch could otherwise
-get its own shell run without anyone clicking anything. A server known only
-through its `status` command is therefore not stopped by archive and keeps
-running; stop it before archiving, or let the repo's own tooling clean it up.
+repo code — a TBD tab still running the command, a TBD tab whose state cannot
+be read (*Unknown*), or a live running file — using the stop rules above,
+including a declared `stop`. Archive can run with no user gesture (auto-archive
+when a pull request merges), so it never runs a `status` command: a branch
+could otherwise get its own shell run without anyone clicking anything. A
+server known only through its `status` command is therefore not stopped by
+archive and keeps running; stop it before archiving, or let the repo's own
+tooling clean it up. That includes a server TBD started whose command detached
+— `docker compose up -d` exits at once, so its tab has ended and nothing but
+the `status` command knows the container runs.
 Archive does this in its first phase,
 right after the worktree's status flips to archived — so a concurrent `server
 start` is refused — and before its tabs are torn down, so group kills reach
@@ -499,9 +523,17 @@ Archive never runs one.
   already gone records no server state; start and stop detach the saved entry;
   "Show last output" opens the entry on the holder transport and focuses the
   tab on tmux.
-- Archive stops TBD-started and file-reported servers, runs no `status`
-  command and leaves a status-only server running, leaves other worktrees'
-  servers alone, and leaves no server reading *Exited*.
+- Archive stops servers with a live running file or a TBD tab still running
+  (or unreadable), runs no `status` command and leaves a server known only
+  through its `status` command running — including one TBD started whose
+  command detached and whose tab has exited — leaves other worktrees' servers
+  alone, and leaves no server reading *Exited*.
+- The daemon marks a state the `status` command decided, and whether a server
+  declares a `status` command. The app keeps a remembered answer over a
+  stopped server and over an exited one whose tab is the one the answer saw,
+  not over a newer exited tab; drops it when the server or its `status`
+  command is gone and when the worktree leaves the app; and keeps an older
+  run's answers when a newer run fails.
 - The OrphanGC leg deletes stale files only, and only under `gcEnabled`.
 - `scripts/test.sh` adds `DEV_SERVERS_DIR` to its fence, pointed at scratch, so
   no test reads or writes the real `~/.local/state/dev-servers/`.

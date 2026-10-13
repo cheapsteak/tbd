@@ -53,13 +53,23 @@ public struct DevServerInfo: Codable, Sendable, Equatable, Identifiable {
     /// output (holder transport; plan decision D2), or nil. Set only when
     /// `state == .exited`. Optional, so an older daemon's JSON decodes nil.
     public var lastOutputID: UUID?
+    /// True when the server's declared `status` command decided `state` —
+    /// it exited 0 (running) or timed out (unknown) and nothing ranked above
+    /// it. The app remembers such answers across refreshes that do not run
+    /// `status` commands. Optional, so an older daemon's JSON decodes nil.
+    public var stateFromStatusCommand: Bool?
+    /// Whether the server's declaration has a `status` command. Optional, so
+    /// an older daemon's JSON decodes nil (not known).
+    public var hasStatusCommand: Bool?
 
     public init(name: String, label: String, source: String?, state: DevServerStateKind,
                 exitCode: Int32?, endpoints: [DevServerEndpoint], terminalID: UUID?,
-                pid: Int32?, hasStopCommand: Bool, lastOutputID: UUID? = nil) {
+                pid: Int32?, hasStopCommand: Bool, lastOutputID: UUID? = nil,
+                stateFromStatusCommand: Bool? = nil, hasStatusCommand: Bool? = nil) {
         self.name = name; self.label = label; self.source = source; self.state = state
         self.exitCode = exitCode; self.endpoints = endpoints; self.terminalID = terminalID
         self.pid = pid; self.hasStopCommand = hasStopCommand; self.lastOutputID = lastOutputID
+        self.stateFromStatusCommand = stateFromStatusCommand; self.hasStatusCommand = hasStatusCommand
     }
 
     /// The first endpoint's URL — the server's main URL.

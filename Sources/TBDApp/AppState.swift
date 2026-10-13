@@ -998,13 +998,18 @@ final class AppState {
     /// The newest `server.list` result per worktree, as the daemon sent it —
     /// what `devServerLists` is rebuilt from when a `status` answer lands.
     @ObservationIgnored var devServerFetchedLists: [UUID: DevServerListResult] = [:]
-    /// Per worktree, the servers the last `status`-command run found running
-    /// or unknown by their `status` command alone (`statusOnlyStates`).
-    /// Replaced by each such run; refreshes without `status` commands keep it.
-    @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerStateKind]] = [:]
-    /// The newest `status`-command refresh started per worktree, so an older
-    /// run's answers never replace a newer run's.
+    /// Per worktree, the servers whose state the last `status`-command run
+    /// decided (`statusCommandStates`), with the TBD tab each had then.
+    /// Replaced by each such run; refreshes without `status` commands keep
+    /// it, minus servers that are gone or no longer declare a `status`
+    /// command. Dropped when the worktree leaves app state.
+    @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerRememberedStatus]] = [:]
+    /// The newest `status`-command refresh started per worktree.
     @ObservationIgnored var devServerStatusGenerations: [UUID: UInt64] = [:]
+    /// The newest `status`-command refresh that answered per worktree, so an
+    /// older run's answers never replace a newer run's, while a newer run
+    /// that failed does not discard an older one's.
+    @ObservationIgnored var devServerLandedStatusGenerations: [UUID: UInt64] = [:]
     /// The newest `server.list` started per worktree. Refreshes are not
     /// awaited by their triggers and can overlap; a result whose generation
     /// is no longer the newest is discarded, so an older read never lands
