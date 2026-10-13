@@ -129,16 +129,7 @@ extension WorktreeLifecycle {
         // refused rather than racing the teardown. A failure is logged and
         // the archive continues: the tab teardown below still ends what TBD
         // started.
-        if let devServerOperations {
-            for report in await devServerOperations.stopAllForArchive(worktree: worktree)
-            where !report.succeeded {
-                archiveLogger.warning("""
-                    archive: dev server \(report.name, privacy: .public) in \
-                    \(worktreeID, privacy: .public) did not stop: \
-                    \(report.message ?? "unknown", privacy: .public)
-                    """)
-            }
-        }
+        await stopDevServersForArchive(worktree: worktree)
 
         // Capture each terminal's scrollback into Closed Terminals history,
         // then kill its tmux window, reaping any wedged agent that survives
@@ -173,9 +164,7 @@ extension WorktreeLifecycle {
         // A holder server's exit — including the one archive's own stop
         // caused — is stamped only while its terminal row exists, so after
         // the delete above nothing can re-attach an entry this clears.
-        if devServerOperations != nil {
-            await db.terminalHistory.detachAllServerOutputs(worktreeID: worktreeID)
-        }
+        await detachDevServerOutputsForArchive(worktreeID: worktreeID)
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)
             await subscriptions?.broadcastPendingPrompts(
@@ -183,6 +172,30 @@ extension WorktreeLifecycle {
         }
 
         return (worktree.worktree, repo)
+    }
+
+    /// Archive's dev-server stop, shared by `beginArchiveWorktree` and
+    /// reconcile's archive of a vanished worktree: signals only (no repo
+    /// command runs), and a server that did not stop is logged while the
+    /// archive continues. A no-op when no operations are wired.
+    func stopDevServersForArchive(worktree: LocalWorktree) async {
+        guard let devServerOperations else { return }
+        for report in await devServerOperations.stopAllForArchive(worktree: worktree)
+        where !report.succeeded {
+            archiveLogger.warning("""
+                archive: dev server \(report.name, privacy: .public) in \
+                \(worktree.id, privacy: .public) did not stop: \
+                \(report.message ?? "unknown", privacy: .public)
+                """)
+        }
+    }
+
+    /// Archive's last dev-server step, run once the worktree's terminal rows
+    /// are deleted: no saved output may make a server read *Exited* after a
+    /// revive. Never throws; a no-op when no operations are wired.
+    func detachDevServerOutputsForArchive(worktreeID: UUID) async {
+        guard devServerOperations != nil else { return }
+        await db.terminalHistory.detachAllServerOutputs(worktreeID: worktreeID)
     }
 
     /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.

@@ -185,6 +185,36 @@ struct DevServerArchiveTests {
         #expect(try await f.db.terminals.get(id: tab.id) == nil)
     }
 
+    /// Reconcile archives a worktree whose checkout has vanished and runs
+    /// archive's dev-server steps: a server known only through a running file
+    /// (its `root` still names the vanished path) is signalled, no repo
+    /// command runs, and the worktree's saved server output is detached.
+    @Test func reconcileArchiveOfAVanishedWorktreeStopsServersAndDetachesOutputs() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let repo = try await f.db.repos.create(path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        // Never created on disk: no tbd.toml, no directory, not a git worktree.
+        let vanished = tempDir.appendingPathComponent("vanished").path
+        let wt = try await f.db.worktrees.create(
+            repoID: repo.id, name: "gone", branch: "tbd/gone", path: vanished, tmuxServer: "tbd-srvarc")
+        let file = try report(f, root: vanished, pid: 500)
+        let tab = try await f.db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
+        f.inspector.set(.exited(code: 143), for: tab.id)
+        await f.db.terminalHistory.recordServerExit(terminal: tab, serverName: "web", capture: nil, exitCode: 143)
+        #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: wt.id)["web"] != nil)
+
+        try await f.lifecycle.reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+
+        #expect(try await f.db.worktrees.get(id: wt.id)?.status == .archived)
+        #expect(f.runner.runs.isEmpty)
+        #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
+        #expect(!FileManager.default.fileExists(atPath: file))
+        #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: wt.id).isEmpty)
+    }
+
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {
         var f = try await Self.makeFixture(); defer { f.tearDown() }
         f.lifecycle.devServerOperations = nil

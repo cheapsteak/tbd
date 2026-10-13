@@ -441,6 +441,11 @@ started. Once the tabs' rows are deleted, archive detaches every server's
 saved last output, so no exit — including the one its own stop caused — leaves
 a server reading *Exited* after a revive.
 
+Reconcile's archive of a worktree whose checkout has vanished takes the same
+two steps in the same order — stopping servers before its tab teardown and
+detaching saved outputs once the tabs' rows are deleted — with a running file
+whose `root` names the vanished path still identifying the worktree.
+
 ## CLI
 
 `tbd server` is a new command group. Every command takes `--worktree`

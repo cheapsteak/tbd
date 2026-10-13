@@ -353,6 +353,12 @@ extension WorktreeLifecycle {
             try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: wt.id, allowedStatuses: [wt.status]
             ) { current in
+                // Dev servers stop first, as in `beginArchiveWorktree`, while
+                // their tabs' processes are alive to be signalled — including
+                // a server known only through a running file, whose `root`
+                // still names the vanished path. Signals only; a failure is
+                // logged and the reconcile continues.
+                await stopDevServersForArchive(worktree: current)
                 let terminals = try await db.terminals.list(worktreeID: current.id)
                 var recordedEveryKill = true
                 for terminal in terminals {
@@ -402,6 +408,8 @@ extension WorktreeLifecycle {
                     ClaudeHookOverlay.removePerSessionOverlay(
                         sessionKey: terminal.id.uuidString)
                 }
+                // After the rows are gone, as in `beginArchiveWorktree`.
+                await detachDevServerOutputsForArchive(worktreeID: current.id)
                 try await db.worktrees.archive(id: current.id)
             }
         }
