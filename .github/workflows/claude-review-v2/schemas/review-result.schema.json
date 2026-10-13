@@ -16,6 +16,15 @@
     "comment_body": {
       "type": ["string", "null"],
       "description": "The review comment's markdown, or null when the run produced no prose. render_comment.py already treats a non-string body as blank and falls back to a machine-rendered body plus a `::warning::` — a designed degradation. Failing the gate closed on the null instead would block the PR outright and post nothing, which is strictly worse than the fallback the renderer was built for. `findings` and `disposition` are NOT nullable by contrast: the validator iterates both, and a null there is a broken run with no safe reading."
+    },
+    "specialists_skipped": {
+      "type": ["object", "null"],
+      "properties": {
+        "reason": { "type": "string", "pattern": "\\S" }
+      },
+      "required": ["reason"],
+      "additionalProperties": false,
+      "description": "The orchestrator's explicit declaration that it reviewed the diff itself, without spawning the specialists, because it judged the change too small to benefit from the fan-out. Its presence is the ONLY thing that lets validate.py accept missing specialist findings files: without it a missing lens is indistinguishable from a crashed one, and fails closed. `reason` is one sentence saying why and must contain a non-whitespace character; a declaration without one fails the whole file. Null is the model's spelling of absence and declares nothing. The orchestrator's own findings go in `findings` exactly as merged findings would, so the verdict is computed from them by the same rule. Any specialist findings file that exists anyway is validated and must be dispositioned as usual — the declaration excuses an absent lens, never a present one."
     }
   },
   "required": ["findings", "disposition", "comment_body"],

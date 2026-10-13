@@ -22,6 +22,7 @@ from render_comment import (
     marker_block,
     prose_of,
     render_review_body,
+    skip_note,
 )
 
 REPO = "acme/acme-tools"
@@ -66,6 +67,13 @@ _ALL_BRANCHES = {
     "blank prose without findings": _result(),
     "whitespace-only prose": _result(comment_body="   \n\t\n  "),
     "unreadable result": None,
+    "declared specialist skip": _result(
+        comment_body="✅ Looks good.",
+        specialists_skipped={"reason": "one-line constant change"},
+    ),
+    "declared specialist skip with blank prose": _result(
+        specialists_skipped={"reason": "one-line constant change"},
+    ),
 }
 
 
@@ -472,3 +480,56 @@ def test_main_has_no_skip_note_mode(monkeypatch: pytest.MonkeyPatch) -> None:
                 "--result-file", "unused.json",
             ],
         )
+
+
+# --- declared specialist skip -------------------------------------------------
+#
+# A one-agent review must be visible on the PR whatever the model's prose says,
+# so the workflow writes its own line for a declared skip.
+
+
+def test_a_declared_skip_adds_a_workflow_line_after_the_prose() -> None:
+    prose = "✅ Looks good."
+    body, warning = _render(
+        _result(
+            comment_body=prose,
+            specialists_skipped={"reason": "one-line\n  constant change"},
+        ),
+        verdict="APPROVE",
+    )
+    assert warning is None
+    note = skip_note({"specialists_skipped": {"reason": "one-line constant change"}})
+    assert "without the specialist fan-out" in note
+    assert "one-line constant change" in note
+    assert body == "\n".join(
+        [marker_block(PATCH_ID, "APPROVE"), "", prose, "", note, "", _attribution()]
+    )
+
+
+def test_a_declared_skip_is_noted_on_the_fallback_path_too() -> None:
+    body, _ = _render(
+        _result(
+            findings=[_finding()],
+            specialists_skipped={"reason": "tiny diff"},
+        )
+    )
+    assert "rendered from `review-result.json`" in body
+    assert "without the specialist fan-out" in body
+    assert "tiny diff" in body
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [None, {}, {"reason": ""}, {"reason": "  "}, {"reason": 3}, "tiny", True],
+)
+def test_no_skip_line_without_a_well_formed_declaration(declaration: object) -> None:
+    result = _result(comment_body="✅ Looks good.", specialists_skipped=declaration)
+    body, _ = _render(result)
+    assert "specialist fan-out" not in body
+    assert skip_note(result) == ""
+
+
+def test_no_skip_line_on_an_ordinary_fanned_out_review() -> None:
+    body, _ = _render(_result(comment_body="✅ Looks good."))
+    assert "specialist fan-out" not in body
+    assert skip_note(None) == ""

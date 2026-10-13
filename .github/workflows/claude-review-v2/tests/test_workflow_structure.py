@@ -238,6 +238,24 @@ def test_the_description_cannot_clear_findings() -> None:
     assert "never downgrades or drops a finding" in merge_section
 
 
+def test_the_prompt_requires_an_explicit_declaration_for_a_skipped_fan_out() -> None:
+    # validate.py accepts missing specialist files ONLY on a schema-valid
+    # `specialists_skipped` declaration, so a prompt that allows the skip
+    # without demanding the declaration reproduces the failure it exists to
+    # fix: a sound one-agent review failing closed as a crashed fan-out. The
+    # decision precedes the fan-out, and the diagnostics must name it too.
+    prompt = _prompt_template()
+    before_fanout, _, _ = prompt.partition("STEP 1 — FAN OUT")
+    skip_section = before_fanout.partition("STEP 0 —")[2]
+    assert skip_section, "the prompt no longer has a STEP 0 before STEP 1"
+    assert '`specialists_skipped`: `{"reason":' in skip_section
+    assert "MANDATORY" in skip_section
+    assert "There is no size threshold" in skip_section
+    assert "HIGH or MEDIUM you report rejects" in skip_section
+    _, _, diagnostics = prompt.partition("<summary>Review diagnostics</summary>")
+    assert "specialists_skipped" in diagnostics.partition("</details>")[0]
+
+
 def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
     # "Report it in the diagnostics section" routes the failure into collapsed
     # prose no script reads: the session then submits empty findings, and

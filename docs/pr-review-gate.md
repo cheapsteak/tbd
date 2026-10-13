@@ -160,7 +160,10 @@ distinguishing error line in the job log is what an operator reads:
   consecutive blocks — and not a statement about the diff. Re-running may clear it;
   a recurrence is a pipeline defect.
 - **A partial fan-out** — one lens named as having produced no findings file while
-  another reported. The session ran and the review is incomplete.
+  another reported, or every lens named while `review-result.json` carries no
+  `specialists_skipped` declaration. The session ran and the review is incomplete.
+  A declared skip never lands here; see
+  [the next section](#a-diff-too-small-for-the-fan-out).
 - **A findings file the schema rejected** — a lens named as having produced a file
   that failed validation, printed directly beneath the schema error itself. That
   lens *did* run; its output was discarded, and the schema error above is the thing
@@ -195,6 +198,52 @@ only behind a trustworthy verdict. A stall is therefore something you read in th
 run — `validate.py` writes the diagnosis to the job log — never on the PR. Whatever
 a step annotation or check summary shows alongside it is the workflow's and GitHub's
 rendering of a failed step; the log line is the part the scripts guarantee.
+
+### A diff too small for the fan-out
+
+The orchestrator may decide, on its own judgement and with no size threshold, that a
+change is too small to benefit from two specialist lenses — a one-file test tweak, a
+typo, a one-line constant — and review the diff itself. Two specialists reading an
+eleven-line diff spend ten minutes and a session's worth of turns to say what one
+reader says in one.
+
+When it does, it records the decision in `review-result.json`:
+
+```json
+"specialists_skipped": {"reason": "<one sentence: why this diff did not need the fan-out>"}
+```
+
+and states the skip and its reason in the comment's Review diagnostics section. The
+declaration is what keeps a deliberately absent lens distinguishable from a crashed
+one: both leave the same absence on disk, and only the declaration says which it was.
+So it is the one thing `validate.py` accepts in place of the expected findings files,
+and only when the result file passes the schema with it — `reason` a string holding
+something other than whitespace. Everything else holds exactly as on a fanned-out run:
+
+- **Missing files without the declaration fail closed** with the partial-fan-out
+  error above, as does a declaration that is malformed (`{}`, an empty reason, a bare
+  string), because a schema-rejected result excuses nothing. `null` declares nothing.
+- **The verdict is computed the same way.** The orchestrator writes its own findings
+  into `findings` in the specialists' finding shape, and `validate.py` computes the
+  verdict from them by the usual rule, so a HIGH or MEDIUM it reports rejects the PR.
+  `disposition` is empty, because no specialist finding exists to account for.
+- **A specialist file that exists anyway is validated and dispositioned as usual.**
+  The declaration excuses an absent lens, never a present one: a schema-rejected file
+  still fails the run, and a valid file's findings still need disposition entries.
+- **The skip is visible on a green run.** `validate.py` prints a `::notice::`
+  annotation carrying the stated reason, and `render_comment.py` adds a
+  workflow-written line under the review prose saying the review ran without the
+  specialist fan-out and why, whatever the model's own prose mentions.
+- **The Stop hook needs nothing new.** It releases the session as soon as
+  `review-result.json` parses. If the orchestrator tries to stop before writing it,
+  the hold reason names the way out alongside the usual wait instruction.
+
+The cost is plain: on this design a one-agent review of a large PR would pass the
+gate. The declaration and its reason, in the annotation and on the PR, are what make
+that case visible to a human. A fixed size cap computed by `prepare.py` would have
+closed it mechanically and was not chosen, because the judgement call is the
+orchestrator's to make — a diff's line count says little about whether it needs a
+second lens.
 
 ## Trusted fork PRs need `allow-unsafe-pr-checkout`
 
