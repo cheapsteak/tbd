@@ -85,12 +85,22 @@ struct DevServerTabInspectorTests {
             == .runningUnverifiable(pid: getpid()))
     }
 
-    @Test func aLiveHolderChildIsAnchoredByItsRecordedStart() async {
-        let started = Date(timeIntervalSince1970: 1_760_190_000)
+    @Test func aLiveHolderChildIsAnchoredByItsRecordedStart() async throws {
+        let started = try #require(DevServerProcessProbe.kernelInfo(pid: getpid())).startTime
         var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
                                 childPID: getpid(), holderChildStartedAt: started)
         terminal.serverName = "web"
         #expect(await holderInspector().status(of: terminal, tmuxServer: "unused")
             == .running(pid: getpid(), expectedStart: started))
+    }
+
+    /// The recorded child pid is alive but started far from the recorded
+    /// time: a reused pid, so the server's command has ended.
+    @Test func aHolderChildPidReusedByAnotherProcessReadsExited() async throws {
+        let actual = try #require(DevServerProcessProbe.kernelInfo(pid: getpid())).startTime
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+                                childPID: getpid(), holderChildStartedAt: actual.addingTimeInterval(-86_400))
+        terminal.serverName = "web"
+        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused") == .exited(code: nil))
     }
 }

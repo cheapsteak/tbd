@@ -50,7 +50,9 @@ protocol DevServerTabInspecting: Sendable {
 
 /// tmux: `#{pane_dead}` / `#{pane_dead_status}`. Holder: the registry's last
 /// known child status, else the liveness of the registry's adopted child (or,
-/// for a session it has not adopted, the row's recorded child pid). The registry's
+/// for a session it has not adopted, the row's recorded child pid). A pid the
+/// row recorded a start time for counts as alive only while the kernel's start
+/// time for it still matches, so a reused pid reads ended. The registry's
 /// status is in memory only, so after a daemon restart an ended holder tab
 /// reads `exited(code: nil)` here; the deriver then takes the code from the
 /// server's saved last output (docs/specs/2026-10-11-dev-servers-design.md,
@@ -59,6 +61,8 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
     let tmux: TmuxManager
     let holderRegistry: HolderRegistry?
     let signaller: any ProcessSignaller
+    /// Reads the kernel's start time for a pid checked against the row's.
+    var probe: DevServerProcessProbe = .live
 
     func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus {
         switch terminal.transport {
@@ -82,13 +86,22 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
             if let adopted = await holderRegistry?.adoptedProcess(for: terminal.id) {
                 guard signaller.isAlive(adopted.childPID) else { return .exited(code: nil) }
                 if adopted.childPID == terminal.childPID, let started = terminal.holderChildStartedAt {
+                    guard isSameProcess(adopted.childPID, startedAt: started) else { return .exited(code: nil) }
                     return .running(pid: adopted.childPID, expectedStart: started)
                 }
                 return .running(pid: adopted.childPID, expectedStart: nil)
             }
             guard let pid = terminal.childPID, signaller.isAlive(pid) else { return .exited(code: nil) }
             guard let started = terminal.holderChildStartedAt else { return .runningUnverifiable(pid: pid) }
+            guard isSameProcess(pid, startedAt: started) else { return .exited(code: nil) }
             return .running(pid: pid, expectedStart: started)
         }
+    }
+
+    /// Whether `pid` is still the process the row recorded: alive, not a
+    /// zombie, and started within the same window a stop's kill allows.
+    private func isSameProcess(_ pid: Int32, startedAt recorded: Date) -> Bool {
+        guard let info = probe.info(pid), !info.isZombie else { return false }
+        return abs(info.startTime.timeIntervalSince(recorded)) <= AgentReaper.defaultHolderIdentityWindow
     }
 }
