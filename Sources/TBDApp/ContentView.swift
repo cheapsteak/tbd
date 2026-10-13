@@ -398,13 +398,14 @@ struct ContentView: View {
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
             }
-            // The Servers button's list, with `status` commands, whenever a
-            // single worktree becomes selected (plan decision D3: the toolbar
-            // menu exposes no reliable will-open hook). Actions and
+            // The Servers button's list whenever a single worktree becomes
+            // selected (the toolbar menu exposes no reliable will-open hook).
+            // Selection is not a gesture on the servers, so repo `status`
+            // commands do not run here; actions, "Refresh status" and
             // `devServersChanged` deltas refresh it from `AppState`.
             .task(id: appState.selectedWorktreeIDs.count == 1 ? appState.selectedWorktreeIDs.first : nil) {
                 guard appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first else { return }
-                await appState.refreshDevServers(worktreeID: id, runStatusCommands: true)
+                await appState.refreshDevServers(worktreeID: id, trigger: .selection)
             }
 
             StatusBarView()
@@ -591,9 +592,9 @@ struct ContentView: View {
     }
 
     /// The Servers menu: the main URL first (D4), then each server with its
-    /// state, its URLs and its actions; then Start all / Stop all; then parse
-    /// errors and the last action's failures. Rebuilt via `.id` (see
-    /// `ServersButtonLabel.splitButtonID`).
+    /// state, its URLs and its actions; then Start all / Stop all / Refresh
+    /// status; then parse errors and the last action's failures. Rebuilt via
+    /// `.id` (see `ServersButtonLabel.splitButtonID`).
     @ViewBuilder
     private func serversMenu(worktreeID: UUID, list: DevServerListResult) -> some View {
         if let primaryURL = AppState.primaryDevServerURL(list),
@@ -643,6 +644,11 @@ struct ContentView: View {
             Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: stopAllNames) }
         }
         .disabled(stopAllNames.isEmpty)
+        // The app's only way to run the repo's `status` commands without
+        // starting or stopping anything.
+        Button("Refresh status") {
+            Task { await appState.refreshDevServerStatus(worktreeID: worktreeID) }
+        }
         let problems = list.parseErrors.map { "\(($0.path as NSString).lastPathComponent): \($0.message)" }
             + (appState.devServerActionMessages[worktreeID] ?? [])
         if !problems.isEmpty {

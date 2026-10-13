@@ -11,8 +11,9 @@ extension RPCMethod {
 
 public struct DevServerListParams: Codable, Sendable {
     public let worktreeID: UUID
-    /// Run declared `status` commands (5 s timeout each). The sidebar never
-    /// asks for this; `tbd server list/status` and the toolbar do.
+    /// Run declared `status` commands (5 s timeout each). Only explicit user
+    /// requests ask for this: `tbd server list/status`, and the app after a
+    /// Start, Stop or Restart and on "Refresh status".
     public let runStatusCommands: Bool
     public init(worktreeID: UUID, runStatusCommands: Bool) {
         self.worktreeID = worktreeID; self.runStatusCommands = runStatusCommands

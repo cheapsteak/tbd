@@ -144,7 +144,7 @@ A server's state is the first of these that applies:
 4. **Unknown** – TBD could not read its tab's state, or the `status` command timed out, and nothing above applies.
 5. **Stopped** – none of the above.
 
-`status` commands run only on demand: by `tbd server list` and `tbd server status`, and in the app when a worktree is selected, after each Start, Stop or Restart, and when the daemon reports a change for the selected worktree. They never run on a timer or for the sidebar dot. TBD watches the running-file directory and, every 10 seconds, re-checks the liveness of known files and of its own server tabs, so a server that died without cleaning up drops out of the sidebar dot.
+`status` commands run only when you ask: by `tbd server list` and `tbd server status`, and in the app after each Start, Stop or Restart and when you pick **Refresh status** in the Servers menu. Selecting a worktree never runs them, because a `status` command is the repo's own shell and a branch you are only looking at could change it. Between runs, the app shows a server known only through its `status` command in the state its last run found; until one has run, that server reads Stopped. Archiving a worktree also runs them, to find which servers to stop. They never run on a timer or for the sidebar dot. TBD watches the running-file directory and, every 10 seconds, re-checks the liveness of known files and of its own server tabs, so a server that died without cleaning up drops out of the sidebar dot.
 
 ### Stopping
 

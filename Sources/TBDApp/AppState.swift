@@ -989,10 +989,22 @@ final class AppState {
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     var prBindings: [UUID: [PRBinding]] = [:]
-    /// Each worktree's dev servers as last fetched (`server.list`). Fetched
-    /// for the selected worktree on selection (with `status` commands) and
-    /// after every Start/Stop/Restart. See `AppState+DevServers.swift`.
+    /// Each worktree's dev servers as shown: the newest `server.list` result
+    /// with the last-known `status` command answers laid over it. Fetched for
+    /// the selected worktree on selection and on `devServersChanged` (without
+    /// `status` commands), and after every Start/Stop/Restart and "Refresh
+    /// status" (with them). See `AppState+DevServers.swift`.
     var devServerLists: [UUID: DevServerListResult] = [:]
+    /// The newest `server.list` result per worktree, as the daemon sent it —
+    /// what `devServerLists` is rebuilt from when a `status` answer lands.
+    @ObservationIgnored var devServerFetchedLists: [UUID: DevServerListResult] = [:]
+    /// Per worktree, the servers the last `status`-command run found running
+    /// or unknown by their `status` command alone (`statusOnlyStates`).
+    /// Replaced by each such run; refreshes without `status` commands keep it.
+    @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerStateKind]] = [:]
+    /// The newest `status`-command refresh started per worktree, so an older
+    /// run's answers never replace a newer run's.
+    @ObservationIgnored var devServerStatusGenerations: [UUID: UInt64] = [:]
     /// The newest `server.list` started per worktree. Refreshes are not
     /// awaited by their triggers and can overlap; a result whose generation
     /// is no longer the newest is discarded, so an older read never lands

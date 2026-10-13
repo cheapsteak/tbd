@@ -257,11 +257,23 @@ Each server's state is derived, in this order:
    the pane or its server is absent makes a tab gone.
 5. **Stopped** – none of the above.
 
-`status` commands run with a 5-second timeout, and only on demand: by `tbd
-server list` and `tbd server status`, and in the app when a single worktree
-becomes selected, after every Start, Stop or Restart the app issues, and when
-the daemon reports a dev-server change for the selected worktree. They never
-run on a timer and never for the sidebar dot.
+`status` commands run with a 5-second timeout, and only on a user's explicit
+request: by `tbd server list` and `tbd server status`, and in the app after
+every Start, Stop or Restart it issues and when someone picks "Refresh status"
+in the Servers menu. A `status` command is repo-authored shell, and a branch
+can change it, so merely looking at a worktree must not run it: the app's
+automatic refreshes — when a single worktree becomes selected, and when the
+daemon reports a dev-server change for it — fetch the list without `status`
+commands. They never run on a timer and never for the sidebar dot. Archive
+also runs them, as part of stopping a worktree's servers (see "On archive").
+
+Between those requests the app shows, for each server known only through its
+`status` command, the state that command's last run in the app found: running,
+or unknown when it timed out. Running files and TBD's tabs are read on every
+refresh and always win over a remembered answer. A server whose `status`
+command has not run in the app since it launched reads stopped until someone
+starts, stops, restarts or refreshes it. The remembered answers live in the
+app's memory only.
 
 TBD watches the running-file directory for changes and every 10 seconds
 re-checks the liveness of known running files and of its own server tabs, so a
@@ -392,8 +404,9 @@ output`.
     plus "Show last output" for an exited server. A server with nothing
     running that still has its TBD tab — an exited one, declared or not —
     shows "Close" in place of Stop, which closes that tab. Then "Start all"
-    and "Stop all", which acts on every server showing Stop or Close; then
-    any parse errors and the last action's failures.
+    and "Stop all", which acts on every server showing Stop or Close, and
+    "Refresh status", which runs the worktree's `status` commands; then any
+    parse errors and the last action's failures.
 - **Sidebar dot** – a green dot on a worktree's row when any of its servers is
   running according to a live running file or a live TBD server tab. The dot
   never runs `status` commands. Stopped and exited servers show nothing.
@@ -413,7 +426,10 @@ process is gone.
 
 A repo that has only `.claude/launch.json` counts as opted in: it gains the
 Servers button and Start/Stop/logs with no extra setup, and gains open buttons
-once it writes running files. Nothing runs until someone clicks Start.
+once it writes running files. Nothing runs until someone clicks Start, and
+no repo `status` command runs until someone starts, stops, restarts or
+refreshes the servers, archives the worktree, or runs `tbd server list` or
+`tbd server status`.
 
 ## Who reclaims what
 
