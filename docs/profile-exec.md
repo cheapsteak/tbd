@@ -52,9 +52,12 @@ own account into the command:
   `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`,
   `ANTHROPIC_VERTEX_PROJECT_ID`, and the model defaults
   `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
-  `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`. A profile
-  that needs one sets it in its env overrides, which are applied after the
-  clear.
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
+  `CLAUDE_CODE_SUBAGENT_MODEL`. A profile that needs one sets it in its env
+  overrides, which are applied after the clear.
+
+The list is kept by hand, so a selector it does not name passes through from the
+caller.
 
 `AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION` stay inherited unless the
 profile sets them: other tools read them, and Claude Code consults them only for
@@ -73,9 +76,10 @@ are its own. When the command never runs, the status follows `env(1)`:
 - **127** – the command was not found.
 
 `tbd profile exec` prints nothing on success and never prints a credential. The
-daemon hands the credential over its owner-only socket in the
-`modelProfile.execEnvironment` result, whose description lists variable names
-only.
+daemon hands the credential over in the `modelProfile.execEnvironment` result,
+whose description lists variable names only. That method is served only on the
+daemon's Unix socket, which admits only its owner; the daemon's loopback HTTP
+transport refuses it.
 
 ## Stricter than a spawn
 

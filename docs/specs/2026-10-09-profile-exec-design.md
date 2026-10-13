@@ -124,8 +124,13 @@ command. When the command never runs, the status follows `env(1)`, `nice(1)` and
   unknown, a token or API-key profile has no stored credential, or the config
   directory could not be provisioned.
 - **126** – the command was found but could not be executed.
-- **127** – the command was not found, looked up on the child's `PATH` (or
-  `execvp`'s default path when it has none).
+- **127** – the command was not found.
+
+A command without a slash is looked up the way `execvp(3)` does it: on the
+child's `PATH`, or `execvp`'s default path when it has none, with an empty entry
+meaning the current directory and same-named directories skipped. A
+non-executable match is used only when no executable one exists, so it fails
+with 126 rather than reading as missing.
 
 `tbd profile exec` prints nothing when it succeeds, and a one-line reason on
 stderr when it does not.
@@ -151,12 +156,27 @@ only through tmux's `-e` into a spawned terminal's environment, never into
 
 `modelProfile.execEnvironment` is the one RPC result that carries a whole
 secret. It returns the token so the CLI can put it into the child's environment,
-the same destination a spawn delivers it to. The boundary it crosses is the
-daemon's socket, which the daemon `chmod`s to the owner before listening. That
-is the same boundary as the 0600 token file the daemon itself reads: any process
-that can connect to the socket can already read the file.
+the same destination a spawn delivers it to.
 
-Three properties keep the new path from becoming a leak:
+The daemon serves its RPCs on two transports, and only one of them is a fit:
+
+- **The Unix socket**, which the daemon `chmod`s to its owner before listening.
+  That is the same boundary as the 0600 token file the daemon itself reads: any
+  process that can connect to the socket can already read the file.
+- **A loopback HTTP server** (`HTTPServer`, `POST /rpc` on an auto-assigned
+  `127.0.0.1` port). A loopback port is not owner-only: any local process can
+  reach it, under any user.
+
+So the method is **socket-only**. `RPCMethod.socketOnly` names it, and the HTTP
+handler refuses every method in that set before the router sees the request. A
+test starts the HTTP server with a stored token, confirms the method is refused
+and the token absent from the response, and confirms an ordinary method is
+still answered there. Any future method whose result carries a secret belongs
+in the same set.
+
+Four properties keep the new path from becoming a leak:
+
+- **It never crosses the HTTP transport.** As above.
 
 - **It is never printed.** `ModelProfileExecEnvironmentResult`'s `description`,
   `debugDescription` and `customMirror` list variable names only, so logging,
@@ -179,10 +199,12 @@ the whole token, and one named RPC does.
   `otherSelectors` is disjoint from it.
 - `ModelProfileRPCTests` – the handler against the real file store under the
   test fence: each kind's exact environment, both refusals, override merging,
-  an unknown id, and redaction of the result's descriptions.
+  an unknown id, redaction of the result's descriptions, and the HTTP
+  transport refusing the method without the token reaching its response.
 - `ProfileCommandsTests` – argument parsing, clear-then-apply against a caller
-  carrying another profile's credentials, executable lookup, and the status
-  mapping.
+  carrying another profile's credentials, `execvp`-style executable lookup
+  (empty `PATH` entries, skipped directories, an unrunnable match), and the
+  status mapping.
 
 ## Rejected alternatives
 

@@ -263,11 +263,49 @@ struct ProfileCommandsTests {
 
         #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir:\(dir.path)") == tool.path)
         #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir") == nil)
+        // An empty PATH entry is the current directory, wherever it falls.
+        #expect(profileExecExecutablePath("tool", searchPath: ":/nonexistent-dir",
+                                          currentDirectory: dir.path) == tool.path)
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir:",
+                                          currentDirectory: dir.path) == tool.path)
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir",
+                                          currentDirectory: dir.path) == nil)
         // A path is taken as given, found or not; execve reports a missing one.
         #expect(profileExecExecutablePath("./tool", searchPath: dir.path) == "./tool")
         #expect(profileExecExecutablePath("/no/such/tool", searchPath: dir.path) == "/no/such/tool")
         // No PATH in the child's environment: execvp's default search path.
         #expect(profileExecExecutablePath("sh", searchPath: nil) == "/bin/sh")
+    }
+
+    @Test func execExecutablePath_prefersAnExecutableAndReportsAnUnrunnableMatch() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("tbd-profile-exec-\(UUID().uuidString)", isDirectory: true)
+        let plain = root.appendingPathComponent("plain", isDirectory: true)
+        let runnable = root.appendingPathComponent("runnable", isDirectory: true)
+        let dirs = root.appendingPathComponent("dirs", isDirectory: true)
+        for dir in [plain, runnable, dirs] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        // The same name three ways: a non-executable file, a directory, and an
+        // executable file.
+        let unrunnable = plain.appendingPathComponent("tool")
+        try Data("#!/bin/sh\n".utf8).write(to: unrunnable)
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: unrunnable.path)
+        try fm.createDirectory(at: dirs.appendingPathComponent("tool"), withIntermediateDirectories: true)
+        let tool = runnable.appendingPathComponent("tool")
+        try Data("#!/bin/sh\n".utf8).write(to: tool)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+
+        // An executable later on PATH wins over an unrunnable match before it.
+        #expect(profileExecExecutablePath("tool", searchPath: "\(plain.path):\(dirs.path):\(runnable.path)")
+            == tool.path)
+        // With no executable at all, the unrunnable match is returned, so exec
+        // fails with EACCES (126) instead of reporting the command missing (127).
+        #expect(profileExecExecutablePath("tool", searchPath: "\(dirs.path):\(plain.path)") == unrunnable.path)
+        // A directory alone is not a match.
+        #expect(profileExecExecutablePath("tool", searchPath: dirs.path) == nil)
     }
 
     @Test func execStatus_followsTheEnvConvention() {

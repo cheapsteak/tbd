@@ -574,13 +574,38 @@ enum ProfileExecStatus {
 /// `PATH`.
 let profileExecDefaultSearchPath = "/usr/bin:/bin"
 
-/// The path to exec for `command`, the way a shell finds it: as given when it
-/// contains a slash, else the first executable match on `searchPath` (or on
-/// `profileExecDefaultSearchPath` when the child has no `PATH`). nil when
-/// nothing matches.
-func profileExecExecutablePath(_ command: String, searchPath: String?) -> String? {
+/// The path to exec for `command`, the way `execvp(3)` and a shell find it.
+///
+/// - A command containing a slash is taken as given.
+/// - Otherwise each directory of `searchPath` is tried in order, or of
+///   `profileExecDefaultSearchPath` when the child has no `PATH`. An empty
+///   entry means `currentDirectory`, as POSIX specifies, and directories named
+///   like the command are skipped.
+/// - The first executable regular file wins. With none, the first match that is
+///   not executable is returned, so `execve` reports it unrunnable (126)
+///   rather than missing (127).
+///
+/// nil when nothing matches. `currentDirectory` is a parameter so tests can
+/// name it without changing the process-wide working directory.
+func profileExecExecutablePath(
+    _ command: String,
+    searchPath: String?,
+    currentDirectory: String = "."
+) -> String? {
     if command.contains("/") { return command }
-    return findExecutable(named: command, searchPath: searchPath ?? profileExecDefaultSearchPath)
+    let fileManager = FileManager.default
+    var unrunnable: String?
+    let entries = (searchPath ?? profileExecDefaultSearchPath)
+        .split(separator: ":", omittingEmptySubsequences: false)
+    for entry in entries {
+        let candidate = "\(entry.isEmpty ? currentDirectory : String(entry))/\(command)"
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: candidate, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { continue }
+        if fileManager.isExecutableFile(atPath: candidate) { return candidate }
+        if unrunnable == nil { unrunnable = candidate }
+    }
+    return unrunnable
 }
 
 /// The one-line reason `tbd profile exec` prints when it fails before running

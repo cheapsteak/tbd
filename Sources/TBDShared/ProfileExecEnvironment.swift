@@ -7,7 +7,7 @@ import Foundation
 /// so `PATH`, `HOME` and the working tools still reach it. Two steps then make
 /// the profile, and only the profile, decide which account the child runs on:
 ///
-/// 1. **Clear** every variable in `clearedKeys` from the inherited environment.
+/// 1. **Clear** the variables in `clearedKeys` from the inherited environment.
 ///    Each of them selects a credential, provider, endpoint or model for
 ///    `claude`, and one the profile does not set itself would otherwise leak
 ///    through from the caller. The case that matters: a caller that is itself a
@@ -44,6 +44,10 @@ public enum ProfileExecEnvironment {
     /// location settings that other tools also read (`AWS_REGION`,
     /// `CLOUD_ML_REGION`) stay inherited, for the reason given on
     /// `profileKeys`.
+    ///
+    /// This list is maintained by hand against Claude Code's documented
+    /// variables, so a selector it does not name passes through from the
+    /// caller. Add one here when Claude Code grows one.
     public static let otherSelectors: Set<String> = [
         // Credentials that authenticate ahead of a config dir's login.
         "ANTHROPIC_AUTH_TOKEN",
@@ -62,6 +66,7 @@ public enum ProfileExecEnvironment {
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
     ]
 
     /// The child's environment: `inherited` without `clearedKeys`, with

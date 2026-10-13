@@ -213,6 +213,12 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
+
+    /// Methods served only on the daemon's Unix socket, never on its loopback
+    /// HTTP transport. The socket's mode admits only its owner; a loopback port
+    /// answers any local process, under any user. A method whose result carries
+    /// a secret belongs here.
+    public static let socketOnly: Set<String> = [modelProfileExecEnvironment]
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
@@ -1088,11 +1094,12 @@ public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
 /// **This is the one RPC result that carries a whole secret.** Everywhere else
 /// a token profile is shown only by its masked tail. This result exists so
 /// `tbd profile exec` can put the credential into a child process's
-/// environment, which is where a spawned session's credential goes too. It
-/// travels over the daemon's owner-only socket, the same boundary as the 0600
-/// file the daemon reads it from. `description`, `debugDescription` and
-/// `customMirror` name the keys only, so printing, interpolating or dumping the
-/// value cannot reveal the secret.
+/// environment, which is where a spawned session's credential goes too. It is
+/// served only on the daemon's Unix socket (`RPCMethod.socketOnly`), whose mode
+/// admits only its owner: the same boundary as the 0600 file the daemon reads
+/// it from. The loopback HTTP transport refuses it. `description`,
+/// `debugDescription` and `customMirror` name the keys only, so printing,
+/// interpolating or dumping the value cannot reveal the secret.
 public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
     CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
