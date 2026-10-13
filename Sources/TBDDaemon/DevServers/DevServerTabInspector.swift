@@ -88,22 +88,31 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
             if let adopted = await holderRegistry?.adoptedProcess(for: terminal.id) {
                 guard signaller.isAlive(adopted.childPID) else { return .exited(code: nil) }
                 if adopted.childPID == terminal.childPID, let started = terminal.holderChildStartedAt {
-                    guard isSameProcess(adopted.childPID, startedAt: started) else { return .exited(code: nil) }
-                    return .running(pid: adopted.childPID, expectedStart: started)
+                    return identified(adopted.childPID, startedAt: started)
                 }
                 return .runningUnverifiable(pid: adopted.childPID)
             }
             guard let pid = terminal.childPID, signaller.isAlive(pid) else { return .exited(code: nil) }
             guard let started = terminal.holderChildStartedAt else { return .runningUnverifiable(pid: pid) }
-            guard isSameProcess(pid, startedAt: started) else { return .exited(code: nil) }
-            return .running(pid: pid, expectedStart: started)
+            return identified(pid, startedAt: started)
         }
     }
 
-    /// Whether `pid` is still the process the row recorded: alive, not a
-    /// zombie, and started within the same window a stop's kill allows.
-    private func isSameProcess(_ pid: Int32, startedAt recorded: Date) -> Bool {
-        guard let info = probe.info(pid), !info.isZombie else { return false }
-        return abs(info.startTime.timeIntervalSince(recorded)) <= AgentReaper.defaultHolderIdentityWindow
+    /// Running when `pid` is still the process the row recorded — alive,
+    /// not a zombie, and started within the same window a stop's kill
+    /// allows — and exited when it is definitely not. A read that fails is
+    /// unknown: the job may still run.
+    private func identified(_ pid: Int32, startedAt recorded: Date) -> DevServerTabStatus {
+        switch probe.read(pid) {
+        case .gone:
+            return .exited(code: nil)
+        case .unreadable(let reason):
+            return .unknown(reason: "process \(pid) could not be read: \(reason)")
+        case .process(let info):
+            guard !info.isZombie,
+                  abs(info.startTime.timeIntervalSince(recorded)) <= AgentReaper.defaultHolderIdentityWindow
+            else { return .exited(code: nil) }
+            return .running(pid: pid, expectedStart: recorded)
+        }
     }
 }
