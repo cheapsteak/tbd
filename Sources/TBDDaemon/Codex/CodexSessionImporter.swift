@@ -642,9 +642,11 @@ final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         inbox.finish(CodexSessionImportError.processExited(status: status, stderr: stderr))
     }
 
-    /// Test observability; see `ReadState.exitReports`.
+    /// Test observability; see `ReadState.exitReports`. `capturedStderr` is
+    /// what the readability handler has captured so far.
     var exitReportCount: Int { readState.withLock { $0.exitReports } }
     var graceTimersScheduledCount: Int { readState.withLock { $0.graceTimersScheduled } }
     var hasObservedExit: Bool { readState.withLock { $0.exitStatus != nil } }
     var isStderrDrained: Bool { readState.withLock { $0.stderrDrained } }
+    var capturedStderr: String { readState.withLock { String(data: $0.stderr, encoding: .utf8) ?? "" } }
 }

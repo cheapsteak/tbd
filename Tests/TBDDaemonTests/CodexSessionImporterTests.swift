@@ -282,15 +282,25 @@ struct CodexSessionImporterTests {
         let description: String
     }
 
-    // Tier 1: the grace under test runs only on virtual time; the pollers
-    // below observe real pipe delivery and are bounded.
+    // Tier 2: it spawns real subprocesses. The grace under test runs only on
+    // virtual time; the pipe delivery it waits on is real, and bounded.
     @Test("a grandchild holding stderr open is reported once, after the grace")
     func graceReportsExitOnceWhenGrandchildHoldsStderr() async throws {
         let dir = try makeScratchDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let pidFile = dir.appendingPathComponent("grandchild.pid")
+        // The grandchild's hold on stderr is bounded by this test's lifetime,
+        // never by a timer: a wall-clock hold (`sleep 30`) lapses on its own
+        // under the saturated pass and reports the exit before the grace is
+        // advanced. fd 3 duplicates the child's stdin (the connection's stdin
+        // pipe) before backgrounding, because POSIX gives an async list
+        // /dev/null as stdin ahead of explicit redirections. `cat <&3` then
+        // blocks on that pipe, and its stdout goes to stderr so it holds the
+        // stderr write end until it is killed by captured pid or the
+        // connection's stdin write end closes (close(), or this process dying).
         let script = try makeFakeCodex(in: dir, body: """
-            sleep 30 >&2 &
+            exec 3<&0
+            cat <&3 >&2 &
             echo $! > '\(pidFile.path)'
             echo last-line >&2
             exit 3
@@ -318,6 +328,17 @@ struct CodexSessionImporterTests {
         #expect(connection.exitReportCount == 0)
         #expect(!connection.isStderrDrained)
 
+        // The grace exists to let stderr land; virtual time lapses it in zero
+        // real time, so wait for real delivery of the last line first.
+        guard await pollUntilTrue(timeout: TestDeadlines.saturatedPass, {
+            connection.capturedStderr.contains("last-line")
+        }) == .satisfied else {
+            throw PollTimedOut(description:
+                "the child's last stderr line was never captured before the grace; "
+                + "stderr=\(connection.capturedStderr.debugDescription) "
+                + "drained=\(connection.isStderrDrained)")
+        }
+
         await clock.advance(by: ProcessCodexAppServerConnection.stderrDrainGrace)
         do {
             _ = try await receive.value
@@ -329,7 +350,10 @@ struct CodexSessionImporterTests {
 
         // A late EOF must not report the exit a second time.
         if grandchild > 0 { kill(grandchild, SIGKILL) }
-        guard await pollUntilTrue(timeout: .seconds(10), { connection.isStderrDrained })
+        // The defer must not re-signal a pid that may since have been reused.
+        grandchild = 0
+        guard await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, { connection.isStderrDrained })
             == .satisfied else {
             throw PollTimedOut(description:
                 "stderr never reached EOF after killing the grandchild; "
