@@ -58,6 +58,22 @@ struct DevServerRPCCodingTests {
         #expect(decoded.hasStatusCommand == nil)
     }
 
+    /// The ended tab run survives the wire, and an older daemon that sends
+    /// no `exitedTab` decodes nil.
+    @Test func theExitedTabSurvivesTheWireAndDecodesNilWhenAbsent() throws {
+        let info = DevServerInfo(
+            name: "db", label: "db", source: "tbd.toml", state: .running, exitCode: nil,
+            endpoints: [], terminalID: UUID(), pid: nil, hasStopCommand: false,
+            exitedTab: DevServerExitedTab(terminalID: UUID(), pid: 700))
+        #expect(try roundTrip(info) == info)
+        var object = try #require(try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(info)) as? [String: Any])
+        object.removeValue(forKey: "exitedTab")
+        let decoded = try JSONDecoder().decode(
+            DevServerInfo.self, from: try JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.exitedTab == nil)
+    }
+
     /// A newer daemon's state must not fail an older app's whole decode.
     @Test func anUnknownStateDecodesAsUnknown() throws {
         let state = try JSONDecoder().decode(DevServerStateKind.self, from: Data(#""warming""#.utf8))

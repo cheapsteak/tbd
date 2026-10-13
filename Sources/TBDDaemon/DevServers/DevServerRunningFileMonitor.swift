@@ -127,7 +127,7 @@ actor DevServerRunningFileMonitor {
             case .running(let pid, _), .runningUnverifiable(let pid):
                 next.insert(tab.worktreeID)
                 state = "running \(pid)"
-            case .exited(let code):
+            case .exited(let code, _):
                 state = "exited \(code.map(String.init) ?? "?")"
             case .unknown:
                 // No answer is not an exit: a worktree the dot already shows

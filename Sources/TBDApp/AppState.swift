@@ -999,10 +999,12 @@ final class AppState {
     /// what `devServerLists` is rebuilt from when a `status` answer lands.
     @ObservationIgnored var devServerFetchedLists: [UUID: DevServerListResult] = [:]
     /// Per worktree, the servers whose state the last `status`-command run
-    /// decided (`statusCommandStates`), with the TBD tab each had then.
+    /// decided (`statusCommandStates`), with the ended TBD tab each had then.
     /// Replaced by each such run; refreshes without `status` commands keep
     /// it, minus servers that are gone or no longer declare a `status`
-    /// command. Dropped when the worktree leaves app state.
+    /// command. Dropped when the worktree leaves app state: archived, gone
+    /// from the daemon's worktree list, or removed with its repo
+    /// (`forgetDevServerState`).
     @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerRememberedStatus]] = [:]
     /// The newest `status`-command refresh started per worktree.
     @ObservationIgnored var devServerStatusGenerations: [UUID: UInt64] = [:]
@@ -1013,7 +1015,8 @@ final class AppState {
     /// The newest `server.list` started per worktree. Refreshes are not
     /// awaited by their triggers and can overlap; a result whose generation
     /// is no longer the newest is discarded, so an older read never lands
-    /// over a newer one.
+    /// over a newer one. This and the two `status` generations outlive a
+    /// forgotten worktree, so a refresh still in flight for it cannot land.
     @ObservationIgnored var devServerListGenerations: [UUID: UInt64] = [:]
     /// Worktrees with a dev server running by a live running file or a live
     /// TBD server tab (`server.summary`) — the sidebar's green dot.
@@ -3973,8 +3976,10 @@ final class AppState {
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
                 let merged = fetched + placeholders
                 if merged != worktrees[repoID] ?? [] {
+                    let previous = (worktrees[repoID] ?? []).map(\.id)
                     worktrees[repoID] = merged
                     listsChanged = true
+                    forgetDevServerState(droppedFrom: previous, keeping: Set(merged.map(\.id)))
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
@@ -3994,6 +3999,7 @@ final class AppState {
                         grouped[rid, default: []].append(wt)
                     }
                 }
+                let previousIDs = worktrees.values.joined().map(\.id) + scratchWorktrees.map(\.id)
                 if grouped != worktrees {
                     worktrees = grouped
                     listsChanged = true
@@ -4003,6 +4009,9 @@ final class AppState {
                     scratchWorktrees = sortedScratch
                     listsChanged = true
                 }
+                forgetDevServerState(
+                    droppedFrom: previousIDs,
+                    keeping: Set(grouped.values.joined().map(\.id) + sortedScratch.map(\.id)))
             }
             // Restored history is computed against these lists; recompute the
             // arrows now that they have loaded (no save — nothing changed).

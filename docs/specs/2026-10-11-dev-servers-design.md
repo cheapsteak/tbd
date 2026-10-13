@@ -270,18 +270,25 @@ during archive, which can happen with no click at all (see "On archive").
 Between those requests the app shows the answers of the last run in the app.
 In each server it lists, the daemon marks whether the `status` command decided
 the state — it exited 0 (running) or timed out (unknown) and nothing ranked
-above it — and whether the declaration has a `status` command at all. The app
-remembers each answer the `status` command decided, together with the server's
-TBD tab at that moment, and lays it over a list fetched without `status`
-commands in two cases:
+above it — and whether the declaration has a `status` command at all. It also
+reports the server's TBD tab whenever that tab has ended, whatever decided the
+state: the tab's id (or, once the tab's row is gone, the id its saved last
+output carries) and, on tmux, the process the dead pane ran. Starting a server
+whose tmux tab has exited respawns that tab in place under the same id, so the
+process id is what tells one run of the tab from the next. The app remembers
+each answer the `status` command decided, together with the server's ended tab
+at that moment, if it had one, and lays it over a list fetched without
+`status` commands in two cases:
 
 - **Stopped** – the server is known only through its `status` command, which
   that list did not run.
-- **Exited, same tab** – the server's TBD tab has ended and is the tab the
-  remembered answer saw (or, once the tab's row is gone, its saved last output
-  is that tab's). This is a command that detaches: `docker compose up -d db`
-  exits at once and its tab reads exited, while `docker compose ps db` keeps
-  answering running. An exited tab from a later start is a new fact and wins.
+- **Exited, same run** – the server's TBD tab has ended, and its ended run is
+  the one the remembered answer saw: the same tab and, on tmux, the same
+  process. This is a command that detaches: `docker compose up -d db` exits at
+  once and its tab reads exited, while `docker compose ps db` keeps answering
+  running. A tab that was still running when the answer came and has ended
+  since, an exited tab from a later start, and a respawn of the same tab that
+  exited again are new facts and win.
 
 Every other state comes from a running file or a running or unreadable TBD tab,
 which are read on every refresh and always win. Each run replaces what the app
@@ -289,12 +296,15 @@ remembers for the worktree; a run that fails replaces nothing, and an older run
 that answers after a newer one has answered is discarded. The app drops a
 remembered answer once the newest list no longer has that server or its
 declaration no longer has a `status` command, and drops everything it holds for
-a worktree when the worktree leaves the app (archived or removed). A server
+a worktree when the worktree leaves the app: archived, gone from the daemon's
+worktree list, or removed with its repo. A refresh still in flight when that
+happens writes nothing back. A server
 whose `status` command has not run in the app since it launched reads stopped,
 or exited by its tab, until someone starts, stops, restarts or refreshes it.
 The remembered answers live in the app's memory only, so a stop from the CLI of
-a server known only through its `status` command shows in the app at its next
-`status` run.
+a server whose state its `status` command decided — one known only through
+that command, or one TBD started whose command detached — shows in the app at
+its next `status` run.
 
 TBD watches the running-file directory for changes and every 10 seconds
 re-checks the liveness of known running files and of its own server tabs, so a
@@ -529,11 +539,13 @@ Archive never runs one.
   command detached and whose tab has exited — leaves other worktrees' servers
   alone, and leaves no server reading *Exited*.
 - The daemon marks a state the `status` command decided, and whether a server
-  declares a `status` command. The app keeps a remembered answer over a
-  stopped server and over an exited one whose tab is the one the answer saw,
-  not over a newer exited tab; drops it when the server or its `status`
-  command is gone and when the worktree leaves the app; and keeps an older
-  run's answers when a newer run fails.
+  declares a `status` command, and reports an ended tab with its process id.
+  The app keeps a remembered answer over a stopped server and over an exited
+  one whose ended run is the one the answer saw, not over a newer exited tab,
+  a respawn of the same tab, or a tab that ended after the answer; drops it
+  when the server or its `status` command is gone and when the worktree
+  leaves the app, with no refresh in flight writing it back; and keeps an
+  older run's answers when a newer run fails.
 - The OrphanGC leg deletes stale files only, and only under `gcEnabled`.
 - `scripts/test.sh` adds `DEV_SERVERS_DIR` to its fence, pointed at scratch, so
   no test reads or writes the real `~/.local/state/dev-servers/`.

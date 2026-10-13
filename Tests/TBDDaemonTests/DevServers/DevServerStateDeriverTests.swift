@@ -125,6 +125,22 @@ struct DevServerStateDeriverTests {
         #expect(derive(tab: tab(.running(pid: 42, expectedStart: nil)))?.stateFromStatusCommand != true)
     }
 
+    /// The ended tab is reported whatever decided the state, with the pid
+    /// that ended, so the app can tell the tab a `status` answer was given
+    /// over from a later run of the same tab.
+    @Test func anEndedTabIsReportedWhateverDecidedTheState() {
+        let t = tab(.exited(code: 0, pid: 700))
+        let expected = DevServerExitedTab(terminalID: t.terminal.id, pid: 700)
+        #expect(derive(tab: t, check: .running)?.exitedTab == expected)
+        #expect(derive(tab: t)?.exitedTab == expected)
+        #expect(derive(tab: tab(.running(pid: 42, expectedStart: nil)), check: .running)?.exitedTab == nil)
+        #expect(derive(check: .running)?.exitedTab == nil)
+        // Once the tab's row is gone, its saved output names it.
+        let entryID = UUID()
+        #expect(derive(check: .running, saved: savedOutput(id: entryID, code: 0))?.exitedTab
+            == DevServerExitedTab(terminalID: entryID, pid: nil))
+    }
+
     @Test func aServerSaysWhetherItDeclaresAStatusCommand() {
         let db = DeclaredDevServer(name: "db", command: "docker compose up -d db",
                                    status: "docker compose ps db", source: .repoTOML)

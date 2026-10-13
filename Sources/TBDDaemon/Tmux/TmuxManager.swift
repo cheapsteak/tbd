@@ -1054,7 +1054,9 @@ public struct TmuxManager: Sendable {
     public enum PaneExitState: Sendable, Equatable {
         case running(pid: Int32)
         /// `status` is nil when tmux reported none (e.g. the pane died to a signal).
-        case dead(status: Int32?)
+        /// `pid` is the process the dead pane ran: tmux keeps `pane_pid`
+        /// after the exit, and a respawn gives the pane a new one.
+        case dead(status: Int32?, pid: Int32? = nil)
         case gone
         /// The query got no usable answer — a timeout, a failed spawn, or a
         /// failure tmux did not word as the pane or its server being absent.
@@ -1076,7 +1078,9 @@ public struct TmuxManager: Sendable {
         for line in output.split(separator: "\n") {
             let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             guard fields.count == 4, fields[0] == paneID else { continue }
-            if fields[1] == "1" { return .dead(status: Int32(fields[2])) }
+            if fields[1] == "1" {
+                return .dead(status: Int32(fields[2]), pid: Int32(fields[3]).flatMap { $0 > 0 ? $0 : nil })
+            }
             guard let pid = Int32(fields[3]), pid > 0 else { return .gone }
             return .running(pid: pid)
         }

@@ -35,8 +35,11 @@ enum DevServerRefreshTrigger: Sendable {
 /// refreshes that do not run `status` commands.
 struct DevServerRememberedStatus: Sendable, Equatable {
     var state: DevServerStateKind
-    /// The server's TBD tab when the run answered, if it had one.
-    var terminalID: UUID?
+    /// The server's ended TBD tab when the run answered — a command that
+    /// detached — and the one exited tab the answer may be laid over. nil
+    /// when the server had no tab or its tab was still running or
+    /// unreadable: a tab that ends after the answer is a new fact.
+    var exitedTab: DevServerExitedTab?
 }
 
 extension AppState {
@@ -94,14 +97,29 @@ extension AppState {
     }
 
     /// Drops what the app holds about a worktree's dev servers, when the
-    /// worktree leaves app state.
+    /// worktree leaves app state: archived, gone from the daemon's worktree
+    /// list, or removed with its repo.
+    ///
+    /// The generations are advanced, not removed, so a refresh already in
+    /// flight — archive's own stop triggers one — fails both guards when it
+    /// lands and writes nothing back: its list generation is no longer the
+    /// newest, and its `status` generation is no newer than the landed one.
     func forgetDevServerState(worktreeID: UUID) {
+        devServerListGenerations[worktreeID] = (devServerListGenerations[worktreeID] ?? 0) &+ 1
+        devServerLandedStatusGenerations[worktreeID] = devServerStatusGenerations[worktreeID] ?? 0
         devServerFetchedLists.removeValue(forKey: worktreeID)
         devServerLastStatus.removeValue(forKey: worktreeID)
-        devServerStatusGenerations.removeValue(forKey: worktreeID)
-        devServerLandedStatusGenerations.removeValue(forKey: worktreeID)
-        devServerLists.removeValue(forKey: worktreeID)
-        devServerActionMessages.removeValue(forKey: worktreeID)
+        if devServerLists[worktreeID] != nil { devServerLists.removeValue(forKey: worktreeID) }
+        if devServerActionMessages[worktreeID] != nil { devServerActionMessages.removeValue(forKey: worktreeID) }
+    }
+
+    /// `forgetDevServerState` for each worktree in `previous` that is not in
+    /// `current` — the worktrees a replacement of app state dropped — whose
+    /// servers the app has asked about.
+    func forgetDevServerState<Previous: Sequence<UUID>>(droppedFrom previous: Previous, keeping current: Set<UUID>) {
+        for id in previous where !current.contains(id) && devServerListGenerations[id] != nil {
+            forgetDevServerState(worktreeID: id)
+        }
     }
 
     /// The Servers menu's "Refresh status": runs the worktree's `status`
@@ -121,13 +139,14 @@ extension AppState {
     }
 
     /// The servers whose state a `status`-command run decided — the daemon
-    /// marks them `stateFromStatusCommand` — with the TBD tab each had then.
+    /// marks them `stateFromStatusCommand` — with the ended TBD tab each had
+    /// then.
     /// Such a server reads running when its `status` command exited 0 and
     /// unknown when it timed out, with nothing ranked above it.
     nonisolated static func statusCommandStates(in list: DevServerListResult) -> [String: DevServerRememberedStatus] {
         var states: [String: DevServerRememberedStatus] = [:]
         for server in list.servers where server.stateFromStatusCommand == true {
-            states[server.name] = DevServerRememberedStatus(state: server.state, terminalID: server.terminalID)
+            states[server.name] = DevServerRememberedStatus(state: server.state, exitedTab: server.exitedTab)
         }
         return states
     }
@@ -151,9 +170,11 @@ extension AppState {
     /// `status` command can: a server known only through one reads stopped,
     /// and one whose command detached (`docker compose up -d`) reads exited
     /// by its finished TBD tab. Show the state the last `status` run found
-    /// instead — over a stopped server, or over an exited one whose tab is
-    /// the one that run saw. A newer exited tab, and every other state (a
-    /// running file, a running or unreadable TBD tab), is live and wins.
+    /// instead — over a stopped server, or over an exited one whose ended
+    /// tab run is the one that run saw (same tab, same process). A tab that
+    /// ended after the answer, or was started again and ended again, is new
+    /// and wins, as does every other state (a running file, a running or
+    /// unreadable TBD tab).
     nonisolated static func withLastKnownStatus(
         _ list: DevServerListResult, lastKnown: [String: DevServerRememberedStatus]
     ) -> DevServerListResult {
@@ -166,9 +187,7 @@ extension AppState {
             case .stopped:
                 merged.servers[index].state = known.state
             case .exited:
-                // Once the tab's row is gone, its saved output carries the
-                // tab's id.
-                guard let seen = known.terminalID, (server.terminalID ?? server.lastOutputID) == seen else { continue }
+                guard let seen = known.exitedTab, server.exitedTab == seen else { continue }
                 merged.servers[index].state = known.state
                 merged.servers[index].exitCode = nil
                 merged.servers[index].lastOutputID = nil

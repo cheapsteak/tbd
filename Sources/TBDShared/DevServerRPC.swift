@@ -61,20 +61,45 @@ public struct DevServerInfo: Codable, Sendable, Equatable, Identifiable {
     /// Whether the server's declaration has a `status` command. Optional, so
     /// an older daemon's JSON decodes nil (not known).
     public var hasStatusCommand: Bool?
+    /// The server's TBD tab when that tab has ended, whatever decided
+    /// `state`: a command that detaches (`docker compose up -d`) leaves an
+    /// ended tab behind a server its `status` command reads running.
+    /// Optional, so an older daemon's JSON decodes nil.
+    public var exitedTab: DevServerExitedTab?
 
     public init(name: String, label: String, source: String?, state: DevServerStateKind,
                 exitCode: Int32?, endpoints: [DevServerEndpoint], terminalID: UUID?,
                 pid: Int32?, hasStopCommand: Bool, lastOutputID: UUID? = nil,
-                stateFromStatusCommand: Bool? = nil, hasStatusCommand: Bool? = nil) {
+                stateFromStatusCommand: Bool? = nil, hasStatusCommand: Bool? = nil,
+                exitedTab: DevServerExitedTab? = nil) {
         self.name = name; self.label = label; self.source = source; self.state = state
         self.exitCode = exitCode; self.endpoints = endpoints; self.terminalID = terminalID
         self.pid = pid; self.hasStopCommand = hasStopCommand; self.lastOutputID = lastOutputID
         self.stateFromStatusCommand = stateFromStatusCommand; self.hasStatusCommand = hasStatusCommand
+        self.exitedTab = exitedTab
     }
 
     /// The first endpoint's URL — the server's main URL.
     public var mainURL: String? { endpoints.first?.url }
     public var isDeclared: Bool { source != nil }
+}
+
+/// One run of a server's TBD tab that has ended. Starting the server again
+/// in a tmux tab respawns that tab in place, keeping its terminal id, so the
+/// process id is what tells one run of the tab from the next.
+public struct DevServerExitedTab: Codable, Sendable, Equatable {
+    /// The tab's terminal id. Once an ended tab's row is gone, its saved
+    /// last output carries the same id.
+    public var terminalID: UUID
+    /// The process the tab ran, when the transport still reports it after
+    /// the exit (a tmux pane kept by `remain-on-exit`); nil otherwise. A
+    /// holder tab is never respawned in place, so its terminal id alone is
+    /// one run.
+    public var pid: Int32?
+
+    public init(terminalID: UUID, pid: Int32?) {
+        self.terminalID = terminalID; self.pid = pid
+    }
 }
 
 public struct DevServerListResult: Codable, Sendable, Equatable {

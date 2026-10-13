@@ -14,7 +14,9 @@ enum DevServerTabStatus: Sendable, Equatable {
     /// to signal it and reports so.
     case runningUnverifiable(pid: Int32)
     /// The command ended; `code` is nil when the transport could not say.
-    case exited(code: Int32?)
+    /// `pid` is the process that ended, when the transport still reports it
+    /// (a tmux dead pane); it tells a respawned tab's runs apart.
+    case exited(code: Int32?, pid: Int32? = nil)
     /// The tab's window or session no longer exists.
     case gone
     /// The transport could not be asked — a tmux query that timed out or
@@ -63,7 +65,7 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
         case .tmux:
             switch await tmux.paneExitState(server: tmuxServer, paneID: terminal.tmuxPaneID) {
             case .running(let pid): return .running(pid: pid, expectedStart: nil)
-            case .dead(let status): return .exited(code: status)
+            case .dead(let status, let pid): return .exited(code: status, pid: pid)
             case .gone: return .gone
             case .unknown(let reason): return .unknown(reason: reason)
             }

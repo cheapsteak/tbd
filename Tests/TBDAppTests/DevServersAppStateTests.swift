@@ -14,13 +14,16 @@ struct DevServersAppStateTests {
     }
 
     /// `fromStatus` marks a state the server's `status` command decided, as
-    /// the daemon does.
+    /// the daemon does. `ended` is the server's ended tab run, which the
+    /// daemon reports whatever decided the state.
     private func info(_ name: String, _ state: DevServerStateKind, url: String? = nil,
-                      fromStatus: Bool = false, terminalID: UUID? = nil) -> DevServerInfo {
+                      fromStatus: Bool = false, terminalID: UUID? = nil,
+                      ended: DevServerExitedTab? = nil) -> DevServerInfo {
         DevServerInfo(name: name, label: name, source: "tbd.toml", state: state, exitCode: nil,
                       endpoints: url.map { [DevServerEndpoint(name: "app", url: $0)] } ?? [],
-                      terminalID: terminalID, pid: nil, hasStopCommand: false,
-                      stateFromStatusCommand: fromStatus ? true : nil, hasStatusCommand: true)
+                      terminalID: terminalID ?? ended?.terminalID, pid: nil, hasStopCommand: false,
+                      stateFromStatusCommand: fromStatus ? true : nil, hasStatusCommand: true,
+                      exitedTab: ended)
     }
 
     private func list(_ servers: [DevServerInfo], id: UUID = UUID()) -> DevServerListResult {
@@ -137,39 +140,72 @@ struct DevServersAppStateTests {
     }
 
     /// Only a state the daemon says a `status` command decided is
-    /// remembered, with the tab the server had then: a server running by its
-    /// TBD tab or a running file is read live.
+    /// remembered, with the ended tab the server had then: a server running
+    /// by its TBD tab or a running file is read live.
     @Test func onlyStatesTheStatusCommandDecidedAreRemembered() {
-        let tab = UUID()
+        let ended = DevServerExitedTab(terminalID: UUID(), pid: 700)
         var tabbed = info("tab", .running, terminalID: UUID())
         tabbed.pid = 42
         let filed = info("file", .running, url: "http://localhost:1")
-        let l = list([info("db", .running, fromStatus: true, terminalID: tab),
-                      info("cache", .unknown, fromStatus: true), info("web", .stopped),
+        let l = list([info("db", .running, fromStatus: true, ended: ended),
+                      info("cache", .unknown, fromStatus: true),
+                      info("api", .running, fromStatus: true, terminalID: UUID()), info("web", .stopped),
                       info("plain", .running), tabbed, filed])
         #expect(AppState.statusCommandStates(in: l) == [
-            "db": DevServerRememberedStatus(state: .running, terminalID: tab),
-            "cache": DevServerRememberedStatus(state: .unknown, terminalID: nil),
+            "db": DevServerRememberedStatus(state: .running, exitedTab: ended),
+            "cache": DevServerRememberedStatus(state: .unknown, exitedTab: nil),
+            "api": DevServerRememberedStatus(state: .running, exitedTab: nil),
         ])
     }
 
     /// The remembered answer covers a stopped server, and an exited one whose
-    /// tab is the one the `status` run saw (a detached command's finished
-    /// tab). A newer exited tab and every other state are live and win.
+    /// ended tab run is the one the `status` run saw (a detached command's
+    /// finished tab). A newer exited tab, a respawn of the same tab, a tab
+    /// that was still running when the answer came, and every other state
+    /// are live and win.
     @Test func theLastKnownStatusCoversAStoppedServerAndTheSameExitedTab() {
-        let seen = UUID(), newer = UUID()
-        var savedOnly = info("saved", .exited)
-        savedOnly.lastOutputID = seen
-        let l = list([info("same", .exited, terminalID: seen), info("newer", .exited, terminalID: newer),
-                      info("web", .stopped), savedOnly, info("tabless", .exited),
-                      info("live", .unknown, terminalID: seen)])
-        let known = DevServerRememberedStatus(state: .running, terminalID: seen)
+        let seen = DevServerExitedTab(terminalID: UUID(), pid: 700)
+        let saved = DevServerExitedTab(terminalID: UUID(), pid: nil)
+        let l = list([info("same", .exited, ended: seen),
+                      info("newer", .exited, ended: DevServerExitedTab(terminalID: UUID(), pid: 700)),
+                      info("respawned", .exited, ended: DevServerExitedTab(terminalID: seen.terminalID, pid: 701)),
+                      info("web", .stopped), info("saved", .exited, ended: saved),
+                      info("wasRunning", .exited, ended: seen),
+                      info("live", .unknown, terminalID: seen.terminalID)])
+        let known = DevServerRememberedStatus(state: .running, exitedTab: seen)
         let merged = AppState.withLastKnownStatus(l, lastKnown: [
-            "same": known, "newer": known, "web": DevServerRememberedStatus(state: .running, terminalID: nil),
-            "saved": known, "tabless": DevServerRememberedStatus(state: .running, terminalID: nil),
+            "same": known, "newer": known, "respawned": known,
+            "web": DevServerRememberedStatus(state: .running, exitedTab: nil),
+            "saved": DevServerRememberedStatus(state: .running, exitedTab: saved),
+            "wasRunning": DevServerRememberedStatus(state: .running, exitedTab: nil),
             "live": known,
         ])
-        #expect(merged.servers.map(\.state) == [.running, .exited, .running, .running, .exited, .unknown])
+        #expect(merged.servers.map(\.state) == [.running, .exited, .exited, .running, .running, .exited, .unknown])
+    }
+
+    /// tmux respawns an exited server tab in place, keeping its terminal id.
+    /// The app remembers Running over a detached command's ended tab; a CLI
+    /// start then respawns that tab and the new run exits 1. That exit is a
+    /// new fact and must show, not the remembered Running.
+    @Test func aRespawnOfTheSameTabThatExitsIsShown() async {
+        await withState { state in
+            let id = UUID(), tab = UUID()
+            let firstRun = DevServerExitedTab(terminalID: tab, pid: 700)
+            let probed = self.list([self.info("db", .running, fromStatus: true, ended: firstRun)], id: id)
+            state.devServerListFetcher = { _, _ in probed }
+            await state.refreshDevServerStatus(worktreeID: id)
+            let quiet = self.list([self.info("db", .exited, ended: firstRun)], id: id)
+            state.devServerListFetcher = { _, _ in quiet }
+            await state.refreshDevServers(worktreeID: id, trigger: .change)
+            #expect(state.devServerLists[id]?.servers.map(\.state) == [.running])
+            var failed = self.info("db", .exited, ended: DevServerExitedTab(terminalID: tab, pid: 701))
+            failed.exitCode = 1
+            let respawned = self.list([failed], id: id)
+            state.devServerListFetcher = { _, _ in respawned }
+            await state.refreshDevServers(worktreeID: id, trigger: .change)
+            #expect(state.devServerLists[id]?.servers.map(\.state) == [.exited])
+            #expect(state.devServerLists[id]?.servers.first?.exitCode == 1)
+        }
     }
 
     /// `docker compose up -d db` with `status = "docker compose ps db"`: the
@@ -179,8 +215,9 @@ struct DevServersAppStateTests {
     @Test func aDetachedServerStaysRunningAfterItsTabExits() async {
         await withState { state in
             let id = UUID(), tab = UUID()
-            let probed = self.list([self.info("db", .running, fromStatus: true, terminalID: tab)], id: id)
-            let quiet = self.list([self.info("db", .exited, terminalID: tab)], id: id)
+            let ended = DevServerExitedTab(terminalID: tab, pid: 700)
+            let probed = self.list([self.info("db", .running, fromStatus: true, ended: ended)], id: id)
+            let quiet = self.list([self.info("db", .exited, ended: ended)], id: id)
             state.devServerListFetcher = { _, run in run ? probed : quiet }
             state.devServerSummaryFetcher = { DevServerSummaryResult(runningWorktreeIDs: []) }
             state.devServerActionSender = { _, _, _ in
@@ -191,7 +228,8 @@ struct DevServersAppStateTests {
             await state.refreshDevServers(worktreeID: id, trigger: .change)
             #expect(state.devServerLists[id]?.servers.map(\.state) == [.running])
             // A newer start's tab that exited is a new fact and wins.
-            let restarted = self.list([self.info("db", .exited, terminalID: UUID())], id: id)
+            let restarted = self.list(
+                [self.info("db", .exited, ended: DevServerExitedTab(terminalID: UUID(), pid: 800))], id: id)
             state.devServerListFetcher = { _, _ in restarted }
             await state.refreshDevServers(worktreeID: id, trigger: .change)
             #expect(state.devServerLists[id]?.servers.map(\.state) == [.exited])
@@ -232,9 +270,52 @@ struct DevServersAppStateTests {
             state.removeArchivedWorktreeFromState(id: id)
             #expect(state.devServerLastStatus[id] == nil)
             #expect(state.devServerFetchedLists[id] == nil)
-            #expect(state.devServerStatusGenerations[id] == nil)
-            #expect(state.devServerLandedStatusGenerations[id] == nil)
             #expect(state.devServerLists[id] == nil)
+        }
+    }
+
+    /// Archive's own stop sends `devServersChanged`, so a refresh can be in
+    /// flight when the worktree is forgotten. Landing afterwards, it must
+    /// write nothing back — with or without `status` commands.
+    @Test func aRefreshInFlightAcrossTheForgetWritesNothingBack() async {
+        await withState { state in
+            let id = UUID()
+            let probed = self.list([self.info("db", .running, fromStatus: true)], id: id)
+            var pending: [CheckedContinuation<DevServerListResult, Never>] = []
+            state.devServerListFetcher = { _, _ in await withCheckedContinuation { pending.append($0) } }
+            let quiet = Task { await state.refreshDevServers(worktreeID: id, trigger: .change) }
+            let status = Task { await state.refreshDevServerStatus(worktreeID: id) }
+            for _ in 0..<500 where pending.count < 2 { await Task.yield() }
+            guard pending.count == 2 else {
+                Issue.record("both refreshes never reached their fetch")
+                return
+            }
+            state.removeArchivedWorktreeFromState(id: id)
+            for held in pending { held.resume(returning: probed) }
+            await quiet.value
+            await status.value
+            #expect(state.devServerLists[id] == nil)
+            #expect(state.devServerFetchedLists[id] == nil)
+            #expect(state.devServerLastStatus[id] == nil)
+        }
+    }
+
+    /// A replacement of app state that drops a worktree forgets its servers;
+    /// a worktree it keeps, and one the app never asked about, are left alone.
+    @Test func aDroppedWorktreeForgetsItsDevServerState() async {
+        await withState { state in
+            let dropped = UUID(), kept = UUID(), neverAsked = UUID()
+            for id in [dropped, kept] {
+                let probed = self.list([self.info("db", .running, fromStatus: true)], id: id)
+                state.devServerListFetcher = { _, _ in probed }
+                await state.refreshDevServerStatus(worktreeID: id)
+            }
+            state.forgetDevServerState(droppedFrom: [dropped, kept, neverAsked], keeping: [kept])
+            #expect(state.devServerLists[dropped] == nil)
+            #expect(state.devServerLastStatus[dropped] == nil)
+            #expect(state.devServerLists[kept] != nil)
+            #expect(state.devServerLastStatus[kept] != nil)
+            #expect(state.devServerListGenerations[neverAsked] == nil)
         }
     }
 

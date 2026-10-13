@@ -9,8 +9,12 @@ struct DevServerTabInspectorTests {
         #expect(TmuxManager.parsePaneExitState("%3|0||1234\n%4|0||99", paneID: "%3") == .running(pid: 1234))
     }
 
-    @Test func aDeadPaneCarriesItsStatus() {
-        #expect(TmuxManager.parsePaneExitState("%4|0||99\n%3|1|127|1234", paneID: "%3") == .dead(status: 127))
+    /// tmux keeps a dead pane's `pane_pid`, and a respawn changes it: the
+    /// pid tells one run of a respawned server tab from the next.
+    @Test func aDeadPaneCarriesItsStatusAndPID() {
+        #expect(TmuxManager.parsePaneExitState("%4|0||99\n%3|1|127|1234", paneID: "%3")
+            == .dead(status: 127, pid: 1234))
+        #expect(TmuxManager.parsePaneExitState("%3|1|1|", paneID: "%3") == .dead(status: 1, pid: nil))
     }
 
     @Test func aMissingPaneIsGone() {

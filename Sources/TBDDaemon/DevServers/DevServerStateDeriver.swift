@@ -70,7 +70,7 @@ enum DevServerStateDeriver {
         } else if let tabPID = tab?.status.runningPID {
             state = .running
             pid = tabPID
-        } else if case .exited(let code)? = tab?.status {
+        } else if case .exited(let code, _)? = tab?.status {
             state = .exited
             // The tab's own saved output only: an entry from an earlier tab
             // is not this exit's.
@@ -91,10 +91,18 @@ enum DevServerStateDeriver {
             fromStatus = true
         }
         if pid == nil, let tabPID = tab?.status.runningPID { pid = tabPID }
+        // Reported whatever decided `state`, so the app can tell the ended
+        // tab a `status` answer was given over from a later run of it.
+        var exitedTab: DevServerExitedTab?
+        if let tab, case .exited(_, let tabPID) = tab.status {
+            exitedTab = DevServerExitedTab(terminalID: tab.terminal.id, pid: tabPID)
+        } else if tab == nil, let saved {
+            exitedTab = DevServerExitedTab(terminalID: saved.id, pid: nil)
+        }
         return DevServerInfo(
             name: name, label: label, source: source, state: state, exitCode: exitCode,
             endpoints: endpoints, terminalID: tab?.terminal.id, pid: pid, hasStopCommand: hasStopCommand,
             lastOutputID: lastOutputID, stateFromStatusCommand: fromStatus ? true : nil,
-            hasStatusCommand: hasStatusCommand)
+            hasStatusCommand: hasStatusCommand, exitedTab: exitedTab)
     }
 }
