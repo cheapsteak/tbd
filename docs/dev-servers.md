@@ -144,7 +144,7 @@ A server's state is the first of these that applies:
 4. **Unknown** – TBD could not read its tab's state, or the `status` command timed out, and nothing above applies.
 5. **Stopped** – none of the above.
 
-`status` commands run only when you ask: by `tbd server list` and `tbd server status`, and in the app after each Start, Stop or Restart and when you pick **Refresh status** in the Servers menu. Selecting a worktree never runs them, because a `status` command is the repo's own shell and a branch you are only looking at could change it. Between runs, the app shows a server known only through its `status` command in the state its last run found; until one has run, that server reads Stopped. Archiving a worktree also runs them, to find which servers to stop. They never run on a timer or for the sidebar dot. TBD watches the running-file directory and, every 10 seconds, re-checks the liveness of known files and of its own server tabs, so a server that died without cleaning up drops out of the sidebar dot.
+`status` commands run only when you ask: by `tbd server list` and `tbd server status`, and in the app after each Start, Stop or Restart and when you pick **Refresh status** in the Servers menu. Selecting a worktree never runs them, because a `status` command is the repo's own shell and a branch you are only looking at could change it. Between runs, the app shows a server known only through its `status` command in the state its last run found; until one has run, that server reads Stopped. Archiving a worktree never runs them. They never run on a timer or for the sidebar dot. TBD watches the running-file directory and, every 10 seconds, re-checks the liveness of known files and of its own server tabs, so a server that died without cleaning up drops out of the sidebar dot.
 
 ### Stopping
 
@@ -157,7 +157,7 @@ Stopping an exited server closes its tab and clears its Exited state without sig
 
 `restart` is stop, then start; with no name it restarts exactly the declared servers that were running. An undeclared server is stopped and not started again, since nothing declares how to start it. Ctrl+C in the server's tab is not a stop through TBD: the command exits on its own and the server reads Exited.
 
-Archiving a worktree stops its running and Unknown servers first — including those running only by their `status` command — using these rules, before the worktree's tabs are torn down and before the archive hook runs. This includes forced archives. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
+Archiving a worktree stops the servers TBD can see without running the repo's code — a running or Unknown server tab, or a live running file — using these rules (a declared `stop` included), before the worktree's tabs are torn down and before the archive hook runs, forced archives included. Archive can happen without a click, such as auto-archive when a pull request merges, so it never runs a `status` command. A server known only through its `status` command, such as a detached container, keeps running after archive: stop it before archiving, or let your repo's own tooling clean it up. A server that fails to stop is logged and the archive continues. Afterwards no server in the worktree reads Exited.
 
 ## Exited servers and their last output
 

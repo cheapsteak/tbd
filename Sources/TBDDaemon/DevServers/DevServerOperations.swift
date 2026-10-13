@@ -175,13 +175,15 @@ struct DevServerOperations: Sendable {
             runningFilePaths: files.map(\.path))
     }
 
-    /// Archive's half: stop every server that reads running — TBD's tab, a
-    /// live running file, or its declared `status` command (each bounded by
-    /// `statusTimeout`) — or unknown, as `server.stop` does, in parallel.
-    /// Tabs are left for archive's own teardown, which captures their
-    /// scrollback.
+    /// Archive's half: stop every server TBD can see without running repo
+    /// code — a running or unreadable TBD tab, or a live running file — as
+    /// `server.stop` does, in parallel. Archive can run with no user gesture
+    /// (auto-archive on merge), so it never runs a declared `status`
+    /// command: a server that reads running only through one is left
+    /// running. Tabs are left for archive's own teardown, which captures
+    /// their scrollback.
     func stopAllForArchive(worktree: LocalWorktree) async -> [DevServerStopReport] {
-        let snapshot = await snapshot(worktree: worktree, runStatusCommands: true)
+        let snapshot = await snapshot(worktree: worktree, runStatusCommands: false)
         let repoPath = await repoPath(for: worktree)
         var requests: [DevServerStopRequest] = []
         for server in snapshot.servers where server.state == .running || server.state == .unknown {

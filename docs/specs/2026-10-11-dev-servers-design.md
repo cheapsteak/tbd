@@ -264,8 +264,8 @@ in the Servers menu. A `status` command is repo-authored shell, and a branch
 can change it, so merely looking at a worktree must not run it: the app's
 automatic refreshes — when a single worktree becomes selected, and when the
 daemon reports a dev-server change for it — fetch the list without `status`
-commands. They never run on a timer and never for the sidebar dot. Archive
-also runs them, as part of stopping a worktree's servers (see "On archive").
+commands. They never run on a timer, never for the sidebar dot, and never
+during archive, which can happen with no click at all (see "On archive").
 
 Between those requests the app shows, for each server known only through its
 `status` command, the state that command's last run in the app found: running,
@@ -353,9 +353,15 @@ reads *Exited*.
 
 ### On archive
 
-Archive stops every server in the worktree that reads running — TBD's tab, a
-live running file, or its `status` command, which archive runs with the usual
-5-second timeout — or *Unknown*, using the stop rules above. It does so in archive's first phase,
+Archive stops every server in the worktree that TBD can see without running
+repo code — a running TBD tab, a TBD tab whose state cannot be read
+(*Unknown*), or a live running file — using the stop rules above, including a
+declared `stop`. Archive can run with no user gesture (auto-archive when a pull
+request merges), so it never runs a `status` command: a branch could otherwise
+get its own shell run without anyone clicking anything. A server known only
+through its `status` command is therefore not stopped by archive and keeps
+running; stop it before archiving, or let the repo's own tooling clean it up.
+Archive does this in its first phase,
 right after the worktree's status flips to archived — so a concurrent `server
 start` is refused — and before its tabs are torn down, so group kills reach
 live tab processes and a declared `stop` runs while the checkout still exists.
@@ -428,8 +434,8 @@ A repo that has only `.claude/launch.json` counts as opted in: it gains the
 Servers button and Start/Stop/logs with no extra setup, and gains open buttons
 once it writes running files. Nothing runs until someone clicks Start, and
 no repo `status` command runs until someone starts, stops, restarts or
-refreshes the servers, archives the worktree, or runs `tbd server list` or
-`tbd server status`.
+refreshes the servers, or runs `tbd server list` or `tbd server status`.
+Archive never runs one.
 
 ## Who reclaims what
 
@@ -493,8 +499,9 @@ refreshes the servers, archives the worktree, or runs `tbd server list` or
   already gone records no server state; start and stop detach the saved entry;
   "Show last output" opens the entry on the holder transport and focuses the
   tab on tmux.
-- Archive stops TBD-started, file-reported and status-only servers, leaves
-  other worktrees' servers alone, and leaves no server reading *Exited*.
+- Archive stops TBD-started and file-reported servers, runs no `status`
+  command and leaves a status-only server running, leaves other worktrees'
+  servers alone, and leaves no server reading *Exited*.
 - The OrphanGC leg deletes stale files only, and only under `gcEnabled`.
 - `scripts/test.sh` adds `DEV_SERVERS_DIR` to its fence, pointed at scratch, so
   no test reads or writes the real `~/.local/state/dev-servers/`.

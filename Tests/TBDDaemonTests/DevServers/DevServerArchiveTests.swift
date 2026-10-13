@@ -105,9 +105,10 @@ struct DevServerArchiveTests {
                 "the output stays in Closed Terminals")
     }
 
-    /// A server that reads running only through its `status` command (a
-    /// detached container) is stopped too: archive runs status commands.
-    @Test func archiveStopsAStatusOnlyServerThroughItsStopCommand() async throws {
+    /// Archive can fire with no user gesture (auto-archive on merge), so it
+    /// never runs a repo's `status` command. A server that reads running
+    /// only through one is left running: its `stop` does not run either.
+    @Test func archiveNeverRunsStatusCommandsAndLeavesAStatusOnlyServerRunning() async throws {
         let f = try await Self.makeFixture(); defer { f.tearDown() }
         try Data("""
             [servers.db]
@@ -116,27 +117,37 @@ struct DevServerArchiveTests {
             stop = "docker compose stop db"
             """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
-        #expect(f.runner.runs.map(\.command) == ["docker compose ps db", "docker compose stop db"])
+        #expect(f.runner.runs.isEmpty)
+        #expect(f.signalling.sentSignals.isEmpty)
     }
 
-    /// A server whose `status` timed out reads *Unknown*; archive stops it
-    /// as `server.stop` would, rather than taking it for stopped.
-    @Test func archiveStopsAServerWhoseStatusTimedOut() async throws {
-        var f = try await Self.makeFixture(); defer { f.tearDown() }
-        let runner = FakeDevServerCommandRunner(outcomes: ["probe": .timedOut])
-        f.lifecycle.devServerOperations = DevServerOperations(
-            db: f.db, tabInspector: f.inspector, commandRunner: runner,
-            stopper: DevServerStopper(commandRunner: runner),
-            runningFiles: DevServerRunningFileStore(directory: f.filesDir),
-            probe: DevServerProcessProbe(info: { _ in nil }), environment: [:])
+    /// Servers archive can see without repo code — a live running file and a
+    /// running TBD tab — are still stopped through the normal stop path
+    /// (a declared `stop` included), while no `status` command runs and a
+    /// status-only server is left alone.
+    @Test func archiveStopsVisibleServersWithoutRunningStatusCommands() async throws {
+        let f = try await Self.makeFixture(); defer { f.tearDown() }
         try Data("""
+            [servers.web]
+            command = "pnpm dev"
+            status = "probe web"
+            [servers.api]
+            command = "pnpm api"
+            status = "probe api"
+            stop = "make stop-api"
             [servers.db]
             command = "docker compose up -d db"
-            status = "probe"
-            stop = "make stop"
+            status = "probe db"
+            stop = "make stop-db"
             """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
+        let file = try report(f, root: f.pathA, pid: 500)
+        let tab = try await f.db.terminals.create(
+            worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "api")
+        f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
-        #expect(runner.runs.map(\.command) == ["probe", "make stop"])
+        #expect(f.runner.runs.map(\.command) == ["make stop-api"])
+        #expect(f.signalling.sentSignals == [.init(pgid: 500, signal: SIGTERM)])
+        #expect(!FileManager.default.fileExists(atPath: file))
     }
 
     @Test func withoutOperationsWiredArchiveSignalsNothing() async throws {
