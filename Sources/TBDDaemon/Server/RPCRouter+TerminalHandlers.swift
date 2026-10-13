@@ -2187,6 +2187,143 @@ extension RPCRouter {
         }.value
     }
 
+    /// `terminal.migrateTransport` — move one session (or, with no id, every
+    /// session) from the tmux transport to the pty holder in place.
+    ///
+    /// Deliberately no pre-filter: the migrator decides eligibility, and a
+    /// shell is as migratable as a Claude session. A shell has no
+    /// `claudeSessionID`, so the guards `handleTerminalSwapProfile` applies
+    /// would wrongly refuse it.
+    ///
+    /// Park and wake broadcast their own hibernation deltas, and neither
+    /// carries the `transport` column, so every row that comes back
+    /// holder-backed is re-read and published whole as `.terminalReplaced`,
+    /// which the app adopts in place.
+    ///
+    /// **Per row, inside the loop — the record, the broadcast and the move.**
+    /// A fleet run is composed from the single-session move rather than being a
+    /// second mechanism (see the spec's `Surfaces`), and two things have to
+    /// happen at each session's own act moment rather than after the whole run.
+    /// The actuation row, because the record's unit is an actuation on a
+    /// session and a destructive fleet gesture must be able to say which
+    /// sessions it stopped — the shape `worktree.suspend` and `worktree.resume`
+    /// already have. And the broadcast, because until it lands every app client
+    /// still caches `tmux` and the window id this migration has already
+    /// retired, so a mounted pane rebuilds into an attach against a dead window
+    /// and spends a recovery attempt on a `terminal.recreateWindow` the daemon
+    /// refuses for a holder row. For one id that gap is milliseconds; for
+    /// `--all` over a real fleet it would be the whole run, for every mounted
+    /// pane.
+    ///
+    /// Each row's request record is fail-closed like every other actuation: an
+    /// unwritable record stops the run where it stands rather than acting
+    /// unrecorded, which is `worktree.resume`'s stance for its own fan-out.
+    func handleTerminalMigrateTransport(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
+
+        // The third door into the Nightwatch/holder pair, and refused like the
+        // other two: `config.setPtyHolderEnabled` refuses `true` while a mode
+        // is on, `nightwatch.setMode` refuses a mode while the hazard is live.
+        // A watch mode and the holder are never both live — on the holder the
+        // desk's liveness check reads an empty tmux window id and leaks one
+        // Claude session per tick — and this migration CREATES holder-backed
+        // sessions, so it asks the flag door's own question with
+        // `enabling: true`: the migration is that enabling, for the rows it
+        // moves.
+        //
+        // Refused per CALL and before any row is read, because the hazard is
+        // the transport rather than any one session: nothing is written,
+        // nothing is broadcast, nothing is migrated, and no actuation row
+        // exists — the shape `nightwatch.setMode`'s refusal has. This is the
+        // authoritative gate; the app's hidden button is a courtesy on top of
+        // it and covers neither the CLI nor an older app build.
+        let config = try await db.config.get()
+        if NightwatchHolderGate.refusesHolder(
+            enabling: true, currentMode: config.nightwatchMode) {
+            logger.notice("transport migration: refusing the whole call — a watch mode is active")
+            return RPCResponse(error: NightwatchHolderGate.migrationRefusal)
+        }
+
+        let operations = transportMigratorOperationsOverride ?? .production(
+            hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
+        let migrator = TerminalTransportMigrator(db: db, operations: operations)
+
+        let terminalIDs: [UUID]
+        if let id = params.terminalID {
+            terminalIDs = [id]
+        } else {
+            terminalIDs = await migrator.fleetTerminalIDs()
+        }
+
+        var migrated: [UUID] = []
+        var movedNotResumed: [TerminalMigrationSkip] = []
+        var skipped: [TerminalMigrationSkip] = []
+        var refused: [TerminalMigrationSkip] = []
+        var alreadyHolder: [UUID] = []
+        for terminalID in terminalIDs {
+            let actuationID = try await beginActuation(
+                .terminalMigrateTransport, actor: actor,
+                target: await resolvedTerminalTarget(terminalID))
+            let outcome = await migrator.migrate(terminalID: terminalID)
+            await publishIfMovedToHolder(terminalID: terminalID, outcome: outcome)
+            await finishActuation(
+                actuationID, ActuationOutcome.classify(outcome),
+                error: ActuationOutcome.detail(outcome))
+            switch outcome {
+            case .migrated:
+                migrated.append(terminalID)
+            case .movedNotResumed(let reason):
+                movedNotResumed.append(
+                    TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            case .alreadyHolder:
+                alreadyHolder.append(terminalID)
+            case .skipped(let reason):
+                skipped.append(TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            case .refused(let reason):
+                refused.append(TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            }
+        }
+        return try RPCResponse(result: TerminalMigrateTransportResult(
+            migrated: migrated, movedNotResumed: movedNotResumed,
+            skipped: skipped, refused: refused, alreadyHolder: alreadyHolder))
+    }
+
+    /// Publish one migrated row whole, for every outcome that may have left it
+    /// holder-backed.
+    ///
+    /// **Keyed on what the row now says, not on the outcome.** The rewrite
+    /// landing and the wake succeeding are two different facts: a migration
+    /// whose wake failed has a holder-backed row with blanked coordinates, and
+    /// a client that never heard about it keeps attaching to the window this
+    /// migration killed until some unrelated full refresh. `.alreadyHolder` is
+    /// the one outcome with nothing to publish, because nothing was touched.
+    ///
+    /// A re-read that fails or finds nothing is logged rather than swallowed:
+    /// the consequence is a client holding a stale transport, which is
+    /// invisible from the row and has to be findable in the log.
+    private func publishIfMovedToHolder(
+        terminalID: UUID, outcome: TransportMigrationOutcome
+    ) async {
+        guard outcome != .alreadyHolder else { return }
+        do {
+            guard let row = try await db.terminals.get(id: terminalID) else {
+                if outcome.claimsTheRowMoved {
+                    logger.warning("transport migration: terminal \(terminalID, privacy: .public) moved but was gone when its row was re-read, so no replacement was published")
+                } else {
+                    logger.debug("transport migration: terminal \(terminalID, privacy: .public) is gone, so there was nothing to publish")
+                }
+                return
+            }
+            guard row.transport == .holder else { return }
+            subscriptions.broadcast(delta: .terminalReplaced(row))
+        } catch {
+            let detail = "\(error)"
+            logger.error("transport migration: could not re-read terminal \(terminalID, privacy: .public) to publish it, so clients keep a stale transport: \(detail, privacy: .public)")
+        }
+    }
+
     func handleTerminalSwapProfile(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2885,7 +3022,7 @@ extension RPCRouter {
         // parked on its old account while it is in fact awake there.
         //
         // The swap's own halves are unaffected: `performHibernate` consults
-        // `hibernatesInFlight` and `wakeHolderForProfileSwap` consults that and
+        // `hibernatesInFlight` and `wakeHolderAfterInPlaceChange` consults that and
         // `wakesInFlight`, and neither reads the swap claim.
         guard await hibernationCoordinator.claimSwap(terminalID: oldTerminal.id) else {
             let reason = "Terminal \(oldTerminal.id) was not switched to the other account: another pause, wake or account switch of this session is in flight; nothing was changed. Retry once it has finished."
@@ -3034,7 +3171,7 @@ extension RPCRouter {
             supervisor: modelProxySupervisor)
         let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
         let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
-        let woken = await hibernationCoordinator.wakeHolderForProfileSwap(
+        let woken = await hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: target,
             worktree: worktree,
             sessionID: storedSessionID,

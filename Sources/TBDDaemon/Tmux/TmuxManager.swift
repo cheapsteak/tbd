@@ -1752,6 +1752,17 @@ public struct TmuxManager: Sendable {
         ).resolve()?.path
     }
 
+    /// Whether this manager could run a tmux command at all: dry-run always
+    /// can, real mode needs a tmux binary that resolves against the same PATH
+    /// `runTmux` uses. Lets a caller refuse a tmux-only action up front with a
+    /// sentence a person can act on, instead of surfacing status 127 from the
+    /// middle of it.
+    var canServeTmux: Bool {
+        dryRun || Self.tmuxPath(
+            path: tmuxPathOverride ?? ProcessInfo.processInfo.environment["PATH"]
+        ) != nil
+    }
+
     /// The argv a one-shot tmux client actually runs with: the caller's
     /// arguments behind `-u`.
     ///

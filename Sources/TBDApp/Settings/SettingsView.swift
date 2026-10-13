@@ -57,6 +57,8 @@ struct GeneralSettingsTab: View {
     @AppStorage("errorNotificationSoundName") private var errorSoundName: String = "Sosumi"
     @AppStorage("errorNotificationSoundCustomPath") private var errorCustomPath: String = ""
 
+    @State private var migrating = false
+    @State private var migrationResult: TerminalMigrateTransportResult?
     /// In-progress amount text for the hibernate-idle-threshold field. Kept
     /// separate from the committed `hibernateIdleDuration` so a keystroke
     /// never fires an RPC — only `.onSubmit` / focus-loss / a unit-picker
@@ -337,12 +339,62 @@ struct GeneralSettingsTab: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        // Hidden while a watch mode forbids the move, which the daemon refuses
+        // outright: the caption below is what explains it, and it renders in
+        // exactly that state.
+        if supported, !TransportMigrationMenu.isBlockedByWatchMode(appState.nightwatchMode) {
+            transportMigrationRow
+        }
         if supported && !enabled && appState.nightwatchMode != .off {
             Text(nightwatchExperimental
                 ? NightwatchHolderGate.holderRefusal
                 : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Moves the sessions that already exist onto the holder. Sits beside the
+    /// toggle because that is where someone who just turned it on looks for what
+    /// to do about them. The report keeps skips and refusals apart: a skip names
+    /// a state to change before retrying, a refusal waits on a fact.
+    @ViewBuilder
+    private var transportMigrationRow: some View {
+        HStack {
+            Button("Move existing sessions to the holder") {
+                Task {
+                    migrating = true
+                    migrationResult = await appState.migrateAllTerminalsToHolder()
+                    migrating = false
+                }
+            }
+            .disabled(migrating)
+            if migrating { ProgressView().controlSize(.small) }
+        }
+        .help("Moves running tmux sessions onto the holder in place. Sessions that are busy are skipped and can be retried.")
+        if let result = migrationResult {
+            let report = TransportMigrationMenu.report(
+                result, label: { appState.transportMigrationLabel(for: $0) })
+            Text(report.headline)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            transportMigrationLines(report.movedNotResumedHeading, report.movedNotResumed)
+            transportMigrationLines(report.skippedHeading, report.skipped)
+            transportMigrationLines(report.refusedHeading, report.refused)
+        }
+    }
+
+    @ViewBuilder
+    private func transportMigrationLines(
+        _ heading: String, _ lines: [TransportMigrationMenu.Line]
+    ) -> some View {
+        if !lines.isEmpty {
+            Text(heading).font(.caption).fontWeight(.medium)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text("\(line.label) — \(line.reason)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

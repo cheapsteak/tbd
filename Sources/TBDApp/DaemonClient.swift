@@ -2248,6 +2248,16 @@ actor DaemonClient {
         )
     }
 
+    /// Move one session (or, with `nil`, every session) from the tmux
+    /// transport to the pty holder in place.
+    func migrateTerminalTransport(terminalID: UUID?) async throws -> TerminalMigrateTransportResult {
+        return try await callAsync(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: terminalID),
+            resultType: TerminalMigrateTransportResult.self
+        )
+    }
+
     /// List Claude session summaries for a worktree.
     func listSessions(worktreeID: UUID) async throws -> [SessionSummary] {
         return try await callAsync(

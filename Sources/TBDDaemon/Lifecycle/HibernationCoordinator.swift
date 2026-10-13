@@ -130,6 +130,59 @@ public enum WakeResult: Equatable, Sendable {
     case paneBusy(pid: Int32)
 }
 
+/// What moving a RUNNING session with nothing to resume onto the pty holder
+/// came to — `HibernationCoordinator.moveRunningShellToHolder`.
+///
+/// Four cases, and the three that did not move mean different things. A lost
+/// compare-and-set is a race whose other side already gave the person a
+/// working session and a busy pane is a state they can change, so both are
+/// reported as skips; a refusal names a fact that has to change first.
+enum ShellTransportMoveOutcome: Sendable, Equatable {
+    /// The row reads holder-backed and names the processes of a fresh login
+    /// shell running in the same working directory.
+    case moved
+    /// The write found the row had changed under the move, so nothing was
+    /// written and the holder that had been started was abandoned.
+    case lostTheRace
+    /// Something other than the pane's own shell is running in the session's
+    /// terminal, and moving the session would stop it. Nothing was touched;
+    /// the person finishes or stops that process and runs the migration again.
+    ///
+    /// Distinct from `refused` because of where it lands in a fleet run's
+    /// report: this is the "change this and try again" column, and the whole
+    /// point of telling someone is that they can.
+    case busy(reason: String)
+    /// The move was not attempted, or could not be finished. Nothing was
+    /// written either way.
+    case refused(reason: String)
+}
+
+/// How the running-shell move starts a holder, and undoes one whose move could
+/// not be recorded.
+///
+/// A **test seam only**: production leaves
+/// `HibernationCoordinator.holderSpawnOracle` nil and the move goes through
+/// `HolderRegistry`, which is the only thing that can actually start a holder.
+/// It exists for the same reason `holderScreenOracle` does — reaching the
+/// move's own decisions (the launch it composes, a write that lost its
+/// compare-and-set, the abandon that undoes the spawn) through a real registry
+/// would mean a real `TBDHolder`, a real pty and a real handshake for
+/// questions this coordinator answers either side of the spawn.
+///
+/// **What still reaches the real registry**, so the seam cannot hide a broken
+/// production wiring: every case in `RunningShellTransportMoveTests` that
+/// passes no oracle — the registry-cannot-spawn refusal — plus
+/// `TerminalTransportMigratorTests`'
+/// `aRunningShellWhoseHolderCannotBeStartedIsRefused`, which runs the
+/// production operations and fails inside the real `registry.spawn`, and the
+/// two `KillWindowSiblingSitesPaneOwnershipTests` shell-move cases, which reach
+/// the pane consult and the kill with no oracle wired. There is no live-target
+/// coverage of this move; the gap is the spawn itself succeeding.
+struct HolderSpawnOracle: Sendable {
+    let spawn: @Sendable (UUID, HolderLaunchRequest) async throws -> HolderHandle
+    let abandon: @Sendable (UUID, HolderHandle) async -> Void
+}
+
 /// Owns session PARKING — the single unified "park a Claude session" feature
 /// (the former Suspend and Hibernate features merged into one). It gracefully
 /// terminates a Claude process while KEEPING its tmux window alive (the shell
@@ -218,7 +271,7 @@ public actor HibernationCoordinator {
     /// swap's OWN halves are exempt by construction, not by a flag a caller
     /// could forget to pass: `performHibernate` consults only
     /// `hibernatesInFlight`, and the swap wakes through
-    /// `wakeHolderForProfileSwap`, which consults only the two sets above.
+    /// `wakeHolderAfterInPlaceChange`, which consults only the two sets above.
     private var swapsInFlight: Set<UUID> = []
 
     /// Debounce after a terminal first crosses the idle threshold: the sweep
@@ -312,6 +365,11 @@ public actor HibernationCoordinator {
     /// A throw means the same thing as a refused projection.
     var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
 
+    /// Starts and undoes the holder the running-shell transport move needs. A
+    /// **test seam only** — production leaves it nil and the move goes through
+    /// `holderRegistry`. See `HolderSpawnOracle`.
+    var holderSpawnOracle: HolderSpawnOracle?
+
     /// Whether a recorded holder pid is still a live `TBDHolder` — the
     /// holder half of `HolderChildDisposition.sessionHasEnded`. Production uses the shared
     /// `HolderSpawner.isLiveHolder`; tests replace it through
@@ -336,6 +394,17 @@ public actor HibernationCoordinator {
     /// RPC handlers call that same method after writing their own row, and a
     /// row there would double-count every manual park.
     private let actuationLog: ActuationLog
+
+    /// What a person is told when a tmux-backed session cannot be woken because
+    /// tmux cannot serve. Names the gesture that moves the session, **and the
+    /// session**: this string is the entire product of the backstop — it exists
+    /// to hand a stranded person a command they can run — so the id is
+    /// interpolated rather than left as a placeholder to be looked up.
+    static func tmuxWakeUnavailableReason(terminalID: UUID) -> String {
+        "This session still runs on the tmux transport, and tmux is not available here. "
+        + "Run `tbd terminal migrate \(terminalID.uuidString)` (or `tbd terminal migrate --all`) "
+        + "to move it to the pty holder, then wake it again."
+    }
 
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -425,6 +494,12 @@ public actor HibernationCoordinator {
         _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
     ) {
         holderScreenOracle = oracle
+    }
+
+    /// Wire the running-shell move's holder seam. Tests only — see
+    /// `HolderSpawnOracle`.
+    func setHolderSpawnOracle(_ oracle: HolderSpawnOracle?) {
+        holderSpawnOracle = oracle
     }
 
     func setInputActivity(_ tracker: InputActivityTracker) {
@@ -517,6 +592,429 @@ public actor HibernationCoordinator {
         }
         return await performHibernate(
             terminal: terminal, reason: .auto, policy: .profileSwap)
+    }
+
+    /// Park a session because it is being moved from the tmux transport to the
+    /// pty holder in place, same row and same session id.
+    ///
+    /// The park half of `TerminalTransportMigrator.migrate`. `.auto` as the
+    /// reason, for the same purpose as the profile swap's: a daemon that dies
+    /// between this park and the wake that follows leaves a row the next
+    /// focus-wake heals, where a manual park is excluded from wake-on-focus
+    /// and would sit there until somebody woke it by hand.
+    ///
+    /// **`.manual` as the policy, which is the opposite of the swap's choice
+    /// and is the point.** `.profileSwap` stops honouring the rails that read
+    /// live state because switching accounts should interrupt regardless; a
+    /// migration instead discards typed-but-unsent input, which is exactly
+    /// what those rails protect. So a rail that refuses this park is
+    /// protecting the session, and its refusal becomes the migration's skip
+    /// reason — a person sends or clears the input and runs the migration
+    /// again. No new policy case is added, and the tmux leg's unconditional
+    /// typed-input rail is untouched.
+    /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`,
+    /// "The park honours every live rail".
+    func parkForTransportMigration(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        return await performHibernate(
+            terminal: terminal, reason: .auto, policy: .manual)
+    }
+
+    /// The pid of whatever is running in a tmux pane that is **not** the
+    /// pane's own shell, or nil when nothing is and nil when the question
+    /// could not be asked.
+    ///
+    /// Asked of the process table, never the rendered screen. The pane's own
+    /// pid answering means an idle interactive shell; a different pid means
+    /// something is running under it. An unreadable pid answers nil: a pane
+    /// tmux cannot answer for is not evidence that a process is there, and
+    /// refusing on it would strand the row behind a probe failure with no way
+    /// back.
+    ///
+    /// The one place this question is composed, for the two rails that ask it —
+    /// the exit-stamped guard below and the running-shell move's own. Copying
+    /// the body beside a second caller is how the unreadable-pid stance and the
+    /// `> 0` guard get quietly dropped from one of them.
+    ///
+    /// tmux-only by construction: a holder row's pane id is the empty string
+    /// and names no tmux coordinate, so each caller establishes that first.
+    func paneForegroundPIDOtherThanItsShell(
+        server: String, paneID: String
+    ) async -> Int32? {
+        guard let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
+              let panePID = Int32(panePIDString), panePID > 0,
+              let foregroundPID = paneProcessInspector.paneForegroundPID(panePID: panePID),
+              foregroundPID != panePID else { return nil }
+        return foregroundPID
+    }
+
+    /// The pid of whatever is running in an **exit-stamped** row's pane, or
+    /// nil when nothing is, when the row is not exit-stamped, or when the
+    /// question could not be asked.
+    ///
+    /// `.exited` parks the row while the pane's SHELL stays alive and usable —
+    /// that is the whole point of the stamp — so the pane is the one the person
+    /// was sitting in when the agent left, and they may have started something
+    /// in it since. Any action that would destroy that pane has to ask first.
+    func exitStampedPaneBusyPID(
+        terminal: Terminal, server: String, paneID: String
+    ) async -> Int32? {
+        guard terminal.isExitStamped, terminal.transport != .holder else { return nil }
+        return await paneForegroundPIDOtherThanItsShell(server: server, paneID: paneID)
+    }
+
+    /// The refusal a transport migration owes a parked row whose pane still
+    /// has something running in it, or nil when the rewrite may proceed.
+    ///
+    /// The migration blanks the row's tmux coordinates, after which nothing
+    /// names that window and the reconcile pass kills it as untracked — so for
+    /// an exit-stamped row the migration would destroy whatever the person
+    /// started in the pane their agent left behind. This is the same question
+    /// `wake` asks before its `respawn-window -k`, with the same refusal text,
+    /// and it resolves the server itself because the migrator holds the row
+    /// rather than the worktree.
+    func transportMigrationPaneBusyRefusal(terminal: Terminal) async -> String? {
+        guard terminal.isExitStamped, terminal.transport != .holder else { return nil }
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            return nil
+        }
+        guard let busyPID = await exitStampedPaneBusyPID(
+            terminal: terminal,
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID) else { return nil }
+        logger.info("transport migration: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in its pane — refusing to move it rather than orphaning that window")
+        return Self.paneBusyRefusal(pid: busyPID)
+    }
+
+    /// Retire the tmux window a parked row leaves behind when its transport is
+    /// rewritten to the holder.
+    ///
+    /// The tmux park keeps the window and respawns it to a bare login shell,
+    /// which is what makes a parked tab wakeable in place. Once the row is
+    /// holder-backed that window belongs to nobody: the row no longer names it,
+    /// and one dangling window and shell per migrated session is a fleet run's
+    /// worth of residue. So the migration retires it, and the reconcile pass's
+    /// untracked-window sweep is the backstop rather than the mechanism.
+    ///
+    /// Must be called with a `terminal` that still carries the PRE-rewrite
+    /// coordinates, and only once the rewrite has landed — a window killed for
+    /// a row still recorded on tmux would be a tab the person loses for
+    /// nothing.
+    ///
+    /// Best-effort and never reported upward: the session is already on the
+    /// holder, and `paneOwnership` refuses outright if the coordinate has been
+    /// recycled, so the one failure this can have is leaving the window for the
+    /// sweep.
+    func retireTmuxWindowAfterTransportMigration(terminal: Terminal) async {
+        guard !terminal.tmuxWindowID.isEmpty,
+              let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            return
+        }
+        let server = worktree.tmuxServer
+        let ownership = await tmux.paneOwnership(
+            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID)
+        guard ownership.permitsTeardown else {
+            logger.warning("transport migration: leaving window \(terminal.tmuxWindowID, privacy: .public) untouched for terminal \(terminal.id, privacy: .public) — \(ownership.refusalDetail ?? "", privacy: .public)")
+            return
+        }
+        do {
+            try await tmux.killWindow(server: server, windowID: terminal.tmuxWindowID)
+            logger.info("transport migration: retired tmux window \(terminal.tmuxWindowID, privacy: .public) for terminal \(terminal.id, privacy: .public)")
+        } catch {
+            logger.warning("transport migration: could not retire tmux window \(terminal.tmuxWindowID, privacy: .public) for terminal \(terminal.id, privacy: .public); the reconcile pass will: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Moving a running session that has nothing to resume
+
+    /// The refusal when this session's worktree cannot give the move a local
+    /// working directory.
+    ///
+    /// Two readings, and the wording has to carry both, because `getLocal`
+    /// answers nil for each: a row that could not be read at all, and a row
+    /// that is perfectly readable and REMOTE — a remote worktree has no
+    /// filesystem path and no tmux server, so there is nowhere on this machine
+    /// to start a replacement shell. Saying only "could not be read" would
+    /// report the ordinary second case as a database fault.
+    static let shellMoveWorktreeUnreadableRefusal =
+        "This session's worktree gives TBD no local directory to start a replacement shell in — "
+        + "it is a remote worktree, or its row could not be read; nothing was changed."
+
+    /// The skip when something other than the pane's own shell is running in
+    /// the session's terminal.
+    ///
+    /// Worded like the typed-input rail's: it names the state, and it names
+    /// the two moves the person has. Not a refusal — this is the column of a
+    /// fleet run's report a person can act on.
+    static func shellMovePaneBusyRefusal(pid: Int32) -> String {
+        "Something other than this session's own shell is running in its terminal (pid \(pid)), "
+        + "and moving the session would stop it. Finish or stop that process and run the "
+        + "migration again."
+    }
+
+    /// The refusal when the pane the row names cannot be proven to still be
+    /// this terminal's. Carries `PaneOwnership.refusalDetail`, so the person
+    /// reads the same fact every other teardown-by-coordinate site reports.
+    static func shellMovePaneUnverifiedRefusal(detail: String) -> String {
+        "This session was not moved because \(detail). Stopping its program would have risked "
+        + "destroying another terminal's window, so nothing was changed."
+    }
+
+    /// The refusal when tmux would not kill the window. The program is
+    /// presumed still running, so nothing was started beside it.
+    static func shellMoveKillFailedRefusal(detail: String) -> String {
+        "This session's tmux window could not be stopped (\(detail)), so it was not moved and "
+        + "nothing was changed."
+    }
+
+    /// The refusal when the replacement shell could not be started. Says what
+    /// state the session is in, because its program is already gone.
+    static func shellMoveSpawnFailedRefusal(detail: String) -> String {
+        "This session's program was stopped, but starting a holder for its replacement shell "
+        + "failed (\(detail)). The session still reads as running on tmux with its window gone, "
+        + "which the tab's window-died recovery repairs; retry the move after that."
+    }
+
+    /// The refusal the loser of two concurrent moves of one row meets: a holder
+    /// is already registered for this session, so the winner has started its
+    /// replacement shell.
+    ///
+    /// Its own reason rather than the spawn-failure one, whose recovery advice
+    /// — the session reads as running on tmux with its window gone, and the
+    /// tab's window-died recovery repairs it — describes a row that was not
+    /// moved. The winner has already moved this one, so that advice would be
+    /// false in every particular.
+    static let shellMoveAlreadyMovingRefusal =
+        "Another move of this session is already running and has started its replacement shell "
+        + "on the pty holder, so this one changed nothing further."
+
+    /// The refusal when the one guarded write threw. The holder started for
+    /// the move has been abandoned, so no process outlives the row.
+    static func shellMoveWriteFailedRefusal(detail: String) -> String {
+        "This session's program was stopped and a replacement shell was started, but the move "
+        + "could not be recorded (\(detail)), so that shell was stopped again. The session still "
+        + "reads as running on tmux with its window gone, which the tab's window-died recovery "
+        + "repairs."
+    }
+
+    /// Move a RUNNING session that has no conversation to resume onto the pty
+    /// holder: stop its program, start a fresh login shell on a holder in the
+    /// same working directory, and record the move in one guarded write.
+    ///
+    /// **Reached only by shells.** `TransportMigrationEligibility` turns away
+    /// every other row that names no conversation — a Codex tab, a Claude tab
+    /// whose session has not begun, a hook tab of either kind — each with its
+    /// own reason, so nothing here has to guess what a tab was for.
+    ///
+    /// **Four steps, and the order is the contract.** Refuse early what cannot
+    /// be done; kill the tmux window under the pane-ownership guard and the
+    /// busy rail; spawn the holder carrying a freshly minted incarnation; write
+    /// once. Killing before
+    /// the write is the opposite of the parked path's order and is safe for a
+    /// different reason: the write is a compare-and-set, so a recreate that
+    /// notices the dead window first rotates the row's incarnation and this
+    /// write finds its snapshot stale. Both outcomes are consistent, and
+    /// nothing can leave a row naming a transport its live process is not on.
+    ///
+    /// **There is nothing to park.** A park exists to preserve a conversation
+    /// across a respawn, and this row names none — which is exactly why
+    /// `performHibernate` refuses it ("No session id to resume later") and why
+    /// this path exists at all. The kill IS the stop.
+    ///
+    /// **And the stop is why there is a busy rail here.** A shell fires no
+    /// hooks, so its activity state is never written and the eligibility rails
+    /// that skip a busy session cannot fire for one. The process table answers
+    /// instead, and a pane running something other than its own shell is left
+    /// alone and named.
+    ///
+    /// **No model-proxy route is minted.** A shell has none at its create path,
+    /// so there is nothing to attach and nothing to retire.
+    ///
+    /// Every failure lands the session in one of two states and no third: the
+    /// row untouched with its program still running, or the row untouched with
+    /// its window dead — the ordinary window-died state the app's recovery
+    /// banner already owns, and which `handleTerminalRecreateWindow` can still
+    /// repair precisely because the row has not been rewritten.
+    /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`.
+    func moveRunningShellToHolder(terminal: Terminal) async -> ShellTransportMoveOutcome {
+        // Before anything is touched. A session whose holder cannot be started
+        // must keep the program it has rather than lose it to a move that
+        // could never finish.
+        //
+        // The registry is required even when the oracle answers the spawn,
+        // because its `environment` is what the job inherits: the same daemon
+        // environment every other holder spawn reads, scrubbed by
+        // `SpawnBaseEnvironment` inside `holderLaunch`. The INHERITED
+        // environment deliberately has no fallback to
+        // `ProcessInfo.processInfo.environment` — under the test fence that is
+        // the ambient `TBD_HOME` and rendezvous root the fence exists to keep
+        // out of a composed launch. The program the job runs is a separate
+        // question and does read the ambient `SHELL`: `defaultShell` is
+        // `ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"`, which is
+        // the daemon's own login shell and the same one every other replacement
+        // shell in this file is launched with.
+        guard let registry = holderRegistry else {
+            logger.warning("shell transport move: refusing \(terminal.id, privacy: .public) — this daemon has no holder registry")
+            return .refused(reason: TerminalTransportMigrator.holderUnspawnableRefusal)
+        }
+        let spawnEnvironment = registry.environment
+        let spawnHolder: @Sendable (UUID, HolderLaunchRequest) async throws -> HolderHandle
+        let abandonHolder: @Sendable (UUID, HolderHandle) async -> Void
+        if let oracle = holderSpawnOracle {
+            spawnHolder = oracle.spawn
+            abandonHolder = oracle.abandon
+        } else {
+            guard registry.canSpawn else {
+                logger.warning("shell transport move: refusing \(terminal.id, privacy: .public) — no holder can be started")
+                return .refused(reason: TerminalTransportMigrator.holderUnspawnableRefusal)
+            }
+            spawnHolder = { try await registry.spawn(terminalID: $0, launch: $1) }
+            abandonHolder = { await registry.abandon(terminalID: $0, handle: $1) }
+        }
+        guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            logger.warning("shell transport move: refusing \(terminal.id, privacy: .public) — its worktree row could not be read")
+            return .refused(reason: Self.shellMoveWorktreeUnreadableRefusal)
+        }
+
+        // Taken BEFORE the kill, so the write below compares against the row
+        // as it was when this move decided to act.
+        let expectedState = TerminalReplacementSnapshot(terminal: terminal)
+
+        // The pane-ownership guard every teardown by DB-recorded coordinate
+        // goes through. A tmux server restart resets window and pane
+        // numbering, and several worktrees of one repo share a server, so this
+        // row's coordinate can collide with an unrelated live terminal's. A
+        // pane that names a different terminal — or a consultation that could
+        // not be run at all, which is "we do not know" rather than "gone" —
+        // refuses, and nothing is written.
+        let server = worktree.tmuxServer
+        let ownership = await tmux.paneOwnership(
+            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID)
+        guard ownership.permitsTeardown else {
+            let detail = ownership.refusalDetail ?? "its pane could not be verified"
+            logger.warning("shell transport move: refusing \(terminal.id, privacy: .public) — \(detail, privacy: .public)")
+            return .refused(reason: Self.shellMovePaneUnverifiedRefusal(detail: detail))
+        }
+
+        // The busy rail, and the only one a shell can have. A shell fires no
+        // hooks, so nothing ever writes its activity state and the row reads
+        // `.unknown` for life — which means the eligibility rails that skip a
+        // *busy* session can never fire for one. Ask the process table the same
+        // question the exit-stamped guard asks: is the pane's foreground
+        // process its own shell? A different pid is something the person
+        // started, and a fleet-wide run is precisely the case where they did
+        // not choose this tab. An unreadable pid proceeds, exactly as it does
+        // for the wake: a pane tmux cannot answer for is not evidence that a
+        // process is there.
+        if let busyPID = await paneForegroundPIDOtherThanItsShell(
+            server: server, paneID: terminal.tmuxPaneID) {
+            logger.info("shell transport move: terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in its pane — leaving it alone rather than stopping it")
+            return .busy(reason: Self.shellMovePaneBusyRefusal(pid: busyPID))
+        }
+
+        // The parity guard its sibling retire has
+        // (`retireTmuxWindowAfterTransportMigration`). No reachable row shape
+        // has `transport == .tmux` with blank coordinates today, but
+        // `kill-window -t ''` on a server several worktrees share is not a
+        // no-op, and a row that names no window has nothing to stop.
+        if terminal.tmuxWindowID.isEmpty {
+            logger.info("shell transport move: terminal \(terminal.id, privacy: .public) names no tmux window, so there is nothing to stop; continuing to the replacement shell")
+        } else {
+            do {
+                try await tmux.killWindow(server: server, windowID: terminal.tmuxWindowID)
+            } catch {
+                // A window that is already gone is not a failure to stop anything:
+                // `PaneOwnership.owned` covers "pane gone, server positively
+                // absent" on purpose, so a row whose window died before the person
+                // reached for this gesture arrives here and must not be refused
+                // with a tmux error about a program that no longer exists. Only
+                // tmux's own positive "no such window" counts; `.alive` is a
+                // program still running, and `.unknown` is "we do not know", which
+                // is a refusal at every site in this family.
+                let detail = "\(error)"
+                switch await tmux.probeWindow(server: server, windowID: terminal.tmuxWindowID) {
+                case .absent:
+                    logger.info("shell transport move: the window of \(terminal.id, privacy: .public) was already gone (\(detail, privacy: .public)); continuing to the replacement shell")
+                case .alive, .unknown:
+                    // The program is presumed still running, so nothing is started
+                    // beside it: two live programs for one row is the one state
+                    // this path must never produce.
+                    logger.warning("shell transport move: could not stop the window of \(terminal.id, privacy: .public): \(detail, privacy: .public)")
+                    return .refused(reason: Self.shellMoveKillFailedRefusal(detail: detail))
+                }
+            }
+        }
+
+        // Minted here rather than inside the write, which is what collapses a
+        // prepare-then-record pair into one statement: the replacement shell
+        // is launched already carrying the incarnation the row will name.
+        let incarnationID = UUID()
+        // `TBD_WORKTREE_ID` so `tbd` commands and a hand-launched agent in this
+        // shell resolve the right worktree instead of whatever the daemon's own
+        // environment carries, and `TBD_TERMINAL_ID` so they resolve the right
+        // tab — the same two the recreate-as-shell branch plants, for the same
+        // reasons.
+        let launchEnv = AgentProcessEnvironment.replacement(
+            base: [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": terminal.id.uuidString,
+            ],
+            incarnationID: incarnationID)
+        let handle: HolderHandle
+        do {
+            handle = try await spawnHolder(
+                terminal.id,
+                WorktreeLifecycle.holderLaunch(
+                    shellCommand: defaultShell,
+                    env: launchEnv,
+                    // Nothing sensitive to carry: a shell has no model-proxy
+                    // route, no profile and no resume argv.
+                    sensitiveEnv: [:],
+                    workingDirectory: worktree.path,
+                    cols: TmuxManager.defaultCols,
+                    rows: TmuxManager.defaultRows,
+                    environment: spawnEnvironment))
+        } catch {
+            // Not a spawn that failed: a spawn the registry DECLINED because
+            // this session already has a holder, which is what the loser of two
+            // concurrent moves of one row meets. The winner has moved the row,
+            // so the spawn-failure reason's recovery advice would be false in
+            // every particular.
+            if let registryError = error as? HolderRegistry.Error,
+               case .sessionAlreadyRegistered = registryError {
+                logger.warning("shell transport move: \(terminal.id, privacy: .public) already has a registered holder — another move won; nothing further was changed")
+                return .refused(reason: Self.shellMoveAlreadyMovingRefusal)
+            }
+            let detail = "\(error)"
+            logger.warning("shell transport move: could not start a holder for \(terminal.id, privacy: .public): \(detail, privacy: .public)")
+            return .refused(reason: Self.shellMoveSpawnFailedRefusal(detail: detail))
+        }
+
+        do {
+            guard try await db.terminals.moveRunningShellToHolder(
+                id: terminal.id,
+                expectedState: expectedState,
+                incarnationID: incarnationID,
+                holderPID: handle.holderPID,
+                childPID: handle.childPID,
+                startedAt: now()) != nil else {
+                // A holder and a job no row names would be reclaimable by
+                // nothing, so the abandon is not optional. The person keeps
+                // whatever the race gave them.
+                await abandonHolder(terminal.id, handle)
+                logger.warning("shell transport move: the write was refused for \(terminal.id, privacy: .public) — the row changed under the move; the holder was abandoned")
+                return .lostTheRace
+            }
+        } catch {
+            await abandonHolder(terminal.id, handle)
+            let detail = "\(error)"
+            logger.error("shell transport move: started a holder for \(terminal.id, privacy: .public) but could not record the move, so it was abandoned: \(detail, privacy: .public)")
+            return .refused(reason: Self.shellMoveWriteFailedRefusal(detail: detail))
+        }
+        logger.info("shell transport move: terminal \(terminal.id, privacy: .public) now runs a fresh login shell on the pty holder (holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
+        return .moved
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
@@ -1187,6 +1685,19 @@ public actor HibernationCoordinator {
             return await classifyUnparkedHolderWake(terminal)
         }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
+        // The backstop for a tmux row whose leg cannot serve the wake. Refusing
+        // here, before anything is touched, leaves the row parked with its
+        // session id, so a wake after `tbd terminal migrate` succeeds on the
+        // holder. Today the leg cannot serve when tmux is not installed; once
+        // the tmux path is deleted it can never serve and this is the answer.
+        if terminal.transport != .holder, !tmux.canServeTmux {
+            // `.notice`, not `.error`: a retrying focus-wake reaches this on
+            // every attempt, and a state the person can act on is not a daemon
+            // fault.
+            logger.notice("wake: terminal \(terminal.id, privacy: .public) is on the tmux transport and tmux is unavailable; refusing and leaving it parked")
+            return .respawnFailed(
+                reason: Self.tmuxWakeUnavailableReason(terminalID: terminal.id))
+        }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
@@ -1230,13 +1741,10 @@ public actor HibernationCoordinator {
         //
         // tmux-only, for the same reason the cwd assertion below is: a holder
         // row's pane id is the empty string and names no tmux coordinate.
-        if terminal.isExitStamped, terminal.transport != .holder,
-           let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
-           let panePID = Int32(panePIDString), panePID > 0,
-           let foregroundPID = paneProcessInspector.paneForegroundPID(panePID: panePID),
-           foregroundPID != panePID {
-            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(foregroundPID, privacy: .public) in pane \(paneID, privacy: .public) (pane pid \(panePID, privacy: .public)) — refusing the respawn rather than killing it")
-            return .paneBusy(pid: foregroundPID)
+        if let busyPID = await exitStampedPaneBusyPID(
+            terminal: terminal, server: server, paneID: paneID) {
+            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in pane \(paneID, privacy: .public) — refusing the respawn rather than killing it")
+            return .paneBusy(pid: busyPID)
         }
 
         // Assert that the process about to be resumed will run in THIS

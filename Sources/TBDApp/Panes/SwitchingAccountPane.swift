@@ -17,8 +17,31 @@ struct SwitchingAccount: Equatable, Sendable {
     /// a profile the app has not loaded, which it cannot name).
     let profileName: String?
 
+    /// Replaces the account-switch wording when the same park, re-home and wake
+    /// is doing something else: a session moving to the pty holder rides this
+    /// veil because its blink is the same blink.
+    let captionOverride: String?
+
+    /// Set explicitly by `transportMove`, never inferred from the caption, so a
+    /// caption override on some other record cannot change attach-epoch behavior.
+    /// True for the veil of a session moving to the pty holder. Its lifetime
+    /// ends on adoption of the migrated row, and it does not advance the attach
+    /// epoch: the replaced row's new window id is the one rebuild.
+    let isTransportMove: Bool
+
+    init(profileName: String?, captionOverride: String? = nil, isTransportMove: Bool = false) {
+        self.profileName = profileName
+        self.captionOverride = captionOverride
+        self.isTransportMove = isTransportMove
+    }
+
+    /// The record for a session moving from tmux to the pty holder.
+    static let transportMove = SwitchingAccount(
+        profileName: nil, captionOverride: "Moving session off tmux…", isTransportMove: true)
+
     /// What the pane says while the switch runs.
     var caption: String {
+        if let captionOverride { return captionOverride }
         if let profileName { return "Switching account to \(profileName)…" }
         return "Switching account…"
     }

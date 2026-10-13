@@ -213,6 +213,7 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let terminalSwapProfile = "terminal.swapProfile"
+    public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalSessionEnded = "terminal.sessionEnded"
@@ -722,6 +723,75 @@ public struct NightwatchSetModeParams: Codable, Sendable {
 public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
     case inPlace
     case fork
+}
+
+/// `terminal.migrateTransport` — move a session from the tmux transport to the
+/// pty holder in place.
+public struct TerminalMigrateTransportParams: Codable, Sendable {
+    /// The session to move. `nil` means every session TBD tracks.
+    public let terminalID: UUID?
+    public init(terminalID: UUID?) {
+        self.terminalID = terminalID
+    }
+}
+
+/// One session a migration did not move, and why.
+public struct TerminalMigrationSkip: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let reason: String
+    public init(terminalID: UUID, reason: String) {
+        self.terminalID = terminalID
+        self.reason = reason
+    }
+}
+
+/// What a `terminal.migrateTransport` call came to, one list per outcome.
+///
+/// Five outcomes rather than two, because they ask different things of the
+/// person. A **skip** names a state they can change and retry (a busy turn, a
+/// rail refusing the pause) and the session is still on tmux. A **refusal**
+/// does not help until the named fact changes (no holder can be started) and
+/// the session is still on tmux. **`movedNotResumed`** is neither: the row is
+/// holder-backed and will come back there when it is next woken, but its
+/// program was not started again now — grouping it with the refusals would
+/// tell a person a session "can't be moved" that has in fact moved, and would
+/// undercount the run. A fleet run reports every session it considered,
+/// including the ones already on the holder.
+public struct TerminalMigrateTransportResult: Codable, Sendable, Equatable {
+    public let migrated: [UUID]
+    /// Sessions now recorded on the holder whose program was not started again:
+    /// the rewrite landed and the wake that follows it did not. Each carries
+    /// the wake's own reason.
+    public let movedNotResumed: [TerminalMigrationSkip]
+    public let skipped: [TerminalMigrationSkip]
+    public let refused: [TerminalMigrationSkip]
+    /// Sessions that were already holder-backed; nothing was done to them.
+    public let alreadyHolder: [UUID]
+    public init(
+        migrated: [UUID],
+        movedNotResumed: [TerminalMigrationSkip] = [],
+        skipped: [TerminalMigrationSkip],
+        refused: [TerminalMigrationSkip],
+        alreadyHolder: [UUID] = []
+    ) {
+        self.migrated = migrated
+        self.movedNotResumed = movedNotResumed
+        self.skipped = skipped
+        self.refused = refused
+        self.alreadyHolder = alreadyHolder
+    }
+    private enum CodingKeys: String, CodingKey {
+        case migrated, movedNotResumed, skipped, refused, alreadyHolder
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        migrated = try c.decode([UUID].self, forKey: .migrated)
+        movedNotResumed = try c.decodeIfPresent(
+            [TerminalMigrationSkip].self, forKey: .movedNotResumed) ?? []
+        skipped = try c.decode([TerminalMigrationSkip].self, forKey: .skipped)
+        refused = try c.decode([TerminalMigrationSkip].self, forKey: .refused)
+        alreadyHolder = try c.decodeIfPresent([UUID].self, forKey: .alreadyHolder) ?? []
+    }
 }
 
 public struct TerminalSwapProfileParams: Codable, Sendable {

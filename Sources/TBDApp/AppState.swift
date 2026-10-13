@@ -1918,6 +1918,22 @@ final class AppState {
                 terminalID: terminalID, newProfileID: newProfileID,
                 mode: mode, cols: cols, rows: rows)
         }
+    /// How the transport-migration actions reach the daemon — injectable for the
+    /// same reason as `terminalProfileSwapper`: the veil's lifetime and the
+    /// result's presentation are testable without a running daemon.
+    ///
+    /// One session per call, never the daemon's `--all`: the app's fleet run is
+    /// composed from this, so a long run cannot outrun the receive deadline and
+    /// every row gets its own veil (`migrateAllTerminalsToHolder`).
+    @ObservationIgnored
+    lazy var terminalTransportMigrator:
+        @MainActor (UUID) async throws -> TerminalMigrateTransportResult =
+        { [daemonClient] terminalID in
+            try await daemonClient.migrateTerminalTransport(terminalID: terminalID)
+        }
+    /// Clock for the bounded wait that holds a transport-move veil until the
+    /// migrated row is adopted (see `awaitTransportMoveAdoption`).
+    @ObservationIgnored var transportMoveClock: any Clock<Duration> = ContinuousClock()
     /// How the composer's wake reaches the daemon — the result-returning sibling
     /// of `terminalWakeSender`, injectable for the same reason, so the wake's
     /// three replies are statable in a test without a running daemon.
@@ -3366,8 +3382,11 @@ final class AppState {
         // real un-park counts — a wake delta for a row the cache already holds
         // awake is not the swap's, and rebuilding on it would tear down a live
         // attach for nothing.
+        // A transport move does not bump here: this wake lands while the cached
+        // row still reads tmux, so a bump would rebuild against the window the
+        // migration retires. The replaced row's new window id is its rebuild.
         if !delta.hibernated,
-           switchingAccountTerminals[delta.terminalID] != nil,
+           let veil = switchingAccountTerminals[delta.terminalID], !veil.isTransportMove,
            terminals[delta.worktreeID]?[idx].isParked == true {
             terminalAttachEpochs[delta.terminalID, default: 0] += 1
         }

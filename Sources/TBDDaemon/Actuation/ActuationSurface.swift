@@ -86,6 +86,8 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// acts too, and acts differently — see `ActuationBranch`.
     case terminalRecreateWindow
     case terminalSwapProfile
+    /// Parks a session, rewrites its transport and wakes it on the pty holder.
+    case terminalMigrateTransport
     case terminalContinueInCodex
     case terminalContinueInClaude
     case terminalHistoryRevive
@@ -154,6 +156,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .worktreeResume: return RPCMethod.worktreeResume
         case .terminalRecreateWindow: return RPCMethod.terminalRecreateWindow
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
+        case .terminalMigrateTransport: return RPCMethod.terminalMigrateTransport
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
         case .terminalContinueInClaude: return RPCMethod.terminalContinueInClaude
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
@@ -180,6 +183,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         switch self {
         case .terminalSend, .remoteSend, .remoteSendMessage, .promptAnswer, .remoteAnswer: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
+             .terminalMigrateTransport,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,

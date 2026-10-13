@@ -1060,7 +1060,14 @@ extension HibernationCoordinator {
     }
 
     /// Wake a parked holder row onto a spawn command the CALLER composed — the
-    /// wake half of an in-place profile swap.
+    /// wake half of an action that rewrote the row in place while it was
+    /// parked. The in-place profile swap is the one such action today.
+    ///
+    /// A caller that needs no command of its own takes the public `wake`
+    /// instead: everything above its single transport branch is already
+    /// transport-independent, so an in-place change that only rewrote a column
+    /// resumes through the code every other wake uses. This entry point exists
+    /// for the caller whose command and route had to be minted together.
     ///
     /// `wakeHolderSection` is the mutate half and claims nothing, while the
     /// public `wake` claims the in-flight sets and then composes its own
@@ -1075,7 +1082,7 @@ extension HibernationCoordinator {
     /// because the section is never entered: the caller minted a route for a
     /// spawn that is not going to happen, and leaving it behind would make the
     /// row's route ambiguous for as long as it stayed parked.
-    func wakeHolderForProfileSwap(
+    func wakeHolderAfterInPlaceChange(
         terminal: Terminal,
         worktree: LocalWorktree,
         sessionID: String,
