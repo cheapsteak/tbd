@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -370,7 +369,7 @@ struct HolderClientTests {
     /// Proves the budget runs on the **injected** clock: the fake executable
     /// exits before it could bind anything, and the spawn only gives up once
     /// virtual time is advanced past `bindTimeout`. On wall time this test
-    /// would take 200 ms of real waiting; on a `TestClock` it takes none, and a
+    /// would take 200 ms of real waiting; on an `EventDrivenTestClock` it takes none, and a
     /// spawner that consulted `ContinuousClock` instead could not pass inside
     /// the helper's own real-time guard.
     @Test func spawnTimesOutIfTheHolderNeverBinds() async throws {
@@ -378,8 +377,7 @@ struct HolderClientTests {
         defer { try? FileManager.default.removeItem(atPath: home) }
         let environment = SpawnedHolderFixture.environment(home: home)
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let spawner = HolderSpawner(
             // Exits immediately and binds nothing. `/usr/bin/true` rather than a
             // written script so nothing about the fixture's own file creation
@@ -403,7 +401,7 @@ struct HolderClientTests {
             }
         }
 
-        let ranOut = await clock.advanceUntil("the bind budget to run out", by: .milliseconds(20)) {
+        let ranOut = try await clock.advanceUntil("the bind budget to run out", by: .milliseconds(20)) {
             outcome.isFinished
         }
         #expect(ranOut)

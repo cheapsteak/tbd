@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import os
@@ -15,21 +14,28 @@ import TestSupport
 ///
 /// Two deliberate splits:
 ///
-/// - The debounce/re-open tests inject a `TestClock` (wrapped, see
+/// - The debounce/re-open tests inject an `EventDrivenTestClock` (wrapped, see
 ///   `RecordingClock`) and never look at wall time for the behaviour under test.
 /// - The lifecycle tests construct `FileWatcher()` with **no clock argument**.
 ///   That is deliberate, but it is *not* proof that the production default is
 ///   wired: none of them ever writes to the watched file, so none of them
 ///   reaches `clock.sleep`, and swapping the production default for a
-///   `TestClock` would leave all four green.
+///   virtual clock would leave all four green.
 ///   `defaultClockDeliversOneRealDebouncedNotification` is the single test that
 ///   closes that hole — default clock, a real write, a real ~150 ms wait.
 ///
-/// `.serialized` is load-bearing and now doubly so: `TestClock.advance(to:)`
-/// calls `Task.megaYield()` — 20 serially-awaited background-QoS tasks — twice
-/// per advance, so clock-driven tests are their own contention source and
-/// starve each other when run in parallel. `.clockDriven` is the hang guard for
-/// the known virtual-time failure mode (a sleep nobody advances hangs forever).
+/// `.serialized` is load-bearing: the lifecycle assertions read process-global
+/// DEBUG counters (`liveStreamCount`, `closedFDCount`) against a baseline, so
+/// two tests of this suite running at once would count each other's streams
+/// and closes. `.clockDriven` is the hang guard for the known virtual-time
+/// failure mode (a sleep nobody advances hangs forever).
+///
+/// `EventDrivenTestClock.advance` does not yield: when it returns, a resumed
+/// debounce or re-open task has not yet run its post-sleep code. So every
+/// positive read after an advance is a bounded `poll`, and every negative read
+/// ("nothing notified yet", "nothing else notified") is preceded by `settle()`,
+/// which hands the executor back so a yield that *would* land gets the chance
+/// to before the counter is read.
 ///
 /// ## Deadline budget
 ///
@@ -44,7 +50,7 @@ import TestSupport
 /// | `poll` / `writeUntilArmed` default | `TestDeadlines.saturatedPass` | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
 /// | `fdCloseTimeout` | `TestDeadlines.saturatedPass` | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
 /// | `withWatchedFile` FD quiescence | `TestDeadlines.saturatedPass` | same cancel handler, but not an assertion |
-/// | `advanceWhenSuspended` | 45 s | fixed by `ClockTestSupport`, not ours to set |
+/// | `requireAdvanceWhenArmed` | 45 s | the clock's default arming guard; the arm is one hop from the recorded entry to `sleep` |
 /// | `writeUntilArmed`'s `attemptWindow` | 4 s | **not a guard** — the threshold that decides "the event is gone" |
 ///
 /// **The criterion these are sized against** is: the FIRST guard to fire must
@@ -193,8 +199,8 @@ struct FileWatcherTests {
         // every other runnable task in a 1300-test target, so it competes with
         // the very task it is waiting for and one turn guarantees nothing. The
         // poll below sleeps instead, which makes this task non-runnable and
-        // hands the executor back — the same reasoning
-        // `ClockTestSupport.waitForSuspension` documents.
+        // hands the executor back — the same reasoning `Tests/CLAUDE.md`
+        // documents for spinning `Task.yield()` against a task being waited on.
         await Self.poll("consuming task reached changes(for:) (baseline \(baseline))",
                         observing: { FileWatcher.liveStreamCount }) { $0 >= baseline + 1 }
 
@@ -245,8 +251,8 @@ struct FileWatcherTests {
     /// boundary assertion below unambiguous. (`writeUntilArmed` may itself
     /// write more than once; extra writes inside the same window are more of
     /// the input this test collapses, not a confound.)
-    @Test func writesWithinOneWindowCollapseToOneNotification() async {
-        await Self.withWatchedFile { f in
+    @Test func writesWithinOneWindowCollapseToOneNotification() async throws {
+        try await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
             await Self.writeUntilArmed(f)
             await Self.writeUntilArmed(f)
@@ -273,10 +279,16 @@ struct FileWatcherTests {
             //   three sleeps simply run to the same virtual deadline. The
             //   CONFIRMING re-assertion at the bottom is what reddens then, and
             //   that is the mutation it was measured against.
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
+            //
+            // `settle()` before each negative read: `advance` does not yield, so
+            // a yield that would land has to be given the executor first, or the
+            // read passes vacuously.
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval - .milliseconds(1))
+            await settle()
             #expect(f.yields.count == 0, "one millisecond short of the window must not notify")
 
+            // Plain `advance`: the debounce sleeper armed above is still in the
+            // ledger at the 150 ms deadline, so nothing has to re-arm.
             await f.clock.advance(by: .milliseconds(1))
             await Self.poll("a notification landed on the debounce boundary",
                             observing: { f.yields.count }) { $0 == 1 }
@@ -287,11 +299,12 @@ struct FileWatcherTests {
             // advance below is what upgrades that into "one fired and nothing
             // else was pending": a further full window with no yield.
             //
-            // Plain `advance(by:)`, NOT `advanceWhenSuspended(by:)`: the debounce
-            // has already fired, so there is no sleeper registered and waiting
-            // for a suspension would (correctly) time out and record a spurious
-            // Issue. Do not "fix" this to `advanceWhenSuspended`.
+            // Plain `advance(by:)`, NOT `requireAdvanceWhenArmed(by:)`: the
+            // debounce has already fired, so a healthy watcher has no sleeper
+            // registered and the strict wait would (correctly) throw
+            // `NoSleeperArmed`. Do not "fix" this to the strict form.
             await f.clock.advance(by: FileWatcher.debounceInterval)
+            await settle()
             let settled = f.yields.count
             #expect(settled == 1,
                     "three writes in one window must collapse to one notification: observed \(settled)")
@@ -301,12 +314,12 @@ struct FileWatcherTests {
     /// Tier 2. The boundary assertion no wall-clock test can express: nothing
     /// fires at `debounceInterval - 1ms`, and the notification lands on the
     /// very next millisecond.
-    @Test func nothingFiresUntilTheFullIntervalElapsed() async {
-        await Self.withWatchedFile { f in
+    @Test func nothingFiresUntilTheFullIntervalElapsed() async throws {
+        try await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
 
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval - .milliseconds(1))
+            await settle()
             #expect(f.yields.count == 0, "the debounce must not fire early")
 
             await f.clock.advance(by: .milliseconds(1))
@@ -317,8 +330,9 @@ struct FileWatcherTests {
             // without this the test would also pass if the single write somehow
             // produced a second notification a window later. Plain `advance(by:)`
             // deliberately: the debounce has fired, no sleeper is registered, and
-            // `advanceWhenSuspended` would time out and record a spurious Issue.
+            // `requireAdvanceWhenArmed` would throw `NoSleeperArmed`.
             await f.clock.advance(by: FileWatcher.debounceInterval)
+            await settle()
             let settled = f.yields.count
             #expect(settled == 1,
                     "one write must notify exactly once, at the boundary: observed \(settled)")
@@ -340,20 +354,22 @@ struct FileWatcherTests {
     /// concurrently with the new task's body. Residual, named because it is
     /// real: a pathologically delayed cancel could still let the old deadline
     /// fire. It would fail RED here, not pass silently.
-    @Test func lateWriteRestartsTheWindow() async {
-        await Self.withWatchedFile { f in
+    @Test func lateWriteRestartsTheWindow() async throws {
+        try await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: .milliseconds(100))
+            try await f.clock.requireAdvanceWhenArmed(by: .milliseconds(100))
+            await settle()
             #expect(f.yields.count == 0)
 
             await Self.writeUntilArmed(f)
 
             // Now at virtual 100 with a deadline at 250. Advancing 149 crosses
             // the ORIGINAL deadline (150) — if the window had not restarted,
-            // this is where the stale notification would land.
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
+            // this is where the stale notification would land. `advance` does
+            // not run the woken task, so `settle()` gives a stale fire its turn
+            // before the negative read; without it the read passes vacuously.
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval - .milliseconds(1))
+            await settle()
             #expect(f.yields.count == 0, "the superseded deadline must not fire")
 
             await f.clock.advance(by: .milliseconds(1))
@@ -364,9 +380,10 @@ struct FileWatcherTests {
             // read, so on its own it cannot distinguish "the restarted window
             // notified once" from "the superseded deadline also fired, just
             // later". Plain `advance(by:)` deliberately: the debounce has fired,
-            // no sleeper is registered, and `advanceWhenSuspended` would time out
-            // and record a spurious Issue.
+            // no sleeper is registered, and `requireAdvanceWhenArmed` would throw
+            // `NoSleeperArmed`.
             await f.clock.advance(by: FileWatcher.debounceInterval)
+            await settle()
             let settled = f.yields.count
             #expect(settled == 1,
                     "the restarted window must notify exactly once: observed \(settled)")
@@ -377,17 +394,15 @@ struct FileWatcherTests {
     /// elements the only observable ordering is *when* each arrives, so the
     /// per-window assertions below are the ordering assertion: the count is 1
     /// after the first window closes and 2 after the second.
-    @Test func separatedWritesNotifyTwice() async {
-        await Self.withWatchedFile { f in
+    @Test func separatedWritesNotifyTwice() async throws {
+        try await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
             await Self.poll("first window notified",
                             observing: { f.yields.count }) { $0 == 1 }
 
             await Self.writeUntilArmed(f)
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
             await Self.poll("second window notified",
                             observing: { f.yields.count }) { $0 == 2 }
 
@@ -396,8 +411,9 @@ struct FileWatcherTests {
             // proves only "at least two" — a notify-per-write regression would
             // pass through 2 on its way to 3+. Plain `advance(by:)` deliberately:
             // both windows have fired, no sleeper is registered, and
-            // `advanceWhenSuspended` would time out and record a spurious Issue.
+            // `requireAdvanceWhenArmed` would throw `NoSleeperArmed`.
             await f.clock.advance(by: FileWatcher.debounceInterval)
+            await settle()
             let settled = f.yields.count
             #expect(settled == 2,
                     "two separated writes must notify exactly twice: observed \(settled)")
@@ -409,16 +425,15 @@ struct FileWatcherTests {
     /// watcher re-opens the path after `reopenDelay` — 50 ms, not 150 ms, which
     /// is what distinguishes the re-open producer of `yield()` from the
     /// debounce producer.
-    @Test func atomicSaveReopensAndKeepsStreamLive() async {
-        await Self.withWatchedFile { f in
+    @Test func atomicSaveReopensAndKeepsStreamLive() async throws {
+        try await Self.withWatchedFile { f in
             // Warm-up: prove the dispatch source is registered and delivering
             // before the rename. `DispatchSource.resume()` registers its kqueue
             // filter asynchronously, and unlike a write a rename cannot be
             // retried against the same temp file, so liveness is established
             // first rather than assumed.
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
             await Self.poll("watcher is live before the rename",
                             observing: { f.yields.count }) { $0 == 1 }
 
@@ -430,8 +445,11 @@ struct FileWatcherTests {
             let renamed = rename(replacement.path, f.path)
             #expect(renamed == 0, "rename(2) over the watched path failed: errno=\(errno)")
 
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.reopenDelay - .milliseconds(1))
+            // The rename's `.delete` event arms the re-open sleep; the strict
+            // wait is what establishes the event was delivered. `settle()` then
+            // gives an early re-open its turn before the negative read.
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.reopenDelay - .milliseconds(1))
+            await settle()
             #expect(f.yields.count == 1, "the re-open must not land before reopenDelay")
 
             await f.clock.advance(by: .milliseconds(1))
@@ -452,8 +470,7 @@ struct FileWatcherTests {
             // in the suite where a retry is legitimately silent rather than
             // reported as event loss.
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+            try await f.clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
             await Self.poll("re-opened stream still debounces",
                             observing: { f.yields.count }) { $0 == 3 }
         }
@@ -475,11 +492,11 @@ struct FileWatcherTests {
     /// runs and cannot distinguish a correct drop from a stale yield into the
     /// void. Observing it would need a DEBUG counter at production's yield site,
     /// which is out of scope here.
-    @Test func terminationWithAPendingDebounceStillClosesTheFD() async {
+    @Test func terminationWithAPendingDebounceStillClosesTheFD() async throws {
         let baseline = FileWatcher.liveStreamCount
         let fdBaseline = FileWatcher.closedFDCount
 
-        await Self.withWatchedFile { f in
+        try await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
 
             f.consumer.cancel()
@@ -502,7 +519,7 @@ struct FileWatcherTests {
     /// clock argument, write once, wait out the real ~150 ms window.
     ///
     /// Why it earns a real wait: every other test in this suite would stay green
-    /// if the production default were swapped for a `TestClock`, or if the sleep
+    /// if the production default were swapped for a virtual clock, or if the sleep
     /// were taken on some clock other than the injected one — the lifecycle
     /// tests never write, and the debounce tests inject their own clock. This is
     /// the only assertion that fails in either case. The wait is bounded polling
@@ -550,9 +567,9 @@ struct FileWatcherTests {
     /// and the polling helpers can share it.
     private struct Fixture: Sendable {
         let path: String
-        /// The `TestClock` to advance. Production sees the `RecordingClock`
+        /// The clock to advance. Production sees the `RecordingClock`
         /// wrapper around it; virtual time is this clock's.
-        let clock: TestClock<Swift.Duration>
+        let clock: EventDrivenTestClock
         /// Number of sleeps production has armed on the clock.
         let armed: Counter
         /// Number of `AsyncStream` elements the consumer has received.
@@ -560,27 +577,27 @@ struct FileWatcherTests {
         let consumer: Task<Void, Never>
     }
 
-    /// A `Clock` that delegates to a `TestClock` and counts every armed sleep.
+    /// A `Clock` that delegates to an `EventDrivenTestClock` and counts every
+    /// armed sleep.
     ///
-    /// Why the count is needed: `TestClock.checkSuspension()` only answers "is
+    /// Why the count is needed: the clock's arming wait only answers "is
     /// *anything* suspended", so it cannot tell a superseded debounce still
-    /// being cleaned up from the fresh one a later write just armed — the
-    /// limitation `AppearanceDebounceTests.lateChangeRestartsWindow` documents.
-    /// Counting arms turns "the FS event was delivered and the timer
-    /// re-armed" into a positive, pollable fact instead of something inferred
-    /// from elapsed wall time.
+    /// being cleaned up from the fresh one a later write just armed. Counting
+    /// arms turns "the FS event was delivered and the timer re-armed" into a
+    /// positive, pollable fact instead of something inferred from elapsed wall
+    /// time.
     ///
     /// Delegating (the `CancelOnResumeClock` shape) rather than reimplementing
-    /// keeps virtual time exactly `TestClock`'s, so `advanceWhenSuspended` on
-    /// the base clock behaves normally.
+    /// keeps virtual time exactly the base clock's, so `requireAdvanceWhenArmed`
+    /// on the base clock sees every sleep production arms through this wrapper.
     private struct RecordingClock: Clock {
-        let base: TestClock<Swift.Duration>
+        let base: EventDrivenTestClock
         let armed: Counter
 
-        var now: TestClock<Swift.Duration>.Instant { base.now }
+        var now: EventDrivenTestClock.Instant { base.now }
         var minimumResolution: Swift.Duration { base.minimumResolution }
 
-        func sleep(until deadline: TestClock<Swift.Duration>.Instant,
+        func sleep(until deadline: EventDrivenTestClock.Instant,
                    tolerance: Swift.Duration?) async throws {
             armed.record()
             try await base.sleep(until: deadline, tolerance: tolerance)
@@ -595,8 +612,8 @@ struct FileWatcherTests {
         func record() { state.withLock { $0 += 1 } }
     }
 
-    /// Real temp file + real dispatch source + injected `TestClock`, torn down
-    /// unconditionally.
+    /// Real temp file + real dispatch source + injected `EventDrivenTestClock`,
+    /// torn down unconditionally, including when the body throws.
     ///
     /// Two one-sidednesses to keep in mind when reading any `yields.count`
     /// assertion in this suite — both make the counts a lower bound, never an
@@ -606,17 +623,16 @@ struct FileWatcherTests {
     ///   has not drained yet collapses. Notification counts can therefore
     ///   *under*-report and never over-report.
     /// - The `#expect(count == 0, "must not notify early")` checks read the
-    ///   counter immediately after an advance, with no settling, so a
-    ///   pathologically late stale yield could arrive after the read. They can
-    ///   false-PASS but never false-FAIL.
-    private static func withWatchedFile(_ body: (Fixture) async -> Void) async {
+    ///   counter after `settle()`, which proves absence only up to the settle
+    ///   window, so a pathologically late stale yield could arrive after the
+    ///   read. They can false-PASS but never false-FAIL.
+    private static func withWatchedFile(_ body: (Fixture) async throws -> Void) async throws {
         let url = makeTempFile()
         // `defer`, not a trailing call: a temp file must not survive a failing
         // body.
         defer { try? FileManager.default.removeItem(at: url) }
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Swift.Duration>()
+        let clock = EventDrivenTestClock()
         let armed = Counter()
         let yields = Counter()
         let fdBaseline = FileWatcher.closedFDCount
@@ -631,7 +647,14 @@ struct FileWatcherTests {
         // consumer is a SwiftUI `.task`.
         let consumer = Task { for await _ in stream { yields.record() } }
 
-        await body(Fixture(path: url.path, clock: clock, armed: armed, yields: yields, consumer: consumer))
+        // A strict clock wait in the body throws; the teardown below must run
+        // regardless, so the error is held and rethrown at the end.
+        var bodyError: (any Error)?
+        do {
+            try await body(Fixture(path: url.path, clock: clock, armed: armed, yields: yields, consumer: consumer))
+        } catch {
+            bodyError = error
+        }
 
         consumer.cancel()
         _ = await consumer.value
@@ -666,6 +689,7 @@ struct FileWatcherTests {
             previous = current
             try? await Task.sleep(for: .milliseconds(10))
         }
+        if let bodyError { throw bodyError }
     }
 
     // MARK: - Helpers
@@ -686,7 +710,7 @@ struct FileWatcherTests {
     /// its kqueue filter asynchronously on the source's own queue, so a write
     /// issued right after `changes(for:)` returns can land before the source is
     /// watching and be lost forever — which would leave the following
-    /// `advanceWhenSuspended` waiting out its whole hang guard. This is bounded
+    /// `requireAdvanceWhenArmed` waiting out its whole hang guard. This is bounded
     /// polling on real IO (assertion-hygiene rule 3), not a timing assertion.
     ///
     /// Timing-neutral by construction: virtual time does not move here, and the
@@ -753,7 +777,7 @@ struct FileWatcherTests {
                 // at least one event, so a lost write is production event loss —
                 // exactly what this suite exists to catch. Reported once, and the
                 // loop still retries, so the test fails here with a diagnosis
-                // instead of wedging on the next `advanceWhenSuspended`.
+                // instead of wedging on the next `requireAdvanceWhenArmed`.
                 Issue.record(
                     Failure("""
                         FileWatcher missed a write against an already-registered dispatch source \
