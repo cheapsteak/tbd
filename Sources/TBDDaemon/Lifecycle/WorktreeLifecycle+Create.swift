@@ -1665,6 +1665,10 @@ extension WorktreeLifecycle {
                 holderEnvironment: holderRegistry?.environment,
                 supervisor: modelProxySupervisor)
             primaryAttachment = attachment
+            let primarySessionName = await ClaudeSessionTitle.forSpawn(
+                db: db, store: sessionTitles,
+                worktreeID: worktreeID, displayName: worktree.displayName,
+                terminalID: plannedTerminalID1, label: TerminalLabel.claudeCode)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1697,7 +1701,7 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: primarySessionName
             )
             primaryCommand = spawn.command
             primaryEnv = [
@@ -1923,6 +1927,10 @@ extension WorktreeLifecycle {
                     projectsRoot: claudeProjectsRoot(profileConfigDirPath: restoreProfileConfigDir),
                     storedTranscriptPath: nil
                 )
+                let restoreSessionName = await ClaudeSessionTitle.forSpawn(
+                    db: db, store: sessionTitles,
+                    worktreeID: worktreeID, displayName: worktree.displayName,
+                    terminalID: plannedID, label: TerminalLabel.claudeCode)
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,
                     freshSessionID: nil,
@@ -1948,7 +1956,7 @@ extension WorktreeLifecycle {
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,
-                    sessionName: worktree.displayName
+                    sessionName: restoreSessionName
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,

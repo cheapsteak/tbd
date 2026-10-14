@@ -516,6 +516,17 @@ extension RPCRouter {
             attachment = nil
         }
 
+        // Only a Claude spawn carries a session name; a shell's command never
+        // reads it, so it is neither computed nor recorded for one.
+        let sessionName: String?
+        if isClaudeType {
+            sessionName = await ClaudeSessionTitle.forSpawn(
+                db: db, store: lifecycle.sessionTitles,
+                worktreeID: params.worktreeID, displayName: worktree.displayName,
+                terminalID: plannedTerminalID, label: label)
+        } else {
+            sessionName = nil
+        }
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -539,7 +550,7 @@ extension RPCRouter {
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: worktree.displayName
+            sessionName: sessionName
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -954,6 +965,7 @@ extension RPCRouter {
         await pendingQuestions.clear(terminalID: terminal.id)
         await broadcastPendingPrompts(terminalID: terminal.id)
         await continueInClaudeReadiness.clear(terminalID: terminal.id)
+        await lifecycle.sessionTitles.forget(terminalID: terminal.id)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.
@@ -1229,6 +1241,10 @@ extension RPCRouter {
                 storedTranscriptPath: nil
             )
             let claudeEnvOverrides = reviveConfig?.envSettingOverrides ?? [:]
+            let reviveSessionName = await ClaudeSessionTitle.forSpawn(
+                db: db, store: lifecycle.sessionTitles,
+                worktreeID: worktree.id, displayName: worktree.displayName,
+                terminalID: plannedTerminalID, label: TerminalLabel.claudeCode)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: sessionID,
                 freshSessionID: nil,
@@ -1251,7 +1267,7 @@ extension RPCRouter {
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: reviveSessionName
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -2686,6 +2702,14 @@ extension RPCRouter {
             promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
         )
 
+        // The session name is the swapped tab's: the new tab on a fork, the
+        // same row on an in-place swap.
+        let swapSessionName = await ClaudeSessionTitle.forSpawn(
+            db: db, store: lifecycle.sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id,
+            label: mode == .fork ? TerminalLabel.claudeCode : oldTerminal.label)
+
         // The spawn each arm runs, as a closure rather than a value: the
         // holder arm cannot compose its own until after its park, because its
         // endpoint comes from a model proxy route and that route may only be
@@ -2696,7 +2720,8 @@ extension RPCRouter {
                 builderBaseURL: builderBaseURL,
                 overlayPath: overlayPath, profileConfigDir: profileConfigDir,
                 worktree: worktree, repo: repo, swapConfig: swapConfig,
-                claudeEnvOverrides: claudeEnvOverrides)
+                claudeEnvOverrides: claudeEnvOverrides,
+                sessionName: swapSessionName)
         }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
@@ -2894,7 +2919,8 @@ extension RPCRouter {
         worktree: LocalWorktree,
         repo: Repo?,
         swapConfig: Config?,
-        claudeEnvOverrides: [String: ClaudeEnvValue]
+        claudeEnvOverrides: [String: ClaudeEnvValue],
+        sessionName: String?
     ) -> ClaudeSpawnCommandBuilder.Result {
         switch plan {
         case .resume(let resumeID):
@@ -2917,7 +2943,7 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: sessionName
             )
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
@@ -2941,7 +2967,7 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: sessionName
             )
         }
     }
@@ -6126,7 +6152,14 @@ extension RPCRouter {
         if activityApplication.clearedAwaitingInput {
             broadcastAwaitingInputRetraction(terminal: terminal)
         }
-        return .ok()
+        // Only a caller that asked gets a title — the Claude overlay's
+        // `UserPromptSubmit` entry. Asked after the identity check above, so a
+        // delayed hook from a replaced process is never handed one and never
+        // moves the record of what the live session carries.
+        guard params.wantsSessionTitle == true else { return .ok() }
+        let sessionTitle = await ClaudeSessionTitle.forPrompt(
+            db: db, store: lifecycle.sessionTitles, terminal: terminal)
+        return try RPCResponse(result: TerminalActivityEventResult(sessionTitle: sessionTitle))
     }
 
     /// Announce that a terminal's recorded wait reason is gone.

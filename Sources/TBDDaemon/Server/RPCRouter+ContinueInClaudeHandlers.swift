@@ -338,6 +338,12 @@ extension RPCRouter {
             throw ContinueInClaudeError(
                 "Could not stage the continuation packet: \(error.localizedDescription)")
         }
+        // The source row is still a Codex tab here; the title helper counts
+        // it as the Claude session it is about to become.
+        let claudeSessionName = await ClaudeSessionTitle.forSpawn(
+            db: db, store: lifecycle.sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: source.id, label: source.label)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -363,7 +369,7 @@ extension RPCRouter {
                 promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
-            sessionName: worktree.displayName)
+            sessionName: claudeSessionName)
         let claudeSensitiveEnv = EnvOverrideResolver.merge(
             global: config?.envOverrides,
             repo: repo?.envOverrides,

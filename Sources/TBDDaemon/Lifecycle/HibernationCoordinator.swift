@@ -223,6 +223,10 @@ public actor HibernationCoordinator {
     /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
     /// point it at a temp dir instead of falling back to the real `~/.claude`.
     private let configDirManager: ClaudeProfileConfigDirManager
+    /// The title each Claude session was last given — shared with the
+    /// lifecycle and router, so a wake's `--name` is what the next prompt's
+    /// title is compared against. See `ClaudeSessionTitle`.
+    private let sessionTitles: ClaudeSessionTitleStore
     /// Default input activity tracker. Wired post-construction by Daemon.swift
     /// to the shared instance from the input router so both use the same tracker.
     var inputActivity: InputActivityTracker
@@ -424,6 +428,7 @@ public actor HibernationCoordinator {
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        sessionTitles: ClaudeSessionTitleStore = ClaudeSessionTitleStore(),
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -440,6 +445,7 @@ public actor HibernationCoordinator {
         self.clock = clock
         self.signaller = signaller
         self.paneProcessInspector = paneProcessInspector
+        self.sessionTitles = sessionTitles
         self.actuationLog = actuationLog
     }
 
@@ -1897,6 +1903,10 @@ public actor HibernationCoordinator {
             overlayPath: overlayPath,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
+        let sessionName = await ClaudeSessionTitle.forSpawn(
+            db: db, store: sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: terminal.id, label: terminal.label)
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -1922,7 +1932,7 @@ public actor HibernationCoordinator {
             settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: worktree.displayName
+            sessionName: sessionName
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.

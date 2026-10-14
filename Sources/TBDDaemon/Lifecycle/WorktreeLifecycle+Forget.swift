@@ -100,6 +100,7 @@ extension WorktreeLifecycle {
         }
 
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
+        await sessionTitles.forget(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
         // Hard delete: closed-terminal history (rows + captured files) goes too.
         try await db.terminalHistory.deleteForWorktree(worktreeID: worktreeID)

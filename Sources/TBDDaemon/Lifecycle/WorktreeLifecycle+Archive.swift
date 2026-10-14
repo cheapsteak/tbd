@@ -160,6 +160,7 @@ extension WorktreeLifecycle {
 
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
+        await sessionTitles.forget(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
         // No server may read *Exited* after archive.
         // A holder server's exit — including the one archive's own stop

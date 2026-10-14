@@ -110,6 +110,11 @@ public struct WorktreeLifecycle: Sendable {
     /// Where archived worktree directories go before their bytes are
     /// reclaimed. See `WorktreeDeletionQueue`.
     let deletionQueue = WorktreeDeletionQueue()
+    /// The title each Claude session was last given (`--name` at spawn, or a
+    /// `UserPromptSubmit` hook title since). An actor reference, so every copy
+    /// of this struct — and the router and hibernation coordinator it is
+    /// handed to — shares one record. See `ClaudeSessionTitle`.
+    public let sessionTitles = ClaudeSessionTitleStore()
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
