@@ -1850,6 +1850,10 @@ extension RPCRouter {
                             at: now()) else {
                             throw StaleTerminalReplacementError()
                         }
+                        // The row is a plain shell now; its title entry must
+                        // not keep blocking other Claude tabs' titles.
+                        await self.lifecycle.sessionTitles.forget(
+                            terminalID: params.terminalID)
                         replacementEnv = AgentProcessEnvironment.replacement(
                             base: replacementEnv, incarnationID: incarnationID)
                     } catch {
@@ -2727,7 +2731,7 @@ extension RPCRouter {
         let swapSpawnTitle = await ClaudeSessionTitle.forSpawn(
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id)
+            terminalID: plannedTerminalID)
         let swapSessionName = swapSpawnTitle.name
 
         // The spawn each arm runs, as a closure rather than a value: the

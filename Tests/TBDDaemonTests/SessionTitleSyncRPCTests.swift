@@ -254,6 +254,26 @@ struct SessionTitleSyncRPCTests {
         #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
     }
 
+    @Test("recreating a Claude tab as a plain shell forgets its title, freeing the number")
+    func recreateAsShellForgetsTitle() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        // No claudeSessionID, so the recreate takes the plain-shell arm.
+        let tab = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+            label: TerminalLabel.claudeCode, kind: .claude)
+        let titles = router.lifecycle.sessionTitles
+        await titles.record(terminalID: tab.id, worktreeID: wt.id, title: "acme-feature")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: tab.id)))
+        #expect(response.success, "error: \(response.error ?? "nil")")
+
+        #expect(try await db.terminals.get(id: tab.id)?.kind == .shell)
+        #expect(await titles.lastApplied(terminalID: tab.id) == nil)
+    }
+
     @Test("a prompt leaves the reservation of a spawn whose row is not written yet")
     func promptKeepsInFlightReservations() async throws {
         let (wt, path) = try await makeWorktree()
