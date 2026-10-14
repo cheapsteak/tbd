@@ -77,7 +77,8 @@ struct EventDrivenTestClockSelfTests {
 
     /// Counts how many times a condition closure was evaluated, so a test can
     /// assert on *effort* rather than on elapsed time — the only way to pin a
-    /// busy-spin without a timing assertion of its own.
+    /// busy-spin without a timing assertion of its own. The `advanceUntil`
+    /// tests also count a poller's ticks with it.
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var n = 0
@@ -446,6 +447,216 @@ struct EventDrivenTestClockSelfTests {
         waiter.cancel()
         #expect(await waiter.value == "returned",
                 "attribution belongs to whatever cancelled the test, not to this call site")
+    }
+
+    // MARK: Several sleepers
+
+    /// A sleeper that records `label` when it fires, for the counted-arming
+    /// tests.
+    private static func sleeper(on clock: EventDrivenTestClock, for duration: Swift.Duration,
+                                label: String, into recorder: FireRecorder<String>) -> Task<Void, Never> {
+        Task {
+            guard (try? await clock.sleep(for: duration)) != nil else { return }
+            recorder.record(label)
+        }
+    }
+
+    /// The counted wait must stay parked through every registration short of
+    /// `count` and be released by the one that reaches it. The mid-way check is
+    /// what makes this discriminate: a wait released by *any* registration —
+    /// the single-sleeper behaviour — is gone from the ledger by the time the
+    /// second sleeper is visible, because both happen under one lock.
+    @Test("requireSleepersArmed waits for every sleeper, from several tasks, including late ones")
+    func requireSleepersArmedWaitsForTheCount() async throws {
+        let clock = EventDrivenTestClock()
+        let recorder = FireRecorder<String>()
+
+        let first = Self.sleeper(on: clock, for: .seconds(1), label: "a", into: recorder)
+        await Self.waitUntil("the first sleeper is registered") { clock.sleeperCount == 1 }
+
+        async let armed: Void = clock.requireSleepersArmed(count: 3, timeout: TestDeadlines.saturatedPass)
+        await Self.waitUntil("the counted waiter is parked") { clock.hasParkedArmingWaiter }
+
+        let second = Self.sleeper(on: clock, for: .seconds(2), label: "b", into: recorder)
+        await Self.waitUntil("the second sleeper is registered") { clock.sleeperCount == 2 }
+        #expect(clock.hasParkedArmingWaiter,
+                "two of three registered must not release a wait for three")
+
+        let third = Self.sleeper(on: clock, for: .seconds(3), label: "c", into: recorder)
+        try await armed
+        #expect(clock.sleeperCount == 3)
+
+        await clock.advance(by: .seconds(3))
+        // The three resumed tasks run concurrently, so record order is not
+        // fire order; what matters is that all three fired.
+        var fired: [String] = []
+        for _ in 0..<3 { fired.append(await recorder.next() ?? "nothing") }
+        #expect(fired.sorted() == ["a", "b", "c"])
+        for task in [first, second, third] { await task.value }
+    }
+
+    @Test("requireSleepersArmed throws a diagnostic naming expected and observed counts")
+    func requireSleepersArmedThrowsOnTooFew() async {
+        let clock = EventDrivenTestClock()
+        let recorder = FireRecorder<String>()
+        let first = Self.sleeper(on: clock, for: .seconds(1), label: "a", into: recorder)
+        let second = Self.sleeper(on: clock, for: .seconds(1), label: "b", into: recorder)
+        await Self.waitUntil("both sleepers are registered") { clock.sleeperCount == 2 }
+
+        var text = "nothing was thrown"
+        do {
+            // 50 ms rather than the 45 s default, so the proof is cheap.
+            try await clock.requireSleepersArmed(count: 3, timeout: .milliseconds(50))
+        } catch {
+            text = String(describing: error)
+        }
+
+        #expect(text.contains("expected at least 3 task(s)"), "got: \(text)")
+        #expect(text.contains("observed 2 registered sleeper(s)"), "got: \(text)")
+        #expect(text.contains("EventDrivenTestClockSelfTests.swift"),
+                "the thrown diagnostic must name the wait that gave up — got: \(text)")
+        #expect(clock.hasParkedArmingWaiter == false,
+                "a stranded counted waiter must be deregistered")
+
+        first.cancel()
+        second.cancel()
+        await first.value
+        await second.value
+    }
+
+    // MARK: advanceUntil
+
+    /// A poller that ticks every second, `limit` times (forever when nil),
+    /// re-arming after each tick is counted.
+    private static func poller(on clock: EventDrivenTestClock, ticks: Counter,
+                               limit: Int? = nil) -> Task<Void, Never> {
+        Task {
+            while limit.map({ ticks.count < $0 }) ?? true {
+                guard (try? await clock.sleep(for: .seconds(1))) != nil else { return }
+                ticks.bump()
+            }
+        }
+    }
+
+    /// Several re-arms, and an exact landing: `now` must equal the number of
+    /// ticks the condition needed. An advance taken with nothing armed would
+    /// push the next sleep's deadline past where the count says it should be,
+    /// and an advance taken after the condition held would overshoot.
+    @Test("advanceUntil steps a re-arming loop to its condition and stops exactly there")
+    func advanceUntilStepsARearmingLoop() async throws {
+        let clock = EventDrivenTestClock()
+        let ticks = Counter()
+        let poller = Self.poller(on: clock, ticks: ticks)
+
+        let held = try await clock.advanceUntil("three ticks", by: .seconds(1),
+                                                timeout: TestDeadlines.saturatedPass) { ticks.count >= 3 }
+
+        #expect(held)
+        #expect(ticks.count == 3)
+        #expect(clock.now.offset == .seconds(3))
+        poller.cancel()
+        await poller.value
+    }
+
+    /// The last tick of a loop that stops does not re-arm, so the final step
+    /// can only end on the condition. Without the condition watch this step
+    /// would sit out the arming guard and throw, so a broken watch is red —
+    /// slowly, after the guard — rather than green.
+    @Test("advanceUntil returns when the loop's last tick ends it without re-arming")
+    func advanceUntilSeesTheLastTick() async throws {
+        let clock = EventDrivenTestClock()
+        let ticks = Counter()
+        let poller = Self.poller(on: clock, ticks: ticks, limit: 4)
+
+        let held = try await clock.advanceUntil("four ticks", by: .seconds(1),
+                                                timeout: TestDeadlines.saturatedPass) { ticks.count >= 4 }
+
+        #expect(held)
+        #expect(clock.now.offset == .seconds(4))
+        await poller.value
+        #expect(clock.hasSleeper == false)
+    }
+
+    @Test("advanceUntil returns at once, advancing nothing, when the condition already holds")
+    func advanceUntilWithConditionAlreadyHeld() async throws {
+        let clock = EventDrivenTestClock()
+        let held = try await clock.advanceUntil("already true", by: .seconds(1),
+                                                timeout: .milliseconds(50)) { true }
+        #expect(held)
+        #expect(clock.now.offset == .zero)
+    }
+
+    /// The step invariant: when nothing re-arms, the call throws the arming
+    /// diagnostic instead of advancing blind. One tick lands, the sleeper does
+    /// not come back, and `now` must stay at that one tick.
+    @Test("advanceUntil throws rather than advancing blind when nothing re-arms")
+    func advanceUntilThrowsWhenNothingRearms() async {
+        let clock = EventDrivenTestClock()
+        let ticks = Counter()
+        let oneShot = Self.poller(on: clock, ticks: ticks, limit: 1)
+        await Self.waitUntil("the one-shot sleeper is registered") { clock.hasSleeper }
+
+        var text = "nothing was thrown"
+        do {
+            try await clock.advanceUntil("a state that never comes", by: .seconds(1),
+                                         timeout: .milliseconds(50)) { false }
+        } catch {
+            text = String(describing: error)
+        }
+
+        #expect(text.contains("no task suspended on the clock within"),
+                "a missed re-arm must throw the NoSleeperArmed diagnostic — got: \(text)")
+        #expect(text.contains("EventDrivenTestClockSelfTests.swift"), "got: \(text)")
+        #expect(clock.now.offset == .seconds(1),
+                "exactly the one armed tick may be advanced — got \(clock.now.offset)")
+        await oneShot.value
+    }
+
+    /// A recurring timer re-arms forever, so the arming guard never fires and
+    /// only the step budget can end the call. Exactly `maxSteps` advances are
+    /// spent — not one more — and the diagnostic says what was awaited.
+    @Test("advanceUntil throws once maxSteps advances pass with the loop still re-arming")
+    func advanceUntilStopsAtMaxSteps() async {
+        let clock = EventDrivenTestClock()
+        let ticks = Counter()
+        let poller = Self.poller(on: clock, ticks: ticks)
+
+        var text = "nothing was thrown"
+        do {
+            try await clock.advanceUntil("a state the poller never reaches", by: .seconds(1),
+                                         timeout: TestDeadlines.saturatedPass, maxSteps: 4) { false }
+        } catch {
+            text = String(describing: error)
+        }
+
+        #expect(text.contains("a state the poller never reaches did not hold after 4 advance(s)"),
+                "got: \(text)")
+        #expect(text.contains("EventDrivenTestClockSelfTests.swift"), "got: \(text)")
+        #expect(clock.now.offset == .seconds(4))
+        poller.cancel()
+        await poller.value
+    }
+
+    /// Cancellation ends the call like every other wait here: no throw, no
+    /// advance, and `false` because the condition never held.
+    @Test("a cancelled advanceUntil returns false and advances nothing")
+    func advanceUntilIsInertOnCancellation() async {
+        let clock = EventDrivenTestClock()
+        let waiter = Task { [clock] () -> String in
+            do {
+                // Long enough that expiry cannot be what ends this wait.
+                let held = try await clock.advanceUntil("never", by: .seconds(1),
+                                                        timeout: .seconds(120)) { false }
+                return "returned \(held)"
+            } catch {
+                return "threw: \(error)"
+            }
+        }
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        waiter.cancel()
+        #expect(await waiter.value == "returned false")
+        #expect(clock.now.offset == .zero)
     }
 
     // MARK: Cancellation

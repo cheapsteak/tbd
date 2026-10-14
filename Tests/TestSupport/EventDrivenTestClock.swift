@@ -139,6 +139,9 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// authoritative verdict no matter which task the group sees finish first.
     private struct ArmingWaiter {
         let id: UUID
+        /// How many registered sleepers release this waiter: 1 for the
+        /// single-sleeper waits, `count` for ``requireSleepersArmed(count:timeout:sourceLocation:)``.
+        let count: Int
         let continuation: CheckedContinuation<Bool, Never>
     }
 
@@ -248,8 +251,12 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                 }
                 box.continuation = continuation
                 suspensions.append(Suspension(id: id, deadline: deadline, box: box))
-                let waiters = armingWaiters
-                armingWaiters.removeAll()
+                // Release only the waiters this registration satisfies: a
+                // counted waiter asking for three sleepers stays parked through
+                // the first two.
+                let registered = suspensions.count
+                let waiters = armingWaiters.filter { $0.count <= registered }
+                armingWaiters.removeAll { $0.count <= registered }
                 lock.unlock()
                 // Outside the lock: a waiter resumes into arbitrary user code.
                 // Draining the ledger and resuming what was drained are one
@@ -377,8 +384,12 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     ///   registered. A `true` under cancellation is not evidence of anything —
     ///   see the note at the bottom of this method — so both callers check
     ///   `Task.isCancelled` before reporting.
-    private func armingTimedOut(timeout: Swift.Duration) async -> Bool {
-        if hasSleeper { return false }
+    ///
+    /// `count` is how many registered sleepers satisfy the wait — 1 for the
+    /// single-sleeper forms, more for
+    /// ``requireSleepersArmed(count:timeout:sourceLocation:)``.
+    private func armingTimedOut(timeout: Swift.Duration, count: Int = 1) async -> Bool {
+        if sleeperCount >= count { return false }
 
         let waiterID = UUID()
         let timedOut = await withTaskGroup(of: ArmingRace.self, returning: Bool.self) { group in
@@ -387,7 +398,7 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                     lock.lock()
                     // Re-check under the lock: a sleeper may have registered
                     // between the fast path above and this park.
-                    if !suspensions.isEmpty {
+                    if suspensions.count >= count {
                         lock.unlock()
                         continuation.resume(returning: true)
                         return
@@ -400,7 +411,7 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                         continuation.resume(returning: false)
                         return
                     }
-                    armingWaiters.append(ArmingWaiter(id: waiterID, continuation: continuation))
+                    armingWaiters.append(ArmingWaiter(id: waiterID, count: count, continuation: continuation))
                     lock.unlock()
                 }
                 return .waiter(timedOut: !armed)
@@ -522,6 +533,169 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
         await advance(by: duration)
     }
 
+    // MARK: Multi-sleeper and multi-step waits
+
+    /// Waits until at least `count` tasks are suspended on this clock — the
+    /// several-sleeper form of ``requireSleeperArmed(timeout:sourceLocation:)``,
+    /// for tests that arm several timers at once and must not advance until all
+    /// of them are in the ledger. `clockwork.FakeClock.BlockUntil(n)` is the
+    /// same idea.
+    ///
+    /// Same mechanism, not a poll: the waiter parks on a continuation that
+    /// ``sleep(until:tolerance:)`` resumes from the registration that brings the
+    /// ledger to `count`, and the registrations before it leave it parked.
+    /// Returns at once if `count` sleepers are already registered.
+    ///
+    /// - Throws: `TooFewSleepersArmed`, naming the expected count, the count
+    ///   actually registered when the guard gave up, and this call site.
+    /// - Parameters:
+    ///   - count: how many sleepers must be registered at the same time.
+    ///   - timeout: hang guard only, exactly as in
+    ///     ``requireSleeperArmed(timeout:sourceLocation:)``, including the
+    ///     ``TestDeadlines/saturatedPass`` advice for `@MainActor` arming. **On
+    ///     task cancellation this returns without throwing.**
+    public func requireSleepersArmed(count: Int,
+                                     timeout: Swift.Duration = .seconds(45),
+                                     sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        guard await armingTimedOut(timeout: timeout, count: count), !Task.isCancelled else { return }
+        throw TooFewSleepersArmed(expected: count, observed: sleeperCount, timeout: timeout,
+                                  virtualNow: now, sourceLocation: sourceLocation)
+    }
+
+    /// Steps virtual time by `step`, one armed sleeper at a time, until
+    /// `condition` holds — the event-driven replacement for
+    /// `TestClock.advanceUntil`, for a loop under test that re-arms an unknown
+    /// number of times before reaching the state the test waits for.
+    ///
+    /// Each step is the strict handshake: wait for an armed sleeper, then
+    /// advance by `step`. **Nothing is advanced with an empty ledger**, so a
+    /// re-arm that has not registered yet is waited for rather than overtaken.
+    /// Virtual time spent is `clock.now` after the call minus before it, which
+    /// is how a test measures backoff instead of tolerating it.
+    ///
+    /// The condition is also watched *while* a step waits for its arming,
+    /// because the last tick of a loop that stops — a bound that runs out, a
+    /// poller that found what it wanted — does not re-arm, and its effect lands
+    /// after `advance` has returned. Watching is a real-time poll of the
+    /// condition at 10 ms (no megaYield, and the task is non-runnable between
+    /// reads); it can end a wait, never start an advance.
+    ///
+    /// - Returns: `true` once `condition` holds. `false` only when the
+    ///   enclosing task was cancelled before it held: like every wait on this
+    ///   clock, cancellation ends the call silently and advances nothing more,
+    ///   because the failure belongs to whatever cancelled the test.
+    /// - Throws:
+    ///   - `NoSleeperArmed` when no sleeper registers within `timeout` and the
+    ///     condition still does not hold — the loop under test stopped without
+    ///     reaching the state, or never started.
+    ///   - `AdvanceUntilExhausted` when the loop re-armed after `maxSteps`
+    ///     advances with the condition still false — a recurring timer that
+    ///     would otherwise be stepped until the suite time limit.
+    /// - Parameters:
+    ///   - what: names the awaited state in the exhaustion diagnostic.
+    ///   - step: virtual time per advance — normally the interval the code
+    ///     under test sleeps on, so each advance wakes it once.
+    ///   - timeout: hang guard for **each** arming wait, as in
+    ///     ``requireAdvanceWhenArmed(by:timeout:sourceLocation:)``. A loop
+    ///     that keeps re-arming never reaches it; `maxSteps` bounds that case.
+    ///   - maxSteps: most advances spent before giving up. 1,000 covers the
+    ///     current callers' few dozen steps with room; pass a value near the
+    ///     expected count to catch a runaway early.
+    ///   - condition: read before each advance and between arming waits. It
+    ///     runs concurrently with the arming wait, so it must be `@Sendable`.
+    @discardableResult
+    public func advanceUntil(_ what: String,
+                             by step: Swift.Duration,
+                             timeout: Swift.Duration = .seconds(45),
+                             maxSteps: Int = 1_000,
+                             sourceLocation: SourceLocation = #_sourceLocation,
+                             _ condition: @escaping @Sendable () async -> Bool) async throws -> Bool {
+        var advances = 0
+        while true {
+            switch await armedOrConditionHeld(timeout: timeout, condition: condition) {
+            case .conditionHeld:
+                return true
+            case .cancelled:
+                return await condition()
+            case .unarmed:
+                // The guard and the watcher race; read once more so a condition
+                // that came true at the last moment is not reported as a hang.
+                if await condition() { return true }
+                throw NoSleeperArmed(timeout: timeout, virtualNow: now, sourceLocation: sourceLocation)
+            case .armed:
+                // A loop that re-arms after reaching the state must not be
+                // stepped past it.
+                if await condition() { return true }
+                guard advances < maxSteps else {
+                    throw AdvanceUntilExhausted(what: what, maxSteps: maxSteps, step: step,
+                                                virtualNow: now, sourceLocation: sourceLocation)
+                }
+                // The fast path can report "armed" to a cancelled task; the
+                // invariant holds there too — cancellation advances nothing.
+                guard !Task.isCancelled else { return false }
+                await advance(by: step)
+                advances += 1
+            }
+        }
+    }
+
+    /// How one ``advanceUntil(_:by:timeout:maxSteps:sourceLocation:_:)`` step's
+    /// wait ended.
+    private enum StepWait {
+        case armed
+        case conditionHeld
+        case unarmed
+        case cancelled
+    }
+
+    /// One outcome of a step's two-task race, tagged by its producer.
+    private enum StepRace {
+        case arming(timedOut: Bool)
+        case conditionHeld
+        case watcherCancelled
+    }
+
+    /// Races the arming wait against a watch on `condition`, so the step ends
+    /// on whichever comes first: a sleeper to advance, or no need to.
+    private func armedOrConditionHeld(timeout: Swift.Duration,
+                                      condition: @escaping @Sendable () async -> Bool) async -> StepWait {
+        let outcome: StepWait = await withTaskGroup(of: StepRace.self, returning: StepWait.self) { group in
+            group.addTask { [self] in
+                let timedOut = await armingTimedOut(timeout: timeout)
+                return .arming(timedOut: timedOut)
+            }
+            group.addTask {
+                while !Task.isCancelled {
+                    if await condition() { return .conditionHeld }
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                return .watcherCancelled
+            }
+            // The watcher only ends on its own when the condition holds, so the
+            // first decisive result is the verdict; `.watcherCancelled` is
+            // never decisive.
+            var verdict: StepWait = .unarmed
+            race: while let raced = await group.next() {
+                switch raced {
+                case .arming(let timedOut):
+                    verdict = timedOut ? .unarmed : .armed
+                    break race
+                case .conditionHeld:
+                    verdict = .conditionHeld
+                    break race
+                case .watcherCancelled:
+                    continue
+                }
+            }
+            group.cancelAll()
+            return verdict
+        }
+        // Cancellation releases the arming wait as "timed out", which is not
+        // evidence of anything — same rule as the single-step waits.
+        if outcome == .unarmed, Task.isCancelled { return .cancelled }
+        return outcome
+    }
+
     // MARK: Advancing
 
     /// Advances virtual time by `duration`, firing every sleeper it passes.
@@ -623,6 +797,46 @@ private struct NoSleeperArmed: Error, CustomStringConvertible {
         zero registered sleepers, virtual now = \(virtualNow.offset). The code under test \
         never reached its sleep: did you start the task, cancel it first, or advance past \
         the point where it would have armed?\(site)
+        """
+    }
+}
+
+/// Diagnostic for ``EventDrivenTestClock/requireSleepersArmed(count:timeout:sourceLocation:)``.
+/// Same shape and reasoning as ``NoSleeperArmed``: observed state, on the
+/// primary failure line, with the call site because it is thrown.
+private struct TooFewSleepersArmed: Error, CustomStringConvertible {
+    let expected: Int
+    let observed: Int
+    let timeout: Swift.Duration
+    let virtualNow: EventDrivenTestClock.Instant
+    let sourceLocation: SourceLocation
+
+    var description: String {
+        """
+        EventDrivenTestClock: expected at least \(expected) task(s) suspended on the clock \
+        within \(timeout) — observed \(observed) registered sleeper(s), virtual now = \
+        \(virtualNow.offset). Some of the code under test never reached its sleep: did \
+        every task start, and did any fire or get cancelled before the rest arrived?
+        The wait that gave up: \(sourceLocation.fileID):\(sourceLocation.line).
+        """
+    }
+}
+
+/// Diagnostic for ``EventDrivenTestClock/advanceUntil(_:by:timeout:maxSteps:sourceLocation:_:)``
+/// running out of steps while the code under test kept re-arming.
+private struct AdvanceUntilExhausted: Error, CustomStringConvertible {
+    let what: String
+    let maxSteps: Int
+    let step: Swift.Duration
+    let virtualNow: EventDrivenTestClock.Instant
+    let sourceLocation: SourceLocation
+
+    var description: String {
+        """
+        EventDrivenTestClock: \(what) did not hold after \(maxSteps) advance(s) of \(step) — \
+        the code under test re-armed every time, virtual now = \(virtualNow.offset). Either \
+        the state is never reached, or it needs more steps than maxSteps allows.
+        The wait that gave up: \(sourceLocation.fileID):\(sourceLocation.line).
         """
     }
 }
