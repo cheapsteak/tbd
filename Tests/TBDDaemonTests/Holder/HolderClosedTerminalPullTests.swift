@@ -187,6 +187,7 @@ struct HolderClosedTerminalPullTests {
         try await suspend(reader)
 
         let sidecar = Sidecar()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = sidecar.makePull(clock: TestClock())
         let resolver = Self.resolver(role: .viewer(attach: 4), pull: pull)
 
@@ -232,6 +233,7 @@ struct HolderClosedTerminalPullTests {
 
         let sidecar = Sidecar()
         let resolver = Self.resolver(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             role: .daemon, pull: sidecar.makePull(clock: TestClock()))
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
@@ -259,6 +261,7 @@ struct HolderClosedTerminalPullTests {
         try await suspend(reader)
 
         let sidecar = Sidecar()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let resolver = Self.resolver(
             role: .viewer(attach: 4), pull: sidecar.makePull(clock: clock))
@@ -269,6 +272,7 @@ struct HolderClosedTerminalPullTests {
                 history: fx.db.terminalHistory)
         }
         try await waitFor("the screen request to reach the sidecar") { sidecar.sendCount == 1 }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.closedTerminalPullBound)
         await dispose.value
         await reader.stop()
@@ -289,6 +293,7 @@ struct HolderClosedTerminalPullTests {
         try await suspend(reader)
 
         let sidecar = Sidecar()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = sidecar.makePull(clock: TestClock())
         let resolver = Self.resolver(role: .viewer(attach: 4), pull: pull)
 
@@ -322,6 +327,7 @@ struct HolderClosedTerminalPullTests {
         let sidecar = Sidecar()
         sidecar.sendError = SidecarNotConnected()
         let resolver = Self.resolver(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             role: .viewer(attach: 4), pull: sidecar.makePull(clock: TestClock()))
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
@@ -363,6 +369,7 @@ struct HolderClosedTerminalPullTests {
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
             detached.terminal, reader: draining,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             resolver: Self.resolver(role: .daemon, pull: sidecar.makePull(clock: TestClock())),
             history: detached.db.terminalHistory)
         // The same walk the viewer runs, over the same bytes — so what goes on
@@ -375,6 +382,7 @@ struct HolderClosedTerminalPullTests {
         let (suspended, suspendedOurs) = try await makeSeededReader(sessionID: viewed.terminal.id)
         defer { close(suspendedOurs) }
         try await suspend(suspended)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = sidecar.makePull(clock: TestClock())
         let dispose = Task {
             await WorktreeLifecycle.recordHolderClosedTerminal(

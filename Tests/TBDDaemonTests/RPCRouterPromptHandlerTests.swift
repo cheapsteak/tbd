@@ -35,6 +35,7 @@ struct RPCRouterPromptHandlerTests {
             .appendingPathComponent("tbd-prompt-rpc-\(UUID().uuidString)", isDirectory: true)
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
         let db = try TBDDatabase(inMemory: true)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let store = PendingPromptStore(clock: clock)
         let router = RPCRouter(
@@ -296,6 +297,7 @@ struct RPCRouterPromptHandlerTests {
 
         let answering = Task { try await answer(f, promptID: id) }
         _ = await waiter.value
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await f.clock.advanceWhenSuspended(by: .seconds(5))
         let response = try await answering.value
         #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .unknown,

@@ -421,14 +421,17 @@ struct TransportMigrationRaceTests {
 
     @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async {
         await withAppState { state in
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             let clock = TestClock<Duration>()
             let row = setUp(state, clock: clock)
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
             // The migrator parks the row before the reply.
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.waitForSuspension()
             state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
                 terminalID: row.id, worktreeID: row.worktreeID, hibernated: true, keepWarm: false)))
             var identities = [identity(state, row)]
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.advanceWhenSuspended(by: .milliseconds(300))
             #expect(state.switchingAccountTerminals[row.id] == .transportMove,
                     "the veil cleared on the reply, before the deltas")
@@ -442,6 +445,7 @@ struct TransportMigrationRaceTests {
             moved.tmuxPaneID = ""
             moved.transport = .holder
             state.handleDelta(.terminalReplaced(moved))
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.advanceWhenSuspended(by: .milliseconds(100))
             await task.value
 
@@ -456,9 +460,11 @@ struct TransportMigrationRaceTests {
 
     @Test func noDeltaMeansTheBoundClearsTheVeil() async {
         await withAppState { state in
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             let clock = TestClock<Duration>()
             let row = setUp(state, clock: clock)
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.waitForSuspension()
             #expect(state.switchingAccountTerminals[row.id] == .transportMove)
             // The wait re-arms every 100 ms, so step it until the bound (5 s of

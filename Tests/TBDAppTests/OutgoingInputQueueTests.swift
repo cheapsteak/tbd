@@ -119,6 +119,7 @@ struct OutgoingInputQueueTests {
         // `endUserPaste()`, the awaited `enqueueInjection` call below would
         // simply hang, and the suite's `.clockDriven` time limit would fail
         // the test with a clear diagnostic rather than a false pass.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
@@ -141,6 +142,7 @@ struct OutgoingInputQueueTests {
     @Test("An injection arriving outside a paste goes straight out")
     func injectionOutsidePasteGoesStraightOut() async {
         let recorder = WriteRecorder()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(2), clock: clock) { data in
             recorder.write(data)
@@ -161,6 +163,7 @@ struct OutgoingInputQueueTests {
         // nobody. Acking `true` here would stop the daemon falling back and
         // lose the prompt invisibly — the failure H1 named.
         recorder.result = false
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
@@ -180,6 +183,7 @@ struct OutgoingInputQueueTests {
         queue.beginUserPaste()
         let forced = Task { await queue.enqueueInjection(Data("FORCED".utf8)) }
         await waitForHeldInjections(1, on: queue)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(999))
         #expect(await forced.value == false)
 
@@ -195,6 +199,7 @@ struct OutgoingInputQueueTests {
     @Test("Ordering within each stream is preserved")
     func orderingWithinEachStreamPreserved() async {
         let recorder = WriteRecorder()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         // Never advanced: the two holds below must be released by
         // `endUserPaste()`, not by their bound.
@@ -256,6 +261,7 @@ struct OutgoingInputQueueTests {
     func unclosedPasteDoesNotStrandInjectionForever() async {
         let recorder = WriteRecorder()
         let bound = HolderInputTiming.pasteHoldBound
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let queue = OutgoingInputQueue(clock: clock) { data in
             recorder.write(data)
@@ -274,10 +280,12 @@ struct OutgoingInputQueueTests {
         // deadline, so an implementation that released early would let the
         // hold expire inside a paste it was supposed to outlast. Without this
         // assertion a mutation that shortened the wait passed the suite.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: bound - .milliseconds(1))
         #expect(queue.pendingInjectionCountForTesting == 1)
         #expect(recorder.writes.isEmpty)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(1))
 
         let wasWritten = await injection.value
@@ -288,6 +296,7 @@ struct OutgoingInputQueueTests {
     @Test("Teardown releases a held injection as unwritten")
     func shutdownReleasesHeldInjectionAsUnwritten() async {
         let recorder = WriteRecorder()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
@@ -310,6 +319,7 @@ struct OutgoingInputQueueTests {
     @Test("A keystroke that reaches no transport is reported once per episode")
     func unwrittenUserBytesReportOncePerEpisode() {
         let recorder = WriteRecorder()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: TestClock()) { data in
             recorder.write(data)
         }

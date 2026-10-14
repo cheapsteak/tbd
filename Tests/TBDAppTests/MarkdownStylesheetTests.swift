@@ -322,6 +322,7 @@ struct MarkdownStylesheetTests {
             ) == bundledMarker)
         }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Swift.Duration>()
         let armed = Counter()
         let notified = Counter()
@@ -362,6 +363,7 @@ struct MarkdownStylesheetTests {
         // The timer is virtual, so crossing the window costs no wall time. The
         // poll after it is the real leg: `AsyncStream` delivery into the
         // consuming `Task`, on the same 8 s budget `FileWatcherTests.poll` uses.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
         guard await Self.waitUntil(.seconds(8), { notified.count > 0 }) else {
             throw Failure("""
@@ -387,6 +389,7 @@ struct MarkdownStylesheetTests {
                 armed=\(armed.count) (baseline \(armedBefore)) after polling up to 8 seconds
                 """)
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
         guard await Self.waitUntil(.seconds(8), { notified.count > before }) else {
             throw Failure("""

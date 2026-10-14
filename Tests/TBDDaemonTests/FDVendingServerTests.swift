@@ -74,11 +74,14 @@ struct FDVendingServerTests {
         // Tier 1: virtual time. 3 attempts → 2 waits; crossing both exhausts
         // the window, which is the same claim the 10/50 ms production pair
         // makes over 450 ms of real time.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
 
         let send = Task { try await server.send(fd: 0, header: Data()) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
 
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
@@ -92,6 +95,7 @@ struct FDVendingServerTests {
         let (serverSideFD, clientSideFD) = try makeSocketPair()
         defer { Darwin.close(clientSideFD) }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let server = FDVendingServer(retryAttempts: 5, retryInterval: Self.interval, clock: clock)
 
@@ -103,13 +107,16 @@ struct FDVendingServerTests {
         let send = Task { try await server.send(fd: readFD, header: header) }
 
         // Two intervals with nobody connected: still retrying, not yet failed.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
 
         // The app finally connects, mid-window. `send` is parked inside the
         // actor's sleep, so this adoption is free to run and the next
         // iteration re-reads `clientFD`.
         await server.adoptConnection(fd: serverSideFD)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
 
         try await send.value   // must NOT throw
@@ -127,6 +134,7 @@ struct FDVendingServerTests {
         // Pins the attempt count itself: with N attempts there are N-1 waits,
         // so at N-2 crossings it must still be retrying and the N-1st crossing
         // is what makes it throw. Nothing pinned this boundary before.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let attempts = 4
         let server = FDVendingServer(retryAttempts: attempts, retryInterval: Self.interval, clock: clock)
@@ -137,12 +145,15 @@ struct FDVendingServerTests {
             try await server.send(fd: 0, header: Data())
         }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
 
         // Re-armed for wait 3 of 3: it is parked, so it demonstrably has not
         // run its `defer` yet. `waitForSuspension` is the happens-before that
         // makes the count check below non-vacuous.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(finished.count == 0,
                 "must still be retrying after \(attempts - 2) of its \(attempts - 1) waits")
@@ -157,6 +168,7 @@ struct FDVendingServerTests {
         // production numbers. This one pins the default interval exactly, in
         // two advances: 2 attempts → exactly 1 wait, so 49 ms must not fire it
         // and the 50th millisecond must.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let server = FDVendingServer(retryAttempts: 2, clock: clock)   // default interval
 
@@ -166,7 +178,9 @@ struct FDVendingServerTests {
             try await server.send(fd: 0, header: Data())
         }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(49))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()   // still parked → the wait is > 49 ms
         #expect(finished.count == 0, "a 50 ms interval must not elapse at 49 ms")
 
@@ -356,6 +370,7 @@ struct FDVendingServerTests {
         // Deterministic teardown: the exit hook now fires AFTER the actor clears
         // clientFD, so once it fires the stale fd is already gone.
         let exited = SidecarInputCollector()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
         await server.setOnReceiveLoopExit {
@@ -375,7 +390,9 @@ struct FDVendingServerTests {
         defer { Darwin.close(readFD); Darwin.close(writeFD) }
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%stale", attachID: UUID()))
         let send = Task { try await server.send(fd: readFD, header: header) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.interval)
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
 

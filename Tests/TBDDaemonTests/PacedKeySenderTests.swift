@@ -121,6 +121,7 @@ struct PacedKeySenderTests {
     @Test("a throwing send stops the sequence and propagates")
     func throwingSendStops() async throws {
         struct PaneGone: Error {}
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
@@ -139,6 +140,7 @@ struct PacedKeySenderTests {
 
     @Test("a one-key sequence needs no pause at all")
     func singleKeyNeedsNoPause() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let recorder = KeyRecorder()
         try await PacedKeySender(clock: clock).send(["C-c"]) { recorder.record($0) }

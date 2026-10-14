@@ -88,6 +88,7 @@ struct PendingPromptExpirySweepTests {
     @Test("the sweep also resolves a prompt no hook has attached to for an hour")
     func sweepOnceAlsoReapsDetachedPrompts() async {
         let dates = TestDateSource()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let store = PendingPromptStore(now: dates.provider, clock: TestClock<Duration>())
         let terminalID = UUID()
         let input = #"{"command":"ls"}"#

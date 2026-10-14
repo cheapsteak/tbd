@@ -119,6 +119,7 @@ struct PRPollerTests {
         let (db, wtID) = try await Self.makeDB()
         let gh = CountingGH(nodes: [Self.nodeJSON(number: 41, head: "tbd/w")])
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
@@ -126,8 +127,11 @@ struct PRPollerTests {
 
         await poller.start()
         // 300s background cadence, 150s tick: due on the second advance.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.tick)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.tick)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
 
         let queries = await gh.branchQueries
@@ -143,13 +147,16 @@ struct PRPollerTests {
         let (db, _) = try await Self.makeDB()
         let gh = CountingGH()
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
             isForeground: { true }, clock: clock)
 
         await poller.start()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.tick)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
 
         let queries = await gh.branchQueries
@@ -165,19 +172,24 @@ struct PRPollerTests {
         let (db, _) = try await Self.makeDB()
         let gh = CountingGH()
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
             isForeground: { false }, clock: clock)
 
         await poller.start()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.tick)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
 
         let early = await gh.branchQueries
         #expect(early == 0, "150s waited against the 300s background cadence should not have fetched; observed \(early)")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.tick)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         let after = await gh.branchQueries
         #expect(after == 1, "the 300s background cadence should be due after two 150s ticks, observed \(after)")
@@ -198,6 +210,7 @@ struct PRPollerTests {
         await manager.setOnMergedTransition { id, number in await recorder.record(id, number) }
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             isForeground: { true }, clock: TestClock<Duration>())
 
         await poller.tick()
@@ -302,6 +315,7 @@ struct PRPollerTests {
         let router = Self.makeRouter(db: db, manager: PRStatusManager(ghRunner: { _, _ in nil }))
         let cache = router.branchTrackingCache
         let poller = Self.makePoller(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             router: router, isForeground: { false }, clock: TestClock<Duration>())
 
         // Prime an entry for a worktree that is about to leave the poll set.
@@ -335,6 +349,7 @@ struct PRPollerTests {
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             isForeground: { false }, clock: TestClock<Duration>())
 
         try await poller.fetchOnce()

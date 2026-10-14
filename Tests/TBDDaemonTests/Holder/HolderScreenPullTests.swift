@@ -103,6 +103,7 @@ struct HolderScreenPullTests {
     @Test("A reply under the pending request id resolves the pull with its payload")
     func replyResolvesThePull() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -133,6 +134,7 @@ struct HolderScreenPullTests {
     @Test("A styled capture asked for and answered rides the same reply")
     func styledCaptureRidesTheReply() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -165,6 +167,7 @@ struct HolderScreenPullTests {
     func refusalResolvesImmediately() async throws {
         for reason in SidecarScreenReply.Unavailable.allCases {
             let harness = Harness()
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
             let terminalID = UUID()
 
@@ -199,6 +202,7 @@ struct HolderScreenPullTests {
     @Test("A silent viewer times the pull out at the production bound")
     func silentViewerTimesOut() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
 
@@ -209,6 +213,7 @@ struct HolderScreenPullTests {
         }
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
 
         #expect(await answer.value == .timedOut)
@@ -227,6 +232,7 @@ struct HolderScreenPullTests {
     @Test("The pull's bound is not reached early")
     func boundIsNotReachedEarly() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let terminalID = UUID()
@@ -239,6 +245,7 @@ struct HolderScreenPullTests {
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
         let request = try harness.decodeRequest()
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: HolderInputTiming.screenPullBound - .milliseconds(1))
         let sent = Self.payload()
@@ -256,6 +263,7 @@ struct HolderScreenPullTests {
     @Test("A reply arriving after the bound is late, and is not applied")
     func replyAfterTheBoundIsLate() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let terminalID = UUID()
@@ -268,6 +276,7 @@ struct HolderScreenPullTests {
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
         let request = try harness.decodeRequest()
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
         #expect(await answer.value == .timedOut)
 
@@ -290,6 +299,7 @@ struct HolderScreenPullTests {
     @Test("A reply for an unknown request id is counted late and disturbs nothing")
     func unknownRequestIDDisturbsNothing() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -325,6 +335,7 @@ struct HolderScreenPullTests {
     @Test("A misaddressed reply is dropped and leaves the request pending")
     func misaddressedReplyLeavesTheRequestPending() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -363,6 +374,7 @@ struct HolderScreenPullTests {
     func replyOnAStaleEpochIsDropped() async throws {
         let harness = Harness()
         harness.epoch = 4
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -397,6 +409,7 @@ struct HolderScreenPullTests {
     func lostConnectionFailsItsRequests() async throws {
         let harness = Harness()
         harness.epoch = 2
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
 
         let answer = Task {
@@ -419,6 +432,7 @@ struct HolderScreenPullTests {
     func lostConnectionLeavesOtherEpochsAlone() async throws {
         let harness = Harness()
         harness.epoch = 2
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -455,6 +469,7 @@ struct HolderScreenPullTests {
     func sendOnAnEndedEpochAnswersAtOnce() async throws {
         let harness = Harness()
         harness.epoch = 5
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
 
         pull.connectionLost(epoch: 5)
@@ -483,6 +498,7 @@ struct HolderScreenPullTests {
     func sendOnANewerEpochSurvivesAnOlderLoss() async throws {
         let harness = Harness()
         harness.epoch = 6
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -513,6 +529,7 @@ struct HolderScreenPullTests {
     func undeliverableFrameAnswersAtOnce() async throws {
         let harness = Harness()
         harness.sendFrameError = SidecarGone()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
 
         let answer = await pull.pull(
@@ -535,6 +552,7 @@ struct HolderScreenPullTests {
     @Test("Two overlapping pulls for one session are both answered, each with its own payload")
     func overlappingPullsAreIndependent() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
         let terminalID = UUID()
 
@@ -584,6 +602,7 @@ struct HolderScreenPullTests {
     @Test("A requested depth past the daemon's retained depth goes out clamped")
     func requestedDepthIsClampedOnTheWire() async throws {
         let harness = Harness()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
 
         let terminalID = UUID()

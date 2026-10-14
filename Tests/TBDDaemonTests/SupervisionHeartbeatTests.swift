@@ -140,6 +140,7 @@ struct SupervisionHeartbeatTests {
     func writesImmediatelyThenOnCadence() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
@@ -150,7 +151,9 @@ struct SupervisionHeartbeatTests {
         // only do after the immediate tick. The second waits for the sleep that
         // follows the *second* tick — so its returning is the evidence that a
         // tick happened per elapsed interval, not merely once at start.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
         await heartbeat.stop()
 
@@ -162,6 +165,7 @@ struct SupervisionHeartbeatTests {
     func firstTickPrecedesTheFirstInterval() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
@@ -171,6 +175,7 @@ struct SupervisionHeartbeatTests {
         // Parking on the clock is the loop's first act after its immediate
         // write, so a registered sleeper with no file on disk would mean the
         // daemon published nothing for a whole interval after boot.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(FileManager.default.fileExists(atPath: path))
         await heartbeat.stop()
@@ -180,12 +185,14 @@ struct SupervisionHeartbeatTests {
     func stopEndsTheCadence() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
         await heartbeat.applyBrake(released: true, sequence: 1)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
         // `stop()` returns only once the loop has unwound, so what follows is
         // an assertion about a settled state rather than a race.
@@ -201,6 +208,7 @@ struct SupervisionHeartbeatTests {
     func engagedBrakePublishesOnceAndArmsNoTimer() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .engaged))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
@@ -223,6 +231,7 @@ struct SupervisionHeartbeatTests {
     func brakeEdgesArmAndDisarmTheTimer() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
@@ -231,7 +240,9 @@ struct SupervisionHeartbeatTests {
         await heartbeat.applyBrake(released: true, sequence: 1)
         // Each advance waits for a registered sleeper first, so returning at
         // all is the evidence the timer is armed and re-arming.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
         #expect(snapshots.calls >= 2, "the timer runs while the brake is released")
 
@@ -253,6 +264,7 @@ struct SupervisionHeartbeatTests {
         let snapshots = ParkingSnapshots(Self.statusFile(brake: .released))
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
 
         // The releasing edge parks inside its own write, which releases the
@@ -291,6 +303,7 @@ struct SupervisionHeartbeatTests {
         let snapshots = Snapshots(Self.statusFile(brake: .engaged))
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
 
         // The store's gate committed `engaged` second, so it holds the higher
@@ -320,6 +333,7 @@ struct SupervisionHeartbeatTests {
             projects: [SupervisionStatusFileProject(
                 name: "acme-web", on: true, mode: "autonomous", lastSweepContactAt: nil)]))
         let heartbeat = SupervisionHeartbeat(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             path: path, snapshot: snapshots.provider, clock: TestClock())
 
         await heartbeat.tick()
@@ -338,6 +352,7 @@ struct SupervisionHeartbeatTests {
             projects: [SupervisionStatusFileProject(
                 name: "acme-web", on: true, mode: "attended", lastSweepContactAt: nil)]))
         let heartbeat = SupervisionHeartbeat(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             path: path, snapshot: snapshots.provider, clock: TestClock())
 
         await heartbeat.tick()
@@ -354,6 +369,7 @@ struct SupervisionHeartbeatTests {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released, at: 1_700_000_000))
         let heartbeat = SupervisionHeartbeat(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             path: path, snapshot: snapshots.provider, clock: TestClock())
 
         await heartbeat.tick()
@@ -377,6 +393,7 @@ struct SupervisionHeartbeatTests {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released, at: 1_700_000_000))
         let heartbeat = SupervisionHeartbeat(
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             path: path, snapshot: snapshots.provider, clock: TestClock())
 
         await heartbeat.tick()

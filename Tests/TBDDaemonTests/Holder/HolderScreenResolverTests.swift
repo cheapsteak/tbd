@@ -138,6 +138,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .daemon
         harness.daemonScreen = try Self.screen(lines: ["live"], source: .daemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
 
@@ -153,6 +154,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon, age: 90_000)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -185,6 +187,7 @@ struct HolderScreenResolverTests {
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(
             lines: ["as it stood at attach"], source: .staleDaemon, age: 90_000)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let resolver = harness.makeResolver(pull: pull)
@@ -192,6 +195,7 @@ struct HolderScreenResolverTests {
         let answer = Task { try await resolver.screen(terminalID: UUID(), maxLines: 50) }
         try await waitFor("the screen request to reach the sidecar") { harness.sendCount == 1 }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
 
         let screen = try #require(try await answer.value)
@@ -206,6 +210,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = nil
         harness.daemonScreen = nil
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
 
         #expect(try await resolver.screen(terminalID: UUID(), maxLines: 50) == nil)
@@ -219,6 +224,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = nil
         harness.daemonScreen = try Self.screen(lines: ["suspended"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
 
         let screen = try await resolver.screen(terminalID: UUID(), maxLines: 50)
@@ -243,6 +249,7 @@ struct HolderScreenResolverTests {
         harness.daemonScreen = try Self.screen(lines: ["at attach"], source: .staleDaemon)
         harness.daemonScreenAfterPull = try Self.screen(
             lines: ["draining again"], source: .daemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -273,6 +280,7 @@ struct HolderScreenResolverTests {
         harness.observedChildFromStart = false
         harness.daemonScreen = try Self.screen(
             lines: ["inherited"], source: .staleDaemon, observed: false)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -300,6 +308,7 @@ struct HolderScreenResolverTests {
         harness.role = .viewer(attach: 3)
         harness.observedChildFromStart = true
         harness.daemonScreen = try Self.screen(lines: ["at attach"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -327,6 +336,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["at attach"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let resolver = harness.makeResolver(pull: pull)
@@ -336,6 +346,7 @@ struct HolderScreenResolverTests {
 
         #expect(try harness.decodeRequest().lines == 5_000)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
         _ = try await answer.value
     }
@@ -349,6 +360,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["at attach"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -381,6 +393,7 @@ struct HolderScreenResolverTests {
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: true, applicationCursor: true, alternateScreen: false),
             modesObserved: true, source: .daemon, ageMilliseconds: 4)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
 
         let reading = try #require(await resolver.modeReading(terminalID: UUID()))
@@ -402,6 +415,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -441,6 +455,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let resolver = harness.makeResolver(pull: pull)
@@ -448,6 +463,7 @@ struct HolderScreenResolverTests {
         let answer = Task { await resolver.modeReading(terminalID: UUID()) }
         try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.sendPathScreenPullBound)
 
         let reading = try #require(await answer.value)
@@ -463,6 +479,7 @@ struct HolderScreenResolverTests {
         let harness = Harness()
         harness.role = .viewer(attach: 3)
         harness.daemonScreen = try Self.screen(lines: ["frozen"], source: .staleDaemon)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pull = harness.makePull(clock: clock)
         let resolver = harness.makeResolver(pull: pull)
@@ -472,6 +489,7 @@ struct HolderScreenResolverTests {
         try await waitFor("the mode request to reach the sidecar") { harness.sendCount == 1 }
         let request = try harness.decodeRequest()
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: HolderInputTiming.sendPathScreenPullBound - .milliseconds(1))
         pull.record(
@@ -497,6 +515,7 @@ struct HolderScreenResolverTests {
         harness.observedChildFromStart = false
         harness.daemonScreen = try Self.screen(
             lines: ["inherited"], source: .staleDaemon, observed: false)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let pull = harness.makePull(clock: TestClock())
         let resolver = harness.makeResolver(pull: pull)
         let terminalID = UUID()
@@ -520,6 +539,7 @@ struct HolderScreenResolverTests {
     func noReaderAnswersNilModes() async throws {
         let harness = Harness()
         harness.daemonScreen = nil
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let resolver = harness.makeResolver(pull: harness.makePull(clock: TestClock()))
 
         #expect(await resolver.modeReading(terminalID: UUID()) == nil)

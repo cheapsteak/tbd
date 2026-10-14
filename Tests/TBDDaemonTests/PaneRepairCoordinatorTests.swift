@@ -43,6 +43,7 @@ struct PaneRepairCoordinatorTests {
     ) {
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let coordinator = PaneRepairCoordinator(
             supervisor: supervisor,
@@ -154,6 +155,7 @@ struct PaneRepairCoordinatorTests {
         // The reader has NOT caught up (pipe still full): batch 2 must wait.
         // Parking on the reader-wait sleep PROVES the loop is waiting —
         // strictly stronger than inferring it from elapsed wall time.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(recorder.writes.count == 1,
                 "captures+continue must not be sent while the reader is behind")
@@ -319,6 +321,7 @@ struct PaneRepairCoordinatorTests {
         // latter). Same short chain, strictly stronger claim.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let fast: Duration = .seconds(2)
         let slow: Duration = .seconds(15)
@@ -360,8 +363,11 @@ struct PaneRepairCoordinatorTests {
         // itself a load-sensitivity hazard (see
         // `readerWaitEscalatesToTheSlowInterval`) — reach further thresholds
         // by injecting larger pacing, never by advancing more times.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         for _ in 0..<2 { await clock.advanceWhenSuspended(by: fast) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         for _ in 0..<2 { await clock.advanceWhenSuspended(by: slow) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()  // re-armed on the slow interval, pipe still full
         #expect(recorder.writes.count == 1, "no captures and NO continue while the reader is wedged")
         #expect(await coordinator.isInFlight(key) == true, "the repair must keep waiting, not give up")
@@ -427,6 +433,7 @@ struct PaneRepairCoordinatorTests {
         // long advance chain here.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let fast: Duration = .seconds(1)
         let slow: Duration = .seconds(10)
@@ -453,8 +460,11 @@ struct PaneRepairCoordinatorTests {
 
         // Two fast intervals accumulate exactly the escalation threshold, so
         // the interval the loop picks NEXT is the slow one.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: fast)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: fast)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()  // re-armed — on the slow interval now
         #expect(await coordinator.isInFlight(key) == true, "the wait must still be running")
 
@@ -463,11 +473,13 @@ struct PaneRepairCoordinatorTests {
         // unsent. (Before escalation, this same advance would have sent it —
         // that is `fullRepairHappyPath`.)
         drainPipe(readFD)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: fast)
         #expect(recorder.writes.count == 1,
                 "past the escalation threshold the wait must sleep the SLOW interval")
 
         // The rest of the slow interval does wake it, and the repair proceeds.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: slow - fast)
         try await waitFor("captures+continue write after escalation") { recorder.writes.count >= 2 }
         try #require(recorder.writes.count >= 2, "the escalated wait never sent batch 2")
@@ -493,6 +505,7 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])  // pause reply — the reader wait begins
 
         // A merely-full pipe keeps the repair parked in the reader-wait…
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
 
@@ -665,6 +678,7 @@ struct PaneRepairCoordinatorTests {
         // The pause reply lands while gen-1 still owns the pane: the repair
         // enters the reader-wait (the pipe is full — read1 is never drained).
         await succeed(client, [[]])
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
         #expect(await coordinator.isInFlight(key) == true, "the repair must be parked in the reader-wait")
@@ -679,6 +693,7 @@ struct PaneRepairCoordinatorTests {
         // the supersession (`nil`). The exit itself then bounds the negative
         // assertions below — the repair task is gone, so no later write can
         // appear.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: checkInterval)
         try await waitFor("repair exit") {
             await coordinator.isInFlight(key) == false
@@ -704,6 +719,7 @@ struct PaneRepairCoordinatorTests {
         // `onOverflowRepair` closure installed in the bridge's init.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let bridge = TmuxControlModeBridge(
             supervisor: supervisor,
@@ -729,6 +745,7 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])
         // The default coordinator parks on the BRIDGE's clock — proof the
         // bridge threaded its clock into the coordinator it constructed.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         drainPipe(readFD)
         await clock.advanceUntil("captures+continue write", by: checkInterval) {

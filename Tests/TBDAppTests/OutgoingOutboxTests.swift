@@ -75,6 +75,7 @@ struct OutgoingOutboxTests {
     }
 
     private func makeQueue(
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         capacity: Int, clock: TestClock<Duration> = TestClock(),
         notifier: NotifierSpy? = nil, backpressure: BackpressureSpy? = nil
     ) -> (OutgoingInputQueue, FakeTransport, NotifierSpy) {
@@ -364,16 +365,19 @@ struct OutgoingOutboxTests {
 
     @Test("the indicator appears only after the threshold, and clears on drain")
     func backpressureAppearsAfterTheThresholdAndClears() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let backpressure = BackpressureSpy()
         let (queue, transport, _) = makeQueue(
             capacity: 1_022, clock: clock, backpressure: backpressure)
 
         queue.enqueueUserBytes(Data(repeating: 0x61, count: 4_096))
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(900))
         #expect(backpressure.published.isEmpty,
                 "a stall shorter than the threshold is not worth a banner")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(200))
         #expect(backpressure.published == [4_096 - 1_022])
 

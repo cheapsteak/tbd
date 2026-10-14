@@ -63,6 +63,7 @@ struct ClaudeCloudSpawnerTimeoutTests {
     /// deadline fires the instant virtual time crosses it, so a passing run
     /// proves the wiring rather than a generous real timeout.
     @Test func spawnTimesOutOnInjectedClockDeadline() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let spawner = BoundedProcessClaudeSpawner(executable: "/bin/sh", clock: clock)
         let call = Task {
@@ -73,6 +74,7 @@ struct ClaudeCloudSpawnerTimeoutTests {
                     usesPseudoTerminal: false,
                     timeout: Self.unreachableTimeout))
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(Self.unreachableTimeout))
         let outcome = try await call.value
         #expect(outcome == .timedOut)
