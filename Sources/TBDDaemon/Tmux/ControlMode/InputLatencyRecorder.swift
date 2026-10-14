@@ -4,7 +4,10 @@ import os
 /// Accumulates keystroke-latency samples (sidecar frame receipt → after the
 /// `send-keys` stream write) and logs a percentile summary at most once per
 /// second. The spec's input telemetry budget is soft 50 ms / hard 200 ms at
-/// p99; this log line is how we read it during dogfooding.
+/// p99; this log line is how we read it during dogfooding. It logs at `.notice`
+/// so the summary persists and `log show` can read p50/p99 after the fact
+/// (`.debug` lives only in the in-memory ring buffer). At most one line per
+/// second, and only while keys are arriving.
 ///
 /// Lock-protected so the router's consumer can `record` while nothing else
 /// contends. The `now` seam lets tests drive the 1 Hz gate without real time.
@@ -53,7 +56,7 @@ final class InputLatencyRecorder: @unchecked Sendable {
         lock.unlock()
 
         if let summary {
-            logger.debug("""
+            logger.notice("""
                 input latency: n=\(summary.count, privacy: .public) \
                 p50=\(summary.p50Ms, privacy: .public)ms \
                 p99=\(summary.p99Ms, privacy: .public)ms \

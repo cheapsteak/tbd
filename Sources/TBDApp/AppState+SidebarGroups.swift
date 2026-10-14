@@ -8,6 +8,13 @@ struct SidebarGroupReveal: Equatable {
     let groups: Set<SidebarGroupID>
 }
 
+/// One repo's cached match result: the adopted locations it was computed
+/// against, and the positions into `remoteSessions` it selected, in sidebar order.
+struct SidebarMatchedSessionsMemo {
+    let adopted: Set<WorktreeLocation>
+    let indices: [Int]
+}
+
 extension SidebarGroupID {
     /// A stable string for persisting an expanded group across launches:
     /// `<kind>|<owner type>|<owner value>`. The provider name comes last and
@@ -202,13 +209,38 @@ extension AppState {
         }
     }
 
+    /// The repo's remote sessions as the sidebar shows them: filtered and sorted
+    /// by `RepoSectionView.matchedRemoteSessionIndices`, memoized per repo.
+    ///
+    /// The memo stores positions into `remoteSessions`, not values, so a hit
+    /// returns the CURRENT elements: `state`, `agentState`, `gone` and `lastSeen`
+    /// are never stale on a hit. Positions stay valid because any change to the
+    /// per-element match inputs (`RepoSectionView.sameMatchInputs`), including a
+    /// change in count, order or identity, clears the cache in the
+    /// `remoteSessions` `didSet`. Equal inputs elementwise therefore mean the
+    /// same sessions sit at the same positions.
+    ///
+    /// Reads `remoteSessions` and `worktrees[repoID]` before consulting the memo,
+    /// for the warm-cache dependency reason in `AppState.swift`.
+    func sidebarMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
+        let sessions = remoteSessions
+        let adopted = RepoSectionView.adoptedLocations(worktrees[repoID] ?? [])
+        if let memo = sidebarMatchedSessionsCache[repoID], memo.adopted == adopted {
+            return memo.indices.map { sessions[$0] }
+        }
+        let indices = RepoSectionView.matchedRemoteSessionIndices(
+            sessions, repoID: repoID, adopted: adopted)
+        sidebarMatchedSessionsSortCount += 1
+        sidebarMatchedSessionsCache[repoID] = SidebarMatchedSessionsMemo(adopted: adopted, indices: indices)
+        return indices.map { sessions[$0] }
+    }
+
     func sidebarRemoteGroups(repoID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let rows = worktrees[repoID] ?? []
         return SidebarRemoteGroups(
             roots: Self.topLevelWorktrees(rows),
-            remainder: RepoSectionView.matchedRemoteSessions(
-                snapshot.sessionsByRepo[repoID] ?? [], repoID: repoID, worktrees: rows),
+            remainder: sidebarMatchedRemoteSessions(repoID: repoID),
             snapshot: snapshot, unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
     }
 

@@ -559,7 +559,14 @@ final class AppState {
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
-        didSet { sidebarRemoteSnapshotCache = nil }
+        didSet {
+            sidebarRemoteSnapshotCache = nil
+            // A sighting that moves only `lastSeen`, `gone` or row state keeps
+            // the match memo: its indices still name the same sessions.
+            if !remoteSessions.elementsEqual(oldValue, by: RepoSectionView.sameMatchInputs) {
+                sidebarMatchedSessionsCache.removeAll()
+            }
+        }
     }
     /// Every retain/import receipt the daemon holds, fetched by
     /// `refreshRemote()`.
@@ -627,6 +634,12 @@ final class AppState {
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
+    /// Per-repo memo of the filtered, sorted indices into `remoteSessions`;
+    /// see `sidebarMatchedRemoteSessions(repoID:)` in `AppState+SidebarGroups.swift`.
+    @ObservationIgnored var sidebarMatchedSessionsCache: [UUID: SidebarMatchedSessionsMemo] = [:]
+    /// Test seam: counts every recompute of a repo's matched-session sort, so a
+    /// test can assert that a sighting which changes no match input re-sorts nothing.
+    @ObservationIgnored var sidebarMatchedSessionsSortCount = 0
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
