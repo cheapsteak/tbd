@@ -479,7 +479,8 @@ final class AppState {
 
     /// Back/forward state. Mutated only by the helpers in `AppState+Navigation.swift` —
     /// any change to `navigationIndex` or `navigationEntries` must be followed by
-    /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
+    /// `navigationHistoryDidChange()`, which refreshes the published toolbar flags
+    /// and saves the history to UserDefaults (`navigationHistoryKey`).
 
     /// Published flags driving the toolbar back/forward buttons.
     private(set) var canGoBack: Bool = false
@@ -2324,6 +2325,7 @@ final class AppState {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let paneHistoriesKey = "com.tbd.app.paneHistories"
+    static let navigationHistoryKey = "com.tbd.app.navigationHistory"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
@@ -2358,6 +2360,7 @@ final class AppState {
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         restoreLayouts()
         restorePaneHistories()
+        restoreNavigationHistory()
         restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
