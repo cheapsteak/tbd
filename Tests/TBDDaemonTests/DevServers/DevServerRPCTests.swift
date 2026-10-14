@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import GRDB
 import Testing
@@ -101,8 +100,7 @@ struct DevServerRPCTests {
         router.devServerEnvironment = ["TBD_HOME": home]
         router.devServerStopper = DevServerStopper(
             killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
-                                         // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                         pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
+                                         pollInterval: .seconds(5), postKillWait: .zero, clock: EventDrivenTestClock()),
             commandRunner: runner)
         router.onDevServersChanged = { changes.bump() }
         return Fixture(db: db, router: router, recorder: recorder, inspector: inspector,

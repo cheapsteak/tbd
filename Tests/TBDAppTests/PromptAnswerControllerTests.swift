@@ -1,5 +1,5 @@
-import Clocks
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -77,8 +77,7 @@ struct PromptAnswerControllerTests {
 
     @Test func deliveredMovesToAnsweredAndRetains() async {
         let recorder = Recorder()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let retention = PromptCardRetention(retainFor: .seconds(30), clock: TestClock())
+        let retention = PromptCardRetention(retainFor: .seconds(30), clock: EventDrivenTestClock())
         let controller = Controller(
             local: { _, _, _ in PromptAnswerResult(outcome: .delivered) },
             remote: { _, _, _, _ in PromptAnswerResult(outcome: .delivered) },

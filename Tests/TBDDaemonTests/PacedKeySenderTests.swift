@@ -1,10 +1,9 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
-/// Tier 1 — pure logic plus a `TestClock` / `EventDrivenTestClock`. No tmux, no daemon, no filesystem.
+/// Tier 1 — pure logic plus an `EventDrivenTestClock`. No tmux, no daemon, no filesystem.
 ///
 /// `PacedKeySender` owns two things a `--keys` payload depends on: the
 /// tokenizer that decides what a keys string even names, and the 150 ms pause
@@ -121,8 +120,7 @@ struct PacedKeySenderTests {
     @Test("a throwing send stops the sequence and propagates")
     func throwingSendStops() async throws {
         struct PaneGone: Error {}
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
 
@@ -140,8 +138,7 @@ struct PacedKeySenderTests {
 
     @Test("a one-key sequence needs no pause at all")
     func singleKeyNeedsNoPause() async throws {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         try await PacedKeySender(clock: clock).send(["C-c"]) { recorder.record($0) }
         #expect(recorder.keys == ["C-c"])
