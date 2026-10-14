@@ -156,6 +156,7 @@ struct SubprocessTimeoutStarvationTests {
                     arguments: ["90"],
                     label: "starvation-test",
                     timeout: .milliseconds(100),
+                    // swiftlint:disable:next no_polling_test_clock - legacy, #1171
                     clock: TestClock()  // never advanced — isolates the watchdog; see suite doc
                 )
                 Issue.record("expected runExternalCommand to time out under pool saturation, but it returned")
@@ -172,6 +173,7 @@ struct SubprocessTimeoutStarvationTests {
 
     @Test func gitRunTimesOutEvenWhenPoolSaturated() async {
         // TestClock never advanced — disables the clock armer; see suite doc.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let git = GitManager(subprocessTimeout: .milliseconds(100), clock: TestClock())
         await withSaturatedGlobalPool {
             do {

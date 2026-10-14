@@ -78,6 +78,7 @@ struct TranscriptPollSchedulerTests {
     /// session nobody is watching.
     @Test("the last holder leaving disarms the session's retire alarm; an earlier one does not")
     func onlyTheLastHolderDisarmsTheRetireAlarm() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let scheduler = TranscriptPollScheduler(source: TranscriptSource(), clock: TestClock())
         let first = TranscriptPaneToken()
         let second = TranscriptPaneToken()
@@ -490,6 +491,7 @@ struct TranscriptPollSchedulerStreamTests {
         let files = try Self.files()
         let stamp = Date(timeIntervalSince1970: 1_700_000_000)
         let source = TranscriptSource()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let scheduler = TranscriptPollScheduler(
             source: source, now: { stamp }, clock: clock)
@@ -498,6 +500,7 @@ struct TranscriptPollSchedulerStreamTests {
         await scheduler.register(
             sessionID: "s1", path: files.transcript, streamPath: files.stream,
             tier: .foreground, token: pane)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(100))
 
         let tailed = await pollUntilTrue(timeout: .seconds(10)) {

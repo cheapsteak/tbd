@@ -279,6 +279,7 @@ struct QueuedPromptDeliveryTests {
     /// `gate`, when given, holds the FIRST delivery open so a test can act
     /// while the cycle is suspended mid-send.
     private func makeSpawnFixture(
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         clock: any Clock<Duration> = TestClock(),
         attachCoordinator: Bool = true,
         gate: Gate? = nil
@@ -338,6 +339,7 @@ struct QueuedPromptDeliveryTests {
     /// each of those lines can be deleted with the actor-level tests still
     /// green and every real parked prompt silently dead.
     private func makeWiredFixture(
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         clock: any Clock<Duration> = TestClock()
     ) async throws -> (fixture: SendFixture, coordinator: PendingPromptCoordinator) {
         let fixture = try await makeSendFixture()
@@ -417,6 +419,7 @@ struct QueuedPromptDeliveryTests {
 
     @Test("the settle poll rechecks completion after the wall deadline")
     func settlePollRechecksAfterDeadline() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await advancePastSettle(TestClock<Duration>(), within: 0) { true }
     }
 
@@ -550,6 +553,7 @@ struct QueuedPromptDeliveryTests {
     /// cleared.
     @Test("a prompt parked before the spawn is pasted once, when the pane is ready")
     func parkedBeforeSpawnIsPastedOnce() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -581,6 +585,7 @@ struct QueuedPromptDeliveryTests {
 
     @Test("a prompt parked after the pane exists is armed against its readiness")
     func parkedAfterSpawnAwaitsReady() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -606,6 +611,7 @@ struct QueuedPromptDeliveryTests {
     /// delivery must not wait for a signal that can never come.
     @Test("an agent whose hook already fired is ready immediately")
     func alreadyAnnouncedSessionDeliversWithoutWaiting() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -646,6 +652,7 @@ struct QueuedPromptDeliveryTests {
     /// only its activity state, so the second leg is the whole answer for it.
     @Test("an activity state alone counts as having announced")
     func activityStateAloneIsReadiness() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -682,6 +689,7 @@ struct QueuedPromptDeliveryTests {
     /// took, so nothing corrects it.
     @Test("no byte is typed until the settle after SessionStart has passed")
     func theFirstPasteWaitsOutTheSettle() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -699,11 +707,13 @@ struct QueuedPromptDeliveryTests {
 
         // One tick short of the settle: the pane is still inside the window
         // where a live TUI throws the bytes away.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: PendingPromptCoordinator.pendingPromptSettleDelay - .milliseconds(1))
         #expect(fixture.sends.calls.isEmpty)
 
         // The tick that clears it.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(1))
         await awaitDeliveries(fixture.coordinator)
 
@@ -740,6 +750,7 @@ struct QueuedPromptDeliveryTests {
     @Test("the parked submit choice is what reaches the send seam")
     func parkedSubmitChoiceReachesTheSendSeam() async throws {
         for submit in [true, false] {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             let clock = TestClock()
             let fixture = try await makeSpawnFixture(clock: clock)
             try await fixture.db.config.setQueuedPrompt(true)
@@ -775,6 +786,7 @@ struct QueuedPromptDeliveryTests {
     /// surfaces cannot answer differently about it.
     @Test("a row with no submit bit recorded is staged, not sent")
     func absentSubmitBitIsStagedNotSent() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -900,6 +912,7 @@ struct QueuedPromptDeliveryTests {
 
     @Test("undeliverable: a paste that failed notifies and keeps the text")
     func failedPasteIsUndeliverable() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -928,6 +941,7 @@ struct QueuedPromptDeliveryTests {
     /// clearing the column on a delivery that never happened.
     @Test("undeliverable: no send path wired keeps the text")
     func noSendPathIsUndeliverable() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setQueuedPrompt(true)
@@ -1019,6 +1033,7 @@ struct QueuedPromptDeliveryTests {
     /// the operator composed on the creation modal.
     @Test("a prompt parked behind a running preSession hook rides the spawn")
     func parkedBehindPreSessionHookIsDelivered() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1126,6 +1141,7 @@ struct QueuedPromptDeliveryTests {
     /// is told.
     @Test("undeliverable: a primary that hibernates during the readiness wait is not typed into")
     func hibernationDuringTheReadinessWaitIsUndeliverable() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1162,6 +1178,7 @@ struct QueuedPromptDeliveryTests {
     /// anything answered earlier is a fact about a moment that has passed.
     @Test("undeliverable: a primary that hibernates during the settle is not typed into")
     func hibernationDuringTheSettleIsUndeliverable() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1197,6 +1214,7 @@ struct QueuedPromptDeliveryTests {
     /// the one in flight typed anyway, up to two minutes later.
     @Test("the flag stops a delivery that was already armed when it was switched off")
     func disablingTheFlagMidFlightStopsTheDelivery() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1226,6 +1244,7 @@ struct QueuedPromptDeliveryTests {
 
     @Test("undeliverable: the readiness wait is bounded on the injected clock")
     func readinessWaitUsesTheInjectedClock() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1239,6 +1258,7 @@ struct QueuedPromptDeliveryTests {
         #expect(result == .awaitingReady)
 
         // One advance past the ceiling — 120 s of virtual time, no wall time.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: PendingPromptCoordinator.pendingPromptReadinessTimeout)
         await awaitDeliveries(fixture.coordinator)
@@ -1255,6 +1275,7 @@ struct QueuedPromptDeliveryTests {
     /// wait is still live and the prompt is still deliverable.
     @Test("the readiness wait has not expired one tick before the ceiling")
     func readinessWaitStillLiveBeforeTheCeiling() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1264,6 +1285,7 @@ struct QueuedPromptDeliveryTests {
 
         _ = await fixture.coordinator.park(
             worktreeID: fixture.worktree.id, text: "late but fine", submit: true)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: PendingPromptCoordinator.pendingPromptReadinessTimeout - .seconds(1))
 
@@ -1332,6 +1354,7 @@ struct QueuedPromptDeliveryTests {
     /// conversation the words were never written for.
     @Test("a retained prompt is not typed into a later spawn's agent")
     func aRetainedPromptIsNotTypedByALaterSpawn() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1368,6 +1391,7 @@ struct QueuedPromptDeliveryTests {
     /// operator's own gesture is what makes a retained prompt deliverable.
     @Test("re-parking a retained prompt makes it deliverable again")
     func reParkingGrantsTheLicenceAgain() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1395,6 +1419,7 @@ struct QueuedPromptDeliveryTests {
     /// outstanding.
     @Test("a pane coming up after a delivered prompt claims no stranded text")
     func paneAfterADeliveredPromptSaysNothing() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1427,6 +1452,7 @@ struct QueuedPromptDeliveryTests {
     /// timeout for a prompt that was replaced rather than lost.
     @Test("a second park supersedes the first without announcing a timeout")
     func secondParkSupersedesTheFirstQuietly() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1462,6 +1488,7 @@ struct QueuedPromptDeliveryTests {
     /// closes it has to be *after* the settle. Move it before and this reds.
     @Test("a repeated park of the same text pastes it once")
     func repeatedParkOfTheSameTextPastesOnce() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1492,6 +1519,7 @@ struct QueuedPromptDeliveryTests {
     /// `.awaitingReady`.
     @Test("a park landing mid-delivery survives its predecessor's clear")
     func clearOnlyRemovesTheTextThatWasDelivered() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let gate = Gate()
         let fixture = try await makeSpawnFixture(clock: clock, gate: gate)
@@ -1537,6 +1565,7 @@ struct QueuedPromptDeliveryTests {
     /// just left the slot.
     @Test("a pane hand-off over an armed prompt does not strand the incumbent cycle")
     func handOffOverAnArmedPromptRetiresTheIncumbent() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1568,6 +1597,7 @@ struct QueuedPromptDeliveryTests {
     /// lost.
     @Test("a superseded cycle announces no timeout of its own")
     func supersededCycleStaysQuietOnItsOwnTimeout() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fixture = try await makeSpawnFixture(clock: clock)
         try await fixture.db.config.setQueuedPrompt(true)
@@ -1580,6 +1610,7 @@ struct QueuedPromptDeliveryTests {
         _ = await fixture.coordinator.park(
             worktreeID: fixture.worktree.id, text: "second", submit: true)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: PendingPromptCoordinator.pendingPromptReadinessTimeout)
         await awaitDeliveries(fixture.coordinator)
@@ -1647,6 +1678,7 @@ struct QueuedPromptDeliveryTests {
     /// leaves every actor-level test in this file green.
     @Test("delivery runs on the RPC hooks alone, with no direct actor calls")
     func deliveryRunsEntirelyThroughRPC() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let (fixture, coordinator) = try await makeWiredFixture(clock: clock)
 
@@ -1675,6 +1707,7 @@ struct QueuedPromptDeliveryTests {
     /// boundaries — the RPC and the send core — and either could drop it.
     @Test("an unsubmitted prompt is staged over RPC, with no Enter")
     func unsubmittedDeliveryRunsThroughRPC() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let (fixture, coordinator) = try await makeWiredFixture(clock: clock)
 

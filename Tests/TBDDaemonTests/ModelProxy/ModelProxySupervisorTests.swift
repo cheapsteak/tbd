@@ -1587,6 +1587,7 @@ struct ModelProxySupervisorTests {
         // Several watch intervals. A supervisor that treated this as transient
         // would take the second stubbed answer.
         for _ in 0..<3 {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
         }
         await supervisor.stop()
@@ -1610,6 +1611,7 @@ struct ModelProxySupervisorTests {
         let supervisor = fixture.supervisor()
         await supervisor.start()
         for _ in 0..<2 {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
         }
         await supervisor.stop()
@@ -2399,6 +2401,7 @@ struct ModelProxySupervisorTests {
         await supervisor.start()
 
         for _ in 0..<10 {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
         }
         await supervisor.stop()
@@ -2655,6 +2658,7 @@ private struct SupervisorFixture {
             identity: StubIdentity(),
             signaller: StubSignaller(),
             portProbe: StubPortProbe(),
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             clock: TestClock())
     }
 

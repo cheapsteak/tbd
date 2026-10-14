@@ -304,6 +304,7 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
@@ -328,6 +329,7 @@ struct AttachRPCOrchestrationTests {
         // The daemon must then detach, closing the write end: EOF on the
         // vended read fd (a blocking read, so it is the teardown itself that
         // unblocks the assertion).
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: readyTimeout)
         var buffer = [UInt8](repeating: 0, count: 8)
         let count = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
@@ -405,6 +407,7 @@ struct AttachRPCOrchestrationTests {
         let (router, db) = try makeRouterAndDB()
         let (client, recorder) = makeFakeClient()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-timeout-test")
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
@@ -432,6 +435,7 @@ struct AttachRPCOrchestrationTests {
 
         // Let the ready-timeout fire while the replay is in flight: the acked
         // attach must NOT be torn down (no EOF on the vended fd).
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: readyTimeout)
         let flags = fcntl(rxFD, F_GETFL)
         _ = fcntl(rxFD, F_SETFL, flags | O_NONBLOCK)

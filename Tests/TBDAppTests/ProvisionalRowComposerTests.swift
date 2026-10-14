@@ -1013,6 +1013,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
         await source.refresh(sessionID: "s1", path: transcriptPath)
         let state = await Self.makeState(streaming: true, suite: suite)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let timer = ProvisionalRetireTimer(clock: TestClock())
         let t0 = Self.t0
 
@@ -1061,6 +1062,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
         await source.refresh(sessionID: "s1", path: transcriptPath)
         let state = await Self.makeState(streaming: true, suite: suite)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let timer = ProvisionalRetireTimer(clock: TestClock())
         let t0 = Self.t0
 
@@ -1080,6 +1082,7 @@ struct ProvisionalRowPublishTests {
         defer { Self.removeSuite(suite) }
         let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
         let state = await Self.makeState(streaming: false, suite: suite)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let timer = ProvisionalRetireTimer(clock: TestClock())
         let t0 = Self.t0
 
@@ -1110,6 +1113,7 @@ struct ProvisionalRetireTimerTests {
 
     @Test("the alarm fires once, after the delay and not before")
     func alarmFiresOnceAfterTheDelay() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
@@ -1117,6 +1121,7 @@ struct ProvisionalRetireTimerTests {
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(59))
         #expect(await log.count == 0, "59 s is inside the window")
 
@@ -1134,11 +1139,13 @@ struct ProvisionalRetireTimerTests {
     /// forever: a re-arm for the id already armed must leave the alarm alone.
     @Test("re-arming the same message does not push the deadline out")
     func reArmingTheSameMessageIsANoOp() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(59))
         // A poll one second before the deadline re-arms with the *same* due
         // instant and the remaining 1 s. The due instant is the identity, so
@@ -1163,6 +1170,7 @@ struct ProvisionalRetireTimerTests {
     /// producing is withdrawn underneath it.
     @Test("re-arming the same message at a later deadline replaces the alarm")
     func reArmingAtALaterDeadlineReplacesTheAlarm() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
@@ -1170,12 +1178,14 @@ struct ProvisionalRetireTimerTests {
         await timer.arm(
             sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
         ) { await log.record() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(30))
         await timer.arm(
             sessionID: "s1", messageID: "msg_a",
             deadline: Self.due.addingTimeInterval(60), after: .seconds(60)
         ) { await log.record() }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(31))
         for _ in 0..<50 { await Task.yield() }
         #expect(await log.count == 0, "the original deadline no longer belongs to anything")
@@ -1189,6 +1199,7 @@ struct ProvisionalRetireTimerTests {
 
     @Test("arming a different message replaces the alarm")
     func armingADifferentMessageReplacesTheAlarm() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
@@ -1198,6 +1209,7 @@ struct ProvisionalRetireTimerTests {
         await timer.arm(sessionID: "s1", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) { await second.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_b")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await second.count == 1 }
         #expect(fired == .satisfied)
@@ -1208,6 +1220,7 @@ struct ProvisionalRetireTimerTests {
     /// disarm must leave every other session's alarm exactly where it is.
     @Test("an alarm is scoped to its session and survives another session's disarm")
     func alarmsAreScopedToTheirSession() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
@@ -1225,6 +1238,7 @@ struct ProvisionalRetireTimerTests {
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
         #expect(await timer.armedMessage(sessionID: "s2") == nil)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await first.count == 1 }
         #expect(fired == .satisfied, "s1's alarm was untouched by s2's disarm")
@@ -1239,6 +1253,7 @@ struct ProvisionalRetireTimerTests {
     /// screen for good.
     @Test("a teardown disarm leaves another session's alarm to fire exactly once")
     func teardownDisarmLeavesOtherSessionsArmed() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let leaving = FireLog()
@@ -1256,6 +1271,7 @@ struct ProvisionalRetireTimerTests {
         #expect(await timer.armedSessionCount == 1, "only the leaving pane's session was disarmed")
         #expect(await timer.armedMessage(sessionID: "s2") == "msg_b")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await staying.count == 1 }
         #expect(fired == .satisfied, "s2's backstop survived the other pane's teardown")
@@ -1267,6 +1283,7 @@ struct ProvisionalRetireTimerTests {
 
     @Test("disarmAll cancels every session's alarm")
     func disarmAllCancelsEverything() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
@@ -1289,11 +1306,13 @@ struct ProvisionalRetireTimerTests {
 
     @Test("disarming cancels a pending alarm")
     func disarmingCancelsThePendingAlarm() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(1))
         await timer.disarm(sessionID: "s1")
         #expect(await timer.armedMessage(sessionID: "s1") == nil)

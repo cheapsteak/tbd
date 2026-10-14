@@ -57,6 +57,7 @@ struct NotePaneModelTests {
         let defaults: UserDefaults
         let dir: URL
         let state: AppState
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let model: NotePaneModel
         let worktreeID = UUID()
@@ -154,6 +155,7 @@ struct NotePaneModelTests {
             // destructive rather than merely late: the next save is composed
             // from the text the editor is holding.
             h.type(h.model.text + " + second edit")
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await h.clock.advanceWhenSuspended(by: Self.debounce)
             await h.model.pendingSaveTask?.value
 
@@ -249,6 +251,7 @@ struct NotePaneModelTests {
             let staleLoad = Task { @MainActor in
                 await h.model.load(noteID: noteA, worktreeID: h.worktreeID, appState: h.state)
             }
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await h.clock.advanceWhenSuspended(by: .seconds(1))
 
             // What `.task(id:)` does when the pane's note is swapped.

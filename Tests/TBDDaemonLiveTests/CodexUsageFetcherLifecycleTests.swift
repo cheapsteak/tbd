@@ -19,6 +19,7 @@ struct CodexUsageFetcherLifecycleTests {
     @Test func virtualTimeoutReturnsTimedOutAndKillsChild() async throws {
         let fixture = try ProcessFixture()
         defer { fixture.cleanup() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let fetch = Task {
             await fixture.fetcher(clock: clock).fetch()
@@ -27,6 +28,7 @@ struct CodexUsageFetcherLifecycleTests {
         let pid = try await fixture.waitForPID()
         defer { fixture.killIfStillAlive(pid) }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
         let result = await fetch.value
 
@@ -38,6 +40,7 @@ struct CodexUsageFetcherLifecycleTests {
         let fixture = try ProcessFixture()
         defer { fixture.cleanup() }
         let fetch = Task {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await fixture.fetcher(clock: TestClock()).fetch()
         }
         defer { fetch.cancel() }

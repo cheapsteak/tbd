@@ -438,6 +438,7 @@ struct HibernationCoordinatorTests {
     @Test func wakeCannotOvertakeStagedHibernation() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let tmux = TmuxManager(
             dryRun: true,
@@ -455,10 +456,12 @@ struct HibernationCoordinatorTests {
         let hibernate = Task {
             await coordinator.manualHibernate(terminalID: terminalID)
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
 
         #expect(await coordinator.wake(terminalID: terminalID) == .inFlight)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .milliseconds(200))
         #expect(await hibernate.value == .ok)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
@@ -847,12 +850,14 @@ struct HibernationCoordinatorTests {
         // dryRun default paneCurrentCommand is "zsh" (not claude) → poll sees the
         // process leave immediately after `/exit`.
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), clock: clock, actuationLog: makeTestActuationLog())
 
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Unblocks the single verify-exit poll attempt.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: coord.exitPollInterval)
         let result = await park.value
 
@@ -889,6 +894,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // claude reports its version as pane_current_command
         )
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pollInterval: Duration = .milliseconds(200)
         let coord = HibernationCoordinator(
@@ -898,6 +904,7 @@ struct HibernationCoordinatorTests {
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Exhaust the whole poll window: one advance per attempt.
         for _ in 0..<3 {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.advanceWhenSuspended(by: pollInterval)
         }
         let result = await park.value
@@ -932,6 +939,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // still claude, every attempt
         )
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let pollInterval: Duration = .milliseconds(200)
         let attempts = 3
@@ -948,13 +956,16 @@ struct HibernationCoordinatorTests {
 
         // N-1 attempts: still inside the poll window.
         for _ in 0..<(attempts - 1) {
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await clock.advanceWhenSuspended(by: pollInterval)
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.waitForSuspension()  // armed for attempt N ⇒ N-1 are done
         #expect(!interruptSent(),
                 "must not escalate before the poll window is exhausted; got: \(recorded.snapshot())")
 
         // The Nth (final) attempt: the window is exhausted, so escalate.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: pollInterval)
         let result = await park.value
         #expect(result == .ok)

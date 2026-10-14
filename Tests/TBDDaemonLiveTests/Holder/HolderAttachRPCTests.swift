@@ -176,6 +176,7 @@ struct HolderAttachRPCTests {
     /// eleven would let a genuine hang in any of them take four times as long
     /// to surface — this family already hits time limits under load.
     @Test(.clockDriven) func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         let harness = try await RPCHarness.start(
@@ -186,6 +187,7 @@ struct HolderAttachRPCTests {
         defer { Darwin.close(first.fd) }
 
         // No acknowledgement is ever sent.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: readyTimeout)
         #expect(await pollUntil("the ready timeout to take the attach back") {
             await harness.registry.viewerAttachment(for: harness.terminalID) == first.generation

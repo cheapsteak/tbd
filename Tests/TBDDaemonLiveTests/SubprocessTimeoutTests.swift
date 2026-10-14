@@ -61,6 +61,7 @@ struct SubprocessTimeoutTests {
         // error can only mean the deadline fired — and the deadline now fires
         // because this test advanced virtual time, not because the runner
         // happened to be fast enough.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let call = Task {
             try await TmuxManager.runExternalCommand(
@@ -71,6 +72,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
         do {
             _ = try await call.value
@@ -100,6 +102,7 @@ struct SubprocessTimeoutTests {
             arguments: ["-c", "yes x | head -c \(bytes)"],
             label: "big-output-test",
             timeout: Self.unreachableTimeout,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             clock: TestClock()
         )
         #expect(out.utf8.count == bytes)
@@ -125,6 +128,7 @@ struct SubprocessTimeoutTests {
         // The plain `sleep 120 &` grandchild is NOT killed and may linger up to
         // 120s after the suite — harmless orphanage locally, irrelevant on
         // ephemeral CI runners.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let call = Task {
             try await TmuxManager.runExternalCommand(
@@ -135,6 +139,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
         do {
             _ = try await call.value
@@ -164,6 +169,7 @@ struct SubprocessTimeoutTests {
             arguments: ["-c", "sleep 30 & echo hi"],
             label: "grandchild-pipe-eof-test",
             timeout: Self.unreachableTimeout,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             clock: TestClock()
         )
         #expect(out == "hi\n")
@@ -177,6 +183,7 @@ struct SubprocessTimeoutTests {
             arguments: ["ok"],
             label: "fast",
             timeout: Self.unreachableTimeout,
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             clock: TestClock()
         )
         #expect(out.contains("ok"))
@@ -221,6 +228,7 @@ struct SubprocessTimeoutTests {
     @Test func pseudoTerminalRunTimesOutAndKillsTheChild() async throws {
         let marker = "tbd-pty-timeout-\(UUID().uuidString)"
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let call = Task {
             try await runBoundedProcess(
@@ -232,6 +240,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
         let outcome = try await call.value
         guard case .timedOut = outcome else {
