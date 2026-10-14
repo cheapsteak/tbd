@@ -1326,9 +1326,11 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// time and never persisted. Non-nil only for `.oauthToken` profiles with a
     /// stored secret. nil = other kind, no secret, or an older daemon.
     ///
-    /// The whole token never leaves the daemon: the app renders
+    /// The list never carries the whole token: the app renders
     /// `Token •••• <tail>` so two token profiles can be told apart, and that is
-    /// all it is ever given.
+    /// all it is ever given. The one RPC result that carries a whole token is
+    /// `ModelProfileExecEnvironmentResult`, which `tbd profile exec` puts into
+    /// its child's environment and never prints.
     public let tokenTail: String?
     /// Count of live Claude sessions on this profile (unparked, not hibernated).
     /// Computed by the daemon at list time (never persisted). Non-nil only on

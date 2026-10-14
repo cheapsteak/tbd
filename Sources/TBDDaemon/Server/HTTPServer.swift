@@ -146,8 +146,22 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    /// The refusal for a method this transport does not serve, or nil to route
+    /// the request. A body that does not decode is routed, so the router
+    /// answers it with its own error, as it always has.
+    static func socketOnlyRefusal(_ bodyData: Data) -> RPCResponse? {
+        guard let method = (try? JSONDecoder().decode(RPCRequest.self, from: bodyData))?.method,
+              RPCMethod.socketOnly.contains(method) else { return nil }
+        return RPCResponse(error: "\(method) is served only on the daemon's Unix socket, not over HTTP")
+    }
+
     private static func processRequest(_ bodyData: Data, router: RPCRouter, wrappedCtx: HTTPSendableContext) async {
-        let response = await router.handleRaw(bodyData)
+        let response: RPCResponse
+        if let refusal = socketOnlyRefusal(bodyData) {
+            response = refusal
+        } else {
+            response = await router.handleRaw(bodyData)
+        }
 
         do {
             let responseData = try JSONEncoder().encode(response)

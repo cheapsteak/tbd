@@ -182,6 +182,147 @@ struct ProfileCommandsTests {
         #expect(sanitized["HOME"] == "/Users/x")
     }
 
+    // MARK: - profile exec
+
+    @Test func execParsing_takesTheProfileAndEverythingAfterTheTerminator() throws {
+        let parsed = try ProfileExec.parse(["work", "--", "claude", "-p", "--model", "x", "hi there"])
+        #expect(parsed.name == "work")
+        #expect(parsed.command == ["claude", "-p", "--model", "x", "hi there"])
+    }
+
+    @Test func execParsing_refusesAMissingCommand() {
+        #expect(throws: Error.self) { _ = try ProfileExec.parse(["work"]) }
+        #expect(throws: Error.self) { _ = try ProfileExec.parse(["work", "--"]) }
+    }
+
+    @Test func execEnvironment_profileAloneChoosesTheAccount() {
+        // A caller that is itself a session on another token profile.
+        let inherited = [
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-callers-own",
+            "CLAUDE_CONFIG_DIR": "/profiles/caller/claude",
+            "ANTHROPIC_API_KEY": "sk-ant-api03-callers-own",
+            "ANTHROPIC_AUTH_TOKEN": "callers-own",
+            "ANTHROPIC_BASE_URL": "http://localhost:8080",
+            "ANTHROPIC_MODEL": "callers-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "callers-sonnet",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Callers-Own: 1",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "AWS_BEARER_TOKEN_BEDROCK": "callers-own",
+            "AWS_PROFILE": "acme-dev",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/Users/x",
+        ]
+        // A signed-in profile sets only its config dir.
+        let env = ProfileExecEnvironment.compose(
+            inherited: inherited,
+            profile: ["CLAUDE_CONFIG_DIR": "/profiles/target/claude"]
+        )
+        #expect(env == [
+            "CLAUDE_CONFIG_DIR": "/profiles/target/claude",
+            "AWS_PROFILE": "acme-dev",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/Users/x",
+        ])
+    }
+
+    @Test func execEnvironment_profileValuesWin() {
+        let env = ProfileExecEnvironment.compose(
+            inherited: ["AWS_REGION": "us-east-1", "KEEP": "1"],
+            profile: ["AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1"]
+        )
+        #expect(env == ["AWS_REGION": "us-west-2", "CLAUDE_CODE_USE_BEDROCK": "1", "KEEP": "1"])
+    }
+
+    @Test func execEnvironment_aClearedSelectorTheProfileSetsSurvives() {
+        // A profile that needs one of the other selectors carries it in its env
+        // overrides; those arrive in the profile's environment, after the clear.
+        let env = ProfileExecEnvironment.compose(
+            inherited: ["ANTHROPIC_DEFAULT_SONNET_MODEL": "callers"],
+            profile: ["ANTHROPIC_DEFAULT_SONNET_MODEL": "the-profiles"]
+        )
+        #expect(env == ["ANTHROPIC_DEFAULT_SONNET_MODEL": "the-profiles"])
+    }
+
+    @Test func execEnvironment_clearsEverythingLoginScrubs() {
+        // `profile login` and `profile exec` defend against the same inherited
+        // variables; exec clears more, because it also has to drop a caller's
+        // token and config dir.
+        #expect(Set(loginPoisonEnvVars).isSubset(of: ProfileExecEnvironment.clearedKeys))
+    }
+
+    @Test func execExecutablePath_resolvesLikeAShell() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("tbd-profile-exec-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let tool = dir.appendingPathComponent("tool")
+        try Data("#!/bin/sh\n".utf8).write(to: tool)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir:\(dir.path)") == tool.path)
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir") == nil)
+        // An empty PATH entry is the current directory, wherever it falls.
+        #expect(profileExecExecutablePath("tool", searchPath: ":/nonexistent-dir",
+                                          currentDirectory: dir.path) == tool.path)
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir:",
+                                          currentDirectory: dir.path) == tool.path)
+        #expect(profileExecExecutablePath("tool", searchPath: "/nonexistent-dir",
+                                          currentDirectory: dir.path) == nil)
+        // A path is taken as given, found or not; execve reports a missing one.
+        #expect(profileExecExecutablePath("./tool", searchPath: dir.path) == "./tool")
+        #expect(profileExecExecutablePath("/no/such/tool", searchPath: dir.path) == "/no/such/tool")
+        // No PATH in the child's environment: execvp's default search path.
+        #expect(profileExecExecutablePath("sh", searchPath: nil) == "/bin/sh")
+    }
+
+    @Test func execExecutablePath_prefersAnExecutableAndReportsAnUnrunnableMatch() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("tbd-profile-exec-\(UUID().uuidString)", isDirectory: true)
+        let plain = root.appendingPathComponent("plain", isDirectory: true)
+        let runnable = root.appendingPathComponent("runnable", isDirectory: true)
+        let dirs = root.appendingPathComponent("dirs", isDirectory: true)
+        for dir in [plain, runnable, dirs] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        // The same name three ways: a non-executable file, a directory, and an
+        // executable file.
+        let unrunnable = plain.appendingPathComponent("tool")
+        try Data("#!/bin/sh\n".utf8).write(to: unrunnable)
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: unrunnable.path)
+        try fm.createDirectory(at: dirs.appendingPathComponent("tool"), withIntermediateDirectories: true)
+        let tool = runnable.appendingPathComponent("tool")
+        try Data("#!/bin/sh\n".utf8).write(to: tool)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+
+        // An executable later on PATH wins over an unrunnable match before it.
+        #expect(profileExecExecutablePath("tool", searchPath: "\(plain.path):\(dirs.path):\(runnable.path)")
+            == tool.path)
+        // With no executable at all, the unrunnable match is returned, so exec
+        // fails with EACCES (126) instead of reporting the command missing (127).
+        #expect(profileExecExecutablePath("tool", searchPath: "\(dirs.path):\(plain.path)") == unrunnable.path)
+        // A directory alone is not a match.
+        #expect(profileExecExecutablePath("tool", searchPath: dirs.path) == nil)
+    }
+
+    @Test func execStatus_followsTheEnvConvention() {
+        #expect(ProfileExecStatus.failed == 125)
+        #expect(ProfileExecStatus.forExecFailure(ENOENT) == 127)
+        #expect(ProfileExecStatus.forExecFailure(ENOTDIR) == 127)
+        #expect(ProfileExecStatus.forExecFailure(EACCES) == 126)
+        #expect(ProfileExecStatus.forExecFailure(ENOEXEC) == 126)
+    }
+
+    @Test func execFailureMessage_namesTheVerbOnce() {
+        #expect(profileExecFailureMessage(CLIError.rpcError("Profile not found"))
+            == "tbd profile exec: Profile not found\n")
+        #expect(profileExecFailureMessage(CLIError.invalidArgument("No profile named 'x'. Available: a"))
+            == "tbd profile exec: No profile named 'x'. Available: a\n")
+    }
+
     // MARK: - Executable lookup
 
     @Test func findExecutable_findsOnlyExecutableFiles() throws {
@@ -212,7 +353,7 @@ struct ProfileCommandsTests {
 
     @Test func subcommandsRegistered() {
         let names = ProfileCommand.configuration.subcommands.map { String(describing: $0) }
-        #expect(names == ["ProfileList", "ProfileSetDefault", "ProfileLogin",
+        #expect(names == ["ProfileList", "ProfileSetDefault", "ProfileLogin", "ProfileExec",
                           "ProfileBalancing", "ProfilePool", "ProfileRename"])
     }
 

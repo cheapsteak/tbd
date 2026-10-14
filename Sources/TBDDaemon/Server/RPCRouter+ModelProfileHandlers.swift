@@ -657,6 +657,63 @@ extension RPCRouter {
         return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
     }
 
+    // MARK: - Exec Environment
+
+    /// `modelProfile.execEnvironment` — the environment `tbd profile exec`
+    /// runs its child under: the profile's routing keys, its credential and
+    /// the global and profile env overrides, composed by
+    /// `ClaudeSpawnCommandBuilder.execEnvironment` from the same resolver read
+    /// and config-dir provisioning a spawned session gets.
+    ///
+    /// Stricter than a spawn in two places, because a headless child has no
+    /// pane to show a problem in. A spawn on a token profile with no stored
+    /// token opens a pane that asks for a login; here that is an error naming
+    /// the repair. And a spawn whose config dir could not be prepared still
+    /// opens; here the child would fall back to the caller's own Claude config
+    /// and run on whatever account is signed in there, so that is an error too.
+    ///
+    /// Repo-scope overrides do not apply: the child runs under a profile, not
+    /// in a repo.
+    func handleModelProfileExecEnvironment(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileExecEnvironmentParams.self, from: paramsData)
+        guard let row = try await db.modelProfiles.get(id: params.id) else {
+            return RPCResponse(error: "Profile not found")
+        }
+        // Only an API-key profile with no stored key resolves to nil.
+        guard let profile = try await modelProfileResolver.loadByID(row.id) else {
+            return RPCResponse(error: "Profile '\(row.name)' has no stored API key. "
+                + "Add one in Settings → Model Profiles in the TBD app.")
+        }
+        if profile.kind == .oauthToken, profile.secret == nil {
+            return RPCResponse(error: "Profile '\(row.name)' has no stored setup token. "
+                + "Mint one with `claude setup-token` and paste it into Settings → Model Profiles → "
+                + "\"Replace token…\" in the TBD app.")
+        }
+        let configDir = await configDirManager.resolveConfigDir(for: profile)
+        if profile.kind != .bedrock, configDir == nil {
+            return RPCResponse(error: "Could not prepare the config dir for profile '\(row.name)'; "
+                + "the daemon log has the reason.")
+        }
+        let config = try await db.config.get()
+        let environment = ClaudeSpawnCommandBuilder.execEnvironment(
+            profileSecret: profile.secret,
+            profileKind: profile.kind,
+            profileBaseURL: profile.baseURL,
+            profileModel: profile.model,
+            profileAwsRegion: profile.awsRegion,
+            profileAwsProfile: profile.awsProfile,
+            profileConfigDir: configDir,
+            envOverrides: EnvOverrideResolver.merge(
+                global: config.envOverrides, repo: nil, profile: profile.envOverrides)
+        )
+        return try RPCResponse(result: ModelProfileExecEnvironmentResult(
+            profileID: profile.profileID,
+            name: profile.name,
+            kind: profile.kind,
+            environment: environment
+        ))
+    }
+
     // MARK: - Pool Opt-Out
 
     /// Set whether this profile is excluded from the balancing pool (design
