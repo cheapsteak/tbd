@@ -38,7 +38,7 @@ inside TBD sessions.
 
 - Reimplement Codex plugin loading.
 - Write TBD-specific hooks into the user's base `~/.codex/config.toml`.
-- Mark any hook trusted in the user's Codex config, base or profile.
+- Have TBD mark any hook trusted in the user's Codex config, base or profile.
 - Continue maintaining per-repo isolated Codex homes as the primary launch mode.
 
 ## Upstream Codex facts
@@ -101,8 +101,9 @@ exists from Codex 0.131, and the TUI honors it at startup (no review screen)
 from 0.135.
 
 Codex hook state supports per-hook `trusted_hash` entries. Plugin hook keys
-include plugin/source identity, so Codex can persist trust for the TBD plugin
-without trusting unrelated user hooks or other plugins.
+include plugin/source identity, so Codex could persist trust for the TBD plugin
+alone, without trusting unrelated user hooks or other plugins. TBD does not rely
+on persisted trust (see Hook trust flow).
 
 ## Design
 
@@ -137,12 +138,10 @@ The minimal profile enables the TBD plugin:
 enabled = true
 ```
 
-It may also contain hook state entries for the TBD plugin hooks:
-
-```toml
-[hooks.state."<hook-key>"]
-trusted_hash = "sha256:..."
-```
+TBD writes no `[hooks.state]` entries. Codex writes them there itself when
+someone trusts a hook or switches one off inside a TBD session, because a
+`--profile tbd` session saves hook state to this file. An `enabled = false`
+saved that way holds for every later TBD launch.
 
 TBD may choose to make `~/.codex/tbd.config.toml` a symlink to a file under
 `~/tbd/agents/codex/tbd.config.toml`, but Codex must see it as the profile
@@ -263,7 +262,7 @@ This design intentionally lets TBD sessions inherit the user's Codex setup:
 
 The only TBD-specific additions are in the `tbd` profile and the `tbd@tbd`
 plugin. A normal `codex` launch that does not pass `--profile tbd` will not see
-the TBD plugin activation or TBD hook trust entries.
+the TBD plugin activation, or any hook state saved inside a TBD session.
 
 ## Implementation plan
 
@@ -385,5 +384,5 @@ hook that should not run inside TBD is switched off with `enabled = false`.
 - Every enabled hook (TBD's plugin hooks and the repository's project hooks)
   runs in every TBD-launched Codex session from the first one, with no
   hook-review screen.
-- A hook switched off stays off, and no hook is marked trusted in the user's
+- A hook switched off stays off, and TBD marks no hook trusted in the user's
   Codex config.
