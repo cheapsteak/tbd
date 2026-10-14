@@ -756,6 +756,10 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// the app renders exactly what it renders today.
     public var transcriptStreamPath: String?
 
+    /// The declared dev server this tab runs, or nil for every other tab.
+    /// Stamped at spawn and never changed.
+    public var serverName: String?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -875,7 +879,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
-        case transcriptStreamPath
+        case transcriptStreamPath, serverName
     }
 
     public init(from decoder: Decoder) throws {
@@ -931,6 +935,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
         transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
+        serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
     }
 }
 
@@ -2294,10 +2299,18 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var claudeSessionID: String?
     /// Line count of the captured text (display metadata).
     public var lineCount: Int
+    /// The dev server whose saved final output this entry is, while the entry
+    /// still speaks for that server; nil for every other entry, and once a
+    /// start or stop has detached it (docs/specs/2026-10-11-dev-servers-design.md,
+    /// "Exited servers keep their last output").
+    public var serverName: String?
+    /// That server's exit status; nil when the transport could not observe it.
+    public var exitCode: Int32?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
-                claudeSessionID: String? = nil, lineCount: Int = 0) {
+                claudeSessionID: String? = nil, lineCount: Int = 0,
+                serverName: String? = nil, exitCode: Int32? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2305,6 +2318,8 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.closedAt = closedAt
         self.claudeSessionID = claudeSessionID
         self.lineCount = lineCount
+        self.serverName = serverName
+        self.exitCode = exitCode
     }
 }
 

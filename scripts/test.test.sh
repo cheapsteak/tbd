@@ -135,6 +135,7 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
   echo "TBD_SOCKET_PATH=${TBD_SOCKET_PATH:-<unset>}"
   echo "TBD_CLAUDE_HOST_HOME=${TBD_CLAUDE_HOST_HOME:-<unset>}"
   echo "TBD_TEST_CODEX_HOME=${TBD_TEST_CODEX_HOME:-<unset>}"
+  echo "DEV_SERVERS_DIR=${DEV_SERVERS_DIR:-<unset>}"
   echo "TMUX_TMPDIR=${TMUX_TMPDIR:-<unset>}"
   echo "tmux-tmpdir-mode=$(stat -f '%Lp' "${TMUX_TMPDIR:-/nonexistent}" 2>/dev/null)"
   echo "TBD_SWIFT_LOCK_PATH=${TBD_SWIFT_LOCK_PATH:-<unset>}"
@@ -270,7 +271,7 @@ RUN_TEE=""
 run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(cd "${RUN_CWD:-.}" && env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
-                 -u TBD_TEST_CODEX_HOME -u TBD_TEST_SCRATCH_ROOT \
+                 -u TBD_TEST_CODEX_HOME -u TBD_TEST_SCRATCH_ROOT -u DEV_SERVERS_DIR \
                  -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
@@ -840,8 +841,35 @@ test_no_fingerprint_leaves_containment_intact() {
   assert_contains "TBD_SOCKET_PATH is under the scratch dir" "$dump" "/sanctioned/tbd/sock"
   assert_contains "TBD_CLAUDE_HOST_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/claude-host"
   assert_contains "TBD_TEST_CODEX_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/codex-host"
+  assert_contains "DEV_SERVERS_DIR is under the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
   assert_contains "TBD_TEST_SCRATCH_ROOT is a scratch dir" "$dump" "TBD_TEST_SCRATCH_ROOT=/tmp/tbd-test-home."
   assert_contains "decoys are still armed" "$dump" "decoy-mode tbd=0"
+  rmfix "$fix"
+}
+
+test_dev_servers_dir_is_fenced_under_the_scratch_dir() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(DEV_SERVERS_DIR="$fix/callers-dev-servers")
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "a clean run exits 0" "$RUN_RC"
+  local dump; dump="$(dump_of "$fix")"
+  assert_contains "DEV_SERVERS_DIR is under the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
+  assert_missing "the caller's DEV_SERVERS_DIR is discarded" "$dump" "DEV_SERVERS_DIR=$fix/callers-dev-servers"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the pin and the caller's real running-file directory
+# reaches the suite.
+test_dev_servers_dir_pin_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" '/^ +DEV_SERVERS_DIR="\$sanctioned_home\/dev-servers" \\$/d')"
+  RUN_ENV=(DEV_SERVERS_DIR="$fix/callers-dev-servers")
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  local dump; dump="$(dump_of "$fix")"
+  assert_contains "without the pin the caller's value survives" "$dump" "DEV_SERVERS_DIR=$fix/callers-dev-servers"
+  assert_missing "and nothing points at the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
   rmfix "$fix"
 }
 

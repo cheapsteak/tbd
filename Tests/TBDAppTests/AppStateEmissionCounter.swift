@@ -144,6 +144,9 @@ final class AppStateEmissionTracker {
         _ = state.prStatuses
         _ = state.prObservations
         _ = state.prBindings
+        _ = state.devServerLists
+        _ = state.devServerRunningWorktreeIDs
+        _ = state.devServerActionMessages
         _ = state.prDetachedCounts
         _ = state.modelProfiles
         _ = state.limitHits
@@ -269,6 +272,9 @@ final class AppStateEmissionTracker {
         "prStatuses",
         "prObservations",
         "prBindings",
+        "devServerLists",
+        "devServerRunningWorktreeIDs",
+        "devServerActionMessages",
         "prDetachedCounts",
         "modelProfiles",
         "limitHits",

@@ -146,6 +146,7 @@ let package = Package(
                 // simply never touches the view types.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 "TBDTerminalSerialization",
+                .product(name: "TOMLKit", package: "TOMLKit"),
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],

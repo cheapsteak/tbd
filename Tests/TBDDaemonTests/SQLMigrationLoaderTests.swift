@@ -519,6 +519,7 @@ import Testing
             "20261008230000_config_remote_transcript_live_sync",
             "20261009072332_config_profile_balancing_thresholds",
             "20261010025458_config_transcript_prompt_answer",
+            "20261011235918_dev_server_columns",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

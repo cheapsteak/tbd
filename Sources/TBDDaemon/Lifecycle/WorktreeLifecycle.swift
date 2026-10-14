@@ -176,6 +176,13 @@ public struct WorktreeLifecycle: Sendable {
     /// a viewer could be asked.
     var holderScreenResolver: HolderScreenResolver?
 
+    /// Stops a worktree's dev servers before archive tears its tabs down
+    /// (docs/specs/2026-10-11-dev-servers-design.md, "On archive"). Wired
+    /// post-construction by `Daemon.swift`, like `holderRegistry`; `nil` in
+    /// mock mode and in tests that do not exercise it, where archive behaves
+    /// exactly as it did before dev servers existed.
+    var devServerOperations: DevServerOperations?
+
     /// The daemon's `ModelProxySupervisor`, wired post-construction by
     /// `Daemon.swift` the way `holderRegistry` is. `nil` in mock mode and in
     /// every test that does not exercise the proxy, where a holder spawn simply
