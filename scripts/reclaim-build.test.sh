@@ -71,6 +71,12 @@ _mk_worktree() { # dir now index_age debug_age
   : > "$d/.build/arm64-apple-macosx/debug/app.o"; touch_age "$d/.build/arm64-apple-macosx/debug/app.o" "$now" "$dage"
 }
 NO_PS='printf ""'   # ps seam that matches nothing
+# An lsof seam that RAN and produced a cwd list naming no fixture worktree — the
+# "probe worked, nothing matched" case, which must still reap. An empty list is
+# NOT this case: the reaper reads that as a broken probe and keeps everything,
+# so a fixture reporting nothing would exercise the opposite branch. Every
+# full-script test sets this, so no case depends on the real machine's lsof.
+LSOF_NO_MATCH="printf 'p1\nfcwd\nn/Users/x/elsewhere\n'"
 
 test_plan_skips_when_no_build_dir() {
   local d; d="$(mktmpd)"
@@ -149,7 +155,7 @@ test_main_dry_run_plans_but_deletes_nothing() {
 ]
 JSON
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
   assert_contains "dry-run plans tier2 for a" "$out" "PLAN tier2 $a"
   assert_contains "dry-run plans tier1 for b" "$out" "PLAN tier1 $b"
   assert_eq "dry-run keeps a/.build" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
@@ -169,7 +175,7 @@ test_main_real_run_reclaims() {
   {"path":"$b","status":"active","liveClaudeSessionCount":0}
 ]
 JSON
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "tier2 removed a/.build"          "false" "$([[ -d "$a/.build" ]] && echo true || echo false)"
   assert_eq "tier1 removed b/index-build"     "false" "$([[ -d "$b/.build/index-build" ]] && echo true || echo false)"
   assert_eq "tier1 kept b debug build"        "true"  "$([[ -d "$b/.build/arm64-apple-macosx" ]] && echo true || echo false)"
@@ -187,6 +193,10 @@ test_write_plist_contains_label_interval_and_script() {
   assert_contains "plist runs the script"  "$body" "/repo/scripts/reclaim-build.sh"
   assert_contains "plist sets launchd PATH" "$body" "<key>PATH</key>"
   assert_contains "plist PATH includes homebrew" "$body" "/opt/homebrew/bin"
+  # /usr/sbin is where macOS keeps lsof, and the launchd PATH is the whole
+  # environment the hourly run gets: off this list, the reclaim's live-process
+  # rail has to fall back to its own absolute lookup to find the tool at all.
+  assert_contains "plist PATH includes the sbin dirs" "$body" "/usr/bin:/bin:/usr/sbin:/sbin"
   rm -rf "$(dirname "$out")"
 }
 
@@ -203,7 +213,7 @@ test_main_exclude_path_skips_only_that_worktree() {
 ]
 JSON
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$a" \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" RECLAIM_EXCLUDE_PATH="$a" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "excluded worktree logged as skipped" "$out" "SKIP excluded $a"
   assert_missing  "excluded worktree never planned"     "$out" "PLAN tier2 $a"
@@ -225,7 +235,7 @@ JSON
   # Exclude via a symlink AND a trailing slash — textually nothing like the
   # listed path; only canonicalization of both sides can match them.
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$root/link/" \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" RECLAIM_EXCLUDE_PATH="$root/link/" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "unnormalized exclude still skips"   "$out" "SKIP excluded $a"
   assert_missing  "unnormalized exclude blocks plan"   "$out" "PLAN tier2 $a"
@@ -248,7 +258,7 @@ test_main_skips_worktree_without_package_swift() {
   {"path":"$b","status":"active","liveClaudeSessionCount":0}
 ]
 JSON
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
   assert_contains "swift worktree planned" "$out" "PLAN tier2 $a"
   assert_missing "non-swift worktree skipped entirely" "$out" "$b"
   rm -rf "$root"
@@ -264,7 +274,7 @@ test_main_skips_recently_touched_build() {
   cat > "$j" <<JSON
 [{"path":"$a","status":"active","liveClaudeSessionCount":0}]
 JSON
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "recently-touched .build NOT deleted" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
   rm -rf "$root"
 }
@@ -294,7 +304,7 @@ test_claude_agent_worktree_tier2_reaped() {
   local agent="$root/.claude/worktrees/agent-abc123"
   _mk_worktree "$agent" "$now" 200000 200000   # both stale -> tier2
   local j="$root/wt.json"; printf '[]' > "$j"
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "claude agent worktree .build reaped (tier2)" "false" "$([[ -d "$agent/.build" ]] && echo true || echo false)"
   rm -rf "$root"
@@ -308,7 +318,7 @@ test_claude_agent_worktree_without_package_swift_skipped() {
   touch_age "$agent/.build/arm64-apple-macosx/debug/app.o" "$now" 200000
   # deliberately NO Package.swift
   local j="$root/wt.json"; printf '[]' > "$j"
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
   assert_missing "non-swift claude agent worktree skipped entirely" "$out" "$agent"
   rm -rf "$root"
@@ -319,7 +329,7 @@ test_claude_agent_worktree_fresh_build_skipped() {
   local agent="$root/.claude/worktrees/agent-fresh"
   _mk_worktree "$agent" "$now" 60 60   # 1 min old — within grace, fresh
   local j="$root/wt.json"; printf '[]' > "$j"
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
   assert_contains "fresh claude agent worktree skipped" "$out" "SKIP fresh $agent"
   rm -rf "$root"
@@ -336,7 +346,7 @@ test_repo_roots_injection_dedups_against_tbd_list() {
   cat > "$j" <<JSON
 [{"path":"$dup","status":"active","liveClaudeSessionCount":5}]
 JSON
-  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
   local count; count="$(grep -c -- "$dup" <<<"$out")"
   assert_eq "dup path processed exactly once" "1" "$count"
@@ -696,7 +706,7 @@ test_main_reaps_installs_in_agent_worktree() {
   _mk_install_dir "$agent" "$now" 200000 .terraform
   local j="$root/wt.json"
   printf '[]' > "$j"
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "node_modules reaped" "false" "$([[ -d "$agent/node_modules" ]] && echo true || echo false)"
   assert_eq ".terraform reaped"   "false" "$([[ -d "$agent/.terraform" ]] && echo true || echo false)"
@@ -716,7 +726,7 @@ test_main_installs_recency_guard_keeps_fresh() {
 JSON
   # T2=0 forces a plan despite manifest freshness; the in-main RECLAIM_ACTIVE_GRACE guard
   # is what must save the just-touched install dir.
-  RECLAIM_NOW=$now RECLAIM_T2_SECONDS=0 RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  RECLAIM_NOW=$now RECLAIM_T2_SECONDS=0 RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "recently-touched installs NOT reaped" "true" "$([[ -d "$a/node_modules" ]] && echo true || echo false)"
   rm -rf "$root"
@@ -750,7 +760,7 @@ test_main_skips_dirty_worktree() {
 [{"path":"$a","status":"active","liveClaudeSessionCount":0}]
 JSON
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "dirty worktree skipped" "$out" "SKIP dirty $a"
   assert_eq "dirty .build survives" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
@@ -764,7 +774,7 @@ test_agent_worktree_installs_reaped() {
   : > "$agent/package.json"; touch_age "$agent/package.json" "$now" 200000
   _mk_install_dir "$agent" "$now" 200000 node_modules   # non-Swift agent worktree
   local j="$root/wt.json"; printf '[]' > "$j"
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "agent worktree node_modules reaped" "false" "$([[ -d "$agent/node_modules" ]] && echo true || echo false)"
   rm -rf "$root"
@@ -779,7 +789,7 @@ test_agent_worktree_dirty_skipped() {
   _mk_install_dir "$agent" "$now" 200000 node_modules
   local j="$root/wt.json"; printf '[]' > "$j"
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "dirty agent worktree skipped" "$out" "SKIP dirty $agent"
   assert_eq "dirty agent installs survive" "true" "$([[ -d "$agent/node_modules" ]] && echo true || echo false)"
@@ -816,7 +826,7 @@ test_main_skips_opted_out_worktree() {
 ]
 JSON
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" bash "$HERE/reclaim-build.sh" 2>&1)"
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "opted-out worktree skipped" "$out" "SKIP opted-out $a"
   assert_contains "sibling still planned" "$out" "PLAN tier2 $b"
   assert_eq "opted-out .build survives" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
@@ -833,7 +843,7 @@ test_reclaim_opted_out_via_repo_root_marker() {
   : > "$root/.tbd-reclaim-optout"   # opt out the whole repo
   local j="$root/wt.json"; printf '[]' > "$j"
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_REPO_ROOTS="$root" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "repo-rooted marker skips agent worktree" "$out" "SKIP opted-out $agent"
   assert_eq "opted-out agent .build survives" "true" "$([[ -d "$agent/.build" ]] && echo true || echo false)"
@@ -869,7 +879,7 @@ JSON
 locked"
   local cmd; cmd="printf '%s\n' \"$porcelain\""
   local out
-  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_WORKTREE_LIST_CMD="$cmd" \
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" RECLAIM_WORKTREE_LIST_CMD="$cmd" \
     bash "$HERE/reclaim-build.sh" 2>&1)"
   assert_contains "locked worktree skipped" "$out" "SKIP locked $wt"
   assert_eq "locked .build survives" "true" "$([[ -d "$wt/.build" ]] && echo true || echo false)"
@@ -886,7 +896,7 @@ test_main_tbd_source_worktree_installs_not_reaped() {
   cat > "$j" <<JSON
 [{"path":"$wt","status":"active","liveClaudeSessionCount":0}]
 JSON
-  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "tbd source worktree node_modules NOT reaped" "true" "$([[ -d "$wt/node_modules" ]] && echo true || echo false)"
   rm -rf "$root"
@@ -958,12 +968,255 @@ test_main_real_run_reclaims_dsyms_only() {
   cat > "$j" <<JSON
 [{"path":"$a","status":"active","liveClaudeSessionCount":1}]
 JSON
-  CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+  CI='' TBD_KEEP_DSYM='' RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
     bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
   assert_eq "product dSYM removed"  "false" "$([[ -d "$debug/App.dSYM" ]] && echo true || echo false)"
   assert_eq "nested test dSYM removed" "false" "$([[ -d "$debug/Pkg.xctest/Contents/MacOS/Pkg.dSYM" ]] && echo true || echo false)"
   assert_eq "debug objects kept" "true" "$([[ -f "$debug/app.o" ]] && echo true || echo false)"
   assert_eq "index-build kept" "true" "$([[ -d "$a/.build/index-build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+# --- the live-binary rail -----------------------------------------------------
+# A worktree whose .build holds the executable of a RUNNING process must never
+# be reaped: deleting it leaves a daemon that cannot spawn its own helpers. The
+# negative cases below are the ones that matter — a rail that skips everything
+# protects nothing and hides the day it stops discriminating.
+
+test_has_live_binary_true_for_daemon_in_this_worktree() {
+  local wt="/Users/x/tbd/worktrees/tbd/w1"
+  local ps_out="901 $wt/.build/debug/TBDDaemon"
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_live_binary "$wt"; then
+    assert_eq "running daemon from this .build is live" y y
+  else
+    assert_eq "running daemon from this .build is live" y n
+  fi
+}
+
+test_has_live_binary_true_for_holder_under_the_triple_dir() {
+  local wt="/Users/x/tbd/worktrees/tbd/w1"
+  local ps_out="902 $wt/.build/arm64-apple-macosx/debug/TBDHolder --session abc"
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_live_binary "$wt"; then
+    assert_eq "running holder from this .build is live" y y
+  else
+    assert_eq "running holder from this .build is live" y n
+  fi
+}
+
+test_has_live_binary_false_for_another_worktrees_build() {
+  local wt="/Users/x/tbd/worktrees/tbd/w1"
+  # A sibling whose path SHARES w1's prefix: the whole reason the match is
+  # anchored at "<wt>/.build/" rather than a substring test.
+  local ps_out="903 /Users/x/tbd/worktrees/tbd/w1-extra/.build/debug/TBDDaemon
+904 /Users/x/tbd/worktrees/tbd/other/.build/debug/TBDHolder"
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_live_binary "$wt"; then
+    assert_eq "sibling .build does not protect this worktree" n y
+  else
+    assert_eq "sibling .build does not protect this worktree" n n
+  fi
+}
+
+test_has_live_binary_false_for_process_outside_build() {
+  local wt="/Users/x/tbd/worktrees/tbd/w1"
+  # Inside the worktree, but not under .build — this rail is about executing
+  # build products, and the live-cwd rail covers the rest.
+  local ps_out="905 $wt/scripts/restart.sh
+906 /bin/zsh -l"
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_live_binary "$wt"; then
+    assert_eq "process outside .build is not a live binary" n y
+  else
+    assert_eq "process outside .build is not a live binary" n n
+  fi
+}
+
+test_has_live_binary_false_when_no_processes_at_all() {
+  if RECLAIM_PS_CMD="$NO_PS" has_live_binary "/Users/x/tbd/worktrees/tbd/w1"; then
+    assert_eq "empty ps -> no live binary" n y
+  else
+    assert_eq "empty ps -> no live binary" n n
+  fi
+}
+
+test_main_skips_worktree_running_a_daemon_from_its_build() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/running" b="$root/idle"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible, but holds a live daemon
+  _mk_worktree "$b" "$now" 200000 200000   # tier2-eligible sibling, same run
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  # Names no swift tool and no cwd, so has_active_build and the live-cwd rail
+  # both pass: the live-binary rail is the only thing that can save $a. The
+  # command path is spelled canonically, the way a daemon TBD launched from the
+  # worktree reports it.
+  local ca; ca="$(canon_path "$a")"
+  local ps; ps="printf '%s\n' \"901 $ca/.build/debug/TBDDaemon\""
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$ps" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "live-binary worktree logged as skipped" "$out" "SKIP live-binary $a"
+  assert_missing  "live-binary worktree never planned"     "$out" "PLAN tier2 $a"
+  assert_eq "live-binary .build survives" "true"  "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_contains "sibling still planned in the same run"  "$out" "PLAN tier2 $b"
+  assert_eq "sibling .build reclaimed"    "false" "$([[ -d "$b/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_skips_worktree_running_a_holder_from_its_build() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/holding"
+  _mk_worktree "$a" "$now" 200000 200000
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # Spelled the way the worktree list reports it, which on a machine whose
+  # TMPDIR is unnormalized is NOT the canonical path: the rail has to match the
+  # listed spelling too, because that is the one the process was launched with.
+  local ps; ps="printf '%s\n' \"902 $a/.build/arm64-apple-macosx/debug/TBDHolder --session abc\""
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$ps" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "live holder worktree skipped" "$out" "SKIP live-binary $a"
+  assert_eq "live holder .build survives" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_rechecks_the_live_binary_rail_at_reap_time() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/late-daemon"
+  _mk_worktree "$a" "$now" 200000 200000
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # A ps fixture that reports nothing for the two reads of the planning pass
+  # (the live-binary rail, then plan_worktree's active-build check) and a live
+  # daemon from the third on, which is the reap pass. That is the window the
+  # re-check exists for: a daemon can be started after the plan is made. The
+  # PLAN assertion below is what keeps this honest — a fixture that armed too
+  # early would skip in the planning loop and never reach the re-check.
+  local calls="$root/ps-calls"
+  local ps
+  local ca; ca="$(canon_path "$a")"
+  ps="n=\$(( \$(cat '$calls' 2>/dev/null || echo 0) + 1 )); printf '%s' \"\$n\" > '$calls'; [ \"\$n\" -ge 3 ] && printf '%s\n' '901 $ca/.build/arm64-apple-macosx/debug/TBDDaemon'; true"
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$ps" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "the plan was made before the daemon started" "$out" "PLAN tier2 $a"
+  assert_contains "the reap-time re-check held it off" "$out" "skip (live binary): $a"
+  assert_eq "late daemon's .build survives" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+# --- the live-cwd probe fails closed ------------------------------------------
+# Without these the probe can go silently dead — a short PATH with no lsof on
+# it, or a seam that errors — and every worktree then reads as "nothing is
+# live", which is exactly how a running build tree gets deleted.
+
+# Run a sourced function with no lsof resolvable anywhere: PATH scrubbed and the
+# absolute fallback list pointed at a file that does not exist. Restores both.
+_without_lsof() {
+  local saved_path="$PATH" rc=0
+  local saved_candidates=("${RECLAIM_LSOF_CANDIDATES[@]}")
+  # shellcheck disable=SC2123 # scrubbing PATH is the point: it is what makes
+  # `command -v lsof` fail, and it is restored below.
+  PATH="/nonexistent-dir-for-tests"
+  RECLAIM_LSOF_CANDIDATES=("/nonexistent-dir-for-tests/lsof")
+  "$@" || rc=$?
+  PATH="$saved_path"
+  RECLAIM_LSOF_CANDIDATES=("${saved_candidates[@]}")
+  return "$rc"
+}
+
+test_lsof_available_true_when_seam_is_injected() {
+  if RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" _without_lsof _lsof_available; then
+    assert_eq "injected seam counts as available" y y
+  else
+    assert_eq "injected seam counts as available" y n
+  fi
+}
+
+test_lsof_available_false_when_tool_is_nowhere() {
+  if RECLAIM_LSOF_CMD='' _without_lsof _lsof_available; then
+    assert_eq "unresolvable lsof is unavailable" n y
+  else
+    assert_eq "unresolvable lsof is unavailable" n n
+  fi
+}
+
+test_scan_live_cwds_marks_ok_only_when_the_probe_produced_data() {
+  RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" scan_live_cwds
+  assert_eq "probe with data -> LIVE_OK=1" "1" "$LIVE_OK"
+  assert_eq "probe with data -> cwds captured" "/Users/x/elsewhere" "$LIVE_CWDS"
+  RECLAIM_LSOF_CMD='printf ""' scan_live_cwds
+  assert_eq "empty probe -> LIVE_OK=0" "0" "$LIVE_OK"
+  RECLAIM_LSOF_CMD='exit 127' scan_live_cwds
+  assert_eq "failing probe -> LIVE_OK=0" "0" "$LIVE_OK"
+  RECLAIM_LSOF_CMD='' _without_lsof scan_live_cwds
+  assert_eq "unavailable probe -> LIVE_OK=0" "0" "$LIVE_OK"
+  LIVE_OK=0; LIVE_CWDS=""
+}
+
+test_main_reclaims_nothing_when_the_probe_returns_nothing() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/wt"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible on every clock
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='printf ""' \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "empty probe warns loudly" "$out" "WARNING: live-process probe produced no cwds"
+  assert_contains "empty probe treats the worktree as live" "$out" "SKIP live-unknown $a"
+  assert_missing  "empty probe plans nothing" "$out" "PLAN tier2 $a"
+  assert_eq ".build survives an empty probe" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_reclaims_nothing_when_the_probe_cannot_run() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/wt"
+  _mk_worktree "$a" "$now" 200000 200000
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # A probe that exits nonzero and prints nothing — what a missing lsof looks
+  # like from main()'s side. (The unresolvable-tool branch itself is covered by
+  # test_lsof_available_false_when_tool_is_nowhere; main() cannot run with a
+  # scrubbed PATH, since it needs jq, git and find.)
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD='exit 127' \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "broken probe warns loudly" "$out" "WARNING: live-process probe produced no cwds"
+  assert_contains "broken probe treats the worktree as live" "$out" "SKIP live-unknown $a"
+  assert_eq ".build survives a broken probe" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_still_reclaims_when_the_probe_runs_and_matches_nothing() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/wt"
+  _mk_worktree "$a" "$now" 200000 200000
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # The fail-closed rail must not turn the reaper off in normal operation: a
+  # probe that ran and listed cwds owning nothing here still reaps.
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_LSOF_CMD="$LSOF_NO_MATCH" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_missing  "a working probe does not warn" "$out" "WARNING: live-process probe"
+  assert_contains "a working probe still plans" "$out" "PLAN tier2 $a"
+  assert_eq "a working probe still reaps" "false" "$([[ -d "$a/.build" ]] && echo true || echo false)"
   rm -rf "$root"
 }
 
