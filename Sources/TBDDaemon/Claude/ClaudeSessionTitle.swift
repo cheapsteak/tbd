@@ -348,13 +348,16 @@ public actor ClaudeSessionTitleStore {
 
     /// The prompt path: compute `terminal`'s wanted title and claim it, in
     /// one step. Nil while a spawn of the terminal is in flight, whose own
-    /// `--name` lands with it.
+    /// `--name` lands with it. Nil, touching nothing, when `terminals` (the
+    /// snapshot the caller read) has no row for the terminal: a late prompt
+    /// hook from a closed tab must not re-create the entry `forget` removed.
     func claimWanted(
         terminal: Terminal,
         displayName: String,
         terminals: [Terminal],
         tabLabels: [UUID: String]
     ) -> String? {
+        guard terminals.contains(where: { $0.id == terminal.id }) else { return nil }
         guard entries[terminal.id]?.reservation == nil else { return nil }
         guard let title = ClaudeSessionTitle.wanted(
             displayName: displayName,

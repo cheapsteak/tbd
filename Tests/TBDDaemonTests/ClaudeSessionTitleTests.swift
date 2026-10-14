@@ -471,6 +471,38 @@ struct ClaudeSessionTitleTests {
         #expect(await store.titles(worktreeID: wt.id).isEmpty)
     }
 
+    @Test("a late prompt for a forgotten terminal with no row claims nothing")
+    func promptForClosedTerminalLeavesNoEntry() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/title-repo-\(UUID().uuidString)",
+            displayName: "title-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-feature", branch: "tbd/acme-feature",
+            path: "/tmp/title-wt-\(UUID().uuidString)", tmuxServer: "tbd-title")
+        let closed = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "s1", kind: .claude)
+        let sibling = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.claudeCode, claudeSessionID: "s2", kind: .claude)
+        let store = ClaudeSessionTitleStore()
+
+        // The tab closes: its row is deleted and its entry forgotten.
+        try await db.terminals.delete(id: closed.id)
+        await store.forget(terminalID: closed.id)
+
+        // Its late UserPromptSubmit hook arrives, row absent.
+        let late = await ClaudeSessionTitle.forPrompt(db: db, store: store, terminal: closed)
+        #expect(late == nil)
+        #expect(await store.lastApplied(terminalID: closed.id) == nil)
+
+        // The sibling still gets the bare title, not " · 2".
+        let next = await ClaudeSessionTitle.forPrompt(db: db, store: store, terminal: sibling)
+        #expect(next == "acme-feature")
+    }
+
     @Test("forSpawn reads the worktree's tab names")
     func forSpawnReadsTabNames() async throws {
         let db = try TBDDatabase(inMemory: true)
