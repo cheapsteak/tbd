@@ -1903,8 +1903,9 @@ public actor HibernationCoordinator {
             overlayPath: overlayPath,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
-        // Recorded once the wake has succeeded, on either transport below.
-        let sessionName = await ClaudeSessionTitle.forSpawn(
+        // Reserved here; confirmed below only when the wake really launched
+        // a session, and released on every other outcome.
+        let spawnTitle = await ClaudeSessionTitle.forSpawn(
             db: db, store: sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
             terminalID: terminal.id)
@@ -1933,7 +1934,7 @@ public actor HibernationCoordinator {
             settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: sessionName
+            sessionName: spawnTitle.name
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.
@@ -1965,9 +1966,14 @@ public actor HibernationCoordinator {
                 attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
                 rows: rows)
-            if case .ok = result {
-                await sessionTitles.record(
-                    terminalID: terminal.id, worktreeID: worktree.id, title: sessionName)
+            // Only a wake that minted a new incarnation launched anything. One
+            // that adopted a holder already running started nothing, so that
+            // session still carries whatever name it had, and the store keeps
+            // the entry it had — the next prompt then delivers the wanted title.
+            if Self.wakeLaunchedSession(result) {
+                await sessionTitles.confirm(spawnTitle)
+            } else {
+                await sessionTitles.release(spawnTitle)
             }
             return result
         }
@@ -2010,10 +2016,12 @@ public actor HibernationCoordinator {
                 )
             }
         } catch {
+            await sessionTitles.release(spawnTitle)
             return .notFound
         }
         switch outcome {
         case .failed(let result):
+            await sessionTitles.release(spawnTitle)
             return result
         case .respawned(
             let newPaneID,
@@ -2027,8 +2035,7 @@ public actor HibernationCoordinator {
             liveIncarnationID = incarnationID
         }
         idleSince[terminal.id] = nil
-        await sessionTitles.record(
-            terminalID: terminal.id, worktreeID: worktree.id, title: sessionName)
+        await sessionTitles.confirm(spawnTitle)
         // Carry the LIVE window/pane ids on the un-park broadcast so the app
         // updates its cached row before (together with) the hibernated flip —
         // otherwise the terminal view rebuilds keyed on the dead window and
@@ -2047,6 +2054,14 @@ public actor HibernationCoordinator {
             expectedIncarnationID: liveIncarnationID)
         logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
         return .ok(sessionIncarnationID: liveIncarnationID)
+    }
+
+    /// Whether a wake launched a new agent process. Only `.ok` carrying the
+    /// incarnation the wake minted does: `.ok` without one is a holder wake
+    /// that adopted a session already running and started nothing.
+    static func wakeLaunchedSession(_ result: WakeResult) -> Bool {
+        if case .ok(let incarnationID) = result { return incarnationID != nil }
+        return false
     }
 
     /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of

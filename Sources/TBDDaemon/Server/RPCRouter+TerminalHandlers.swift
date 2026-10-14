@@ -517,16 +517,17 @@ extension RPCRouter {
         }
 
         // Only a Claude spawn carries a session name; a shell's command never
-        // reads it, so it is neither computed nor recorded for one. Recorded
-        // once the spawn has succeeded, below.
-        let sessionName: String?
+        // reads it, so none is reserved for one. A login session passes the
+        // bare display name and reserves nothing. The reservation is
+        // confirmed once the spawn has succeeded and released if it throws.
+        let spawnTitle: ClaudeSpawnTitle?
         if isClaudeType {
-            sessionName = await ClaudeSessionTitle.forSpawn(
+            spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: lifecycle.sessionTitles,
                 worktreeID: params.worktreeID, displayName: worktree.displayName,
-                terminalID: plannedTerminalID)
+                terminalID: plannedTerminalID, isLogin: isLoginSession)
         } else {
-            sessionName = nil
+            spawnTitle = nil
         }
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
@@ -551,7 +552,7 @@ extension RPCRouter {
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: sessionName
+            sessionName: spawnTitle?.name
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -565,41 +566,44 @@ extension RPCRouter {
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
-        let terminal = try await actuating(actuationID) {
-            try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: params.worktreeID,
-                allowedStatuses: [worktree.status]
-            ) { currentWorktree in
-                try await prepareTmuxServer(
-                    for: transport, worktree: currentWorktree,
-                    cols: resolvedCols, rows: resolvedRows)
-                let terminal = try await lifecycle.spawnTerminal(
-                    id: plannedTerminalID,
-                    worktreeID: params.worktreeID,
-                    tmuxServer: currentWorktree.tmuxServer,
-                    workingDirectory: currentWorktree.path,
-                    command: spawn.command,
-                    env: spawnEnv,
-                    sensitiveEnv: primarySensitiveEnv,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    label: label,
-                    claudeSessionID: claudeSessionID,
-                    profileID: spawnProfileID,
-                    kind: terminalKind,
-                    transport: transport,
-                    attachment: attachment,
-                    modelProxySupervisor: modelProxySupervisor)
-                return terminal
+        let terminal: Terminal
+        do {
+            terminal = try await actuating(actuationID) {
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: params.worktreeID,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    try await prepareTmuxServer(
+                        for: transport, worktree: currentWorktree,
+                        cols: resolvedCols, rows: resolvedRows)
+                    let spawned = try await lifecycle.spawnTerminal(
+                        id: plannedTerminalID,
+                        worktreeID: params.worktreeID,
+                        tmuxServer: currentWorktree.tmuxServer,
+                        workingDirectory: currentWorktree.path,
+                        command: spawn.command,
+                        env: spawnEnv,
+                        sensitiveEnv: primarySensitiveEnv,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        label: label,
+                        claudeSessionID: claudeSessionID,
+                        profileID: spawnProfileID,
+                        kind: terminalKind,
+                        transport: transport,
+                        attachment: attachment,
+                        modelProxySupervisor: modelProxySupervisor)
+                    return spawned
+                }
             }
+        } catch {
+            await lifecycle.sessionTitles.release(spawnTitle)
+            throw error
         }
         // The row is in, so its live count now carries a balanced pick's
         // load; hand the reservation back so it stops counting too.
         await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
-        if isClaudeType {
-            await lifecycle.sessionTitles.record(
-                terminalID: terminal.id, worktreeID: terminal.worktreeID, title: sessionName)
-        }
+        await lifecycle.sessionTitles.confirm(spawnTitle)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
@@ -1246,7 +1250,7 @@ extension RPCRouter {
                 storedTranscriptPath: nil
             )
             let claudeEnvOverrides = reviveConfig?.envSettingOverrides ?? [:]
-            let reviveSessionName = await ClaudeSessionTitle.forSpawn(
+            let reviveSpawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: lifecycle.sessionTitles,
                 worktreeID: worktree.id, displayName: worktree.displayName,
                 terminalID: plannedTerminalID)
@@ -1272,7 +1276,7 @@ extension RPCRouter {
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: reviveSessionName
+                sessionName: reviveSpawnTitle.name
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -1283,24 +1287,29 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: resolvedProfile?.envOverrides
             )
-            let terminal = try await actuating(actuationID) {
-                try await spawnRevivedTerminal(
-                    worktree: worktree.worktree,
-                    plannedTerminalID: plannedTerminalID,
-                    spawnCommand: spawn.command,
-                    env: env,
-                    sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
-                    label: TerminalLabel.claudeCode,
-                    kind: .claude,
-                    claudeSessionID: sessionID,
-                    profileID: resolvedProfile?.profileID,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    transport: transport
-                )
+            let terminal: Terminal
+            do {
+                terminal = try await actuating(actuationID) {
+                    try await spawnRevivedTerminal(
+                        worktree: worktree.worktree,
+                        plannedTerminalID: plannedTerminalID,
+                        spawnCommand: spawn.command,
+                        env: env,
+                        sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
+                        label: TerminalLabel.claudeCode,
+                        kind: .claude,
+                        claudeSessionID: sessionID,
+                        profileID: resolvedProfile?.profileID,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        transport: transport
+                    )
+                }
+            } catch {
+                await lifecycle.sessionTitles.release(reviveSpawnTitle)
+                throw error
             }
-            await lifecycle.sessionTitles.record(
-                terminalID: terminal.id, worktreeID: worktree.id, title: reviveSessionName)
+            await lifecycle.sessionTitles.confirm(reviveSpawnTitle)
             logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
             await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: terminal)
@@ -2710,13 +2719,13 @@ extension RPCRouter {
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
-        // same row on an in-place swap. Recorded only once the swap's spawn
-        // has succeeded, below.
-        let swapTitleTerminalID = mode == .fork ? plannedTerminalID : oldTerminal.id
-        let swapSessionName = await ClaudeSessionTitle.forSpawn(
+        // same row on an in-place swap. Reserved here, confirmed only once
+        // the swap's spawn has succeeded and released otherwise, below.
+        let swapSpawnTitle = await ClaudeSessionTitle.forSpawn(
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: swapTitleTerminalID)
+            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id)
+        let swapSessionName = swapSpawnTitle.name
 
         // The spawn each arm runs, as a closure rather than a value: the
         // holder arm cannot compose its own until after its park, because its
@@ -2815,19 +2824,21 @@ extension RPCRouter {
                 respawnFailure = outcome.respawnError
             }
         } catch {
+            await lifecycle.sessionTitles.release(swapSpawnTitle)
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
         if let respawnFailure {
+            await lifecycle.sessionTitles.release(swapSpawnTitle)
             await finishActuation(actuationID, .transportFailed, error: respawnFailure)
         } else {
             // The only unsuccessful response either swap branch returns is
             // "Terminal vanished after swap" — the row it respawned is gone.
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
             if response.success {
-                await lifecycle.sessionTitles.record(
-                    terminalID: swapTitleTerminalID, worktreeID: worktree.id,
-                    title: swapSessionName)
+                await lifecycle.sessionTitles.confirm(swapSpawnTitle)
+            } else {
+                await lifecycle.sessionTitles.release(swapSpawnTitle)
             }
         }
         return response

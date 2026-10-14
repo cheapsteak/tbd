@@ -254,18 +254,44 @@ struct SessionTitleSyncRPCTests {
         #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
     }
 
-    @Test("a prompt leaves the entry of a spawn whose row is not written yet")
-    func promptKeepsInFlightSpawnEntries() async throws {
+    @Test("a prompt leaves the reservation of a spawn whose row is not written yet")
+    func promptKeepsInFlightReservations() async throws {
         let (wt, path) = try await makeWorktree()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let terminal = try await makeClaudeRow(worktreeID: wt.id)
         let inFlight = UUID()
         let titles = router.lifecycle.sessionTitles
         await titles.record(terminalID: terminal.id, worktreeID: wt.id, title: "acme-feature")
-        await titles.record(terminalID: inFlight, worktreeID: wt.id, title: "acme-feature · 2")
+        let spawn = await ClaudeSessionTitle.forSpawn(
+            db: db, store: titles, worktreeID: wt.id, displayName: wt.displayName,
+            terminalID: inFlight)
+        #expect(spawn.name == "acme-feature · 2")
 
         #expect(try await promptTitle(terminal) == nil)
 
+        #expect(await titles.isReserved(terminalID: inFlight))
         #expect(await titles.lastApplied(terminalID: inFlight) == "acme-feature · 2")
+    }
+
+    @Test("a terminal.create made while another spawn holds a reservation takes the next number")
+    func createSkipsAReservedTitle() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        _ = try await makeClaudeRow(worktreeID: wt.id)
+        // A spawn in flight, its row not written yet, already holds ` · 2`.
+        let inFlight = await ClaudeSessionTitle.forSpawn(
+            db: db, store: router.lifecycle.sessionTitles, worktreeID: wt.id,
+            displayName: wt.displayName, terminalID: UUID())
+        #expect(inFlight.name == "acme-feature · 2")
+
+        let createResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)))
+        #expect(createResponse.success)
+        let created = try createResponse.decodeResult(Terminal.self)
+
+        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 3'") })
+        #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
+        #expect(await router.lifecycle.sessionTitles.isReserved(terminalID: created.id) == false)
     }
 }

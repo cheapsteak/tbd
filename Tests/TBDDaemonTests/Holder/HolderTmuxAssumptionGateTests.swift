@@ -207,11 +207,12 @@ struct HolderTmuxAssumptionGateTests {
     /// ask the real kernel about a fixture pid.
     private func coordinator(
         _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry? = nil,
-        signaller: any ProcessSignaller = ProductionProcessSignaller()
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        sessionTitles: ClaudeSessionTitleStore = ClaudeSessionTitleStore()
     ) async -> HibernationCoordinator {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            signaller: signaller, sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+            signaller: signaller, sessionTitles: sessionTitles, actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
@@ -1062,6 +1063,47 @@ struct HolderTmuxAssumptionGateTests {
                 "adoption forgot the identity anchor the next check needs")
         #expect(recorded.snapshot().isEmpty,
                 "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// An adopting wake launches nothing, so the live session still carries
+    /// whatever name it had, and the title store must keep the entry it had.
+    /// Recording the wake's `--name` instead would claim the session took a
+    /// title it never received, and the next prompt would then not send it.
+    @Test("a wake that adopts a live holder leaves the session's recorded title alone")
+    func adoptingWakeRecordsNoTitle() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+        let titles = ClaudeSessionTitleStore()
+        // The name the running session took before the worktree was renamed;
+        // the wake's own `--name` would be the current display name, `wt`.
+        await titles.record(terminalID: terminal.id, worktreeID: wt.id, title: "before-rename")
+
+        let result = await coordinator(
+            db, tmux: tmux, registry: holderRegistry(listing: [terminal]),
+            signaller: signaller, sessionTitles: titles)
+            .wake(terminalID: terminal.id)
+        #expect(result == .ok(sessionIncarnationID: nil),
+                "the fixture was meant to reach the adopt branch, got \(result)")
+
+        #expect(await titles.lastApplied(terminalID: terminal.id) == "before-rename",
+                "an adopting wake recorded a title it never launched with")
+        #expect(await titles.isReserved(terminalID: terminal.id) == false,
+                "an adopting wake left its reservation behind")
     }
 
     /// The other verdict on the same row: a recorded child that names nothing

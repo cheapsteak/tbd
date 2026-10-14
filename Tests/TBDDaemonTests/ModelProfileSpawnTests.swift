@@ -1968,6 +1968,59 @@ struct ModelProfileSpawnTests {
         #expect(term.label == TerminalLabel.claudeCode)
     }
 
+    /// A login tab is a credentials errand, never a titled session: it keeps
+    /// the bare display name as its `--name` (what every spawn passed before
+    /// tab suffixes), takes no number, records no title, and is never handed
+    /// one on a prompt. See docs/specs/2026-10-14-session-title-sync-design.md.
+    @Test("login session: bare --name, never recorded, counted or titled on a prompt")
+    func loginSessionIsNeverTitled() async throws {
+        let fixture = makeLoginFixture()
+        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "Login")
+        // An existing Claude tab, so a login tab that took a position would be
+        // second and get ` · 2`.
+        _ = try await db.terminals.create(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            worktreeID: wt.id, tmuxWindowID: "@seed", tmuxPaneID: "%seed",
+            label: TerminalLabel.claudeCode, claudeSessionID: UUID().uuidString, kind: .claude)
+        let titles = router.lifecycle.sessionTitles
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true)))
+        #expect(resp.success)
+        let login = try resp.decodeResult(Terminal.self)
+        #expect(recorder.joinedAll.contains("--name 'wt'"))
+        #expect(!recorder.joinedAll.contains("--name 'wt · "))
+        #expect(await titles.lastApplied(terminalID: login.id) == nil)
+        #expect(await titles.isReserved(terminalID: login.id) == false)
+
+        // A prompt from the login tab asks for a title and gets none.
+        let prompt = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: login.id, activityState: .working,
+                sessionIncarnationID: login.sessionIncarnationID,
+                wantsSessionTitle: true)))
+        #expect(prompt.success)
+        let promptTitle = prompt.result == nil
+            ? nil : try prompt.decodeResult(TerminalActivityEventResult.self).sessionTitle
+        #expect(promptTitle == nil)
+        #expect(await titles.lastApplied(terminalID: login.id) == nil)
+
+        // The open login tab holds no number: the next Claude tab is second.
+        let next = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude, overrideProfileID: profile.id)))
+        #expect(next.success)
+        #expect(recorder.joinedAll.contains("--name 'wt · 2'"))
+    }
+
     @Test("login session: missing/unknown profile fails loud, no window spawned")
     func loginSessionUnknownProfile() async throws {
         let fixture = makeLoginFixture()

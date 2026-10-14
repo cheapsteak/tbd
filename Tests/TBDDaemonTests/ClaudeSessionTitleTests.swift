@@ -220,7 +220,109 @@ struct ClaudeSessionTitleTests {
             == "acme-feature · 2")
     }
 
+    @Test("a title reserved by a spawn in flight blocks another, with or without a row")
+    func reservedTitleBlocksWithoutARow() {
+        let first = terminal(0)
+        let planned = UUID()
+        // Another spawn in flight, whose row is not written yet, holds ` · 2`.
+        #expect(ClaudeSessionTitle.wanted(
+            displayName: "acme-feature", terminalID: planned,
+            terminals: [first], reservedTitles: [UUID(): "acme-feature · 2"])
+            == "acme-feature · 3")
+        // The target's own reservation never blocks its own title.
+        #expect(ClaudeSessionTitle.wanted(
+            displayName: "acme-feature", terminalID: planned,
+            terminals: [first], reservedTitles: [planned: "acme-feature · 2"])
+            == "acme-feature · 2")
+    }
+
     // MARK: - Store
+
+    private func reserve(
+        _ store: ClaudeSessionTitleStore, _ terminalID: UUID, after terminals: [Terminal]
+    ) async -> ClaudeSpawnTitle {
+        await store.reserve(
+            terminalID: terminalID, worktreeID: worktreeID, displayName: "acme-feature",
+            terminals: terminals, tabLabels: [:])
+    }
+
+    @Test("two spawns reserved before either row exists get different titles")
+    func concurrentReservationsDiffer() async {
+        let store = ClaudeSessionTitleStore()
+        let first = terminal(0)
+        let a = await reserve(store, UUID(), after: [first])
+        let b = await reserve(store, UUID(), after: [first])
+        #expect(a.name == "acme-feature · 2")
+        #expect(b.name == "acme-feature · 3")
+        #expect(await store.isReserved(terminalID: a.terminalID))
+    }
+
+    @Test("confirm keeps a reservation as the title given; release drops it")
+    func confirmAndRelease() async {
+        let store = ClaudeSessionTitleStore()
+        let first = terminal(0)
+        let launchedRow = terminal(1)
+        let launched = await reserve(store, launchedRow.id, after: [first])
+        let failed = await reserve(store, UUID(), after: [first])
+
+        await store.confirm(launched)
+        await store.release(failed)
+
+        #expect(await store.lastApplied(terminalID: launched.terminalID) == "acme-feature · 2")
+        #expect(await store.isReserved(terminalID: launched.terminalID) == false)
+        #expect(await store.lastApplied(terminalID: failed.terminalID) == nil)
+        // The released title is free again, while the confirmed one, its row
+        // now written, still blocks.
+        #expect(await reserve(store, UUID(), after: [first, launchedRow]).name == "acme-feature · 3")
+    }
+
+    @Test("a release puts back the entry its reservation displaced")
+    func releaseRestoresTheDisplacedEntry() async {
+        let store = ClaudeSessionTitleStore()
+        let parked = terminal(0)
+        await store.record(terminalID: parked.id, worktreeID: worktreeID, title: "old-name")
+
+        let wake = await reserve(store, parked.id, after: [parked])
+        #expect(await store.lastApplied(terminalID: parked.id) == "acme-feature")
+        await store.release(wake)
+
+        #expect(await store.lastApplied(terminalID: parked.id) == "old-name")
+        #expect(await store.isReserved(terminalID: parked.id) == false)
+    }
+
+    @Test("a release never erases a newer entry")
+    func releaseLeavesANewerEntry() async {
+        let store = ClaudeSessionTitleStore()
+        let row = terminal(0)
+        await store.record(terminalID: row.id, worktreeID: worktreeID, title: "old-name")
+        let older = await reserve(store, row.id, after: [row])
+        let newer = await reserve(store, row.id, after: [row])
+
+        await store.release(older)
+        #expect(await store.isReserved(terminalID: row.id), "the older release erased the newer reservation")
+
+        await store.confirm(newer)
+        #expect(await store.lastApplied(terminalID: row.id) == "acme-feature")
+        // A release after the newer one confirmed changes nothing either.
+        await store.release(older)
+        #expect(await store.lastApplied(terminalID: row.id) == "acme-feature")
+    }
+
+    @Test("a confirm after the terminal was forgotten does not bring its entry back")
+    func confirmAfterForgetIsANoOp() async {
+        let store = ClaudeSessionTitleStore()
+        let spawn = await reserve(store, UUID(), after: [])
+        await store.forget(terminalID: spawn.terminalID)
+        await store.confirm(spawn)
+        #expect(await store.lastApplied(terminalID: spawn.terminalID) == nil)
+    }
+
+    @Test("only a wake that minted an incarnation launched a session")
+    func wakeLaunchedSessionReadsTheIncarnation() {
+        #expect(HibernationCoordinator.wakeLaunchedSession(.ok(sessionIncarnationID: UUID())))
+        #expect(!HibernationCoordinator.wakeLaunchedSession(.ok(sessionIncarnationID: nil)))
+        #expect(!HibernationCoordinator.wakeLaunchedSession(.notFound))
+    }
 
     @Test("claim returns a title only when it differs from the last one given")
     func claimSendsOnlyOnChange() async {
@@ -261,8 +363,8 @@ struct ClaudeSessionTitleTests {
 
     // MARK: - Spawn helper
 
-    @Test("forSpawn suffixes a second Claude terminal and leaves the recording to the caller")
-    func forSpawnDoesNotRecord() async throws {
+    @Test("forSpawn suffixes a second Claude terminal and holds it as a reservation")
+    func forSpawnReserves() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/title-repo-\(UUID().uuidString)",
@@ -277,14 +379,53 @@ struct ClaudeSessionTitleTests {
         let store = ClaudeSessionTitleStore()
         let planned = UUID()
 
-        let name = await ClaudeSessionTitle.forSpawn(
+        let spawn = await ClaudeSessionTitle.forSpawn(
             db: db, store: store, worktreeID: wt.id, displayName: wt.displayName,
             terminalID: planned)
 
-        #expect(name == "acme-feature · 2")
-        // A spawn that then fails must leave no record, so the helper does
-        // not write one; the spawn site records after it succeeds.
-        #expect(await store.lastApplied(terminalID: planned) == nil)
+        #expect(spawn.name == "acme-feature · 2")
+        // Held, not given: a concurrent spawn sees it, and a spawn that then
+        // fails releases it rather than leaving a title nobody received.
+        #expect(await store.isReserved(terminalID: planned))
+        let concurrent = await ClaudeSessionTitle.forSpawn(
+            db: db, store: store, worktreeID: wt.id, displayName: wt.displayName,
+            terminalID: UUID())
+        #expect(concurrent.name == "acme-feature · 3")
+    }
+
+    @Test("a login spawn passes the bare display name and reserves nothing")
+    func forSpawnLeavesLoginUntitled() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/title-repo-\(UUID().uuidString)",
+            displayName: "title-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-feature", branch: "tbd/acme-feature",
+            path: "/tmp/title-wt-\(UUID().uuidString)", tmuxServer: "tbd-title")
+        _ = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "s1", kind: .claude)
+        let loginRow = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.login, claudeSessionID: "s2", kind: .claude)
+        let store = ClaudeSessionTitleStore()
+
+        // A new login tab, flagged by its caller.
+        let fresh = await ClaudeSessionTitle.forSpawn(
+            db: db, store: store, worktreeID: wt.id, displayName: wt.displayName,
+            terminalID: UUID(), isLogin: true)
+        // An existing login row being respawned, recognized by its label.
+        let respawn = await ClaudeSessionTitle.forSpawn(
+            db: db, store: store, worktreeID: wt.id, displayName: wt.displayName,
+            terminalID: loginRow.id)
+
+        for spawn in [fresh, respawn] {
+            #expect(spawn.name == "acme-feature")
+            #expect(spawn.reservation == nil)
+            #expect(await store.lastApplied(terminalID: spawn.terminalID) == nil)
+        }
+        #expect(await store.titles(worktreeID: wt.id).isEmpty)
     }
 
     @Test("forSpawn reads the worktree's tab names")
@@ -307,10 +448,10 @@ struct ClaudeSessionTitleTests {
             label: TerminalLabel.claudeCode, claudeSessionID: "s2", kind: .claude)
         try await db.tabs.setLabel(tabID: second.id, worktreeID: wt.id, label: "reviewer")
 
-        let name = await ClaudeSessionTitle.forSpawn(
+        let spawn = await ClaudeSessionTitle.forSpawn(
             db: db, store: ClaudeSessionTitleStore(), worktreeID: wt.id,
             displayName: wt.displayName, terminalID: second.id)
 
-        #expect(name == "acme-feature · reviewer")
+        #expect(spawn.name == "acme-feature · reviewer")
     }
 }

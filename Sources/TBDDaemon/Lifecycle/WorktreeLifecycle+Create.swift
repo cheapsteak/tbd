@@ -1535,10 +1535,10 @@ extension WorktreeLifecycle {
         // `DISABLE_AUTO_UPDATE`, and no auth env at all — silently. `nil` makes
         // that read a compile error instead.
         var primaryAttachment: ModelProxyRouteAttachment.Outcome? = nil
-        // The Claude primary's `--name`, recorded once its spawn has
-        // succeeded. Stays nil for a shell primary, which records nothing.
-        var primarySessionName: String? = nil
-        var primaryIsClaude = false
+        // The Claude primary's `--name`, reserved in the title store until
+        // its spawn succeeds or fails. Stays nil for any other primary, which
+        // reserves nothing.
+        var primarySpawnTitle: ClaudeSpawnTitle? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1669,11 +1669,11 @@ extension WorktreeLifecycle {
                 holderEnvironment: holderRegistry?.environment,
                 supervisor: modelProxySupervisor)
             primaryAttachment = attachment
-            primaryIsClaude = true
-            primarySessionName = await ClaudeSessionTitle.forSpawn(
+            let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
                 worktreeID: worktreeID, displayName: worktree.displayName,
                 terminalID: plannedTerminalID1)
+            primarySpawnTitle = spawnTitle
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1706,7 +1706,7 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: primarySessionName
+                sessionName: spawnTitle.name
             )
             primaryCommand = spawn.command
             primaryEnv = [
@@ -1731,36 +1731,39 @@ extension WorktreeLifecycle {
         // and already correct; a second derivation is a second thing to get
         // wrong. The divergence itself lives in `spawnTerminal`, which every
         // spawn path calls.
-        let primaryTerminal = try await spawnTerminal(
-            id: plannedTerminalID1,
-            worktreeID: worktreeID,
-            tmuxServer: tmuxServer,
-            workingDirectory: worktreePath,
-            command: primaryCommand,
-            env: primaryEnv,
-            sensitiveEnv: primarySensitiveEnv,
-            cols: resolvedCols,
-            rows: resolvedRows,
-            label: primaryLabel,
-            claudeSessionID: primarySessionID,
-            profileID: primaryProfileID,
-            kind: primaryTerminalKind,
-            // Same value the overlay above was built from, written to the row
-            // so the fact outlives this call. A desk woken from hibernation
-            // reuses this row, and the wake site has nothing else to read.
-            watchDeskRole: watchDeskRole,
-            transport: transport,
-            attachment: primaryAttachment,
-            modelProxySupervisor: modelProxySupervisor)
+        let primaryTerminal: Terminal
+        do {
+            primaryTerminal = try await spawnTerminal(
+                id: plannedTerminalID1,
+                worktreeID: worktreeID,
+                tmuxServer: tmuxServer,
+                workingDirectory: worktreePath,
+                command: primaryCommand,
+                env: primaryEnv,
+                sensitiveEnv: primarySensitiveEnv,
+                cols: resolvedCols,
+                rows: resolvedRows,
+                label: primaryLabel,
+                claudeSessionID: primarySessionID,
+                profileID: primaryProfileID,
+                kind: primaryTerminalKind,
+                // Same value the overlay above was built from, written to the row
+                // so the fact outlives this call. A desk woken from hibernation
+                // reuses this row, and the wake site has nothing else to read.
+                watchDeskRole: watchDeskRole,
+                transport: transport,
+                attachment: primaryAttachment,
+                modelProxySupervisor: modelProxySupervisor)
+        } catch {
+            await sessionTitles.release(primarySpawnTitle)
+            throw error
+        }
         // The primary row is in, so its live count now carries a balanced
         // pick's load; hand the reservation back so it stops counting too.
         // Archived-session restores below reuse the same resolution; the
         // first row settles it once.
         await modelProfileResolver?.settleReservation(resolvedProfile?.reservationID)
-        if primaryIsClaude {
-            await sessionTitles.record(
-                terminalID: plannedTerminalID1, worktreeID: worktreeID, title: primarySessionName)
-        }
+        await sessionTitles.confirm(primarySpawnTitle)
         // Recapture reads a tmux pane's screen, so it has nothing to read on a
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.
@@ -1936,7 +1939,7 @@ extension WorktreeLifecycle {
                     projectsRoot: claudeProjectsRoot(profileConfigDirPath: restoreProfileConfigDir),
                     storedTranscriptPath: nil
                 )
-                let restoreSessionName = await ClaudeSessionTitle.forSpawn(
+                let restoreSpawnTitle = await ClaudeSessionTitle.forSpawn(
                     db: db, store: sessionTitles,
                     worktreeID: worktreeID, displayName: worktree.displayName,
                     terminalID: plannedID)
@@ -1965,7 +1968,7 @@ extension WorktreeLifecycle {
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,
-                    sessionName: restoreSessionName
+                    sessionName: restoreSpawnTitle.name
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
@@ -1982,29 +1985,34 @@ extension WorktreeLifecycle {
                 // three sites do not compose their commands that way yet. That
                 // is a follow-up rather than a regression: a tmux spawn was
                 // never routed either, so nothing loses a route it used to have.
-                if !transport.isHolder {
-                    try await ensureTmuxServerOnce()
+                let archivedTerminal: Terminal
+                do {
+                    if !transport.isHolder {
+                        try await ensureTmuxServerOnce()
+                    }
+                    archivedTerminal = try await spawnTerminal(
+                        id: plannedID,
+                        worktreeID: worktreeID,
+                        tmuxServer: tmuxServer,
+                        workingDirectory: worktreePath,
+                        command: spawn.command,
+                        env: perTermEnv,
+                        // Same free-form-under-auth layering as the primary terminal.
+                        sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        label: TerminalLabel.claudeCode,
+                        claudeSessionID: sessionID,
+                        profileID: resolvedProfile?.profileID,
+                        kind: .claude,
+                        transport: transport,
+                        attachment: nil,
+                        modelProxySupervisor: modelProxySupervisor)
+                } catch {
+                    await sessionTitles.release(restoreSpawnTitle)
+                    throw error
                 }
-                let archivedTerminal = try await spawnTerminal(
-                    id: plannedID,
-                    worktreeID: worktreeID,
-                    tmuxServer: tmuxServer,
-                    workingDirectory: worktreePath,
-                    command: spawn.command,
-                    env: perTermEnv,
-                    // Same free-form-under-auth layering as the primary terminal.
-                    sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    label: TerminalLabel.claudeCode,
-                    claudeSessionID: sessionID,
-                    profileID: resolvedProfile?.profileID,
-                    kind: .claude,
-                    transport: transport,
-                    attachment: nil,
-                    modelProxySupervisor: modelProxySupervisor)
-                await sessionTitles.record(
-                    terminalID: plannedID, worktreeID: worktreeID, title: restoreSessionName)
+                await sessionTitles.confirm(restoreSpawnTitle)
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
                 createdTerminalWindowIDs.insert(archivedTerminal.tmuxWindowID)
             }
