@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import SwiftTerm
 import TBDShared
@@ -7,7 +6,7 @@ import Testing
 @testable import TBDApp
 import TestSupport
 
-/// Tier 1: every timed behaviour is driven by a `TestClock`; no real sleep
+/// Tier 1: every timed behaviour is driven by an `EventDrivenTestClock`; no real sleep
 /// gates an assertion. The queue is `@MainActor` and synchronous on the user
 /// side, so a keystroke, a paste marker and their writes are all observable in
 /// the turn they happen in — the only real sleeping left is the bounded poll in
@@ -18,15 +17,21 @@ import TestSupport
 /// test never does).
 ///
 /// `.serialized` for cheap isolation between tests that each mint their own
-/// `TestClock` + queue; not required for correctness, matches this
+/// clock + queue; not required for correctness, matches this
 /// repo's convention for small clock-driven suites (`AppearanceDebounceTests`).
 ///
 /// `.clockDriven` is at SUITE level on purpose: five of these tests `await` a
 /// continuation that a broken implementation would never resume, so each needs
-/// its own hang bound. The first depends on it explicitly — its `TestClock` is
+/// its own hang bound. The first depends on it explicitly — its clock is
 /// deliberately never advanced, so the time limit is what turns "released on
 /// the bound instead of on `endUserPaste`" from an eternal hang into a named
 /// failure.
+///
+/// The paste-hold timeout task inherits the queue's main actor, so its sleep
+/// arms only after a main-actor turn: the strict arming waits here take
+/// `TestDeadlines.saturatedPass`, and a negative read after an advance is
+/// preceded by `settle()`, because `EventDrivenTestClock.advance` does not run
+/// the task it wakes.
 @MainActor
 @Suite("OutgoingInputQueue", .clockDriven, .serialized)
 struct OutgoingInputQueueTests {
@@ -114,13 +119,12 @@ struct OutgoingInputQueueTests {
         let recorder = WriteRecorder()
         // A long bound: this test proves the paste-close path releases the
         // injection, not the timeout — so the timeout must never fire. A
-        // `TestClock` that is NEVER advanced makes that structural: if the
+        // clock that is NEVER advanced makes that structural: if the
         // implementation were buggy and relied on the bound instead of
         // `endUserPaste()`, the awaited `enqueueInjection` call below would
         // simply hang, and the suite's `.clockDriven` time limit would fail
         // the test with a clear diagnostic rather than a false pass.
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
         }
@@ -142,8 +146,7 @@ struct OutgoingInputQueueTests {
     @Test("An injection arriving outside a paste goes straight out")
     func injectionOutsidePasteGoesStraightOut() async {
         let recorder = WriteRecorder()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(2), clock: clock) { data in
             recorder.write(data)
         }
@@ -156,15 +159,14 @@ struct OutgoingInputQueueTests {
     }
 
     @Test("An injection the transport never took is not acked as written")
-    func injectionThatReachedNothingIsNotAckedAsWritten() async {
+    func injectionThatReachedNothingIsNotAckedAsWritten() async throws {
         let recorder = WriteRecorder()
         // The holder-backed panel shape: `performOutgoingWrite` takes the
         // `.localPTY` arm, finds no `localProcess`, and hands the bytes to
         // nobody. Acking `true` here would stop the daemon falling back and
         // lose the prompt invisibly — the failure H1 named.
         recorder.result = false
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
         }
@@ -183,8 +185,9 @@ struct OutgoingInputQueueTests {
         queue.beginUserPaste()
         let forced = Task { await queue.enqueueInjection(Data("FORCED".utf8)) }
         await waitForHeldInjections(1, on: queue)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(999))
+        // The hold's timeout task arms through a main-actor turn, hence the
+        // saturated-pass guard; joining `forced` waits for the fire to land.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(999), timeout: TestDeadlines.saturatedPass)
         #expect(await forced.value == false)
 
         // Composed output, not three `== false`s: `false` is the fail-open
@@ -199,8 +202,7 @@ struct OutgoingInputQueueTests {
     @Test("Ordering within each stream is preserved")
     func orderingWithinEachStreamPreserved() async {
         let recorder = WriteRecorder()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         // Never advanced: the two holds below must be released by
         // `endUserPaste()`, not by their bound.
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
@@ -258,11 +260,10 @@ struct OutgoingInputQueueTests {
     /// Every other test in this suite supplies its own bound, because each is
     /// isolating a different mechanism; this one is the seam's own coverage.
     @Test("A paste that never closes does not strand an injection forever")
-    func unclosedPasteDoesNotStrandInjectionForever() async {
+    func unclosedPasteDoesNotStrandInjectionForever() async throws {
         let recorder = WriteRecorder()
         let bound = HolderInputTiming.pasteHoldBound
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(clock: clock) { data in
             recorder.write(data)
         }
@@ -280,13 +281,21 @@ struct OutgoingInputQueueTests {
         // deadline, so an implementation that released early would let the
         // hold expire inside a paste it was supposed to outlast. Without this
         // assertion a mutation that shortened the wait passed the suite.
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: bound - .milliseconds(1))
+        //
+        // The timeout task arms through a main-actor turn, hence the
+        // saturated-pass guard. `advance` does not run the task it wakes, so
+        // `settle()` hands the main actor back before the negative reads: an
+        // early release would otherwise not have landed yet and the reads would
+        // pass vacuously.
+        try await clock.requireAdvanceWhenArmed(by: bound - .milliseconds(1),
+                                                timeout: TestDeadlines.saturatedPass)
+        await settle()
         #expect(queue.pendingInjectionCountForTesting == 1)
         #expect(recorder.writes.isEmpty)
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .milliseconds(1))
+        // The sleeper armed above is still registered, so the strict wait
+        // returns at once; joining `injection` waits for the release to land.
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(1), timeout: TestDeadlines.saturatedPass)
 
         let wasWritten = await injection.value
         #expect(wasWritten == true)
@@ -296,8 +305,7 @@ struct OutgoingInputQueueTests {
     @Test("Teardown releases a held injection as unwritten")
     func shutdownReleasesHeldInjectionAsUnwritten() async {
         let recorder = WriteRecorder()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
             recorder.write(data)
         }
@@ -319,8 +327,7 @@ struct OutgoingInputQueueTests {
     @Test("A keystroke that reaches no transport is reported once per episode")
     func unwrittenUserBytesReportOncePerEpisode() {
         let recorder = WriteRecorder()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: TestClock()) { data in
+        let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: EventDrivenTestClock()) { data in
             recorder.write(data)
         }
 

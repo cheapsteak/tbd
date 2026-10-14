@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -13,7 +12,7 @@ import Testing
 /// endings: acknowledged, refused, timed out.
 /// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`.)
 ///
-/// The store takes a `TestClock`, so the 5 s ack timeout fires only when a
+/// The store takes an `EventDrivenTestClock`, so the 5 s ack timeout fires only when a
 /// test advances it.
 @Suite(.clockDriven)
 struct RPCRouterPromptHandlerTests {
@@ -24,7 +23,7 @@ struct RPCRouterPromptHandlerTests {
         let db: TBDDatabase
         let router: RPCRouter
         let store: PendingPromptStore
-        let clock: TestClock<Duration>
+        let clock: EventDrivenTestClock
         let terminalID: UUID
         let worktreeID: UUID
         let logPath: String
@@ -35,8 +34,7 @@ struct RPCRouterPromptHandlerTests {
             .appendingPathComponent("tbd-prompt-rpc-\(UUID().uuidString)", isDirectory: true)
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
         let db = try TBDDatabase(inMemory: true)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let store = PendingPromptStore(clock: clock)
         let router = RPCRouter(
             db: db,
@@ -297,8 +295,7 @@ struct RPCRouterPromptHandlerTests {
 
         let answering = Task { try await answer(f, promptID: id) }
         _ = await waiter.value
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await f.clock.advanceWhenSuspended(by: .seconds(5))
+        try await f.clock.requireAdvanceWhenArmed(by: .seconds(5))
         let response = try await answering.value
         #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .unknown,
                 "no ack within 5 s may still mean the hook had the decision")

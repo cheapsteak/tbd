@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -19,8 +18,7 @@ struct DevServerStopperTests {
     private func stopper(_ s: FakeDevServerSignalling, _ r: FakeDevServerCommandRunner) -> DevServerStopper {
         DevServerStopper(
             killer: DevServerGroupKiller(signalling: s, grace: .seconds(5), pollInterval: .seconds(5),
-                                         // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                         postKillWait: .zero, clock: TestClock()),
+                                         postKillWait: .zero, clock: EventDrivenTestClock()),
             commandRunner: r)
     }
 

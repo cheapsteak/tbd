@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -54,8 +53,7 @@ struct DevServerArchiveTests {
             db: db, tabInspector: inspector, commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
-                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                             pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
+                                             pollInterval: .seconds(5), postKillWait: .zero, clock: EventDrivenTestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: filesDir),
             probe: DevServerProcessProbe(info: { processes[$0] }), environment: [:])

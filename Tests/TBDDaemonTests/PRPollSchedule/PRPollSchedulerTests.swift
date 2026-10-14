@@ -1,12 +1,11 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-// Tier 1: in-process, the scheduler's sleep runs on a `TestClock` and its
-// "now" on a `TestDateSource`. The only real waiting is `pollUntilTrue`
+// Tier 1: in-process, the scheduler's sleep runs on an `EventDrivenTestClock`
+// and its "now" on a `TestDateSource`. The only real waiting is `pollUntilTrue`
 // observing the loop task, which is scheduling, not behaviour under test.
 @Suite("PRPollScheduler", .clockDriven, .serialized)
 struct PRPollSchedulerTests {
@@ -50,8 +49,7 @@ struct PRPollSchedulerTests {
         let facts = blockedFacts(a)
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()
         dates.advance(by: 60)
         await s.runOnce()
@@ -71,8 +69,7 @@ struct PRPollSchedulerTests {
         ])
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.recordRateLimitSignal(.limited)
         await s.runOnce()
         #expect(await runs.dues.map(\.track) == [[key(1)]])
@@ -90,15 +87,13 @@ struct PRPollSchedulerTests {
         ])
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()
         #expect(await runs.dues.map(\.track) == [[key(1), key(2)]])
     }
 
     @Test func loopSleepsUntilNextDueAndAKickWakesItEarly() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let dates = TestDateSource()
         let a = UUID()
         let facts = blockedFacts(a)
@@ -122,8 +117,7 @@ struct PRPollSchedulerTests {
         let facts = blockedFacts(a)
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()
         dates.advance(by: 30)
         await s.runOnce()
@@ -146,8 +140,7 @@ struct PRPollSchedulerTests {
                     await box.scheduler?.trigger(worktreeID: a)
                 }
             },
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            now: dates.provider, clock: TestClock<Duration>())
+            now: dates.provider, clock: EventDrivenTestClock())
         await box.set(s)
         await s.runOnce()
         await s.runOnce()   // same instant: due only because the mid-run trigger survived
@@ -160,8 +153,7 @@ struct PRPollSchedulerTests {
         let facts = blockedFacts(a)
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()
         await s.runOnce()
         #expect(await runs.dues.count == 1)
@@ -181,8 +173,7 @@ struct PRPollSchedulerTests {
             bindings: [PRPollBindingFact(key: key(1), state: .blocked)])])
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.read() }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()                      // t0: runs, next due at t0+120
         await facts.setReadable(false)
         dates.advance(by: 60)
@@ -203,8 +194,7 @@ struct PRPollSchedulerTests {
         let facts = blockedFacts(a)
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: dates.provider, clock: TestClock<Duration>())
+                                now: dates.provider, clock: EventDrivenTestClock())
         await s.runOnce()
         await facts.set([])
         dates.advance(by: 120)
@@ -214,8 +204,7 @@ struct PRPollSchedulerTests {
 
     @Test func kickCallsTheProbe() async {
         let kicks = Counter()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let s = PRPollScheduler(facts: { [] }, run: { _ in }, clock: TestClock<Duration>())
+        let s = PRPollScheduler(facts: { [] }, run: { _ in }, clock: EventDrivenTestClock())
         await s.setKickProbeForTests { await kicks.bump() }
         await s.kick()
         await s.trigger(worktreeID: UUID())
@@ -231,16 +220,14 @@ struct PRPollSchedulerTests {
         let facts = blockedFacts(a)
         let runs = Runs()
         let s = PRPollScheduler(facts: { await facts.value }, run: { await runs.add($0) },
-                                // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                now: TestDateSource().provider, clock: TestClock<Duration>())
+                                now: TestDateSource().provider, clock: EventDrivenTestClock())
         await s.trigger(worktreeID: a)
         #expect(await runs.dues.isEmpty)
         #expect(await s.isRunning == false)
     }
 
-    @Test func startIsIdempotentAndStopEndsTheLoop() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+    @Test func startIsIdempotentAndStopEndsTheLoop() async throws {
+        let clock = EventDrivenTestClock()
         let runs = Runs()
         let a = UUID()
         let facts = blockedFacts(a)
@@ -249,8 +236,15 @@ struct PRPollSchedulerTests {
         await s.start()
         await s.start()
         #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { await runs.dues.count == 1 } == .satisfied)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
+        // A second loop would run the item again or arm a second sleeper of its
+        // own, a scheduling turn after the first. Watch for either over a
+        // window rather than sampling once, so a late second loop is still seen.
+        let secondLoop = await pollUntilTrue(timeout: .seconds(1), pollInterval: .milliseconds(10)) {
+            if clock.sleeperCount > 1 { return true }
+            return await runs.dues.count > 1
+        }
+        #expect(secondLoop != .satisfied, "a second start began a second loop")
         await s.stop()
         #expect(await s.isRunning == false)
         // Only one loop ran: a second could have run the item a second time.

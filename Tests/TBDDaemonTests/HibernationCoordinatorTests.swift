@@ -1,4 +1,3 @@
-import Clocks
 import Testing
 import Foundation
 import TestSupport
@@ -19,14 +18,13 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
     )
 }
 
-/// `.clockDriven` is applied at SUITE level even though only the three
-/// park-poll tests below drive a `TestClock`. The trait is a four-minute time
+/// `.clockDriven` is applied at SUITE level even though only the park-poll
+/// tests below drive an `EventDrivenTestClock`. The trait is a four-minute time
 /// limit — a hang-catcher, not a perf budget — so it costs the other tests
 /// nothing and it catches the one failure mode virtual time introduces here (a
-/// `TestClock` sleep nobody advances hangs forever instead of going red).
-/// `.serialized` is deliberately NOT applied: three clock-driven tests out of
-/// ~35 don't justify serializing the whole suite, and it stays available as
-/// the documented escape hatch if the arming handshake ever flakes under load.
+/// test-clock sleep nobody advances hangs forever instead of going red).
+/// `.serialized` is deliberately NOT applied: a handful of clock-driven tests
+/// out of ~35 don't justify serializing the whole suite.
 @Suite("HibernationCoordinator", .clockDriven)
 struct HibernationCoordinatorTests {
 
@@ -438,8 +436,7 @@ struct HibernationCoordinatorTests {
     @Test func wakeCannotOvertakeStagedHibernation() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: recorded.append,
@@ -456,13 +453,11 @@ struct HibernationCoordinatorTests {
         let hibernate = Task {
             await coordinator.manualHibernate(terminalID: terminalID)
         }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
 
         #expect(await coordinator.wake(terminalID: terminalID) == .inFlight)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .milliseconds(200))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(200))
         #expect(await hibernate.value == .ok)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
         let respawns = recorded.snapshot().filter { $0.contains("respawn-window") }
@@ -850,15 +845,13 @@ struct HibernationCoordinatorTests {
         // dryRun default paneCurrentCommand is "zsh" (not claude) → poll sees the
         // process leave immediately after `/exit`.
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), clock: clock, actuationLog: makeTestActuationLog())
 
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Unblocks the single verify-exit poll attempt.
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: coord.exitPollInterval)
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
         let result = await park.value
 
         #expect(result == .ok)
@@ -894,8 +887,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // claude reports its version as pane_current_command
         )
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pollInterval: Duration = .milliseconds(200)
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
@@ -904,8 +896,7 @@ struct HibernationCoordinatorTests {
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Exhaust the whole poll window: one advance per attempt.
         for _ in 0..<3 {
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await clock.advanceWhenSuspended(by: pollInterval)
+            try await clock.requireAdvanceWhenArmed(by: pollInterval)
         }
         let result = await park.value
 
@@ -928,9 +919,12 @@ struct HibernationCoordinatorTests {
     /// (SIGTERM while claude is still exiting) and never escalating (a wedged
     /// claude polled forever).
     ///
-    /// The "hasn't escalated yet" half is proved by `waitForSuspension()`: the
-    /// coordinator is parked on attempt 3's sleep, which means it completed
-    /// attempts 1–2, observed claude both times, and did NOT leave the loop.
+    /// The "hasn't escalated yet" half waits until the coordinator is either
+    /// parked on attempt 3's sleep or has sent the interrupt, then asserts it
+    /// is the former: parked means it completed attempts 1–2, observed claude
+    /// both times, and did NOT leave the loop. Reading straight after the
+    /// advance would prove nothing, because `advance` resumes attempt 2's
+    /// sleeper without running what follows it.
     @Test func escalatesOnlyAfterExactlyTheConfiguredAttemptCount() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
@@ -939,8 +933,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // still claude, every attempt
         )
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pollInterval: Duration = .milliseconds(200)
         let attempts = 3
         let coord = HibernationCoordinator(
@@ -956,17 +949,17 @@ struct HibernationCoordinatorTests {
 
         // N-1 attempts: still inside the poll window.
         for _ in 0..<(attempts - 1) {
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await clock.advanceWhenSuspended(by: pollInterval)
+            try await clock.requireAdvanceWhenArmed(by: pollInterval)
         }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.waitForSuspension()  // armed for attempt N ⇒ N-1 are done
+        // Armed for attempt N ⇒ N-1 are done; an early escalation shows as C-c.
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            clock.hasSleeper || interruptSent()
+        } == .satisfied)
         #expect(!interruptSent(),
                 "must not escalate before the poll window is exhausted; got: \(recorded.snapshot())")
 
         // The Nth (final) attempt: the window is exhausted, so escalate.
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: pollInterval)
+        try await clock.requireAdvanceWhenArmed(by: pollInterval)
         let result = await park.value
         #expect(result == .ok)
         #expect(interruptSent(),

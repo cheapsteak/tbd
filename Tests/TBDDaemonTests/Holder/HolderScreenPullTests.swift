@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TBDShared
 import Testing
@@ -11,11 +10,13 @@ import TestSupport
 /// that does not satisfy all four counted and dropped rather than applied.
 ///
 /// Modelled on `HolderInjectionRoutingTests`, because the two types are
-/// deliberate siblings. Every bound here runs on a `TestClock`, so nothing
-/// sleeps in real time; the only real-time waits are `waitFor` polls for a
-/// frame to have reached the harness, the scheduling handshake
+/// deliberate siblings. Every bound here runs on an `EventDrivenTestClock`, so
+/// nothing sleeps in real time; the only real-time waits are `waitFor` polls
+/// for a frame to have reached the harness, the scheduling handshake
 /// `Tests/CLAUDE.md`'s clock-seam note sanctions, because
-/// `Task { await pull.pull(…) }` only *schedules* the call.
+/// `Task { await pull.pull(…) }` only *schedules* the call — and one
+/// `settle()` before a negative read, because `advance` returns before a
+/// resumed sleeper has run.
 ///
 /// `.clockDriven` at suite level: most of these await a value a broken puller
 /// would never produce, so each needs its own hang bound.
@@ -103,8 +104,7 @@ struct HolderScreenPullTests {
     @Test("A reply under the pending request id resolves the pull with its payload")
     func replyResolvesThePull() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -134,8 +134,7 @@ struct HolderScreenPullTests {
     @Test("A styled capture asked for and answered rides the same reply")
     func styledCaptureRidesTheReply() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -167,8 +166,7 @@ struct HolderScreenPullTests {
     func refusalResolvesImmediately() async throws {
         for reason in SidecarScreenReply.Unavailable.allCases {
             let harness = Harness()
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+            let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
             let terminalID = UUID()
 
             let answer = Task {
@@ -202,8 +200,7 @@ struct HolderScreenPullTests {
     @Test("A silent viewer times the pull out at the production bound")
     func silentViewerTimesOut() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pull = harness.makePull(clock: clock)
 
         let answer = Task {
@@ -213,8 +210,7 @@ struct HolderScreenPullTests {
         }
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
+        try await clock.requireAdvanceWhenArmed(by: HolderInputTiming.screenPullBound)
 
         #expect(await answer.value == .timedOut)
         #expect(await pull.timedOutPullsObserved == 1)
@@ -232,8 +228,7 @@ struct HolderScreenPullTests {
     @Test("The pull's bound is not reached early")
     func boundIsNotReachedEarly() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pull = harness.makePull(clock: clock)
         let terminalID = UUID()
 
@@ -245,9 +240,14 @@ struct HolderScreenPullTests {
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
         let request = try harness.decodeRequest()
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(
+        try await clock.requireAdvanceWhenArmed(
             by: HolderInputTiming.screenPullBound - .milliseconds(1))
+        // `advance` returns before any sleeper it resumed has run, so a bound
+        // that had already elapsed would not yet have expired the request here.
+        // Settling first lets a too-short bound land before the reply does;
+        // without it the reply would win the race and this test would pass
+        // whatever the bound.
+        await settle()
         let sent = Self.payload()
         pull.record(
             SidecarScreenReply(
@@ -263,8 +263,7 @@ struct HolderScreenPullTests {
     @Test("A reply arriving after the bound is late, and is not applied")
     func replyAfterTheBoundIsLate() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pull = harness.makePull(clock: clock)
         let terminalID = UUID()
 
@@ -276,8 +275,7 @@ struct HolderScreenPullTests {
         try await waitFor("the screen request to reach the sidecar") { harness.frames.count == 1 }
         let request = try harness.decodeRequest()
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: HolderInputTiming.screenPullBound)
+        try await clock.requireAdvanceWhenArmed(by: HolderInputTiming.screenPullBound)
         #expect(await answer.value == .timedOut)
 
         pull.record(
@@ -299,8 +297,7 @@ struct HolderScreenPullTests {
     @Test("A reply for an unknown request id is counted late and disturbs nothing")
     func unknownRequestIDDisturbsNothing() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -335,8 +332,7 @@ struct HolderScreenPullTests {
     @Test("A misaddressed reply is dropped and leaves the request pending")
     func misaddressedReplyLeavesTheRequestPending() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -374,8 +370,7 @@ struct HolderScreenPullTests {
     func replyOnAStaleEpochIsDropped() async throws {
         let harness = Harness()
         harness.epoch = 4
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -409,8 +404,7 @@ struct HolderScreenPullTests {
     func lostConnectionFailsItsRequests() async throws {
         let harness = Harness()
         harness.epoch = 2
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
 
         let answer = Task {
             await pull.pull(
@@ -432,8 +426,7 @@ struct HolderScreenPullTests {
     func lostConnectionLeavesOtherEpochsAlone() async throws {
         let harness = Harness()
         harness.epoch = 2
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let answer = Task {
@@ -469,8 +462,7 @@ struct HolderScreenPullTests {
     func sendOnAnEndedEpochAnswersAtOnce() async throws {
         let harness = Harness()
         harness.epoch = 5
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
 
         pull.connectionLost(epoch: 5)
         // A real gate, not a scheduling guess: `connectionLost` is
@@ -498,8 +490,7 @@ struct HolderScreenPullTests {
     func sendOnANewerEpochSurvivesAnOlderLoss() async throws {
         let harness = Harness()
         harness.epoch = 6
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         pull.connectionLost(epoch: 5)
@@ -529,8 +520,7 @@ struct HolderScreenPullTests {
     func undeliverableFrameAnswersAtOnce() async throws {
         let harness = Harness()
         harness.sendFrameError = SidecarGone()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
 
         let answer = await pull.pull(
             terminalID: UUID(), lines: 50, retainedScrollbackLines: 5_000,
@@ -552,8 +542,7 @@ struct HolderScreenPullTests {
     @Test("Two overlapping pulls for one session are both answered, each with its own payload")
     func overlappingPullsAreIndependent() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let first = Task {
@@ -602,8 +591,7 @@ struct HolderScreenPullTests {
     @Test("A requested depth past the daemon's retained depth goes out clamped")
     func requestedDepthIsClampedOnTheWire() async throws {
         let harness = Harness()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let pull = harness.makePull(bound: .seconds(30), clock: TestClock())
+        let pull = harness.makePull(bound: .seconds(30), clock: EventDrivenTestClock())
 
         let terminalID = UUID()
         let answer = Task {

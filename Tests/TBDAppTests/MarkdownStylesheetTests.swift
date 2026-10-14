@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
@@ -292,7 +291,7 @@ struct MarkdownStylesheetTests {
     /// Tier 2, split the way `FileWatcherTests` splits: a real dispatch source
     /// delivers the *event*, while the debounce *timer* is virtual — production
     /// takes `clock: any Clock<Duration>`, so the 150 ms window is crossed by
-    /// advancing a `TestClock` instead of being waited out on a loaded runner.
+    /// advancing an `EventDrivenTestClock` instead of being waited out on a loaded runner.
     /// Waiting out a real debounce plus `AsyncStream` delivery under one 8 s
     /// bound is exactly what starved here when the process carried >5000 tests.
     ///
@@ -322,8 +321,7 @@ struct MarkdownStylesheetTests {
             ) == bundledMarker)
         }
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Swift.Duration>()
+        let clock = EventDrivenTestClock()
         let armed = Counter()
         let notified = Counter()
         let watcher = FileWatcher(clock: RecordingClock(base: clock, armed: armed))
@@ -363,8 +361,7 @@ struct MarkdownStylesheetTests {
         // The timer is virtual, so crossing the window costs no wall time. The
         // poll after it is the real leg: `AsyncStream` delivery into the
         // consuming `Task`, on the same 8 s budget `FileWatcherTests.poll` uses.
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+        try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
         guard await Self.waitUntil(.seconds(8), { notified.count > 0 }) else {
             throw Failure("""
                 the debounce window elapsed but no notification reached the consumer — \
@@ -389,8 +386,7 @@ struct MarkdownStylesheetTests {
                 armed=\(armed.count) (baseline \(armedBefore)) after polling up to 8 seconds
                 """)
         }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
+        try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
         guard await Self.waitUntil(.seconds(8), { notified.count > before }) else {
             throw Failure("""
                 creating the selected stylesheet produced no directory notification — \
@@ -438,24 +434,25 @@ private struct Failure: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-/// A `Clock` that delegates to a `TestClock` and counts every armed sleep.
+/// A `Clock` that delegates to an `EventDrivenTestClock` and counts every
+/// armed sleep.
 ///
 /// Mirrors `FileWatcherTests.RecordingClock`, for the same reason: arming is
 /// the only *positive, pollable* fact that the FS event was delivered and
-/// production reached its timer. `TestClock.checkSuspension()` can answer only
+/// production reached its timer. The base clock's arming wait can answer only
 /// "is anything suspended", so it cannot distinguish a superseded debounce
 /// still being torn down from the fresh one a later write just armed.
 ///
-/// Delegating rather than reimplementing keeps virtual time exactly
-/// `TestClock`'s, so `advanceWhenSuspended` on the base clock behaves normally.
+/// Delegating rather than reimplementing keeps virtual time exactly the base
+/// clock's, so `requireAdvanceWhenArmed` on the base clock behaves normally.
 private struct RecordingClock: Clock {
-    let base: TestClock<Swift.Duration>
+    let base: EventDrivenTestClock
     let armed: Counter
 
-    var now: TestClock<Swift.Duration>.Instant { base.now }
+    var now: EventDrivenTestClock.Instant { base.now }
     var minimumResolution: Swift.Duration { base.minimumResolution }
 
-    func sleep(until deadline: TestClock<Swift.Duration>.Instant,
+    func sleep(until deadline: EventDrivenTestClock.Instant,
                tolerance: Swift.Duration?) async throws {
         armed.record()
         try await base.sleep(until: deadline, tolerance: tolerance)
