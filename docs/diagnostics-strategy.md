@@ -238,6 +238,28 @@ row* the main thread was measuring:
 Signposts are zero-cost when no tracer is attached, so this instrumentation
 ships in every build with no behavior or performance impact.
 
+## Calling the daemon's RPC by hand
+
+The app and the `tbd` CLI reach the daemon over its Unix socket. For poking at
+a method with `curl`, the daemon also serves the same router on a loopback HTTP
+port. That port answers a request only when it meets three conditions:
+
+- it carries the per-start secret from `~/tbd/http-token` in an `X-TBD-Token`
+  header;
+- it names `127.0.0.1`, `localhost` or `[::1]`, with the port, in `Host`;
+- it carries no `Origin` header.
+
+So browsers, and processes that cannot read the token file, are refused.
+
+```sh
+curl -s -H "X-TBD-Token: $(cat ~/tbd/http-token)" \
+  -d '{"method":"daemon.status","params":"{}"}' "http://127.0.0.1:$(cat ~/tbd/port)/rpc"
+```
+
+Both files live under `$TBD_HOME` when it is set, and the daemon rewrites both
+on every start. `params` is itself a JSON-encoded string. Methods in
+`RPCMethod.socketOnly` are refused over HTTP, whatever the request carries.
+
 ## Migration path
 
 This is intentionally a slow, no-big-bang migration. The proposal is the
