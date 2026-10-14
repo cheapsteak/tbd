@@ -336,10 +336,13 @@ sign_app_bundle() {
 #
 # /Applications is the only path macOS 15 accepts for requestAuthorization;
 # bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
-# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). All TBD
-# worktrees share CFBundleIdentifier=com.github.cheapsteak.tbd, so whichever
-# tree most recently installed "wins" /Applications — the same
-# last-install-wins behavior already documented for tbd:// URL routing.
+# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). It is
+# `/bin/cp` by absolute path because -c is BSD-only: a dev shell that puts GNU
+# coreutils first on PATH (nix, direnv, Homebrew's gnubin) resolves a bare `cp`
+# to one that rejects the flag, and the install fails. All TBD worktrees share
+# CFBundleIdentifier=com.github.cheapsteak.tbd, so whichever tree most recently
+# installed "wins" /Applications — the same last-install-wins behavior already
+# documented for tbd:// URL routing.
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -350,7 +353,7 @@ install_app_bundle() {
     fi
 
     rm -rf "$installed_bundle"
-    cp -cR "$bundle_dir" "$installed_bundle" || return 1
+    /bin/cp -cR "$bundle_dir" "$installed_bundle" || return 1
     register_app_bundle "$installed_bundle"
 }
 
