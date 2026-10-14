@@ -404,6 +404,33 @@ struct DevServersAppStateTests {
         }
     }
 
+    /// The periodic summary and an action's summary overlap: a summary that
+    /// started earlier but answers later must not overwrite a newer one.
+    @Test func anOlderSummaryCannotOverwriteANewerOne() async {
+        await withState { state in
+            let stale = UUID()
+            let current = UUID()
+            var pending: CheckedContinuation<DevServerSummaryResult, Never>?
+            var calls = 0
+            state.devServerSummaryFetcher = {
+                calls += 1
+                if calls == 1 { return await withCheckedContinuation { pending = $0 } }
+                return DevServerSummaryResult(runningWorktreeIDs: [current])
+            }
+            let first = Task { await state.refreshDevServerSummary() }
+            for _ in 0..<500 where pending == nil { await Task.yield() }
+            guard let held = pending else {
+                Issue.record("the first summary never reached its fetch")
+                return
+            }
+            await state.refreshDevServerSummary()
+            #expect(state.devServerRunningWorktreeIDs == [current])
+            held.resume(returning: DevServerSummaryResult(runningWorktreeIDs: [stale]))
+            await first.value
+            #expect(state.devServerRunningWorktreeIDs == [current], "the older summary landed over the newer one")
+        }
+    }
+
     @Test func aFailedActionIsShownAndASuccessClearsIt() async {
         await withState { state in
             let id = UUID()

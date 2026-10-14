@@ -43,9 +43,16 @@ struct DevServerRememberedStatus: Sendable, Equatable {
 }
 
 extension AppState {
+    /// Refreshes the sidebar dot's set. Summaries overlap (the periodic
+    /// refresh is not awaited by action-triggered ones); an answer whose
+    /// generation is no longer the newest is discarded, so an older read
+    /// never lands over a newer one.
     func refreshDevServerSummary() async {
+        devServerSummaryGeneration &+= 1
+        let generation = devServerSummaryGeneration
         do {
             let ids = Set(try await devServerSummaryFetcher().runningWorktreeIDs)
+            guard devServerSummaryGeneration == generation else { return }
             if ids != devServerRunningWorktreeIDs { devServerRunningWorktreeIDs = ids }
         } catch {
             logger.debug("server.summary failed: \(error.localizedDescription, privacy: .public)")

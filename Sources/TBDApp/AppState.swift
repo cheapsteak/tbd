@@ -1018,6 +1018,10 @@ final class AppState {
     /// over a newer one. This and the two `status` generations outlive a
     /// forgotten worktree, so a refresh still in flight for it cannot land.
     @ObservationIgnored var devServerListGenerations: [UUID: UInt64] = [:]
+    /// The newest `server.summary` started. The periodic refresh and the
+    /// action-triggered ones overlap the same way list refreshes do; only the
+    /// newest started summary's answer is published.
+    @ObservationIgnored var devServerSummaryGeneration: UInt64 = 0
     /// Worktrees with a dev server running by a live running file or a live
     /// TBD server tab (`server.summary`) — the sidebar's green dot.
     var devServerRunningWorktreeIDs: Set<UUID> = []
