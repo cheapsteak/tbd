@@ -1574,6 +1574,10 @@ public struct TerminalStore: Sendable {
             let label = record.label
             _ = resetRecreatedShellLifecycle(record: &record, at: startedAt)
             record.label = label
+            // The holder job is a plain login shell, not a dev server's
+            // command — the same reason `replaceRecreatedShellWindow` drops
+            // the name.
+            record.server_name = nil
             record.sessionIncarnationID = incarnationID.uuidString
             record.transport = TerminalTransport.holder.rawValue
             record.tmuxWindowID = ""
