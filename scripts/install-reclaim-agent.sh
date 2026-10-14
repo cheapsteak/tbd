@@ -8,6 +8,11 @@
 
 LABEL="com.tbd.reclaim-build"
 
+# The PATH below is the whole environment the hourly run gets: launchd gives an
+# agent no login shell and no inherited PATH. /usr/sbin and /sbin are on it
+# because that is where macOS keeps lsof, which the reclaim's live-process rail
+# needs; without them the rail would have to fall back to its own absolute
+# lookup. An installed plist only changes when this installer is re-run.
 write_plist() { # OUT_PATH SCRIPT_PATH
   local out="$1" script="$2"
   cat > "$out" <<PLIST
@@ -22,7 +27,7 @@ write_plist() { # OUT_PATH SCRIPT_PATH
     <string>${script}</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin</string></dict>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>${HOME}/Library/Logs/tbd-reclaim-build.log</string>

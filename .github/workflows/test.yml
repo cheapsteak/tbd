@@ -129,6 +129,20 @@ jobs:
       - name: Test the test fence
         run: bash scripts/test.test.sh
 
+      # The two disk-reclaim harnesses. They run nothing destructive: each
+      # builds fixture worktrees and scratchpad dirs in temp directories and
+      # drives the scripts through their `ps`, `lsof`, worktree-list and clock
+      # seams, so no real worktree, scratchpad or `~/tbd` is read or written.
+      # They are here because both read BSD `stat -f` and `date -r`, and
+      # because neither script is Swift: no suite anywhere else covers them,
+      # and the rails they test are what stand between a sweep and a
+      # developer's running binaries or a live session's scratch directory.
+      # ~15 s together.
+      - name: Test the disk-reclaim rails
+        run: |
+          bash scripts/reclaim-build.test.sh
+          bash scripts/sweep-scratchpads.test.sh
+
       # The three installer harnesses, which cannot join the Linux collection
       # in `plans-guard`: the plist writer drives `plutil`, and the bundle
       # assembly hard-links into a `.app` and installs it with `cp -cR`. The

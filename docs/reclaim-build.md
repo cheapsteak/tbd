@@ -50,10 +50,13 @@ The script reclaims disk from **active, idle** worktrees:
 
 Safety rails applied before anything is reaped:
 - Never reap a git-worktree-locked worktree (a `git worktree lock` held by Claude Code during an active run: `SKIP locked`).
+- Never reap a worktree whose `.build` holds the executable of a live process — a running `TBDDaemon`, `TBDApp` or `TBDHolder` launched from `<worktree>/.build/` (`SKIP live-binary`, and `skip (live binary)` when the process appears between the plan and the reap). This rail reads the same `ps` pass as the build check, not `lsof`, so no missing external tool can switch it off, and it matches the command's own path anchored at `<worktree>/.build/`, so a sibling worktree whose path merely shares a prefix never protects another. It is the only rail that covers a running daemon: a daemon is not a build process, and its cwd is `/`, so neither the build check nor the live-cwd rail can see it — while deleting the `.build` it was launched from leaves a process that can no longer spawn its own helpers.
 - Never reap a worktree that is the cwd of a live process (one `lsof -d cwd` pass per run: `SKIP live-cwd`).
 - Never reap a worktree with uncommitted changes (`git status --porcelain`: `SKIP dirty`).
 - Never reap a target touched within `RECLAIM_ACTIVE_GRACE` (10m default; defense-in-depth recency guard).
 - Never reap a worktree with a running `swift-*` build process.
+
+**The live-process probe fails closed.** `lsof` is resolved from `PATH` first and then from the absolute locations macOS keeps it in (`/usr/sbin` before the rest), because the hourly launchd run gets only the `PATH` in its plist and a tool missing from it would disable the rail without a word. If the probe still cannot run, or runs and reports no cwd at all, every worktree counts as live for that run: nothing is reclaimed, each worktree is logged `SKIP live-unknown`, and the log carries one `WARNING: live-process probe produced no cwds` line saying so. An empty result is read as a broken probe rather than an idle machine because every live process has a cwd, so a working probe always reports at least the script's own — and a probe that reports nothing, read literally, waves every worktree past the rail that protects a running session. A probe that *did* run and listed cwds owning nothing in a given worktree is the normal case and reaps as usual.
 
 Archived worktrees are already reclaimed by `git worktree remove`.
 
@@ -98,6 +101,23 @@ scripts/install-reclaim-agent.sh install
 scripts/install-reclaim-agent.sh uninstall
 ```
 
+The installed plist at `~/Library/LaunchAgents/com.tbd.reclaim-build.plist` is a
+generated artifact: it only changes when the installer is re-run, so a `PATH`
+fix in `write_plist` reaches an existing installation only after another
+`install`. Its `PATH` is the whole environment the hourly run gets — launchd
+gives an agent no login shell — which is why `/usr/sbin` and `/sbin` are on it,
+and why the scripts also resolve `lsof` from absolute locations of their own.
+
+## Tests
+
+`scripts/reclaim-build.test.sh` and `scripts/sweep-scratchpads.test.sh` cover
+both scripts, including every safety rail above. They build fixture worktrees
+and scratchpads in temp directories and drive the scripts through their `ps`,
+`lsof`, worktree-list and clock seams, so a run touches no real worktree, no
+real scratchpad and no `~/tbd`. Both run in the `lint` job of
+`.github/workflows/test.yml`, on macOS because they read BSD `stat -f` and
+`date -r`.
+
 ## Manual use
 ```sh
 scripts/reclaim-build.sh --dry-run   # preview; deletes/seeds nothing
@@ -114,7 +134,7 @@ scripts/reclaim-build.sh             # reclaim now
 |---|---|---|
 | `RECLAIM_WT_JSON` | run `tbd worktree list --json` | Fixture file for the TBD worktree list (tests) |
 | `RECLAIM_PS_CMD` | `ps -axo pid,args` | Fixture command for the active-build-process scan (tests) |
-| `RECLAIM_LSOF_CMD` | `lsof -d cwd -Fn` | Fixture command for the live-cwd scan — outputs `lsof -d cwd -Fn` format (tests) |
+| `RECLAIM_LSOF_CMD` | `lsof -d cwd -Fn` | Fixture command for the live-cwd scan — outputs `lsof -d cwd -Fn` format (tests). A command that prints nothing means "the probe is broken", not "nothing is live" |
 | `RECLAIM_WORKTREE_LIST_CMD` | `git -C <wt> worktree list --porcelain` | Fixture command for the git-worktree-locked check — outputs `git worktree list --porcelain` format (tests) |
 | `RECLAIM_T1_SECONDS` | `21600` (6h) | Tier-1 (`index-build/`) idle threshold |
 | `RECLAIM_T2_SECONDS` | `172800` (48h) | Tier-2 (whole `.build` + installs) idle threshold |
@@ -129,7 +149,7 @@ scripts/reclaim-build.sh             # reclaim now
 | Var | Default | Purpose |
 |---|---|---|
 | `SWEEP_BASE` | `/private/tmp/claude-$(id -u)` | Scratchpad base directory to sweep (tests) |
-| `SWEEP_LSOF_CMD` | `lsof -d cwd -Fn` | Fixture command for the live-cwd scan — outputs `lsof -d cwd -Fn` format (tests) |
+| `SWEEP_LSOF_CMD` | `lsof -d cwd -Fn` | Fixture command for the live-cwd scan — outputs `lsof -d cwd -Fn` format (tests). A command that prints nothing means "the probe is broken", not "nothing is live" |
 | `SWEEP_DAYS` | `3` | Keep-if-modified-within N days (default 3) |
 | `TBD_SKIP_RECLAIM` | unset | Set to `1` to skip the background launch that `scripts/restart.sh` fires on every run (affects both scripts) |
 
@@ -142,6 +162,8 @@ A scratchpad is **kept** when either:
 - It contains a file modified within `SWEEP_DAYS` (default 3 days).
 
 Everything else is removed by default. Use `--dry-run` to preview. See the Env vars section above for `SWEEP_BASE`, `SWEEP_LSOF_CMD`, and `SWEEP_DAYS`.
+
+The live-process probe fails closed here too, and for a sharper reason: the recency window is the only other thing between a live session's scratch directory and `rm -rf`. `lsof` is resolved from `PATH` and then from its absolute locations; if the probe cannot run, or runs and reports no cwd at all, every scratchpad is kept for that run (`KEEP live-unknown` per directory, plus one `WARNING: live-process probe produced no cwds` line).
 
 ## Foreign worktree sweep (`scripts/sweep-foreign-worktrees.sh`)
 
