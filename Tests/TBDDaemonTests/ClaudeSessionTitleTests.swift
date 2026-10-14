@@ -261,7 +261,11 @@ struct ClaudeSessionTitleTests {
         // A failed rows read (an empty snapshot) still bumps past it.
         let unread = await reserve(store, UUID(), after: [])
         #expect(unread.name == "acme-feature")
-        #expect(await reserve(store, UUID(), after: []).name == "acme-feature · 3")
+        // Held by now: the bare name (`unread`), ` · 2` (confirmed) and ` · 3`
+        // (reserved above, never confirmed or released). An empty snapshot is
+        // position 0, which wants the bare name; that is held, so it bumps
+        // from ` · 2` to the first free number, ` · 4`.
+        #expect(await reserve(store, UUID(), after: []).name == "acme-feature · 4")
     }
 
     @Test("forgetting a terminal frees its title")
