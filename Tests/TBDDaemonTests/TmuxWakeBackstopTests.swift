@@ -42,6 +42,7 @@ struct TmuxWakeBackstopTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop"),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "tmux-backstop"))
         return Fixture(db: db, coordinator: coordinator, worktree: worktree, scratch: scratch)
     }

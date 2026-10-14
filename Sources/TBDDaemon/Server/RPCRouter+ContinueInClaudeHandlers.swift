@@ -125,6 +125,9 @@ private struct PreparedContinueInClaude: Sendable {
     let profileID: UUID?
     let freshClaudeSessionID: String
     let claudeCommand: String
+    /// The `--name` in `claudeCommand`, recorded as the session's title once
+    /// the replacement is finalized.
+    let claudeSessionName: String?
     /// The staged continuation packet `claudeCommand` reads at launch; removed
     /// by `handleTerminalContinueInClaude` when the transaction ends.
     let packetFilePath: String
@@ -343,7 +346,7 @@ extension RPCRouter {
         let claudeSessionName = await ClaudeSessionTitle.forSpawn(
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: source.id, label: source.label)
+            terminalID: source.id)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -400,6 +403,7 @@ extension RPCRouter {
             profileID: resolvedProfile?.profileID,
             freshClaudeSessionID: freshClaudeSessionID,
             claudeCommand: claudeSpawn.command,
+            claudeSessionName: claudeSessionName,
             packetFilePath: packetFilePath,
             claudeEnv: claudeEnv,
             claudeSensitiveEnv: claudeSensitiveEnv,
@@ -507,6 +511,9 @@ extension RPCRouter {
                     "Claude became ready but the terminal replacement could not be finalized.")
             }
             await continueInClaudeReadiness.clear(destinationKey)
+            await lifecycle.sessionTitles.record(
+                terminalID: updated.id, worktreeID: updated.worktreeID,
+                title: prepared.claudeSessionName)
             subscriptions.broadcast(delta: .terminalReplaced(updated))
             continueInClaudeLogger.info(
                 "Replaced Codex with Claude in terminal \(updated.id, privacy: .public)")

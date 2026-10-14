@@ -428,7 +428,7 @@ public actor HibernationCoordinator {
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
-        sessionTitles: ClaudeSessionTitleStore = ClaudeSessionTitleStore(),
+        sessionTitles: ClaudeSessionTitleStore,
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -1903,10 +1903,11 @@ public actor HibernationCoordinator {
             overlayPath: overlayPath,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
+        // Recorded once the wake has succeeded, on either transport below.
         let sessionName = await ClaudeSessionTitle.forSpawn(
             db: db, store: sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: terminal.id, label: terminal.label)
+            terminalID: terminal.id)
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -1951,7 +1952,7 @@ public actor HibernationCoordinator {
         // WHAT to resume and that is transport-independent. Below is the tmux
         // mechanic.
         if terminal.transport == .holder {
-            return await wakeHolderSection(
+            let result = await wakeHolderSection(
                 terminal: terminal,
                 worktree: worktree,
                 sessionID: sessionID,
@@ -1964,6 +1965,11 @@ public actor HibernationCoordinator {
                 attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
                 rows: rows)
+            if case .ok = result {
+                await sessionTitles.record(
+                    terminalID: terminal.id, worktreeID: worktree.id, title: sessionName)
+            }
+            return result
         }
 
         // The window/pane the rest of wake must reference: the original ones
@@ -2021,6 +2027,8 @@ public actor HibernationCoordinator {
             liveIncarnationID = incarnationID
         }
         idleSince[terminal.id] = nil
+        await sessionTitles.record(
+            terminalID: terminal.id, worktreeID: worktree.id, title: sessionName)
         // Carry the LIVE window/pane ids on the un-park broadcast so the app
         // updates its cached row before (together with) the hibernated flip —
         // otherwise the terminal view rebuilds keyed on the dead window and

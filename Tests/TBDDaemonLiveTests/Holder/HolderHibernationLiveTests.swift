@@ -760,6 +760,7 @@ private final class HibernationFixture {
             holderTerminateAttempts: holderTerminateAttempts,
             holderEscalationAttempts: holderEscalationAttempts,
             signaller: signaller,
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
 

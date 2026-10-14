@@ -1535,6 +1535,10 @@ extension WorktreeLifecycle {
         // `DISABLE_AUTO_UPDATE`, and no auth env at all — silently. `nil` makes
         // that read a compile error instead.
         var primaryAttachment: ModelProxyRouteAttachment.Outcome? = nil
+        // The Claude primary's `--name`, recorded once its spawn has
+        // succeeded. Stays nil for a shell primary, which records nothing.
+        var primarySessionName: String? = nil
+        var primaryIsClaude = false
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1665,10 +1669,11 @@ extension WorktreeLifecycle {
                 holderEnvironment: holderRegistry?.environment,
                 supervisor: modelProxySupervisor)
             primaryAttachment = attachment
-            let primarySessionName = await ClaudeSessionTitle.forSpawn(
+            primaryIsClaude = true
+            primarySessionName = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
                 worktreeID: worktreeID, displayName: worktree.displayName,
-                terminalID: plannedTerminalID1, label: TerminalLabel.claudeCode)
+                terminalID: plannedTerminalID1)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1752,6 +1757,10 @@ extension WorktreeLifecycle {
         // Archived-session restores below reuse the same resolution; the
         // first row settles it once.
         await modelProfileResolver?.settleReservation(resolvedProfile?.reservationID)
+        if primaryIsClaude {
+            await sessionTitles.record(
+                terminalID: plannedTerminalID1, worktreeID: worktreeID, title: primarySessionName)
+        }
         // Recapture reads a tmux pane's screen, so it has nothing to read on a
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.
@@ -1930,7 +1939,7 @@ extension WorktreeLifecycle {
                 let restoreSessionName = await ClaudeSessionTitle.forSpawn(
                     db: db, store: sessionTitles,
                     worktreeID: worktreeID, displayName: worktree.displayName,
-                    terminalID: plannedID, label: TerminalLabel.claudeCode)
+                    terminalID: plannedID)
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,
                     freshSessionID: nil,
@@ -1994,6 +2003,8 @@ extension WorktreeLifecycle {
                     transport: transport,
                     attachment: nil,
                     modelProxySupervisor: modelProxySupervisor)
+                await sessionTitles.record(
+                    terminalID: plannedID, worktreeID: worktreeID, title: restoreSessionName)
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
                 createdTerminalWindowIDs.insert(archivedTerminal.tmuxWindowID)
             }

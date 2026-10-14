@@ -159,6 +159,7 @@ struct PRPollReconcileTests {
                 let hibernation = HibernationCoordinator(
                     db: db, tmux: TmuxManager(dryRun: true), subscriptions: subscriptions,
                     configDirManager: makeIsolatedConfigDirManager(tag: "prpoll"),
+                    sessionTitles: ClaudeSessionTitleStore(),
                     actuationLog: makeTestActuationLog())
                 dispatcher = MergedTransitionDispatcher(
                     archive: AutoArchiveOnMergeCoordinator(

@@ -69,6 +69,22 @@ struct SessionTitleSyncRPCTests {
             label: TerminalLabel.claudeCode, claudeSessionID: UUID().uuidString, kind: .claude)
     }
 
+    /// A second Claude row, created after the seeded one and sorting after it
+    /// on id as well.
+    private func makeSecondClaudeRow(worktreeID: UUID) async throws -> Terminal {
+        try await db.terminals.create(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            worktreeID: worktreeID, tmuxWindowID: "@second", tmuxPaneID: "%second",
+            label: TerminalLabel.claudeCode, claudeSessionID: UUID().uuidString, kind: .claude)
+    }
+
+    /// The `new-window` argv lines the dryRun tmux recorded.
+    private func spawnArgv() -> [String] {
+        recorder.calls
+            .filter { $0.contains("new-window") }
+            .map { $0.joined(separator: " ") }
+    }
+
     /// Sends one `UserPromptSubmit`-shaped activity event and returns the
     /// response. The row's own incarnation rides along so the event is
     /// accepted rather than rejected as a stale process's.
@@ -113,10 +129,7 @@ struct SessionTitleSyncRPCTests {
         #expect(createResponse.success)
         let created = try createResponse.decodeResult(Terminal.self)
 
-        let spawnArgv = recorder.calls
-            .filter { $0.contains("new-window") }
-            .map { $0.joined(separator: " ") }
-        #expect(spawnArgv.contains { $0.contains("--name 'acme-feature · 2'") })
+        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 2'") })
 
         let response = try await prompt(created)
         #expect(response.success)
@@ -183,5 +196,76 @@ struct SessionTitleSyncRPCTests {
         // title both say the same thing here: no title.
         let sessionTitle = response.result == nil ? nil : try title(response)
         #expect(sessionTitle == nil)
+    }
+
+    @Test("a successful spawn records the --name it gave the session")
+    func successfulSpawnRecordsItsName() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let createResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)))
+        #expect(createResponse.success)
+        let created = try createResponse.decodeResult(Terminal.self)
+
+        #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature")
+    }
+
+    @Test("renaming a Claude tab retitles its session on the next prompt")
+    func tabRenameRetitles() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let first = try await makeClaudeRow(worktreeID: wt.id)
+        let second = try await makeSecondClaudeRow(worktreeID: wt.id)
+        let titles = router.lifecycle.sessionTitles
+        await titles.record(terminalID: first.id, worktreeID: wt.id, title: "acme-feature")
+        await titles.record(terminalID: second.id, worktreeID: wt.id, title: "acme-feature · 2")
+        #expect(try await promptTitle(second) == nil)
+
+        let rename = await router.handle(try RPCRequest(
+            method: RPCMethod.tabSetLabel,
+            params: TabSetLabelParams(tabID: second.id, worktreeID: wt.id, label: "reviewer")))
+        #expect(rename.success)
+
+        #expect(try await promptTitle(second) == "acme-feature · reviewer")
+        #expect(try await promptTitle(second) == nil)
+        // The first tab's title did not move.
+        #expect(try await promptTitle(first) == nil)
+    }
+
+    @Test("a new spawn skips the number a tab that has not re-prompted still carries")
+    func spawnSkipsATakenNumber() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        // The worktree's first tab has closed; the survivor still carries the
+        // ` · 2` it was given while it was second.
+        let survivor = try await makeClaudeRow(worktreeID: wt.id)
+        await router.lifecycle.sessionTitles.record(
+            terminalID: survivor.id, worktreeID: wt.id, title: "acme-feature · 2")
+
+        let createResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)))
+        #expect(createResponse.success)
+        let created = try createResponse.decodeResult(Terminal.self)
+
+        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 3'") })
+        #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
+    }
+
+    @Test("a prompt leaves the entry of a spawn whose row is not written yet")
+    func promptKeepsInFlightSpawnEntries() async throws {
+        let (wt, path) = try await makeWorktree()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let terminal = try await makeClaudeRow(worktreeID: wt.id)
+        let inFlight = UUID()
+        let titles = router.lifecycle.sessionTitles
+        await titles.record(terminalID: terminal.id, worktreeID: wt.id, title: "acme-feature")
+        await titles.record(terminalID: inFlight, worktreeID: wt.id, title: "acme-feature · 2")
+
+        #expect(try await promptTitle(terminal) == nil)
+
+        #expect(await titles.lastApplied(terminalID: inFlight) == "acme-feature · 2")
     }
 }

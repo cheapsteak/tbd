@@ -125,6 +125,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: isolatedConfigDirManager("kwss-migrate-\(refusal.rawValue)"),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         await coordinator.retireTmuxWindowAfterTransportMigration(terminal: terminal)
@@ -156,6 +157,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: isolatedConfigDirManager("kwss-migrate-ok"),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         await coordinator.retireTmuxWindowAfterTransportMigration(terminal: terminal)
@@ -261,6 +263,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
             let coordinator = HibernationCoordinator(
                 db: db, tmux: tmux,
                 configDirManager: makeIsolatedConfigDirManager(tag: tag),
+                sessionTitles: ClaudeSessionTitleStore(),
                 actuationLog: makeTestActuationLog())
             await coordinator.setHolderRegistry(HolderRegistry(
                 owner: HolderOwnerToken(rawValue: "acme-installation"),

@@ -211,7 +211,7 @@ struct HolderTmuxAssumptionGateTests {
     ) async -> HibernationCoordinator {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            signaller: signaller, actuationLog: makeTestActuationLog())
+            signaller: signaller, sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
@@ -2870,6 +2870,7 @@ struct HolderTmuxAssumptionGateTests {
             configDirManager: isolatedConfigDirManager(),
             now: dates.provider,
             exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: logPath))
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;

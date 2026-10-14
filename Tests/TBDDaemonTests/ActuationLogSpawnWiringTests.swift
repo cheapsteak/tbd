@@ -252,6 +252,7 @@ struct ActuationLogSpawnWiringTests {
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: logPath))
     }
 

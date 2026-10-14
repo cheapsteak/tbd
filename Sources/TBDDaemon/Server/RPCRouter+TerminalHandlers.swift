@@ -517,13 +517,14 @@ extension RPCRouter {
         }
 
         // Only a Claude spawn carries a session name; a shell's command never
-        // reads it, so it is neither computed nor recorded for one.
+        // reads it, so it is neither computed nor recorded for one. Recorded
+        // once the spawn has succeeded, below.
         let sessionName: String?
         if isClaudeType {
             sessionName = await ClaudeSessionTitle.forSpawn(
                 db: db, store: lifecycle.sessionTitles,
                 worktreeID: params.worktreeID, displayName: worktree.displayName,
-                terminalID: plannedTerminalID, label: label)
+                terminalID: plannedTerminalID)
         } else {
             sessionName = nil
         }
@@ -595,6 +596,10 @@ extension RPCRouter {
         // The row is in, so its live count now carries a balanced pick's
         // load; hand the reservation back so it stops counting too.
         await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
+        if isClaudeType {
+            await lifecycle.sessionTitles.record(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, title: sessionName)
+        }
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
@@ -1244,7 +1249,7 @@ extension RPCRouter {
             let reviveSessionName = await ClaudeSessionTitle.forSpawn(
                 db: db, store: lifecycle.sessionTitles,
                 worktreeID: worktree.id, displayName: worktree.displayName,
-                terminalID: plannedTerminalID, label: TerminalLabel.claudeCode)
+                terminalID: plannedTerminalID)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: sessionID,
                 freshSessionID: nil,
@@ -1294,6 +1299,8 @@ extension RPCRouter {
                     transport: transport
                 )
             }
+            await lifecycle.sessionTitles.record(
+                terminalID: terminal.id, worktreeID: worktree.id, title: reviveSessionName)
             logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
             await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: terminal)
@@ -2703,12 +2710,13 @@ extension RPCRouter {
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
-        // same row on an in-place swap.
+        // same row on an in-place swap. Recorded only once the swap's spawn
+        // has succeeded, below.
+        let swapTitleTerminalID = mode == .fork ? plannedTerminalID : oldTerminal.id
         let swapSessionName = await ClaudeSessionTitle.forSpawn(
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id,
-            label: mode == .fork ? TerminalLabel.claudeCode : oldTerminal.label)
+            terminalID: swapTitleTerminalID)
 
         // The spawn each arm runs, as a closure rather than a value: the
         // holder arm cannot compose its own until after its park, because its
@@ -2816,6 +2824,11 @@ extension RPCRouter {
             // The only unsuccessful response either swap branch returns is
             // "Terminal vanished after swap" — the row it respawned is gone.
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
+            if response.success {
+                await lifecycle.sessionTitles.record(
+                    terminalID: swapTitleTerminalID, worktreeID: worktree.id,
+                    title: swapSessionName)
+            }
         }
         return response
     }

@@ -144,6 +144,7 @@ extension RPCRouter {
             }
         }
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        await lifecycle.sessionTitles.forget(worktreeID: wt.id)
         try await db.tabs.deleteForWorktree(worktreeID: wt.id)
         for t in terminals {
             await pendingQuestions.clear(terminalID: t.id)

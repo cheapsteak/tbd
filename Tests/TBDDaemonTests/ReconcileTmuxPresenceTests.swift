@@ -383,6 +383,7 @@ struct ReconcileTmuxPresenceTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: repairingTmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-unpark"),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coordinator.reconcileOnStartup()
 
