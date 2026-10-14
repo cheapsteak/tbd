@@ -10,18 +10,11 @@ import TBDShared
 @Suite("Navigation history persistence")
 struct NavigationHistoryPersistenceTests {
 
-    private func withSuite(_ body: (UserDefaults) throws -> Void) rethrows {
+    private func withSuite(_ body: (UserDefaults) async throws -> Void) async rethrows {
         let suiteName = "TBDAppTests.NavHistoryPersist.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        try body(defaults)
-    }
-
-    private func withSuiteAsync(_ body: (UserDefaults) async -> Void) async {
-        let suiteName = "TBDAppTests.NavHistoryPersist.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        await body(defaults)
+        try await body(defaults)
     }
 
     private func makeWorktree(id: UUID, repoID: UUID) -> Worktree {
@@ -41,8 +34,8 @@ struct NavigationHistoryPersistenceTests {
         defaults.set(try JSONEncoder().encode(ids.map(\.uuidString)), forKey: "com.tbd.app.selectionOrder")
     }
 
-    @Test func roundTripKeepsPositionAndForward() {
-        withSuite { defaults in
+    @Test func roundTripKeepsPositionAndForward() async {
+        await withSuite { defaults in
             let repoID = UUID(), p = UUID(), q = UUID(), r = UUID()
             let wts = [repoID: [p, q, r].map { makeWorktree(id: $0, repoID: repoID) }]
 
@@ -66,8 +59,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func everyEntryKindRoundTrips() {
-        withSuite { defaults in
+    @Test func everyEntryKindRoundTrips() async {
+        await withSuite { defaults in
             let a = UUID(), b = UUID(), repo = UUID()
             let remote = RemoteSessionSelection(provider: "acme", sessionID: "s-1")
             let first = AppState(userDefaults: defaults)
@@ -81,8 +74,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func matchingRestoredSelectionKeepsForward() throws {
-        try withSuite { defaults in
+    @Test func matchingRestoredSelectionKeepsForward() async throws {
+        try await withSuite { defaults in
             let repoID = UUID(), p = UUID(), q = UUID(), r = UUID()
             let first = AppState(userDefaults: defaults)
             // Lists first: flags are computed against them, and navigateBack
@@ -102,8 +95,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func differingRestoredSelectionAppendsAndCutsForward() throws {
-        try withSuite { defaults in
+    @Test func differingRestoredSelectionAppendsAndCutsForward() async throws {
+        try await withSuite { defaults in
             let repoID = UUID(), p = UUID(), q = UUID(), r = UUID(), s = UUID()
             let first = AppState(userDefaults: defaults)
             // Lists first: flags are computed against them, and navigateBack
@@ -126,8 +119,8 @@ struct NavigationHistoryPersistenceTests {
     /// Pins the on-disk format: a literal in the synthesized Codable shape
     /// must keep decoding, so renaming an entry case or a field (which
     /// silently empties every saved history) goes red here.
-    @Test func savedFormatFixtureDecodes() {
-        withSuite { defaults in
+    @Test func savedFormatFixtureDecodes() async {
+        await withSuite { defaults in
             let raw = """
             {"entries":[\
             {"worktrees":{"_0":["11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222"]}},\
@@ -157,8 +150,8 @@ struct NavigationHistoryPersistenceTests {
         #"{"entries":[{"repo":{"_0":"6F9619FF-8B86-D011-B42D-00CF4FC964FF"}}],"index":-1}"#,
         #"{"entries":[{"futureKind":{"_0":"x"}}],"index":0}"#,
     ])
-    func damagedDataLoadsEmpty(raw: String) {
-        withSuite { defaults in
+    func damagedDataLoadsEmpty(raw: String) async {
+        await withSuite { defaults in
             defaults.set(Data(raw.utf8), forKey: AppState.navigationHistoryKey)
             let state = AppState(userDefaults: defaults)
             #expect(state.navigationEntries.isEmpty)
@@ -166,8 +159,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func overCapSnapshotLoadsEmpty() throws {
-        try withSuite { defaults in
+    @Test func overCapSnapshotLoadsEmpty() async throws {
+        try await withSuite { defaults in
             let entries = (0..<101).map { _ in NavigationEntry.repo(UUID()) }
             let data = try JSONEncoder().encode(NavigationHistorySnapshot(entries: entries, index: 100))
             defaults.set(data, forKey: AppState.navigationHistoryKey)
@@ -177,8 +170,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func capHoldsAfterReload() {
-        withSuite { defaults in
+    @Test func capHoldsAfterReload() async {
+        await withSuite { defaults in
             let first = AppState(userDefaults: defaults)
             let ids = (0..<100).map { _ in UUID() }
             for id in ids { first.recordNavigation(.repo(id)) }
@@ -192,8 +185,8 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func staleRestoredEntriesAreSkippedAndKept() {
-        withSuite { defaults in
+    @Test func staleRestoredEntriesAreSkippedAndKept() async {
+        await withSuite { defaults in
             let repoID = UUID(), gone = UUID(), p = UUID(), q = UUID()
             let first = AppState(userDefaults: defaults)
             first.recordNavigation(.worktrees([p]))
@@ -211,36 +204,44 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    @Test func everyMutationSaves() {
-        withSuite { defaults in
+    @Test func everyMutationSaves() async {
+        await withSuite { defaults in
             let repoID = UUID(), a = UUID(), b = UUID(), c = UUID()
             let state = AppState(userDefaults: defaults)
             state.worktrees = [repoID: [a, b, c].map { makeWorktree(id: $0, repoID: repoID) }]
 
-            func reloaded() -> (entries: [NavigationEntry], index: Int) {
+            /// A relaunch must see exactly the live history, entries and index.
+            func expectSaved(sourceLocation: SourceLocation = #_sourceLocation) {
                 let fresh = AppState(userDefaults: defaults)
-                return (fresh.navigationEntries, fresh.navigationIndex)
+                #expect(fresh.navigationEntries == state.navigationEntries, sourceLocation: sourceLocation)
+                #expect(fresh.navigationIndex == state.navigationIndex, sourceLocation: sourceLocation)
             }
 
             state.recordNavigation(.worktrees([a]))
+            expectSaved()
             state.recordNavigation(.worktrees([b]))
+            expectSaved()
             state.recordNavigation(.worktrees([c]))
-            #expect(reloaded().index == 2)
+            expectSaved()
+            #expect(state.navigationIndex == 2)
 
             state.navigateBack()
-            #expect(reloaded().index == 1)
+            expectSaved()
+            #expect(state.navigationIndex == 1)
 
             state.navigateForward()
-            #expect(reloaded().index == 2)
+            expectSaved()
+            #expect(state.navigationIndex == 2)
 
             #expect(state.navigateBackPastArchived(c))
-            #expect(reloaded().index == 1)
-            #expect(reloaded().entries.count == 3)
+            expectSaved()
+            #expect(state.navigationIndex == 1)
+            #expect(state.navigationEntries.count == 3)
         }
     }
 
     @Test func arrowsEnableAfterReposLoad() async {
-        await withSuiteAsync { defaults in
+        await withSuite { defaults in
             let r1 = UUID(), r2 = UUID()
             let first = AppState(userDefaults: defaults)
             first.recordNavigation(.repo(r1))
@@ -260,11 +261,29 @@ struct NavigationHistoryPersistenceTests {
         }
     }
 
-    /// `refreshWorktrees` fetches through `daemonClient` directly (no seam),
-    /// so the flag refresh after a list load is driven through
-    /// `refreshRemote()`, whose fetchers are injectable.
+    /// The terminal and note fetches that follow the worktree merge go
+    /// through `daemonClient` and fail without a daemon; the arrows are
+    /// refreshed before them, so the failure does not affect this check.
+    @Test func arrowsEnableAfterWorktreesLoad() async {
+        await withSuite { defaults in
+            let repoID = UUID(), p = UUID(), q = UUID()
+            let first = AppState(userDefaults: defaults)
+            first.recordNavigation(.worktrees([p]))
+            first.recordNavigation(.worktrees([q]))
+
+            let second = AppState(userDefaults: defaults)
+            #expect(second.navigationIndex == 1)
+            #expect(!second.canGoBack) // lists empty at launch
+
+            let wts = [p, q].map { makeWorktree(id: $0, repoID: repoID) }
+            second.worktreesFetcher = { _ in wts }
+            await second.refreshWorktrees()
+            #expect(second.canGoBack)
+        }
+    }
+
     @Test func arrowsEnableAfterRemoteSessionsLoad() async {
-        await withSuiteAsync { defaults in
+        await withSuite { defaults in
             let a = RemoteSessionSelection(provider: "acme", sessionID: "s-1")
             let b = RemoteSessionSelection(provider: "acme", sessionID: "s-2")
             let first = AppState(userDefaults: defaults)
