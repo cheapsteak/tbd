@@ -351,7 +351,7 @@ reddened `ModelProxySupervisorTests` on three consecutive dispatches of one
 SHA. So a **re-arming** loop belongs on `EventDrivenTestClock`
 instead, driven by an explicit ladder of `requireAdvanceWhenArmed` with a
 closing `requireSleeperArmed` — the re-arm being the proof that the tick before
-it finished. See "The event-driven alternative" below.
+it finished. See "The event-driven clock" below.
 
 On that basis, the deepest chains in the tree are the poller tests, and their
 paper tallies do not all fit under the ceiling:
@@ -438,8 +438,9 @@ Three remedies are already refuted; don't re-litigate them.
 - **Per-suite `.serialized`.** "Archived search debounce" is already
   `.clockDriven, .serialized` and still failed twice in CI. The contention is
   process-global, so serializing one suite does not shrink the queue its waiter
-  sits behind. (The advice under "Clock and date seams" still holds for its own
-  case — a suite starving *itself*.)
+  sits behind. (The remedy for
+  `TestClock`'s polling handshake starving is `EventDrivenTestClock` — see
+  "Clock and date seams".)
 - **`TASK_MEGA_YIELD_COUNT=1`.** Measured across interleaved runs: p90
   26.5/31.2 → 26.0/29.4, p99 26.6 → 27.0. Noise. Real but secondary
   contributor; resolves the open question in issue #496.
@@ -822,33 +823,45 @@ and the migration is behavior-preserving by construction. **Existential, not
 generic**, and not named `scheduler`: these subsystems are actors carrying
 `Sendable` conformances, and a generic parameter would infect their types.
 
-Tests pass `TestClock` and drive time with `advanceWhenSuspended(by:)`, which
-buys exact virtual timings instead of tolerance windows.
+Tests pass `EventDrivenTestClock` and drive time with its strict waits —
+`requireAdvanceWhenArmed(by:)` and `requireSleeperArmed()` — which buys exact
+virtual timings instead of tolerance windows. `ImmediateClock` stays available
+for code whose sleeps should simply return. swift-clocks' `TestClock` is not
+used outside the two files that test it (`ClockTestSupport.swift` and
+`ClockTestSupportTests.swift`): the SwiftLint rule `no_polling_test_clock`
+fails `swiftlint --strict` on any construction of it and on any call to its
+polling probes `advanceWhenSuspended`, `waitForSuspension` and
+`checkSuspension`. Existing uses carry a
+`// swiftlint:disable:next no_polling_test_clock - legacy, #1171` line until
+they are migrated; issue #1171 tracks which files still do, and a new
+suppression draws the same review scrutiny as a new `no_raw_task_sleep` one.
+See "The event-driven clock" below and
+`docs/specs/2026-10-14-retire-polling-test-clock-design.md`.
 
 **Where the real sleeps went — the distinction to keep straight.** "No real
 sleeps" applies to the *behaviour under test*: it never waits on wall time, so
 its assertions are exact and load-independent. It does **not** mean the process
-never sleeps. `advanceWhenSuspended` has to observe that the code under test
-has actually reached its `sleep`, and that is real task scheduling, not virtual
-time — so it polls with a real `Task.sleep` against a deadline (bounded
-polling, rule 3 above). Spinning `Task.yield()` there instead does not
-converge: it keeps the waiter runnable and re-queues it behind the very task it
-is waiting for, and raising the budget makes it worse, not better.
+never sleeps. The test has to observe that the code under test has actually
+reached its `sleep`, and that is real task scheduling, not virtual time, bounded
+by a real deadline. Spinning `Task.yield()` there instead does not converge: it
+keeps the waiter runnable and re-queues it behind the very task it is waiting
+for, and raising the budget makes it worse, not better.
 
-Consequence to design around: clock-driven suites are load-**tolerant**, not
-load-**independent**. `TestClock.advance(to:)` calls `Task.megaYield()` twice
-per advance inside swift-clocks — 20 background-QoS tasks each — so a large
-population of clock-driven tests running in parallel floods the pool with
-exactly the low-priority work each one is waiting on, and they starve each
-other. If a clock-driven suite fails on the arming handshake, reach for
-`@Suite(.serialized)` before reaching for a longer timeout: it narrows that one
-suite rather than the target, and measured on the appearance suite it was both
-reliable *and* faster.
-
-That advice covers a suite starving **itself**. It does not cover
-process-global saturation, where a suite starves on the other 4000 tests — see
-"Population is the scheduler" above, where an already-`.serialized` suite still
-flaked and the remedy was population, not suite ordering.
+**Why `TestClock` is retired: its handshake starves under load.**
+`advanceWhenSuspended` learns that a sleeper is armed by polling
+`checkSuspension()`, and each probe — like each `TestClock.advance(to:)`, which
+megaYields twice — is a `Task.megaYield()`: 20 serially awaited background-QoS
+tasks. A large population of clock-driven tests running in parallel floods the
+pool with exactly the low-priority work each one is waiting on, and they starve
+each other until the 45 s arming guard fires on logic that is correct. In the
+flake ledger's first week of records, 529 of the 850 recorded failures (62%)
+carried that guard's message, and 21 of the 32 test files then using
+`TestClock` had at least one test that hit it. `@Suite(.serialized)` narrows a
+suite starving *itself* (measured on the appearance suite, it was reliable and
+faster), but the contention is process-global, and an already-`.serialized`
+suite still flaked (see "Population is the scheduler" above). `EventDrivenTestClock`
+signals arming from inside the critical section that registers the sleeper, so
+its wait is a continuation, not a poll, and adds no work to the pool.
 
 **Keep advance chains short — single digits.** If crossing a threshold would
 take many production-sized intervals, **inject the pacing values** (that is
@@ -871,12 +884,11 @@ are exposed. `EventDrivenTestClock`'s strict waits — `requireSleeperArmed`,
 `requireAdvanceWhenArmed` — do not share it: a missed arming throws *before*
 anything advances, so the chain stops at the first bad step, nothing later runs
 against a desynced clock, and the failure is a named diagnostic rather than a
-hang. **The rule is not lifted for strict callers.** The majority of
-clock-driven suites still use the predecessor helpers, where the warning holds
-in full, and both suites on the strict waits already sit inside single digits —
-so lifting it would buy nothing and cost a rule that currently holds everywhere.
-A future case with a real need can argue it on evidence now that the mechanism
-is written down.
+hang. **The rule is not lifted for strict callers.** A short chain is cheaper
+to read and to bound, legacy suites on the polling helpers still carry the
+desync in full, and a test that seems to need a long chain needs injected
+pacing instead. A future case with a real need can argue it on evidence now
+that the mechanism is written down.
 
 **The counter-rule, because following the above naively degrades coverage.**
 Shortening a chain silently buys a weaker assertion — and it degrades
@@ -913,7 +925,7 @@ group.cancelAll()
 ```
 
 This is also the better *test* shape: "time out after X" is directly
-advanceable on a `TestClock`, while "sleep until instant Y" invites `Instant`
+advanceable on a test clock, while "sleep until instant Y" invites `Instant`
 arithmetic that drifts back toward wall-clock reasoning. If you hit a case
 that genuinely needs `Instant` math, raise it rather than switching the
 subsystem to a generic clock parameter.
@@ -940,15 +952,17 @@ or date box. This file is the whole shared surface:
   fast-pass suite that needs a limit takes it unless the limit is itself the
   regression detector.
 - `@Suite(.clockDriven)` — the same value under the name a clock-driven suite
-  wants at its call site, because there the hang being caught is a `TestClock`
+  wants at its call site, because there the hang being caught is a test-clock
   sleep nobody advances. See "Population is the scheduler" above for the
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
-- `await clock.advanceWhenSuspended(by:)` — the one you want by default. Its
-  `timeout:` passes through to `waitForSuspension`, and is left at the 45 s
-  default except where the polled probe is itself under test
-  (`ClockTestSupportTests`, which passes `TestDeadlines.saturatedPass`).
-- `await clock.waitForSuspension()` — the same wait without advancing. Each
+- `await clock.advanceWhenSuspended(by:)` and `await clock.waitForSuspension()`
+  — the polling `TestClock` helpers, kept only for the legacy sites tracked in
+  #1171; `no_polling_test_clock` rejects new calls. New tests use
+  `EventDrivenTestClock` (`Tests/TestSupport/EventDrivenTestClock.swift`, below).
+  The `timeout:` of `advanceWhenSuspended` passes through to `waitForSuspension`
+  and is left at the 45 s default except where the polled probe is itself under
+  test (`ClockTestSupportTests`, which passes `TestDeadlines.saturatedPass`). Each
   `checkSuspension()` probe is raced against what is left of `timeout`, because
   its megaYield can go unscheduled for minutes under saturation and the guard is
   only read between probes: unbounded, one stuck probe held the test past its
@@ -960,11 +974,11 @@ or date box. This file is the whole shared surface:
   seam. Deliberately a class with a lock rather than an actor, because that
   seam is a *synchronous* `() -> Date`.
 
-**The failure mode to design against:** a tier-1 test awaiting a `TestClock`
+**The failure mode to design against:** a tier-1 test awaiting a test-clock
 sleep that nobody advances hangs forever. Two mitigations, use both —
-`.clockDriven` on the suite bounds the hang, and `advanceWhenSuspended` turns
+`.clockDriven` on the suite bounds the hang, and `requireAdvanceWhenArmed` turns
 "the code under test never armed its timer" from an infinite hang into a named
-failure. Convention: **put the advance immediately next to the assertion it
+`NoSleeperArmed` failure. Convention: **put the advance immediately next to the assertion it
 unblocks**, not in a setup block far away.
 
 **`.clockDriven` is not a reliable backstop on its own** — known limitation,
@@ -974,7 +988,7 @@ detached task the time limit cannot cancel). It usually works and is worth
 keeping. Do not make it your *only* hang guard: stress harnesses, corpus
 runners and fuzzers need an outer timeout of their own.
 
-One caution on those two helpers: they record an `Issue` and continue rather
+One caution on the two legacy helpers: they record an `Issue` and continue rather
 than throwing, which is safe *only* because neither returns a value. A
 non-throwing waiter that does return something — `ControlModeTestSupport.waitFor`
 (PR #415) — also keeps going after recording, so anything you index out of its
@@ -994,15 +1008,13 @@ same signature is ~180 s). When an assertion failure took far longer than an
 assertion failure should, suspect a swallowed waiter before you believe the
 message.
 
-### The event-driven alternative — `Tests/TestSupport/EventDrivenTestClock.swift`
+### The event-driven clock — `Tests/TestSupport/EventDrivenTestClock.swift`
 
-Everything above describes `TestClock` and stays true for its consumers.
-Alongside it, `EventDrivenTestClock` exists for suites whose arming handshake has
-been **observed** starving under saturation: it signals arming from inside the
-same critical section that registers the sleeper, so `advanceWhenArmed(by:)` —
-its `advanceWhenSuspended(by:)` — parks on a continuation instead of polling
-`checkSuspension()` and its megaYield. The trade to know before choosing it: its
-`advance` does **no** yielding, so it never accidentally runs the resumed task's
+`EventDrivenTestClock` is the clock for any test that drives an injected
+`any Clock<Duration>` through sleeps. It signals arming from inside the same
+critical section that registers the sleeper, so `requireAdvanceWhenArmed(by:)`
+parks on a continuation instead of polling `checkSuspension()` and its
+megaYield. The trade to know: its `advance` does **no** yielding, so it never accidentally runs the resumed task's
 post-sleep code for you. Positive assertions must await the paired
 `FireRecorder.next()`; negative ones read `values` (or `hasSleeper`) and stay
 one-sided as they always were — and a negative of the shape "production must
@@ -1018,17 +1030,16 @@ advance must go through `advanceWhenArmed(by:)`. A bare `advance` moves `now`
 past a deadline that is not in the ledger yet; the re-armed sleep is then
 measured from the new `now` and never fires, and the suite desyncs permanently —
 the same hang described above for `TestClock` under load, except deterministic
-rather than probabilistic. It is the first thing to get right when migrating a
-poller suite, where every advance past the first is a re-arm.
+rather than probabilistic. It is the first thing to get right in a poller
+suite, where every advance past the first is a re-arm.
 
 **Each wait comes in two forms, split like `#expect` / `#require`.**
-`sleeperArmed` / `advanceWhenArmed` record a miss and continue;
-`requireSleeperArmed` / `requireAdvanceWhenArmed` throw the same
-`NoSleeperArmed` diagnostic instead. Prefer the strict pair in anything
-chain-shaped — a poller test, where each step is sound only if the previous one
-landed — and keep the soft pair for a single-shot wait whose next statement is
-an assertion that fails informatively on its own. Both suppress the diagnostic
-on *cancellation*: the wait ends, but attribution belongs to whatever cancelled
+`requireSleeperArmed` / `requireAdvanceWhenArmed` throw a named
+`NoSleeperArmed` diagnostic; `sleeperArmed` / `advanceWhenArmed` record the same
+miss and continue. Tests use the strict pair, and are declared `throws` to do
+so: a missed arming ends the test at its cause with one clear failure, where the
+soft pair lets one starvation show up as a cascade of follow-on failures that
+point elsewhere. Both suppress the diagnostic on *cancellation*: the wait ends, but attribution belongs to whatever cancelled
 the test. Design:
 `docs/specs/2026-08-13-poller-suite-clock-migration-design.md`.
 
@@ -1043,9 +1054,9 @@ watches the condition while waiting so a loop whose last tick does not re-arm
 still ends the call. Design:
 `docs/specs/2026-10-14-retire-polling-test-clock-design.md` §4.
 
-**And the migration's real work is not the clock swap.** It is replacing
-clock-state inference with the observable the test already holds: a poller suite
-that asked `checkSuspension()` whether its sleep had ended was reading a
+**Migrating a `TestClock` suite, the real work is not the clock swap.** It is
+replacing clock-state inference with the observable the test already holds: a
+poller suite that asked `checkSuspension()` whether its sleep had ended was reading a
 snapshot and relying on that call's internal megaYield to have let the resumed
 task run first. `hasSleeper` has no such nudge, so port those to the positive
 fact — `FireRecorder.next()` on the effect, or joining the task — rather than to
@@ -1073,24 +1084,29 @@ consequence and every sibling test passing in milliseconds. Pass the budget
 through the strict `requireAdvanceWhenArmed(by:timeout:)` and
 `next(timeout:)`, so a missed arming ends the test instead of paying the
 recorder's guard as well — a two-step chain then costs at most two guards,
-180 s, inside the 240 s limit. `AppearanceDebounceTests` and
-`SearchQueryDebouncerTests` are the worked examples. Either clock is
-a legitimate choice for a new clock-driven test. Existing `TestClock` suites
-migrate on field evidence, not wholesale — currently `AppearanceDebounceTests`
-and `SearchQueryDebouncerTests`,
-which reproduced the starvation in a full-suite soak, plus the two poller suites
-`GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`, whose chains on the
-predecessor helpers each paid five wall-clock guards — 225 s of the 240 s
-ceiling, one scheduling excursion from tripping it; and the tier-3
-`GitManagerTimeoutTests`, whose arming sits behind an unstructured task inside
-`runBoundedProcess` and whose polled handshake starved past its own real
-`/bin/sleep 30` child under induced load — the call then returned normally
-instead of throwing, at 1–3 of 10 targeted nightly iterations (#503); and
+180 s, inside the 240 s limit.
+
+Worked examples, by shape:
+
+- **`@MainActor` debouncers** – `AppearanceDebounceTests` and
+  `SearchQueryDebouncerTests`, which reproduced the polling starvation in a
+  full-suite soak.
+- **Poller chains** – `GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`,
+  whose chains on the polling helpers each paid five wall-clock guards (225 s of
+  the 240 s ceiling) and on the strict waits cost at most one.
+- **Arming behind an unstructured task, tier 3** – `GitManagerTimeoutTests`,
+  whose sleeper arms inside `runBoundedProcess`. Its polled handshake starved
+  past the test's own real `/bin/sleep 30` child under induced load, so the
+  call returned normally instead of throwing, at 1–3 of 10 targeted nightly
+  iterations (#503).
+
+The polling probe can also fail without any diagnostic:
 `ProvisionalRowPublishTests` and the `--keys` tests in
-`TerminalSendDispatchTests`, which hit `.clockDriven`'s 240 s limit with nothing
-recorded on the nightly stress loop because a single `megaYield` probe never
-returned, so the 45 s guard checked between probes never ran (#503). Design:
-`docs/specs/2026-08-11-event-driven-test-clock-design.md`.
+`TerminalSendDispatchTests` hit `.clockDriven`'s 240 s limit with nothing
+recorded on the nightly stress loop, because a single `megaYield` probe never
+returned and the 45 s guard, checked only between probes, never ran (#503).
+Design: `docs/specs/2026-08-11-event-driven-test-clock-design.md` (the clock)
+and `docs/specs/2026-10-14-retire-polling-test-clock-design.md` (the rule).
 
 `PollerClock` is **not** this seam and must not be copied as a template — see
 its doc comment. Full rationale:

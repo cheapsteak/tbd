@@ -348,6 +348,7 @@ struct PromptCardRetentionTests {
     /// A held unpaired question whose row has its result renders no second
     /// card and is reported settled, so retention lets it go.
     @Test func heldUnpairedQuestionDoesNotDuplicateTheAnsweredRow() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let target = Self.target
         let card = Fix.local(Fix.questionPayload(toolUseID: nil))
@@ -366,6 +367,7 @@ struct PromptCardRetentionTests {
     /// appended, showing its answer, while live, and settles once it is no
     /// longer live.
     @Test func liveAnsweredUnpairedQuestionStaysAppendedUntilItIsNoLongerLive() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let target = Self.target
         let card = Fix.local(Fix.questionPayload(toolUseID: nil))
@@ -388,6 +390,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func anAnsweredCardShowsItsAnswerWhileLiveAndAfterItCloses() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -404,6 +407,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func settleDropsTheHeldCardWhenTheToolResultLands() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.markAnswered(prompt, summary: "Allowed")
@@ -417,6 +421,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func aPromptThatClosesElsewhereIsHeldReadOnly() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -428,6 +433,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func aClosedPromptThatComesBackIsOpenAgain() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -446,6 +452,7 @@ struct PromptCardRetentionTests {
     /// closed while no pane showed it is not held as "Answered elsewhere" when
     /// a pane mounts again.
     @Test func forgetLiveKeepsARemountFromHoldingAStaleCard() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -458,6 +465,7 @@ struct PromptCardRetentionTests {
 
     /// Forgetting one target leaves another's report in place.
     @Test func forgetLiveIsScopedToItsTarget() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -468,6 +476,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func anAnsweredHoldSurvivesThePromptBeingLiveAgain() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         let prompt = Fix.local(Fix.permissionPayload())
         retention.observe(live: [prompt], for: Self.target)
@@ -478,6 +487,7 @@ struct PromptCardRetentionTests {
     }
 
     @Test func theFallbackCardRetiresOnTheTimeout() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
         let prompt = Fix.local(Fix.permissionPayload(id: "p9", toolUseID: nil))
@@ -488,6 +498,7 @@ struct PromptCardRetentionTests {
         #expect(held.items.map(\.id) == ["prompt-p9"])
         #expect(held.settled.isEmpty, "no row can ever settle an unpaired prompt")
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.retainFor)
         #expect(await waitUntilReleased(retention) == .satisfied)
         let after = PendingPromptMerge.apply(items: [], prompts: retention.cards(live: [], for: Self.target))
@@ -497,6 +508,7 @@ struct PromptCardRetentionTests {
     /// A card retired on the timeout is never settled, so retention reports
     /// it for the answer controller to drop its drafts and state.
     @Test func aTimeoutRetirementIsReported() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
         var retired: [String] = []
@@ -506,12 +518,14 @@ struct PromptCardRetentionTests {
         retention.observe(live: [], for: Self.target)
         #expect(retired.isEmpty)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.retainFor)
         #expect(await waitUntilReleased(retention) == .satisfied)
         #expect(retired == ["p9"])
     }
 
     @Test func aSettledCardIsNotReportedAsRetired() {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: TestClock())
         var retired: [String] = []
         retention.onRetire = { retired.append($0) }
@@ -521,11 +535,13 @@ struct PromptCardRetentionTests {
     }
 
     @Test func anAnsweredCardWhoseResultNeverComesRetiresOnTheTimeout() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let retention = PromptCardRetention(retainFor: Self.retainFor, clock: clock)
         retention.markAnswered(Fix.local(Fix.permissionPayload()), summary: "Denied")
         #expect(retention.heldPhase(for: "p1") == .answered(summary: "Denied"))
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: Self.retainFor)
         #expect(await waitUntilReleased(retention) == .satisfied)
         #expect(retention.heldPhase(for: "p1") == nil)

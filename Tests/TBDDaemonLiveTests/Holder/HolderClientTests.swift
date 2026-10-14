@@ -378,6 +378,7 @@ struct HolderClientTests {
         defer { try? FileManager.default.removeItem(atPath: home) }
         let environment = SpawnedHolderFixture.environment(home: home)
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let spawner = HolderSpawner(
             // Exits immediately and binds nothing. `/usr/bin/true` rather than a

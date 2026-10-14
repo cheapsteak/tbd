@@ -80,6 +80,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -162,6 +163,7 @@ struct PeerLinkSupervisorTests {
     @Test func reconnectBackoffGrowsAcrossRepeatedChildExit() async throws {
         let stub = try Stub("backoff", body: "exit 0")
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let backoff = BackoffRequests(clock: clock)
         let supervisor = PeerLinkSupervisor(
@@ -257,6 +259,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let date = TestDateSource()
         let recorder = LinkRecorder()
@@ -323,6 +326,7 @@ struct PeerLinkSupervisorTests {
             done
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let date = TestDateSource()
         let recorder = LinkRecorder()
@@ -403,6 +407,7 @@ struct PeerLinkSupervisorTests {
         defer { stub.remove() }
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             handler: LinkRecorder(), clock: TestClock<Duration>())
         #expect(await supervisor.silenceLimit == PeerBridgeFrameCodec.silenceLimit)
         #expect(await supervisor.keepaliveInterval == PeerBridgeFrameCodec.keepaliveInterval)
@@ -443,6 +448,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let date = TestDateSource()
         let supervisor = PeerLinkSupervisor(
@@ -530,6 +536,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -569,6 +576,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -612,6 +620,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -652,6 +661,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -697,6 +707,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -735,6 +746,7 @@ struct PeerLinkSupervisorTests {
             cat >> "$STDIN_LOG"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -830,6 +842,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -943,6 +956,7 @@ struct PeerLinkSupervisorTests {
             cat >> "$STDIN_LOG"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -1172,6 +1186,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -1255,6 +1270,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -1562,6 +1578,7 @@ private func advanceLockstep(
 /// registered.
 private func isArmed(_ clock: TestClock<Duration>) async -> Bool {
     do {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         try await clock.checkSuspension()
         return false
     } catch {

@@ -202,6 +202,7 @@ struct DeliveryVerificationWiringTests {
         let fixture = try await makeFixture()
         try await fixture.db.config.setDeliveryVerification(enabled: true)
         let source = CountingObservationSource()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         fixture.router.deliveryVerifier = DeliveryVerifier(
             log: fixture.log, source: source,
@@ -231,6 +232,7 @@ struct DeliveryVerificationWiringTests {
             transcriptPath: transcriptPath)
         try await fixture.db.terminals.setActivityState(
             id: fixture.terminal.id, activityState: .working, source: .derived)
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let verifier = DeliveryVerifier(
             log: fixture.log,
@@ -255,6 +257,7 @@ struct DeliveryVerificationWiringTests {
         jsonl.append(0x0A)
         try jsonl.write(to: URL(fileURLWithPath: transcriptPath))
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(60))
         await awaitDeliveryCycle(verifier, observed: {
             "\(observations(at: fixture.logPath).count) observation row(s)"

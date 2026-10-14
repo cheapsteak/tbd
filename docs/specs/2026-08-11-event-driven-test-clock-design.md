@@ -37,7 +37,11 @@ names the real fix and defers it — "a megaYield-free virtual clock replacing
 
 ## Goal
 
-Make both directions of the handshake **event-driven**: no polling, no yield
+`EventDrivenTestClock` is the clock for every test that drives an injected
+`any Clock<Duration>` through sleeps; swift-clocks' `TestClock` survives only in
+the files that test it, held there by the SwiftLint rule
+`no_polling_test_clock` (`docs/specs/2026-10-14-retire-polling-test-clock-design.md`).
+It makes both directions of the handshake **event-driven**: no polling, no yield
 storms, no wall-clock guard on any healthy path.
 
 - **Arming** — the clock signals when a sleeper registers; the test parks on a
@@ -107,7 +111,11 @@ the waiter ledger that makes arming observable.
   is where the budget is passed, so a missed arming ends the test rather than
   paying the recorder's guard as well.
 - **`advanceWhenArmed(by:)`** is `sleeperArmed()` followed by `advance(by:)` —
-  the drop-in replacement for `advanceWhenSuspended(by:)`.
+  the drop-in replacement for `advanceWhenSuspended(by:)`. Tests call the
+  strict forms, `requireSleeperArmed` and `requireAdvanceWhenArmed`, which
+  throw a named `NoSleeperArmed` instead of recording and continuing, so a
+  missed arming ends the test at its cause rather than surfacing as a cascade
+  of follow-on failures.
 - **`advance(by:)` / `advance(to:)`** step `now` through each due deadline in
   order and resume those sleepers outside the lock. **No megaYield and no
   yields at all.** The consequence is documented on the method and is the one
@@ -148,7 +156,7 @@ rather than restating the expectation.
 `AppearanceDebounceTests` and `SearchQueryDebouncerTests` migrate wholesale —
 they are small, each shares one harness, and a mixed-clock suite would be harder
 to read than either pure form. The pattern per positive test is: schedule the
-work, `await clock.advanceWhenArmed(by:)`, `let value = await fired.next()`,
+work, `try await clock.requireAdvanceWhenArmed(by:)`, `let value = await fired.next()`,
 assert on that value and on `fired.values`. Boundary and cancellation tests keep
 their exact-virtual-time structure. `CancelOnResumeClock`, the delegating
 wrapper that reproduces cancellation landing after a sleep resumes, ports
@@ -186,13 +194,14 @@ deregister the stranded waiter afterwards.
 
 ## Non-goals
 
-- **Migrating the other clock-driven suites.** `FileWatcherTests`,
-  `GatedIntervalSleepTests`, `DaywatchRunnerTests`, `PaneRepairCoordinatorTests`
-  and the rest stay on `TestClock` and move on field evidence, one at a time —
-  the Built/Enabled ratchet applied to test infrastructure.
-- **Removing `TestClock`, `advanceWhenSuspended` or `waitForSuspension`.** They
-  remain correct for their existing consumers, and their documented derivation
-  against `.clockDriven`'s limit stays load-bearing.
+- **Migrating the remaining `TestClock` suites.** The lint rule, its
+  suppressions on existing call sites, and their burn-down are specified in
+  `docs/specs/2026-10-14-retire-polling-test-clock-design.md`.
+- **Deleting `TestClock`'s helpers from `ClockTestSupport`.**
+  `advanceWhenSuspended` and `waitForSuspension` stay, covered by
+  `ClockTestSupportTests`, while suppressed legacy call sites still use them,
+  and their documented derivation against `.clockDriven`'s limit stays
+  load-bearing for those sites.
 - **Touching the production clock seam.** `clock: any Clock<Duration>` as the
   last defaulted initializer parameter is unchanged; the new type simply
   conforms to it.

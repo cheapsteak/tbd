@@ -77,6 +77,7 @@ struct PromptAnswerControllerTests {
 
     @Test func deliveredMovesToAnsweredAndRetains() async {
         let recorder = Recorder()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let retention = PromptCardRetention(retainFor: .seconds(30), clock: TestClock())
         let controller = Controller(
             local: { _, _, _ in PromptAnswerResult(outcome: .delivered) },

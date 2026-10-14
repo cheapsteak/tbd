@@ -955,6 +955,7 @@ struct PRStatusManagerBindingTests {
         // that caps the LIFETIME, and it has to reach the call itself —
         // cancellation, which `runCLI` turns into a terminate on the child —
         // rather than merely stop this side waiting for it.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let gl = GitLabFake()
         let recheck = CancellableRecheck()
@@ -974,6 +975,7 @@ struct PRStatusManagerBindingTests {
         #expect(await recheck.wasEntered(), "no recheck was issued for a deadline to bound")
 
         // Virtual time: the bound is proven without spending it.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
 
         #expect(await recheck.wasCancelled(),
@@ -1078,6 +1080,7 @@ struct PRStatusManagerBindingTests {
         // virtual time at all, so a build that had started killing children
         // outright would still pass here while the previous test is what pins
         // the grace being spent only on a child that needs it.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let gl = GitLabFake()
         let dir = FileManager.default.temporaryDirectory
@@ -1116,6 +1119,7 @@ struct PRStatusManagerBindingTests {
             String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)))
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
 
         try await waitFor("the recheck child to exit on SIGTERM alone") {

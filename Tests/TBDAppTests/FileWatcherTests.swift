@@ -273,6 +273,7 @@ struct FileWatcherTests {
             //   three sleeps simply run to the same virtual deadline. The
             //   CONFIRMING re-assertion at the bottom is what reddens then, and
             //   that is the mutation it was measured against.
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
             #expect(f.yields.count == 0, "one millisecond short of the window must not notify")
 
@@ -304,6 +305,7 @@ struct FileWatcherTests {
         await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
 
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
             #expect(f.yields.count == 0, "the debounce must not fire early")
 
@@ -341,6 +343,7 @@ struct FileWatcherTests {
     @Test func lateWriteRestartsTheWindow() async {
         await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: .milliseconds(100))
             #expect(f.yields.count == 0)
 
@@ -349,6 +352,7 @@ struct FileWatcherTests {
             // Now at virtual 100 with a deadline at 250. Advancing 149 crosses
             // the ORIGINAL deadline (150) — if the window had not restarted,
             // this is where the stale notification would land.
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval - .milliseconds(1))
             #expect(f.yields.count == 0, "the superseded deadline must not fire")
 
@@ -376,11 +380,13 @@ struct FileWatcherTests {
     @Test func separatedWritesNotifyTwice() async {
         await Self.withWatchedFile { f in
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
             await Self.poll("first window notified",
                             observing: { f.yields.count }) { $0 == 1 }
 
             await Self.writeUntilArmed(f)
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
             await Self.poll("second window notified",
                             observing: { f.yields.count }) { $0 == 2 }
@@ -411,6 +417,7 @@ struct FileWatcherTests {
             // retried against the same temp file, so liveness is established
             // first rather than assumed.
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
             await Self.poll("watcher is live before the rename",
                             observing: { f.yields.count }) { $0 == 1 }
@@ -423,6 +430,7 @@ struct FileWatcherTests {
             let renamed = rename(replacement.path, f.path)
             #expect(renamed == 0, "rename(2) over the watched path failed: errno=\(errno)")
 
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.reopenDelay - .milliseconds(1))
             #expect(f.yields.count == 1, "the re-open must not land before reopenDelay")
 
@@ -444,6 +452,7 @@ struct FileWatcherTests {
             // in the suite where a retry is legitimately silent rather than
             // reported as event loss.
             await Self.writeUntilArmed(f, firstWriteAfterResume: true)
+            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
             await f.clock.advanceWhenSuspended(by: FileWatcher.debounceInterval)
             await Self.poll("re-opened stream still debounces",
                             observing: { f.yields.count }) { $0 == 3 }
@@ -606,6 +615,7 @@ struct FileWatcherTests {
         // body.
         defer { try? FileManager.default.removeItem(at: url) }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Swift.Duration>()
         let armed = Counter()
         let yields = Counter()

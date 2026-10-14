@@ -23,6 +23,7 @@ struct PendingPromptResolutionTests {
     // MARK: Helpers
 
     private func makeStore(
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         clock: TestClock<Duration> = TestClock(),
         dates: TestDateSource = TestDateSource()
     ) -> PendingPromptStore {
@@ -183,12 +184,14 @@ struct PendingPromptResolutionTests {
     }
 
     @Test func lateNoteAfterFiveSecondsDoesNotAttach() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let store = makeStore(clock: clock)
         let terminal = UUID()
         let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
         #expect(await store.isLateNoteWindowOpen(promptID: id))
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(5))
         let closed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await store.isLateNoteWindowOpen(promptID: id) == false
@@ -418,6 +421,7 @@ struct PendingPromptResolutionTests {
     }
 
     @Test func ackTimeoutAnswersDeliveryUnconfirmed() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let store = makeStore(clock: clock)
         let terminal = UUID()
@@ -432,6 +436,7 @@ struct PendingPromptResolutionTests {
                                answer: .permission(decision: .allow, message: nil))
         }
         _ = await waiter.value
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(5))
         let result = await answering.value
 

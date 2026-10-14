@@ -11,6 +11,7 @@ struct DevServerGroupKillerTests {
     private func target(_ pid: Int32 = 500) -> DevServerKillTarget {
         DevServerKillTarget(pid: pid, expectedStart: start, tolerance: 1)
     }
+    // swiftlint:disable:next no_polling_test_clock - legacy, #1171
     private func killer(_ s: FakeDevServerSignalling, clock: any Clock<Duration> = TestClock()) -> DevServerGroupKiller {
         // pollInterval == grace: crossing the grace is a single advance.
         DevServerGroupKiller(signalling: s, grace: .seconds(5), pollInterval: .seconds(5),
@@ -25,13 +26,16 @@ struct DevServerGroupKillerTests {
     }
 
     @Test func SIGKILLWaitsForTheFullGrace() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let s = FakeDevServerSignalling()
         s.add(pid: 500, pgid: 500, start: start, diesOn: [SIGKILL])
         let k = killer(s, clock: clock)
         let task = Task { await k.kill(target()) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(4))
         #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM)], "SIGKILL before the 5 s grace")
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(1))
         #expect(await task.value == .killed(pgid: 500))
         #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM), .init(pgid: 500, signal: SIGKILL)])
@@ -40,25 +44,31 @@ struct DevServerGroupKillerTests {
     /// A cancelled caller must not cut the grace short: the kill runs out
     /// of the caller's cancellation, so SIGKILL still waits the full grace.
     @Test func aCancelledCallerStillWaitsOutTheGrace() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let s = FakeDevServerSignalling()
         s.add(pid: 500, pgid: 500, start: start, diesOn: [SIGKILL])
         let k = killer(s, clock: clock)
         let task = Task { await k.kill(target()) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(1))
         task.cancel()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(3))
         #expect(s.sentSignals == [.init(pgid: 500, signal: SIGTERM)], "SIGKILL before the 5 s grace")
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(1))
         #expect(await task.value == .killed(pgid: 500))
     }
 
     @Test func aSurvivorIsReportedWithItsPid() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let s = FakeDevServerSignalling()
         s.add(pid: 500, pgid: 500, start: start, diesOn: [])
         let k = killer(s, clock: clock)
         let task = Task { await k.kill(target()) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(5))
         #expect(await task.value == .survived(pid: 500, pgid: 500))
     }
@@ -130,12 +140,14 @@ struct DevServerGroupKillerTests {
     }
 
     @Test func aLonePidThatIgnoresSIGTERMIsSIGKILLedAfterTheGrace() async {
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock()
         let s = FakeDevServerSignalling()
         s.add(pid: 500, pgid: 500, start: start, diesOn: [SIGKILL])
         s.add(pid: 600, pgid: 500, start: start, diesOn: [SIGKILL])
         let k = killer(s, clock: clock)
         let task = Task { await k.kill(target(600)) }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: .seconds(5))
         #expect(await task.value == .killedAlone(pid: 600, pgid: 500))
         #expect(s.sentToProcesses == [.init(pgid: 600, signal: SIGTERM), .init(pgid: 600, signal: SIGKILL)])

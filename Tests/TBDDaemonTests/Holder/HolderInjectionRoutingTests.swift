@@ -123,6 +123,7 @@ struct HolderInjectionRoutingTests {
     func detachedSessionIsWrittenDirectly() async throws {
         let harness = Harness()
         harness.attachment = nil
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let courier = harness.makeCourier(clock: TestClock())
 
         let outcome = await courier.deliver(
@@ -137,6 +138,7 @@ struct HolderInjectionRoutingTests {
     func attachedSessionIsInjectedThroughTheApp() async throws {
         let harness = Harness()
         harness.attachment = 7
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let courier = harness.makeCourier(clock: TestClock())
         let terminalID = UUID()
 
@@ -169,12 +171,14 @@ struct HolderInjectionRoutingTests {
     func missingAckFallsBackToADirectWrite() async throws {
         let harness = Harness()
         harness.attachment = 7
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
 
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
@@ -202,6 +206,7 @@ struct HolderInjectionRoutingTests {
     func deadlineIsNotReachedEarly() async throws {
         let harness = Harness()
         harness.attachment = 7
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let courier = harness.makeCourier(clock: clock)
 
@@ -209,6 +214,7 @@ struct HolderInjectionRoutingTests {
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
         let injection = try harness.decodeOnlyInjection()
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(
             by: HolderInputTiming.injectionAckDeadline - .milliseconds(1))
         courier.acknowledge(
@@ -234,6 +240,7 @@ struct HolderInjectionRoutingTests {
         // A clock that is never advanced: if this path waited for the deadline
         // instead of acting on the ack, the test would hang out to
         // `.clockDriven` rather than pass for the wrong reason.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let courier = harness.makeCourier(clock: TestClock())
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
@@ -254,6 +261,7 @@ struct HolderInjectionRoutingTests {
     func lateAckIsObservedAndNotSuppressed() async throws {
         let harness = Harness()
         harness.attachment = 7
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let courier = harness.makeCourier(clock: clock)
 
@@ -261,6 +269,7 @@ struct HolderInjectionRoutingTests {
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
         let injection = try harness.decodeOnlyInjection()
 
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
         #expect(harness.directWrites.count == 1)
@@ -285,6 +294,7 @@ struct HolderInjectionRoutingTests {
         harness.sendFrameError = SidecarGone()
         // Never advanced: reaching the deadline for a frame that was never sent
         // would be five wasted seconds on every send to a dead sidecar.
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let courier = harness.makeCourier(clock: TestClock())
 
         let outcome = await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8))
@@ -315,11 +325,13 @@ struct HolderInjectionRoutingTests {
         let harness = Harness()
         harness.attachment = 7
         harness.directWriteError = NoDescriptor()
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let clock = TestClock<Duration>()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
 
         guard case .notDelivered(let reason) = await delivery.value else {
@@ -396,6 +408,7 @@ struct HolderInjectionRoutingTests {
     func oversizeInjectionIsRefusedAtTheCap() async throws {
         let harness = Harness()
         harness.attachment = 7
+        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
         let courier = harness.makeCourier(clock: TestClock())
         let overCap = Data(
             repeating: 0x61, count: HolderInjectionCourier.maxInjectionBytes + 1)
