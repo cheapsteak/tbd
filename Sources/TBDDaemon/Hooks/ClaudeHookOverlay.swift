@@ -29,7 +29,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   `tbd notify --type error` — `Stop` fires only on normal completion.
 ///   Also sets activity to idle.
 /// - `UserPromptSubmit`: sets activity to working so the thinking
-///   indicator appears in the sidebar while Claude processes a prompt.
+///   indicator appears in the sidebar while Claude processes a prompt, and
+///   returns `hookSpecificOutput.sessionTitle` when the session's wanted title
+///   (worktree display name plus tab suffix) has changed since TBD last set it
+///   — see `ClaudeSessionTitle`.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
@@ -125,9 +128,14 @@ public enum ClaudeHookOverlay {
         #"tbd hooks notification 2>/dev/null || true"#
 
     /// Sets the terminal activity state to working (shows the thinking
-    /// indicator in the sidebar while Claude processes a prompt).
+    /// indicator in the sidebar while Claude processes a prompt), and asks for
+    /// the session's title on the same round trip. When the worktree's display
+    /// name (or the tab's suffix) changed since the session was last named,
+    /// the command prints `hookSpecificOutput.sessionTitle` and Claude Code
+    /// renames the session; otherwise it prints nothing. stderr is discarded
+    /// and stdout is not, because stdout is the title.
     static let workingCommand =
-        #"tbd terminal-activity working 2>/dev/null || true"#
+        #"tbd terminal-activity working --session-title 2>/dev/null || true"#
 
     /// Sets the terminal activity state to waiting_for_user.
     static let waitingForUserCommand =
