@@ -29,33 +29,37 @@ Out of scope: Codex sessions, TBD remote (cloud) sessions, and renaming a sessio
 
 TBD's hook overlay (`ClaudeHookOverlay`) already runs `tbd terminal-activity working` on every `UserPromptSubmit`, which sends one `terminal.activityEvent` RPC to the daemon. The title rides that existing round trip:
 
-- The Claude overlay's `UserPromptSubmit` command gains a flag, `tbd terminal-activity working --session-title`. Codex hooks share `terminal-activity` and do not pass the flag, so they never receive a title.
+- The Claude overlay's `UserPromptSubmit` command gains a flag: `tbd terminal-activity working --session-title 2>/dev/null || tbd terminal-activity working 2>/dev/null || true`. A `tbd` older than the flag rejects it with a usage error on stderr, and the plain command after it keeps the working indicator alive; such a CLI simply never sets a title. Codex hooks share `terminal-activity` and do not pass the flag, so they never receive a title.
 - With the flag, the RPC request asks for a title. The response carries an optional `sessionTitle`.
 - When the response has a title, the CLI prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"<title>"}}` to stdout. Otherwise it prints nothing, exactly as today.
 - Every failure path (daemon down, RPC error, no `TBD_TERMINAL_ID`) prints nothing and exits 0, as the command does today. A failed title lookup must never block or fail the user's prompt.
 
 There is no new process, no new RPC and no input sent to the session.
 
-Placement: the hook and the CLI are user-land, but the title has to be computed where terminal rows, labels and display names live, which is the daemon. The daemon exposes the fact (the wanted title), and the hook acts on it.
+Placement: the hook and the CLI are user-land, but the title has to be computed where terminal rows, tab names and display names live, which is the daemon. The daemon exposes the fact (the wanted title), and the hook acts on it.
 
 ### The wanted title
 
 One function computes a Claude terminal's wanted title. Both the spawn path (`--name`) and the hook path use it, so a spawn name and a later hook title never disagree.
 
 - **Base:** the worktree's display name, sanitized by `ClaudeSpawnCommandBuilder.sanitizedSessionName`.
-- **Suffix:** the first live Claude terminal in the worktree, by creation order, gets none. Each later one gets ` · <label>` when it has a user-supplied label (`TerminalLabel.userSupplied`), otherwise ` · <n>`, where `n` is its 1-based position among the worktree's live Claude terminals by creation order.
-- A number can shift when an earlier Claude terminal closes. The shifted title is then sent on that terminal's next prompt.
+- **Counted terminals:** the worktree's Claude terminals, by creation order. Parked (hibernated) Claude terminals count, because they resume under their name. Profile login terminals (label `login`) do not: a login tab is a short credentials errand, and counting it would shift every later tab's number while it is open.
+- **Suffix:** the first counted terminal gets none. Each later one gets ` · <tab name>` when the user has renamed its tab, otherwise ` · <n>`, where `n` is its 1-based position among the counted terminals.
+- **Tab names:** the name comes from the `tab` table (`tab.setLabel`), not from the terminal row's `label`, which every Claude spawn sets to a daemon identity (`Claude Code`, `claude`, `login`). A tab's id is the id of the terminal it was opened for, so a terminal that roots a tab finds its name by its own id. Split layouts live in the app, not the daemon, so a terminal split into another tab's layout roots no tab of its own and is numbered.
+- **Uniqueness:** the wanted title must not equal the title last given to any other terminal that still has a row in the worktree. When it does, the number is bumped (` · 3`, ` · 4`, …; ` · <tab name> 2`, … for a named tab; ` · 2`, … for the bare name) until it is unique. Without this rule a spawn made after a tab closes takes the same ` · n` as a surviving tab that has not prompted since, and the two share a peer address until it does.
+- **Length:** the result fits Claude Code's 64-character name cap without cutting the suffix, since two tabs whose suffixes were cut off would share a name. A long tab name is shortened first, so the display name keeps at least 24 characters (all of itself when shorter); the display name then gives up whatever room the suffix still needs.
+- A title can shift when an earlier Claude terminal closes or a tab is renamed. The shifted title is then sent on that terminal's next prompt.
 
-The suffix also gives each Claude tab in a worktree its own peer address, which today they share.
+The suffix also gives each Claude tab in a worktree its own peer address, which without it they would share.
 
 ### When a title is sent: only on change
 
 The daemon keeps, per terminal, the last title it gave that session (`lastAppliedTitle`), in memory.
 
-- At spawn, `lastAppliedTitle` is set to the `--name` value.
+- At spawn, `lastAppliedTitle` is set to the `--name` value once the spawn (or wake, swap, revive, or Continue in Claude) has succeeded. A spawn that fails records nothing, so a title that never reached a session can neither suppress a later send nor block another tab's title.
 - On a `UserPromptSubmit` that asks for a title, the daemon computes the wanted title. If it equals `lastAppliedTitle`, the response carries no title. If it differs, the response carries it and `lastAppliedTitle` is updated.
-- A user's own `/rename` therefore survives until the wanted title next changes, through a worktree rename or a suffix shift. TBD does not fight a manual rename.
-- The entry is dropped when the terminal is removed.
+- A user's own `/rename` therefore survives until the wanted title next changes, through a worktree rename, a tab rename or a suffix shift. TBD does not fight a manual rename.
+- The entry is dropped on every path that deletes terminal rows: `terminal.delete`, a hook tab's teardown, and the per-worktree bulk deletes (archive, forget, reconcile, creation recovery, scratch removal, Watch Desk close). A row removed by a cascade from a deleted worktree or repo leaves its entry behind; that entry is inert, because the uniqueness rule only reads entries whose terminal still has a row. The prompt path never prunes entries itself, since a spawn in flight has an entry before its row is written.
 
 Not persisted: after a daemon restart `lastAppliedTitle` is empty, so each live session gets its wanted title once, on its next prompt. That undoes a manual `/rename` at most once per daemon restart. Persisting it would need a `terminal` column and a migration for a rare, cosmetic case.
 
@@ -69,12 +73,13 @@ This adds no autonomous action, sends no input, kills nothing and moves no UI. I
 
 ## Tests
 
-- **Wanted title:** first Claude terminal gets the bare display name; a labelled later terminal gets ` · <label>`; unlabelled later terminals get ` · 2`, ` · 3`; closing the first terminal renumbers the rest; non-Claude terminals are ignored when counting; sanitization applies.
-- **Spawn uses it:** the second Claude terminal in a worktree spawns with the suffixed `--name`.
-- **Change rule:** the first prompt after spawn returns no title; a prompt after `worktree.rename` returns the new title once and the following prompt returns none; with no `lastAppliedTitle` (daemon restart) the first prompt returns the title.
+- **Wanted title:** first Claude terminal gets the bare display name; a later terminal whose tab was renamed gets ` · <tab name>`, and the terminal row's own label is never used; unnamed later terminals get ` · 2`, ` · 3`; closing the first terminal renumbers the rest; non-Claude and login terminals are ignored when counting; parked terminals are counted; sanitization applies; a long tab name is shortened before the display name drops below 24 characters.
+- **Uniqueness:** a number, a tab name or the bare name another live terminal was last given is bumped; an entry for a terminal with no row blocks nothing.
+- **Spawn uses it:** the second Claude terminal in a worktree spawns with the suffixed `--name`; a spawn after the first tab closed skips the ` · 2` the surviving tab still carries; the spawn helper records nothing itself, and a successful `terminal.create` records the name it used.
+- **Change rule:** the first prompt after spawn returns no title; a prompt after `worktree.rename` returns the new title once and the following prompt returns none; a prompt after `tab.setLabel` returns the tab-named title once; with no `lastAppliedTitle` (daemon restart) the first prompt returns the title; a prompt leaves the entry of a spawn whose row is not written yet.
 - **Request gate:** an activity event without the title request returns no title, even after a rename, so Codex hooks are unaffected.
 - **CLI:** with a title in the response it prints valid hook JSON naming `UserPromptSubmit`; with none, or on any failure, it prints nothing and exits 0.
-- **Overlay:** the generated overlay's `UserPromptSubmit` command includes `--session-title`.
+- **Overlay:** the generated overlay's `UserPromptSubmit` command asks with `--session-title` and falls back to the plain command.
 
 ## Rejected alternatives
 
