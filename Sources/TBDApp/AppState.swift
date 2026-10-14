@@ -3847,6 +3847,7 @@ final class AppState {
             let fetchedRepos = try await reposFetcher()
             if fetchedRepos != repos {
                 repos = fetchedRepos
+                updateNavigationFlags()
             }
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
@@ -3977,6 +3978,9 @@ final class AppState {
             // histories for worktrees not yet loaded — the pane back/forward
             // history was lost on every restart because of that.
             prunePaneHistories()
+            // Restored history is computed against these lists; recompute the
+            // arrows now that they have loaded (no save — nothing changed).
+            updateNavigationFlags()
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)

@@ -17,6 +17,13 @@ struct NavigationHistoryPersistenceTests {
         try body(defaults)
     }
 
+    private func withSuiteAsync(_ body: (UserDefaults) async -> Void) async {
+        let suiteName = "TBDAppTests.NavHistoryPersist.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        await body(defaults)
+    }
+
     private func makeWorktree(id: UUID, repoID: UUID) -> Worktree {
         Worktree(
             id: id,
@@ -200,6 +207,35 @@ struct NavigationHistoryPersistenceTests {
             #expect(state.navigateBackPastArchived(c))
             #expect(reloaded().index == 1)
             #expect(reloaded().entries.count == 3)
+        }
+    }
+
+    /// `refreshWorktrees` fetches through `daemonClient` directly (no seam),
+    /// so the flag refresh after a list load is driven through
+    /// `refreshRemote()`, whose fetchers are injectable.
+    @Test func arrowsEnableAfterRemoteSessionsLoad() async {
+        await withSuiteAsync { defaults in
+            let a = RemoteSessionSelection(provider: "acme", sessionID: "s-1")
+            let b = RemoteSessionSelection(provider: "acme", sessionID: "s-2")
+            let first = AppState(userDefaults: defaults)
+            first.recordNavigation(.remoteSession(a))
+            first.recordNavigation(.remoteSession(b))
+
+            let second = AppState(userDefaults: defaults)
+            #expect(second.navigationIndex == 1)
+            #expect(!second.canGoBack) // lists empty at launch
+
+            let sessions = [a, b].map {
+                RemoteSessionInfo(
+                    provider: $0.provider,
+                    payload: RemoteSessionPayload(id: $0.sessionID, state: .running),
+                    gone: false, dismissed: false, lastSeen: Date())
+            }
+            second.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+            second.remoteSessionsFetcher = { RemoteSessionsResult(sessions: sessions) }
+            second.retainedTranscriptsFetcher = { [] }
+            await second.refreshRemote()
+            #expect(second.canGoBack)
         }
     }
 }
