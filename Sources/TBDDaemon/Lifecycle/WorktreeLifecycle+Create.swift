@@ -294,6 +294,9 @@ extension WorktreeLifecycle {
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
             let resultPath: String
+            // The branch the checkout actually has, which a collision retry or
+            // a fork-PR fetch can move off the row's original one.
+            let resultBranch: String
             // Set by the PR-head branch below: this worktree's contents came
             // from `refs/pull/<n>/head`, which a third-party fork may have
             // authored. Persisted on the row so the five *later* trust-seeding
@@ -455,7 +458,11 @@ extension WorktreeLifecycle {
                 // would hand it a correctly-fetched branch and a valid directory
                 // to destroy. Failing the create is still right (the outer catch
                 // drops the row); destroying the checkout is not.
+                await createdCheckouts.record(
+                    worktreeID: worktreeID, path: worktree.path,
+                    foreignHead: checkoutPRHead && worktree.prNumber != nil)
                 resultPath = worktree.path
+                resultBranch = fetchedPullHeadBranch ?? worktree.branch
                 if let fetchedPullHeadBranch {
                     if fetchedPullHeadBranch != worktree.branch {
                         try await db.worktrees.updateBranch(
@@ -473,16 +480,32 @@ extension WorktreeLifecycle {
                     worktreePath: worktree.path,
                     userSpecifiedFolder: userSpecifiedFolder,
                     userSpecifiedBranch: userSpecifiedBranch,
-                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision
+                    retryGeneratedNameOnCollision: retryGeneratedNameOnCollision,
+                    // A name collision makes `attemptWorktreeAdd` retry at a new
+                    // folder and branch. The row must name the checkout that
+                    // will exist: a row whose path is not in `git worktree
+                    // list` is archived by the next reconcile, which would kill
+                    // the new worktree's terminals. It is written BEFORE the
+                    // retry's add so a daemon death after the add leaves a row
+                    // recovery can match to the checkout. If the retry add then
+                    // fails, the create fails and the rollback deletes the row
+                    // as usual. The row's `name` is left as it was (it is the
+                    // identity the caller was handed; no store setter changes
+                    // it); its folder and branch are what reconcile and every
+                    // later git call read.
+                    beforeRetry: { [db] retryPath, retryBranch in
+                        try await db.worktrees.updatePath(id: worktreeID, path: retryPath)
+                        try await db.worktrees.updateBranch(id: worktreeID, branch: retryBranch)
+                    }
                 )
 
-                // 4. If the name changed due to collision, update the DB record
-                if result.name != worktree.name {
-                    // Update path/branch/name in DB would be complex — for now the retry
-                    // names the worktree path differently but we keep the original DB row.
-                    // The attemptWorktreeAdd already handles retries.
-                }
+                // The checkout exists from here on. Recorded before any
+                // bookkeeping below can throw, so a failed create hands this
+                // checkout back instead of orphaning it.
+                // The fresh-branch leg never checks out a fork's PR head.
+                await createdCheckouts.record(worktreeID: worktreeID, path: result.path, foreignHead: false)
                 resultPath = result.path
+                resultBranch = result.branch
             }
             let worktreeAddElapsedMs = worktreeAddStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("worktree-add \(worktreeID.uuidString, privacy: .public) \(Int(worktreeAddElapsedMs))ms")
@@ -492,6 +515,9 @@ extension WorktreeLifecycle {
             // otherwise the very first Claude spawn would still seed trust for
             // a tree it just fetched from a fork.
             var stamped = worktree.worktree
+            // The in-memory copy predates any path or branch drift above.
+            stamped.localPath = resultPath
+            stamped.branch = resultBranch
             stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
             let spawnWorktree = stamped
 
@@ -547,6 +573,8 @@ extension WorktreeLifecycle {
                         )
                     }
                 }
+                // Phase 3 never deletes the row, so the row owns the checkout now.
+                await createdCheckouts.discard(worktreeID: worktreeID)
                 return .preSessionPending(phase3: phase3)
             }
 
@@ -589,6 +617,7 @@ extension WorktreeLifecycle {
 
             let totalElapsedMs = phaseStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.info("complete-worktree \(worktreeID.uuidString, privacy: .public) total \(Int(totalElapsedMs))ms")
+            await createdCheckouts.discard(worktreeID: worktreeID)
             return .ready
 
         } catch {
@@ -619,6 +648,10 @@ extension WorktreeLifecycle {
     /// either way, because a creation that failed must not linger as a
     /// `.creating` row.
     ///
+    /// If the create had already made its checkout (`createdCheckouts`), the
+    /// checkout is not left untracked: it gets a fresh `.active` row through
+    /// `adoptWorktree` (`readoptCheckoutOfFailedCreate`).
+    ///
     /// `reposDir` and `date` are test seams; production resolves them from
     /// `TBDConstants` (honoring `TBD_HOME`) and the lifecycle's date seam.
     func rollBackFailedCreate(
@@ -638,33 +671,121 @@ extension WorktreeLifecycle {
             deleted = nil
             lost = true
         }
-        // Blankness is judged on a trimmed copy; the file gets the text as
-        // parked, so a leading indent (a code block, say) survives.
-        if let row = deleted,
-           let text = row.pendingPrompt,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let repoID = row.repoID else {
-                // No repo means no `repos/<repoID>/` to save under.
-                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): the row has no repo")
-                return WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true, unsentPromptLost: true)
-            }
-            let base = reposDir ?? TBDConstants.reposDir
-            let directory = base
-                .appendingPathComponent(repoID.uuidString)
-                .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
-            do {
-                savedPath = try UnsentPromptFile.write(
-                    text: text, worktreeName: row.displayName,
-                    directory: directory, date: date ?? now())
-                logger.info("saved parked first message of failed create \(worktreeID, privacy: .public) to \(savedPath ?? "", privacy: .public)")
-            } catch {
-                lost = true
-                logger.error("could not save parked first message of failed create \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
+        if let row = deleted {
+            let saved = saveParkedFirstMessage(of: row, reposDir: reposDir, date: date)
+            savedPath = saved.path
+            lost = lost || saved.lost
+        }
+        // Taken whether or not the delete worked, so the entry never outlives
+        // the create it describes.
+        let madeCheckout = await createdCheckouts.take(worktreeID: worktreeID)
+        if let row = deleted, let madeCheckout {
+            await readoptCheckoutOfFailedCreate(row: row, checkout: madeCheckout)
         }
         return WorktreeIDDelta(
             worktreeID: worktreeID, creationFailed: true,
             unsentPromptPath: savedPath, unsentPromptLost: lost)
+    }
+
+    /// Give the checkout a failed create left behind a fresh `.active` row.
+    ///
+    /// Failing the create is right; destroying or orphaning the checkout is
+    /// not. Reconcile reports a git worktree that has no row but never adopts
+    /// it, so a tree TBD itself made would otherwise be left untracked. The
+    /// ledger entry (`createdCheckouts`) is what says the directory at
+    /// `checkoutPath` came from this create; nothing here infers it from the
+    /// row's own path, which after a name collision can hold someone else's
+    /// tree. The new row is what `adoptWorktree` makes: active, no terminals,
+    /// the old display name. A failure is logged and leaves the checkout
+    /// reported by reconcile; it never propagates, because the rollback it runs
+    /// inside must finish.
+    private func readoptCheckoutOfFailedCreate(
+        row: Worktree, checkout: CreatedCheckoutLedger.Checkout
+    ) async {
+        let checkoutPath = checkout.path
+        guard let repoID = row.repoID else { return }
+        guard FileManager.default.fileExists(atPath: checkoutPath) else { return }
+        do {
+            let outcome = try await adoptWorktree(
+                repoID: repoID, path: checkoutPath, displayName: row.displayName)
+            let adopted = outcome.worktree
+            // A tree fetched from a fork keeps its foreign-head stamp, so folder
+            // trust is never pre-answered for it. The stamp is read from the
+            // row and from the ledger (the row's own write can be the step that
+            // failed). A failed stamp is the dangerous direction: an active,
+            // unstamped row for foreign contents. So it is never left standing:
+            // the new row is deleted again (it has no terminals, so nothing else
+            // hangs off it) and the checkout stays on disk, reported by
+            // reconcile for the user to adopt deliberately.
+            if row.foreignHead || checkout.foreignHead {
+                do {
+                    try await db.worktrees.markForeignHead(id: adopted.id)
+                } catch {
+                    logger.error("failed create \(row.id, privacy: .public): could not stamp the re-adopted fork checkout at \(checkoutPath, privacy: .public) as foreign-head (\(error.localizedDescription, privacy: .public)); removing its row so no unstamped row stands for it")
+                    // Only a row this adopt just inserted is ours to delete.
+                    // `.revived` and `.unchanged` hand back a row that existed
+                    // before the rollback, with its history. In practice the
+                    // outcome is always `.inserted`: the path is UNIQUE and the
+                    // rolled-back row was its only holder.
+                    guard case .inserted = outcome else {
+                        logger.error("failed create \(row.id, privacy: .public): the row \(adopted.id, privacy: .public) holding the fork checkout at \(checkoutPath, privacy: .public) predates this rollback and could not be stamped foreign-head; leaving it in place")
+                        return
+                    }
+                    do {
+                        try await db.worktrees.delete(id: adopted.id)
+                    } catch {
+                        logger.error("failed create \(row.id, privacy: .public): could not remove the unstamped row \(adopted.id, privacy: .public) for the fork checkout at \(checkoutPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                    return
+                }
+            }
+            logger.info("failed create \(row.id, privacy: .public) left its checkout at \(checkoutPath, privacy: .public); tracking it as worktree \(adopted.id, privacy: .public)")
+            subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                worktreeID: adopted.id, repoID: adopted.repoID,
+                name: adopted.name, path: adopted.localPath
+            )))
+        } catch {
+            logger.error("failed create \(row.id, privacy: .public) left a checkout at \(checkoutPath, privacy: .public) that could not be tracked: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Write the first message parked in `row` to
+    /// `~/tbd/repos/<repoID>/unsent-prompts/` (`UnsentPromptFile`) and report
+    /// where it went. A blank or absent prompt writes nothing and reports
+    /// neither a path nor a loss. A failed write, or a row with no repo to save
+    /// under, is logged and reported as `lost`.
+    ///
+    /// This only saves: it neither clears the column nor deletes the row.
+    /// `rollBackFailedCreate` deletes the row it read this from, and startup
+    /// recovery's activation of a terminal-less row clears the column itself.
+    func saveParkedFirstMessage(
+        of row: Worktree, reposDir: URL? = nil, date: Date? = nil
+    ) -> (path: String?, lost: Bool) {
+        // Blankness is judged on a trimmed copy; the file gets the text as
+        // parked, so a leading indent (a code block, say) survives.
+        guard let text = row.pendingPrompt,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, false)
+        }
+        guard let repoID = row.repoID else {
+            // No repo means no `repos/<repoID>/` to save under.
+            logger.error("could not save parked first message of \(row.id, privacy: .public): the row has no repo")
+            return (nil, true)
+        }
+        let base = reposDir ?? TBDConstants.reposDir
+        let directory = base
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(TBDConstants.unsentPromptsDirName, isDirectory: true)
+        do {
+            let savedPath = try UnsentPromptFile.write(
+                text: text, worktreeName: row.displayName,
+                directory: directory, date: date ?? now())
+            logger.info("saved parked first message of \(row.id, privacy: .public) to \(savedPath, privacy: .public)")
+            return (savedPath, false)
+        } catch {
+            logger.error("could not save parked first message of \(row.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return (nil, true)
+        }
     }
 
     /// Creates an initial Notes tab and appends it to the tab order (last; the
@@ -700,7 +821,14 @@ extension WorktreeLifecycle {
         worktreePath: String,
         userSpecifiedFolder: Bool,
         userSpecifiedBranch: Bool,
-        retryGeneratedNameOnCollision: Bool
+        retryGeneratedNameOnCollision: Bool,
+        // Runs once, just before the collision-retry's `git worktree add`, with
+        // the folder and branch the retry is about to create. The caller
+        // persists them on the row so that a daemon death between the add and
+        // the caller's own bookkeeping leaves a row that names the checkout:
+        // startup recovery then finds it, instead of deleting a row whose path
+        // is missing and orphaning the real checkout.
+        beforeRetry: (_ path: String, _ branch: String) async throws -> Void
     ) async throws -> (name: String, branch: String, path: String) {
         let repoPath = repo.path
         let defaultBranch = repo.defaultBranch
@@ -870,6 +998,8 @@ extension WorktreeLifecycle {
         let retryBranchPreExisted: Bool? = retryBranch == branch
             ? branchPreExisted
             : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
+
+        try await beforeRetry(retryPath, retryBranch)
 
         for baseBranch in baseBranches {
             // Sampled per base and before the add, exactly as in the first loop.

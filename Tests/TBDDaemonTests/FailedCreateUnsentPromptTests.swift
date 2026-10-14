@@ -39,6 +39,19 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
             path: "/tmp/fcup-wt-\(UUID())", tmuxServer: "srv", status: .creating)
     }
 
+    /// A real git repo with a real linked worktree, for the recovery paths that
+    /// only activate a row whose path `git worktree list` names.
+    private func makeRepoWithCheckout(
+        _ db: TBDDatabase
+    ) async throws -> (repo: Repo, checkout: URL, cleanup: () -> Void) {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "r", defaultBranch: "main")
+        let checkout = tempDir.appendingPathComponent("checkout-\(UUID().uuidString.prefix(8))")
+        try await shell("git worktree add -b tbd/brave-otter '\(checkout.path)'", at: repoDir)
+        return (repo, checkout, { try? FileManager.default.removeItem(at: tempDir) })
+    }
+
     @Test func aParkedPromptIsSavedAndNamedInTheDelta() async throws {
         let (lifecycle, db) = try makeLifecycle()
         let row = try await makeCreatingRow(db)
@@ -111,6 +124,55 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(files.count == 1)
         let path = dir.appendingPathComponent(try #require(files.first)).path
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "kept across a restart\n")
+    }
+
+    /// A `.creating` row whose checkout exists but which has no terminals is
+    /// kept and activated, not deleted. Its parked first message is saved the
+    /// way a failed create saves it and then cleared, so it can never be
+    /// delivered into whatever terminal the row gets later.
+    @Test func activatingATerminalLessRowSavesThenClearsItsParkedPrompt() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
+            path: checkout.path, tmuxServer: "srv", status: .creating)
+        try await db.worktrees.setPendingPrompt(
+            worktreeID: row.id, text: "kept across a restart", submit: true)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.pendingPrompt == nil, "a stale first message must not wait in an active row")
+        let dir = reposDir.appendingPathComponent(repo.id.uuidString)
+            .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+        let files = try fm.contentsOfDirectory(atPath: dir.path)
+        #expect(files.count == 1)
+        let saved = dir.appendingPathComponent(try #require(files.first)).path
+        #expect(try String(contentsOfFile: saved, encoding: .utf8) == "kept across a restart\n")
+    }
+
+    /// A terminal-less row that was mid-revive keeps its archived Claude
+    /// sessions (there is no terminal to restore them into) and drops its
+    /// archive stamp, the same outcome as a revive with `skipClaude`.
+    @Test func activatingATerminalLessMidReviveRowKeepsItsArchivedSessions() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
+            path: checkout.path, tmuxServer: "srv", status: .active)
+        try await db.worktrees.archive(id: row.id, claudeSessionIDs: ["session-a", "session-b"])
+        try await db.worktrees.updateStatus(id: row.id, status: .creating)
+        #expect(try await db.worktrees.get(id: row.id)?.archivedAt != nil)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.archivedAt == nil)
+        #expect(after.archivedClaudeSessions == ["session-a", "session-b"])
     }
 
     @Test func aParkedPromptInARepolessRowIsReportedLost() async throws {
