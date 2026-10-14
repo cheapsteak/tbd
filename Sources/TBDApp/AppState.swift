@@ -479,7 +479,8 @@ final class AppState {
 
     /// Back/forward state. Mutated only by the helpers in `AppState+Navigation.swift` —
     /// any change to `navigationIndex` or `navigationEntries` must be followed by
-    /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
+    /// `navigationHistoryDidChange()`, which refreshes the published toolbar flags
+    /// and saves the history to UserDefaults (`navigationHistoryKey`).
 
     /// Published flags driving the toolbar back/forward buttons.
     private(set) var canGoBack: Bool = false
@@ -2212,6 +2213,13 @@ final class AppState {
     /// prunes no remembered sidebar group.
     @ObservationIgnored lazy var reposFetcher: @MainActor () async throws -> [Repo] =
         { [daemonClient] in try await daemonClient.listRepos() }
+    /// How `refreshWorktrees(repoID:)` fetches the non-archived worktree
+    /// list — injectable for the same reason as `reposFetcher`, so tests can
+    /// drive the list merge without a real daemon.
+    @ObservationIgnored lazy var worktreesFetcher: @MainActor (UUID?) async throws -> [Worktree] =
+        { [daemonClient] repoID in
+            try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
+        }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -2324,6 +2332,7 @@ final class AppState {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let paneHistoriesKey = "com.tbd.app.paneHistories"
+    static let navigationHistoryKey = "com.tbd.app.navigationHistory"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
@@ -2358,6 +2367,7 @@ final class AppState {
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         restoreLayouts()
         restorePaneHistories()
+        restoreNavigationHistory()
         restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
@@ -3844,6 +3854,7 @@ final class AppState {
             let fetchedRepos = try await reposFetcher()
             if fetchedRepos != repos {
                 repos = fetchedRepos
+                updateNavigationFlags()
             }
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
@@ -3860,7 +3871,7 @@ final class AppState {
             // Single RPC — fetch non-archived worktrees only.
             // Absent rows satisfy reconcileTombstones identically to status==.archived
             // (both confirm the tombstone), so tombstone reconciliation is unaffected.
-            let allWts = try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
+            let allWts = try await worktreesFetcher(repoID)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
             // Reconcile only on the unscoped path: a scoped allWts omits other repos'
@@ -3900,12 +3911,14 @@ final class AppState {
             // periodic refresh is where that flip is observed.
             promoteRevivedWorktrees(observing: allWts)
 
+            var listsChanged = false
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
                 let merged = fetched + placeholders
                 if merged != worktrees[repoID] ?? [] {
                     worktrees[repoID] = merged
+                    listsChanged = true
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
@@ -3927,11 +3940,18 @@ final class AppState {
                 }
                 if grouped != worktrees {
                     worktrees = grouped
+                    listsChanged = true
                 }
                 let sortedScratch = scratch.sorted { $0.sortOrder < $1.sortOrder }
                 if sortedScratch != scratchWorktrees {
                     scratchWorktrees = sortedScratch
+                    listsChanged = true
                 }
+            }
+            // Restored history is computed against these lists; recompute the
+            // arrows now that they have loaded (no save — nothing changed).
+            if listsChanged {
+                updateNavigationFlags()
             }
 
             // Single RPC — fetch all terminals, group client-side

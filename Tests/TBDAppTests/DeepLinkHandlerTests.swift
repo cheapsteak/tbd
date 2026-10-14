@@ -115,7 +115,8 @@ private func tearDown(_ suiteName: String) {
 
 @MainActor
 @Test func navigateToActive_clearsArchivedHighlight() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let id = UUID()
     appState.worktrees = [
         UUID(): [Worktree(id: id, repoID: UUID(), name: "x", displayName: "X",
@@ -131,7 +132,8 @@ private func tearDown(_ suiteName: String) {
 
 @MainActor
 @Test func navigateToActive_setsPendingScrollTarget() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let repoID = UUID()
     let id = UUID()
     appState.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "R")]
@@ -147,7 +149,8 @@ private func tearDown(_ suiteName: String) {
 
 @MainActor
 @Test func navigateToActive_expandsContainingRepoIfCollapsed() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let repoID = UUID()
     let id = UUID()
     appState.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "R", expanded: false)]
@@ -163,7 +166,8 @@ private func tearDown(_ suiteName: String) {
 
 @MainActor
 @Test func navigateToWorktree_beforeInitialLoad_buffersID() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let id = UUID()
     // Default: isInitialStateLoaded == false on a fresh AppState.
     appState.worktrees = [:]
@@ -192,7 +196,8 @@ private func tearDown(_ suiteName: String) {
 
 @MainActor
 @Test func navigateToWorktree_beforeInitialLoad_buffersTerminalID() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let id = UUID()
     let terminalID = UUID()
     // Default: isInitialStateLoaded == false on a fresh AppState.

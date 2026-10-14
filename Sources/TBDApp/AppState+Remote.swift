@@ -45,6 +45,7 @@ extension AppState {
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
             remoteSessions = sessions.sessions
+            updateNavigationFlags()
             pruneExpandedSidebarGroups(providerNames: Set(providers.providers.map(\.config.name)))
             if let selectedRemoteProvider,
                !providers.providers.contains(where: { $0.config.name == selectedRemoteProvider }) {
@@ -71,6 +72,7 @@ extension AppState {
                 // rename overrides or unread bookkeeping.
                 remoteProviders = []
                 remoteSessions = []
+                updateNavigationFlags()
                 // Safe to clear outright, unlike the two maps above: this is a
                 // cache of daemon rows, not user state, and the same refusal
                 // covers the verb that reads it.
