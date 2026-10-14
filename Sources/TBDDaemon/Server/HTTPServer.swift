@@ -12,9 +12,21 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "http")
 /// Accepts POST requests to `/rpc` with a JSON body containing an `RPCRequest`.
 /// Routes through `RPCRouter` and returns JSON `RPCResponse`.
 /// The assigned port is written to `~/tbd/port` for discovery.
+///
+/// Every request must pass `HTTPRequestGate` on its head, before any body is
+/// buffered: a loopback `Host` naming the port the connection arrived on
+/// (refuses DNS rebinding), no `Origin` header (refuses all browser traffic),
+/// and the per-start secret from `~/tbd/http-token` in `X-TBD-Token`. A refused
+/// request gets a JSON error and the connection is closed. Any local process
+/// can still call the port if it can read the owner-only token file, which is
+/// the same trust boundary as the Unix socket.
 public final class HTTPServer: Sendable {
     private let router: RPCRouter
     private let portFilePath: String
+    private let tokenFilePath: String
+    /// This server's secret, kept only so `stop()` can tell its own token file
+    /// from a successor's. Never logged.
+    private nonisolated(unsafe) var token: String?
     private let group: MultiThreadedEventLoopGroup
     private nonisolated(unsafe) var channel: Channel?
 
@@ -28,10 +40,11 @@ public final class HTTPServer: Sendable {
     /// The port the server is bound to, available after start().
     public nonisolated(unsafe) var port: Int = 0
 
-    public init(router: RPCRouter, portFilePath: String? = nil) {
+    public init(router: RPCRouter, portFilePath: String? = nil, tokenFilePath: String? = nil) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
         self.portFilePath = portFilePath ?? TBDConstants.portFilePath
+        self.tokenFilePath = tokenFilePath ?? TBDConstants.httpTokenFilePath
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
     }
 
@@ -39,20 +52,34 @@ public final class HTTPServer: Sendable {
     public func start() async throws {
         let router = self.router
 
+        // The token reaches disk before the socket is bound and before the
+        // port file is written, so no client can learn the port while the
+        // token is still missing.
+        let token = HTTPRPCToken.generate()
+        try HTTPRPCToken.writeOwnerOnly(token, to: tokenFilePath)
+        self.token = token
+        let tokenFilePath = self.tokenFilePath
+
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 64)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.configureHTTPServerPipeline()
-                    let handler = HTTPRPCHandler(router: router)
+                    let handler = HTTPRPCHandler(router: router, token: token, tokenFilePath: tokenFilePath)
                     try channel.pipeline.syncOperations.addHandler(handler)
                 }
             }
 
-        let ch = try await bootstrap.bind(
-            host: "127.0.0.1",
-            port: 0  // Auto-assign port
-        ).get()
+        let ch: Channel
+        do {
+            ch = try await bootstrap.bind(
+                host: "127.0.0.1",
+                port: 0  // Auto-assign port
+            ).get()
+        } catch {
+            try? FileManager.default.removeItem(atPath: tokenFilePath)
+            throw error
+        }
 
         self.channel = ch
 
@@ -77,7 +104,18 @@ public final class HTTPServer: Sendable {
                 // Already closed
             }
             try? await self.group.shutdownGracefully()
-            try? FileManager.default.removeItem(atPath: self.portFilePath)
+            // In a daemon handover the successor starts first and writes its
+            // own files; remove each file only while it still holds this
+            // server's value, so the old daemon never deletes the successor's.
+            if let contents = try? String(contentsOfFile: self.portFilePath, encoding: .utf8),
+               contents == "\(self.port)" {
+                try? FileManager.default.removeItem(atPath: self.portFilePath)
+            }
+            if let token = self.token,
+               let contents = try? String(contentsOfFile: self.tokenFilePath, encoding: .utf8),
+               contents == token {
+                try? FileManager.default.removeItem(atPath: self.tokenFilePath)
+            }
         }
     }
 }
@@ -98,25 +136,60 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let router: RPCRouter
+    private let token: String
+    private let tokenFilePath: String
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
+    /// Set at `.head` when the gate refuses; the body is then ignored and the
+    /// refusal is written at `.end`.
+    private var pendingRefusal: (gate: HTTPRequestGate, refusal: HTTPRequestGate.Refusal)?
+    /// Once a refusal has been written the connection is closing; ignore the rest.
+    private var closing = false
 
-    init(router: RPCRouter) {
+    init(router: RPCRouter, token: String, tokenFilePath: String) {
         self.router = router
+        self.token = token
+        self.tokenFilePath = tokenFilePath
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
+        if closing { return }
 
         switch part {
         case .head(let head):
             requestHead = head
-            bodyBuffer = context.channel.allocator.buffer(capacity: 0)
+            // Runs on the event loop, so localAddress is read here, not elsewhere.
+            let gate = HTTPRequestGate(
+                port: context.channel.localAddress?.port ?? 0,
+                token: token,
+                tokenFilePath: tokenFilePath
+            )
+            if let refusal = gate.refusal(for: head) {
+                logger.info("Refused HTTP request: \(refusal.category, privacy: .public)")
+                pendingRefusal = (gate, refusal)
+                bodyBuffer = nil
+            } else {
+                bodyBuffer = context.channel.allocator.buffer(capacity: 0)
+            }
 
         case .body(var body):
-            bodyBuffer?.writeBuffer(&body)
+            if pendingRefusal == nil {
+                bodyBuffer?.writeBuffer(&body)
+            }
 
         case .end:
+            if let (gate, refusal) = pendingRefusal {
+                pendingRefusal = nil
+                closing = true
+                let encoded = try? JSONEncoder().encode(RPCResponse(error: gate.message(for: refusal)))
+                let body = encoded.flatMap { String(data: $0, encoding: .utf8) }
+                    ?? "{\"success\":false,\"error\":\"Request refused\"}"
+                Self.sendResponseOnLoop(
+                    context: context, status: refusal.status, body: body, closeAfter: true
+                )
+                return
+            }
             guard let head = requestHead else { return }
 
             // Only accept POST /rpc
@@ -188,11 +261,14 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
         Self.sendResponseOnLoop(context: context, status: status, body: body)
     }
 
-    private static func sendResponseOnLoop(context: ChannelHandlerContext, status: HTTPResponseStatus, body: String) {
+    private static func sendResponseOnLoop(
+        context: ChannelHandlerContext, status: HTTPResponseStatus, body: String, closeAfter: Bool = false
+    ) {
         let bodyData = body.utf8
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(bodyData.count)")
+        if closeAfter { headers.add(name: "Connection", value: "close") }
 
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
@@ -201,7 +277,13 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
         buffer.writeString(body)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        if closeAfter {
+            context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+                context.close(promise: nil)
+            }
+        } else {
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        }
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
