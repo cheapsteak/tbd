@@ -329,6 +329,24 @@ struct TokenProfileUsageFetcherTests {
         #expect(json["model"] as? String == TokenProfileUsageFetcher.probeModel)
     }
 
+    /// A Claude Code OAuth token's request without the Claude Code system
+    /// prompt is refused with a header-less 429, so the probe would read no
+    /// usage at all. The model must be one the API still serves.
+    @Test func probeBodyCarriesTheClaudeCodeSystemPromptOnACurrentModel() async throws {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                             headerFields: successHeaders)!, Data("{}".utf8))
+        }
+        _ = await makeTokenFetcher().fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+
+        let body = try #require(TokenProbeMockURLProtocol.lastBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["system"] as? String == TokenProfileUsageFetcher.probeSystemPrompt)
+        #expect(TokenProfileUsageFetcher.probeSystemPrompt
+            == "You are Claude Code, Anthropic's official CLI for Claude.")
+        #expect(json["model"] as? String == "claude-haiku-5-5")
+    }
+
     @Test func capturesOrganizationIDHeader() async {
         let headers = successHeaders.merging(
             ["anthropic-organization-id": "org_abc123"]) { _, new in new }
@@ -396,7 +414,11 @@ struct TokenProfileUsageFetcherTests {
     @Test func rateLimitedProbeCarriesRetryAfter() async {
         TokenProbeMockURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
-                             headerFields: ["Retry-After": "120"])!, Data())
+                             headerFields: [
+                                "Retry-After": "120",
+                                "anthropic-ratelimit-unified-5h-utilization": "0.4",
+                                "anthropic-ratelimit-unified-5h-status": "allowed",
+                             ])!, Data())
         }
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
@@ -456,11 +478,51 @@ struct TokenProfileUsageFetcherTests {
     @Test func rateLimitedProbeWithoutRetryAfterStillMapsToRateLimited() async {
         TokenProbeMockURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
-                             headerFields: nil)!, Data())
+                             headerFields: [
+                                "anthropic-ratelimit-unified-7d-utilization": "0.5",
+                                "anthropic-ratelimit-unified-7d-status": "allowed",
+                             ])!, Data())
         }
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
         #expect(status == .rateLimited(retryAfter: nil))
+    }
+
+    /// A 429 with no `anthropic-ratelimit-unified-*` headers is the API
+    /// refusing the request itself — what a Claude Code OAuth token gets for a
+    /// request without the Claude Code system prompt — not the account's
+    /// usage limit. It recurs however long the caller waits, so it must not
+    /// read as a transient `.rateLimited`, and the body slice that names the
+    /// refusal is kept, redacted.
+    @Test func probeRefusedWithoutUnifiedHeadersIsAnHTTPErrorNotARateLimit() async {
+        let refusal = #"{"type":"error","error":{"type":"rate_limit_error","message":"Error sk-ant-oat01-SECRET"}}"#
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: ["Retry-After": "60"])!, Data(refusal.utf8))
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .httpError(let code, let detail) = status else {
+            Issue.record("expected .httpError, got \(status)"); return
+        }
+        #expect(code == 429)
+        #expect(detail?.contains("rate_limit_error") == true)
+        #expect(detail?.contains("sk-ant-oat01-SECRET") == false)
+        #expect(status.kind == .unknown)
+        #expect(status.retryAfter == nil)
+    }
+
+    /// Other Anthropic headers do not make a 429 the account's answer: only
+    /// the unified rate-limit headers do. A refusal that carries
+    /// `anthropic-organization-id` alone is still the request being refused.
+    @Test func probeRefusedWithOnlyAnOrganizationHeaderIsAnHTTPError() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: ["anthropic-organization-id": "org_acme"])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+        #expect(status == .httpError(429, detail: nil))
     }
 
     /// 5xx is the server's problem and may clear on its own, so it stays a
