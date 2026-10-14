@@ -30,6 +30,9 @@
 #      the host Claude store a profile dir mirrors, or a tmux socket — lands
 #      there instead of in the real one. This catches leaks nobody has
 #      diagnosed yet, including ones in code that has no injection seam at all.
+#      `DEV_SERVERS_DIR` points the shared dev-server running-file directory
+#      (`~/.local/state/dev-servers`, docs/dev-servers.md) at the same scratch,
+#      so no test reads or writes running files a real server published.
 #      `TBD_TEST_SCRATCH_ROOT` names that scratch dir itself, for the handful of
 #      fixtures that must mint a socket-bearing root of their own (see
 #      "NAMING THE RUN ROOT" beside the `env` prefix below).
@@ -909,6 +912,11 @@ reclaim_abandoned_run_roots "$RUN_ROOT_DIR"
 # there. It was previously left to individual tests to remember, which is
 # exactly the shape the run-wide fence exists to replace.
 #
+# DEV_SERVERS_DIR is the sixth leg, and the store is not TBD's at all: any tool
+# on the machine reads the shared running-file directory, so a test that wrote
+# there would put fake servers in front of other tools, and a GC test could
+# delete a real server's stale file.
+#
 # TMUX_TMPDIR is the fifth, and the store it fences is not a TBD one at all:
 # `/tmp/tmux-<uid>`, shared by every tmux server this user runs. Nothing in
 # `Sources/` or `Tests/` ever passes an absolute `-S <path>`; every call site
@@ -1081,6 +1089,7 @@ run_fenced_suite() {
     TBD_SOCKET_PATH="$sanctioned_home/sock" \
     TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
     TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+    DEV_SERVERS_DIR="$sanctioned_home/dev-servers" \
     TMUX_TMPDIR="$tmux_tmpdir" \
     TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
     HOME="$fake_home" \

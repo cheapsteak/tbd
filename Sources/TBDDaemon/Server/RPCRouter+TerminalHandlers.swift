@@ -820,6 +820,41 @@ extension RPCRouter {
             }
         }
 
+        let (transportCleanupFailure, teardownRefusal) = try await closeTerminalTab(
+            terminal, actuationID: actuationID)
+
+        if let transportCleanupFailure {
+            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
+        } else if let teardownRefusal {
+            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
+        } else {
+            await finishActuation(actuationID, .dispatched)
+        }
+        return try RPCResponse(result: TerminalDeleteResult(
+            closed: true,
+            alreadyGone: false,
+            claudeSessionID: terminal.claudeSessionID
+        ))
+    }
+
+    /// The teardown half of `terminal.delete`: cancel a pending auto-resume,
+    /// capture scrollback into Closed Terminals, kill the window (or dispose
+    /// the holder), delete the row and its tab, clear pending prompts, drop
+    /// the per-session overlay, and broadcast `.terminalRemoved`. Shared with
+    /// `server.stop`, which closes a server's tab under its own actuation row.
+    ///
+    /// Returns the two strings `handleTerminalDelete` turns into its outcome
+    /// row; the caller decides how to record them. With an `actuationID`, a
+    /// throw also writes that row's `transport-failed` outcome before it
+    /// propagates; `server.*` passes nil, because its one outcome row covers
+    /// every server in the call and a tab close is one step inside it.
+    func closeTerminalTab(
+        _ terminal: Terminal, actuationID: String?
+    ) async throws -> (transportCleanupFailure: String?, teardownRefusal: String?) {
+        func step<T>(_ body: () async throws -> T) async throws -> T {
+            guard let actuationID else { return try await body() }
+            return try await actuating(actuationID, body)
+        }
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
         if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
             await limitResumeScheduler?.wake()
@@ -829,7 +864,7 @@ extension RPCRouter {
         // user can view it read-only later (Session History → Closed
         // Terminals). Strictly best-effort: any failure logs inside
         // captureOnClose and the close proceeds unchanged.
-        let worktree = try await actuating(actuationID) {
+        let worktree = try await step {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
         // Set when the transport-level teardown failed. The deletion proceeds
@@ -912,34 +947,23 @@ extension RPCRouter {
         }
 
         // Delete from DB
-        try await actuating(actuationID) {
-            try await db.terminals.delete(id: params.terminalID)
-            try await db.tabs.delete(tabID: params.terminalID)
+        try await step {
+            try await db.terminals.delete(id: terminal.id)
+            try await db.tabs.delete(tabID: terminal.id)
         }
-        await pendingQuestions.clear(terminalID: params.terminalID)
-        await broadcastPendingPrompts(terminalID: params.terminalID)
-        await continueInClaudeReadiness.clear(terminalID: params.terminalID)
+        await pendingQuestions.clear(terminalID: terminal.id)
+        await broadcastPendingPrompts(terminalID: terminal.id)
+        await continueInClaudeReadiness.clear(terminalID: terminal.id)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.
-        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: params.terminalID.uuidString)
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
 
         subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
             terminalID: terminal.id
         )))
 
-        if let transportCleanupFailure {
-            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
-        } else if let teardownRefusal {
-            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
-        } else {
-            await finishActuation(actuationID, .dispatched)
-        }
-        return try RPCResponse(result: TerminalDeleteResult(
-            closed: true,
-            alreadyGone: false,
-            claudeSessionID: terminal.claudeSessionID
-        ))
+        return (transportCleanupFailure, teardownRefusal)
     }
 
     /// What a row's own transport can say about whether its session is still

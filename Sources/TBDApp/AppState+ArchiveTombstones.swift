@@ -63,6 +63,7 @@ extension AppState {
         } else {
             selectedWorktreeIDs.remove(id)
         }
+        forgetDevServerState(worktreeID: id)
         let removedTerminalIDs = terminals.removeValue(forKey: id)?.map(\.id) ?? []
         for terminalID in removedTerminalIDs {
             recordTerminalRemoval(terminalID: terminalID)

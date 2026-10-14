@@ -73,6 +73,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `Terminal.transcriptStreamPath`.
     var transcript_stream_path: String?
 
+    /// The declared dev server this tab runs — see `Terminal.serverName`.
+    var server_name: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -107,6 +110,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
         self.transcript_stream_path = terminal.transcriptStreamPath
+        self.server_name = terminal.serverName
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -121,7 +125,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             decodeLogger.warning("Skipping terminal row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
             return nil
         }
-        return Terminal(
+        var model = Terminal(
             id: uuid,
             worktreeID: wtID,
             tmuxWindowID: tmuxWindowID,
@@ -160,6 +164,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             holderChildStartedAt: holder_child_started_at,
             transcriptStreamPath: transcript_stream_path
         )
+        model.serverName = server_name
+        return model
     }
 }
 
@@ -757,7 +763,8 @@ public struct TerminalStore: Sendable {
         // for even one `await` without it can be snapshotted by a concurrent
         // caller, and the stamp that arrives afterwards then makes every
         // replacement that snapshot authorized reject.
-        transcriptStreamPath: String? = nil
+        transcriptStreamPath: String? = nil,
+        serverName: String? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -777,6 +784,7 @@ public struct TerminalStore: Sendable {
         // Assigned rather than passed: `Terminal`'s memberwise initializer is
         // already at the Swift type-checker's expression budget here.
         terminal.transcriptStreamPath = transcriptStreamPath
+        terminal.serverName = serverName
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -1142,6 +1150,11 @@ public struct TerminalStore: Sendable {
             guard expectedIncarnation.matches(record) else { return nil }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            // The rebuilt window runs a plain login shell, not the dev
+            // server's command, so the tab stops being that server's: left
+            // in place, the name would make the server read Running off the
+            // shell and make stop or archive signal the shell's group.
+            record.server_name = nil
             let incarnationID = resetRecreatedShellLifecycle(record: &record, at: date)
             try record.update(db)
             return incarnationID
@@ -1561,6 +1574,10 @@ public struct TerminalStore: Sendable {
             let label = record.label
             _ = resetRecreatedShellLifecycle(record: &record, at: startedAt)
             record.label = label
+            // The holder job is a plain login shell, not a dev server's
+            // command — the same reason `replaceRecreatedShellWindow` drops
+            // the name.
+            record.server_name = nil
             record.sessionIncarnationID = incarnationID.uuidString
             record.transport = TerminalTransport.holder.rawValue
             record.tmuxWindowID = ""

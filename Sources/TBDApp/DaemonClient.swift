@@ -935,6 +935,33 @@ actor DaemonClient {
         )
     }
 
+    // MARK: - Dev servers
+
+    func listDevServers(worktreeID: UUID, runStatusCommands: Bool) async throws -> DevServerListResult {
+        try await callAsync(
+            method: RPCMethod.serverList,
+            params: DevServerListParams(worktreeID: worktreeID, runStatusCommands: runStatusCommands),
+            resultType: DevServerListResult.self)
+    }
+
+    func startDevServers(worktreeID: UUID, names: [String]) async throws -> DevServerActionResult {
+        try await callAsync(
+            method: RPCMethod.serverStart,
+            params: DevServerActionParams(worktreeID: worktreeID, names: names),
+            resultType: DevServerActionResult.self)
+    }
+
+    func stopDevServers(worktreeID: UUID, names: [String]) async throws -> DevServerActionResult {
+        try await callAsync(
+            method: RPCMethod.serverStop,
+            params: DevServerActionParams(worktreeID: worktreeID, names: names),
+            resultType: DevServerActionResult.self)
+    }
+
+    func devServerSummary() async throws -> DevServerSummaryResult {
+        try await callNoParamsAsync(method: RPCMethod.serverSummary, resultType: DevServerSummaryResult.self)
+    }
+
     /// Untrack one PR from one worktree — the same tombstoning `tbd pr detach`
     /// performs, so the app inherits its durability rather than inventing one:
     /// a delete would be undone by the next poll or hook fire.

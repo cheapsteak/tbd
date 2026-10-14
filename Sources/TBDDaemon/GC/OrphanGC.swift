@@ -81,6 +81,12 @@ public actor OrphanGC {
     /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
     /// production; tests pass a temp directory.
     private let unsentPromptsReposBase: URL
+    /// The shared dev-server running-file directory the stale-file leg
+    /// walks. `TBDConstants.devServersDir()` in production (honors
+    /// `DEV_SERVERS_DIR`); tests pass a temp directory.
+    private let devServersStore: DevServerRunningFileStore
+    /// Liveness read for that leg. `.live` in production.
+    private let devServerProbe: DevServerProcessProbe
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -177,6 +183,8 @@ public actor OrphanGC {
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
         reposBase: URL? = nil,
+        devServersBase: URL? = nil,
+        devServerProbe: DevServerProcessProbe? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -240,6 +248,9 @@ public actor OrphanGC {
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
         self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
+        self.devServersStore = DevServerRunningFileStore(
+            directory: devServersBase ?? TBDConstants.devServersDir())
+        self.devServerProbe = devServerProbe ?? .live
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -269,6 +280,7 @@ public actor OrphanGC {
         // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
         // `ReapRecord`.
         var unsentPromptsReaped = 0
+        var devServerFilesReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -377,6 +389,9 @@ public actor OrphanGC {
 
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
+        reclaimStaleDevServerFiles(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &devServerFilesReaped)
+
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
         )
@@ -388,7 +403,7 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped + devServerFilesReaped)
     }
 
     // MARK: - Unsent first messages
@@ -453,6 +468,56 @@ public actor OrphanGC {
                     \(error.localizedDescription, privacy: .public)
                     """)
                 }
+            }
+        }
+    }
+
+    // MARK: - Dev server running files
+
+    /// Deletes running files in the shared dev-server directory whose
+    /// process is definitely gone (`DevServerRunningFileStore.liveness`
+    /// reads stale; a probe that fails reads unknown and keeps the file) and whose
+    /// modification date is at least `gcGraceSeconds` old
+    /// (docs/specs/2026-10-11-dev-servers-design.md, "Who reclaims what").
+    ///
+    /// Under `gcEnabled` alone. Reads and deletes files only; it never
+    /// signals a process. Malformed and newer-version files are kept: another
+    /// tool may own them. No `ReapRecord`.
+    private func reclaimStaleDevServerFiles(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) {
+        let asOf = now()
+        for entry in devServersStore.scan().entries {
+            switch DevServerRunningFileStore.liveness(of: entry.file, probe: devServerProbe) {
+            case .stale:
+                break
+            case .live:
+                planned.append("KEEP live \(entry.path)")
+                continue
+            case .unknown:
+                // A failed probe is not a dead process: keep the file.
+                planned.append("KEEP unknown \(entry.path)")
+                continue
+            }
+            guard let modified = entry.modifiedAt,
+                  asOf.timeIntervalSince(modified) >= TimeInterval(config.gcGraceSeconds) else {
+                planned.append("KEEP grace \(entry.path)")
+                continue
+            }
+            planned.append("REAP dev-server-file \(entry.path)")
+            // The outer `gcEnabled || dryRun` guard means every line below
+            // runs only with gcEnabled == true.
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: entry.path)
+                reaped += 1
+                logger.info("gc: reclaimed stale dev server file \(entry.path, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(entry.path)")
+                logger.warning("""
+                gc: could not remove \(entry.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
             }
         }
     }

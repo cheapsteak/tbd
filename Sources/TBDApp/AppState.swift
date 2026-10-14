@@ -989,6 +989,45 @@ final class AppState {
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     var prBindings: [UUID: [PRBinding]] = [:]
+    /// Each worktree's dev servers as shown: the newest `server.list` result
+    /// with the last-known `status` command answers laid over it. Fetched for
+    /// the selected worktree on selection and on `devServersChanged` (without
+    /// `status` commands), and after every Start/Stop/Restart and "Refresh
+    /// status" (with them). See `AppState+DevServers.swift`.
+    var devServerLists: [UUID: DevServerListResult] = [:]
+    /// The newest `server.list` result per worktree, as the daemon sent it —
+    /// what `devServerLists` is rebuilt from when a `status` answer lands.
+    @ObservationIgnored var devServerFetchedLists: [UUID: DevServerListResult] = [:]
+    /// Per worktree, the servers whose state the last `status`-command run
+    /// decided (`statusCommandStates`), with the ended TBD tab each had then.
+    /// Replaced by each such run; refreshes without `status` commands keep
+    /// it, minus servers that are gone or no longer declare a `status`
+    /// command. Dropped when the worktree leaves app state: archived, gone
+    /// from the daemon's worktree list, or removed with its repo
+    /// (`forgetDevServerState`).
+    @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerRememberedStatus]] = [:]
+    /// The newest `status`-command refresh started per worktree.
+    @ObservationIgnored var devServerStatusGenerations: [UUID: UInt64] = [:]
+    /// The newest `status`-command refresh that answered per worktree, so an
+    /// older run's answers never replace a newer run's, while a newer run
+    /// that failed does not discard an older one's.
+    @ObservationIgnored var devServerLandedStatusGenerations: [UUID: UInt64] = [:]
+    /// The newest `server.list` started per worktree. Refreshes are not
+    /// awaited by their triggers and can overlap; a result whose generation
+    /// is no longer the newest is discarded, so an older read never lands
+    /// over a newer one. This and the two `status` generations outlive a
+    /// forgotten worktree, so a refresh still in flight for it cannot land.
+    @ObservationIgnored var devServerListGenerations: [UUID: UInt64] = [:]
+    /// The newest `server.summary` started. The periodic refresh and the
+    /// action-triggered ones overlap the same way list refreshes do; only the
+    /// newest started summary's answer is published.
+    @ObservationIgnored var devServerSummaryGeneration: UInt64 = 0
+    /// Worktrees with a dev server running by a live running file or a live
+    /// TBD server tab (`server.summary`) — the sidebar's green dot.
+    var devServerRunningWorktreeIDs: Set<UUID> = []
+    /// Failures from the last Start/Stop/Restart per worktree, shown at the
+    /// bottom of the Servers menu.
+    var devServerActionMessages: [UUID: [String]] = [:]
     /// How many of each worktree's bindings are tombstoned, for the worktrees
     /// that have any (a worktree with none is absent, not zero). Refreshed in
     /// the same call as `prBindings` and kept separately because it outlives
@@ -2181,6 +2220,26 @@ final class AppState {
     /// without a daemon.
     @ObservationIgnored lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
+    @ObservationIgnored lazy var devServerListFetcher: @MainActor (UUID, Bool) async throws -> DevServerListResult =
+        { [daemonClient] id, runStatus in
+            try await daemonClient.listDevServers(worktreeID: id, runStatusCommands: runStatus) }
+    @ObservationIgnored lazy var devServerSummaryFetcher: @MainActor () async throws -> DevServerSummaryResult =
+        { [daemonClient] in try await daemonClient.devServerSummary() }
+    @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
+        { [daemonClient] action, id, names in
+            switch action {
+            case .start: return try await daemonClient.startDevServers(worktreeID: id, names: names)
+            case .stop: return try await daemonClient.stopDevServers(worktreeID: id, names: names)
+            }
+        }
+    /// "Show last output" routes through these two, so tests can see which
+    /// one a server's state chose without a daemon or a window.
+    @ObservationIgnored lazy var devServerLastOutputOpener: @MainActor (UUID, UUID) async -> Void =
+        { [weak self] worktreeID, entryID in
+            await self?.openClosedTerminalEntry(worktreeID: worktreeID, entryID: entryID) }
+    @ObservationIgnored lazy var devServerTabFocuser: @MainActor (UUID, UUID) -> Void =
+        { [weak self] worktreeID, terminalID in
+            self?.focusDevServerTab(worktreeID: worktreeID, terminalID: terminalID) }
     /// How `detachPR` untracks one PR — injectable for the same reason as
     /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
     /// outcomes can be driven without a daemon.
@@ -2980,6 +3039,8 @@ final class AppState {
                 suggestedProfileID: d.suggestedProfileID,
                 receivedAt: Date()
             )
+        case .devServersChanged:
+            Task { [weak self] in await self?.refreshDevServersAfterChange() }
         default:
             break
         }
@@ -3641,6 +3702,7 @@ final class AppState {
                     self.pollCycle += 1
                     if self.pollCycle % 15 == 0 {
                         await self.refreshPRStatuses()
+                        await self.refreshDevServerSummary()
                     }
                     // ~every 150 executed cycles (~5 minutes at the ~2s tick).
                     // The daemon's checker runs hourly, so polling it faster
@@ -3687,6 +3749,7 @@ final class AppState {
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
+            await refreshDevServerSummary()
             pushClaudeSpawnPreferences()
             pushForegroundState()
         } else {
@@ -3917,8 +3980,10 @@ final class AppState {
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
                 let merged = fetched + placeholders
                 if merged != worktrees[repoID] ?? [] {
+                    let previous = (worktrees[repoID] ?? []).map(\.id)
                     worktrees[repoID] = merged
                     listsChanged = true
+                    forgetDevServerState(droppedFrom: previous, keeping: Set(merged.map(\.id)))
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
@@ -3938,6 +4003,7 @@ final class AppState {
                         grouped[rid, default: []].append(wt)
                     }
                 }
+                let previousIDs = worktrees.values.joined().map(\.id) + scratchWorktrees.map(\.id)
                 if grouped != worktrees {
                     worktrees = grouped
                     listsChanged = true
@@ -3947,6 +4013,9 @@ final class AppState {
                     scratchWorktrees = sortedScratch
                     listsChanged = true
                 }
+                forgetDevServerState(
+                    droppedFrom: previousIDs,
+                    keeping: Set(grouped.values.joined().map(\.id) + sortedScratch.map(\.id)))
             }
             // Restored history is computed against these lists; recompute the
             // arrows now that they have loaded (no save — nothing changed).

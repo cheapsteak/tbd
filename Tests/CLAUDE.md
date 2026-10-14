@@ -1043,6 +1043,17 @@ point elsewhere. Both suppress the diagnostic on *cancellation*: the wait ends, 
 the test. Design:
 `docs/specs/2026-08-13-poller-suite-clock-migration-design.md`.
 
+**Two strict helpers cover the shapes a single arming cannot.**
+`requireSleepersArmed(count:)` waits until that many sleepers are registered at
+once, released by the registration that reaches the count — use it before
+advancing past several timers armed together. `advanceUntil(_:by:)` steps a
+re-arming loop one armed sleeper at a time until its condition holds; it never
+advances with an empty ledger, throws `NoSleeperArmed` when nothing re-arms,
+throws again once `maxSteps` advances pass with the loop still re-arming, and
+watches the condition while waiting so a loop whose last tick does not re-arm
+still ends the call. Design:
+`docs/specs/2026-10-14-retire-polling-test-clock-design.md` §4.
+
 **Migrating a `TestClock` suite, the real work is not the clock swap.** It is
 replacing clock-state inference with the observable the test already holds: a
 poller suite that asked `checkSuspension()` whether its sleep had ended was reading a
