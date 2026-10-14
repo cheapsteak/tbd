@@ -1292,8 +1292,7 @@ extension AppState {
     /// what takes the veil down.
     private func awaitTransportMoveAdoption(_ ids: [UUID]) async {
         var waited: Duration = .zero
-        // DELIBERATE BREAK (reverted next commit): the bound fires late.
-        while waited < Self.transportMoveAdoptionBound * 2, !Task.isCancelled,
+        while waited < Self.transportMoveAdoptionBound, !Task.isCancelled,
               ids.contains(where: { switchingAccountTerminals[$0]?.isTransportMove == true }) {
             try? await transportMoveClock.sleep(for: Self.transportMovePollInterval)
             waited += Self.transportMovePollInterval

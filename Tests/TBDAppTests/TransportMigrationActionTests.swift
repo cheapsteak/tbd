@@ -435,11 +435,6 @@ struct TransportMigrationRaceTests {
         try await withAppState { state in
             let clock = EventDrivenTestClock()
             let row = setUp(state, clock: clock)
-            // DELIBERATE BREAK (reverted next commit): the veil ends on the reply.
-            state.terminalTransportMigrator = { @MainActor _ in
-                state.switchingAccountTerminals[row.id] = nil
-                return TerminalMigrateTransportResult(migrated: [row.id], skipped: [], refused: [])
-            }
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
             // The reply has landed and the veil is waiting on adoption. A reply
             // that ended the veil would never reach this sleep.
