@@ -19,15 +19,24 @@
 #
 # Safety rails applied to every worktree before anything is reaped:
 #   - never reap a git-worktree-locked worktree (in-use signal from Claude Code)
+#   - never reap a worktree whose .build holds the executable of a live process
+#     (a running TBDDaemon/TBDApp/TBDHolder; read from the one ps pass)
 #   - never reap a worktree that is the cwd of a live process (one lsof -d cwd pass)
 #   - never reap a worktree with uncommitted changes (git status --porcelain)
 #   - never reap a target touched within RECLAIM_ACTIVE_GRACE (recency guard)
 #   - never reap a worktree with a running swift-* build process
 #
+# The live-process probe fails closed: when lsof cannot be resolved, or reports
+# no cwd at all, every worktree counts as live and the run reclaims nothing.
+# Every live process has a cwd, so an empty answer means a broken probe, never
+# an idle machine, and reading it as "nothing is live" would wave every
+# worktree past the rail that protects a running session.
+#
 # Test seams (env):
 #   RECLAIM_WT_JSON     file with `tbd worktree list --json` output (default: run the CLI)
 #   RECLAIM_PS_CMD      command emitting `pid args` lines   (default: ps -axo pid,args)
-#   RECLAIM_LSOF_CMD    command emitting `lsof -d cwd -Fn`  (default: lsof -d cwd -Fn)
+#   RECLAIM_LSOF_CMD    command emitting `lsof -d cwd -Fn`  (default: lsof -d cwd -Fn,
+#                       resolved from PATH and then from RECLAIM_LSOF_CANDIDATES)
 #   RECLAIM_WORKTREE_LIST_CMD  command emitting `git worktree list --porcelain` output
 #                       (default: git -C WORKTREE worktree list --porcelain)
 #   RECLAIM_T1_SECONDS  Tier-1 (index-build) idle threshold (default 21600 = 6h)
@@ -53,6 +62,17 @@ RECLAIM_OPTOUT_FILE="${RECLAIM_OPTOUT_FILE:-.tbd-reclaim-optout}"
 # when the script is sourced by the test harness.
 LIVE_CWDS=""
 
+# 1 once the live-cwd probe has both run and produced data; set by scan_live_cwds().
+# While it is 0 the live-cwd rail knows nothing, so main() treats every worktree
+# as live.
+LIVE_OK=0
+
+# Absolute locations searched for lsof when PATH does not resolve it. launchd
+# hands an agent its own PATH, and /usr/sbin — where macOS keeps lsof — is easy
+# to leave off it; resolving by PATH alone lets a short PATH silently disable
+# the live-cwd rail.
+RECLAIM_LSOF_CANDIDATES=(/usr/sbin/lsof /usr/bin/lsof /usr/local/bin/lsof /opt/homebrew/bin/lsof)
+
 # Dependency-install dirs reaped alongside .build at Tier 2. Kept in one place so
 # plan/reap/recency-guard all agree on the set.
 INSTALL_DIRS=(node_modules .terraform)
@@ -68,7 +88,21 @@ source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"
 _now()           { printf '%s\n' "${RECLAIM_NOW:-$(date +%s)}"; }
 _worktree_json() { if [[ -n "${RECLAIM_WT_JSON:-}" ]]; then cat "$RECLAIM_WT_JSON"; else tbd worktree list --json; fi; }
 _ps_lines()      { if [[ -n "${RECLAIM_PS_CMD:-}" ]]; then eval "$RECLAIM_PS_CMD"; else ps -axo pid,args; fi; }
-_lsof_lines()    { if [[ -n "${RECLAIM_LSOF_CMD:-}" ]]; then eval "$RECLAIM_LSOF_CMD"; else lsof -d cwd -Fn 2>/dev/null; fi; }
+# _lsof_bin -> the lsof to run, from PATH first and then RECLAIM_LSOF_CANDIDATES.
+# Nonzero exit when the tool is nowhere to be found.
+_lsof_bin() {
+  local p
+  if p="$(command -v lsof 2>/dev/null)" && [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+  for p in "${RECLAIM_LSOF_CANDIDATES[@]}"; do
+    [[ -x "$p" ]] && { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+_lsof_lines()    { if [[ -n "${RECLAIM_LSOF_CMD:-}" ]]; then eval "$RECLAIM_LSOF_CMD"; else local b; b="$(_lsof_bin)" || return 1; "$b" -d cwd -Fn 2>/dev/null; fi; }
+# _lsof_available -> exit 0 when the live-cwd probe can run at all. An injected
+# seam counts as available; otherwise the tool itself has to resolve. Mirrors
+# _lsof_available in scripts/sweep-foreign-worktrees.sh.
+_lsof_available() { [[ -n "${RECLAIM_LSOF_CMD:-}" ]] || _lsof_bin >/dev/null; }
 _worktree_list_lines() { if [[ -n "${RECLAIM_WORKTREE_LIST_CMD:-}" ]]; then eval "$RECLAIM_WORKTREE_LIST_CMD"; else git -C "$1" worktree list --porcelain 2>/dev/null; fi; }
 
 # --- helpers -----------------------------------------------------------------
@@ -169,6 +203,47 @@ is_live_cwd() {
     [[ -n "$line" ]] || continue
     [[ "$line" == "$wt" || "$line" == "$wt"/* ]] && return 0
   done <<< "$LIVE_CWDS"
+  return 1
+}
+
+# scan_live_cwds -> sets LIVE_CWDS, and LIVE_OK=1 only when the answer can be
+# trusted. Fails closed: an lsof that cannot be resolved, or a probe that runs
+# and reports no cwd at all, both leave LIVE_OK=0 and main() then treats every
+# worktree as live. The empty result is itself the failure signal, because a
+# working probe always reports at least this script's own cwd. Mirrors
+# scan_live() in scripts/sweep-foreign-worktrees.sh.
+scan_live_cwds() {
+  LIVE_OK=0; LIVE_CWDS=""
+  _lsof_available || return 0
+  LIVE_CWDS="$(live_cwds)"
+  [[ -n "$LIVE_CWDS" ]] || return 0
+  LIVE_OK=1
+}
+
+# has_live_binary WORKTREE -> exit 0 if a live process is executing a binary
+# under <WORKTREE>/.build. A running TBDDaemon/TBDApp/TBDHolder matches no other
+# rail: it is not a build process, and a daemon's own cwd is /, so the live-cwd
+# rail cannot see it either — yet deleting the .build it was launched from
+# leaves a process that can no longer spawn its own helpers. Reads the same
+# `ps` seam as has_active_build rather than lsof, so no missing external tool
+# can switch this rail off. Matching is pure glob against the command's first
+# field, anchored at "<wt>/.build/": a worktree path may contain regex
+# metacharacters, and a sibling worktree whose path merely shares a prefix must
+# never protect this one.
+has_live_binary() {
+  local wt raw lines cmd
+  raw="${1%/}"
+  [[ -n "$raw" ]] || return 1
+  wt="$(canon_path "$raw")"
+  lines="$(_ps_lines)" || true
+  [[ -n "$lines" ]] || return 1
+  while read -r _ cmd; do
+    [[ -n "$cmd" ]] || continue
+    # Both spellings: a process's argv carries whatever path it was launched
+    # with, which need not be the canonical one when the worktree is listed
+    # through a symlink or an unnormalized path.
+    [[ "$cmd" == "$wt"/.build/* || "$cmd" == "$raw"/.build/* ]] && return 0
+  done <<< "$lines"
   return 1
 }
 
@@ -355,7 +430,12 @@ main() {
   local plan_file; plan_file="$(mktemp)"
 
   # One lsof pass for the whole run — the live-cwd gate for every worktree.
-  LIVE_CWDS="$(live_cwds)"
+  # It fails closed: a probe that could not run, or ran and found no cwd at
+  # all, leaves LIVE_OK at 0 and every worktree is then treated as live.
+  scan_live_cwds
+  if (( LIVE_OK == 0 )); then
+    log "WARNING: live-process probe produced no cwds (lsof unavailable or unreadable) — treating EVERY worktree as live; nothing will be reclaimed this run"
+  fi
 
   # Canonicalize the exclusion once up front; per-worktree paths are
   # canonicalized in the loop so symlink/trailing-slash/relative variants of
@@ -376,6 +456,8 @@ main() {
     fi
     if reclaim_opted_out "$wt"; then echo "SKIP opted-out $wt"; continue; fi
     if is_worktree_locked "$wt"; then echo "SKIP locked $wt"; continue; fi
+    if has_live_binary "$wt"; then echo "SKIP live-binary $wt"; continue; fi
+    if (( LIVE_OK == 0 )); then echo "SKIP live-unknown $wt"; continue; fi
     if is_live_cwd "$wt"; then echo "SKIP live-cwd $wt"; continue; fi
     if is_dirty "$wt"; then echo "SKIP dirty $wt"; continue; fi
     has_reclaimable "$wt" || continue
@@ -389,6 +471,9 @@ main() {
       case "$tier" in
         tier1|tier2|dsym)
           if has_active_build "$path"; then log "skip (now active): $path"; continue; fi
+          # A daemon or holder can be started from this .build in the window
+          # between the plan and the reap, so the rail is re-read here too.
+          if has_live_binary "$path"; then log "skip (live binary): $path"; continue; fi
           # Defense-in-depth: has_active_build's ps allowlist misses the dependency
           # fetch phase (top-level swift-build carries no worktree path; its git
           # children do the writing). A live fetch/build/index touches .build
