@@ -932,6 +932,7 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
+                    await sessionTitles.forget(terminalID: terminal.id)
                     logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)

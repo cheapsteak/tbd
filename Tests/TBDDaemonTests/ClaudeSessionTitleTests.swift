@@ -35,7 +35,7 @@ struct ClaudeSessionTitleTests {
     ) -> String? {
         ClaudeSessionTitle.wanted(
             displayName: name, terminalID: target.id, terminals: terminals,
-            tabLabels: tabs, appliedTitles: applied)
+            tabLabels: tabs, heldTitles: applied)
     }
 
     @Test("the first Claude terminal gets the bare display name")
@@ -192,7 +192,7 @@ struct ClaudeSessionTitleTests {
         let applied = [survivor.id: "acme-feature · 2"]
         #expect(ClaudeSessionTitle.wanted(
             displayName: "acme-feature", terminalID: planned,
-            terminals: [survivor], appliedTitles: applied) == "acme-feature · 3")
+            terminals: [survivor], heldTitles: applied) == "acme-feature · 3")
         // The survivor's own entry never blocks its own title.
         #expect(title(survivor, in: [survivor], applied: applied) == "acme-feature")
     }
@@ -212,12 +212,14 @@ struct ClaudeSessionTitleTests {
             applied: [first.id: "acme-feature · 2"]) == "acme-feature · 3")
     }
 
-    @Test("an entry for a terminal with no row does not block a title")
-    func staleEntryIsIgnored() {
+    @Test("an entry for a terminal missing from the row snapshot still blocks a title")
+    func entryWithoutARowBlocks() {
+        // A concurrent spawn confirmed after this caller read the rows: its
+        // row is not in the snapshot, but its title is taken.
         let first = terminal(0)
         let second = terminal(1)
         #expect(title(second, in: [first, second], applied: [UUID(): "acme-feature · 2"])
-            == "acme-feature · 2")
+            == "acme-feature · 3")
     }
 
     @Test("a title reserved by a spawn in flight blocks another, with or without a row")
@@ -227,12 +229,12 @@ struct ClaudeSessionTitleTests {
         // Another spawn in flight, whose row is not written yet, holds ` · 2`.
         #expect(ClaudeSessionTitle.wanted(
             displayName: "acme-feature", terminalID: planned,
-            terminals: [first], reservedTitles: [UUID(): "acme-feature · 2"])
+            terminals: [first], heldTitles: [UUID(): "acme-feature · 2"])
             == "acme-feature · 3")
         // The target's own reservation never blocks its own title.
         #expect(ClaudeSessionTitle.wanted(
             displayName: "acme-feature", terminalID: planned,
-            terminals: [first], reservedTitles: [planned: "acme-feature · 2"])
+            terminals: [first], heldTitles: [planned: "acme-feature · 2"])
             == "acme-feature · 2")
     }
 
@@ -241,9 +243,53 @@ struct ClaudeSessionTitleTests {
     private func reserve(
         _ store: ClaudeSessionTitleStore, _ terminalID: UUID, after terminals: [Terminal]
     ) async -> ClaudeSpawnTitle {
-        await store.reserve(
+        return await store.reserve(
             terminalID: terminalID, worktreeID: worktreeID, displayName: "acme-feature",
             terminals: terminals, tabLabels: [:])
+    }
+
+    @Test("a confirmed title whose row the snapshot missed blocks a reservation")
+    func confirmedEntryOutsideTheSnapshotBlocks() async {
+        let store = ClaudeSessionTitleStore()
+        let first = terminal(0)
+        // Another spawn reserved and confirmed ` · 2`; this caller's row
+        // snapshot predates that spawn's row.
+        let other = await reserve(store, UUID(), after: [first])
+        await store.confirm(other)
+        #expect(other.name == "acme-feature · 2")
+        #expect(await reserve(store, UUID(), after: [first]).name == "acme-feature · 3")
+        // A failed rows read (an empty snapshot) still bumps past it.
+        let unread = await reserve(store, UUID(), after: [])
+        #expect(unread.name == "acme-feature")
+        #expect(await reserve(store, UUID(), after: []).name == "acme-feature · 3")
+    }
+
+    @Test("forgetting a terminal frees its title")
+    func forgetFreesTheTitle() async {
+        let store = ClaudeSessionTitleStore()
+        let first = terminal(0)
+        let closed = await reserve(store, UUID(), after: [first])
+        await store.confirm(closed)
+        await store.forget(terminalID: closed.terminalID)
+        #expect(await reserve(store, UUID(), after: [first]).name == "acme-feature · 2")
+    }
+
+    @Test("a newer reservation supersedes an older one of the same terminal")
+    func newerReservationSupersedes() async {
+        let store = ClaudeSessionTitleStore()
+        let row = terminal(0)
+        await store.record(terminalID: row.id, worktreeID: worktreeID, title: "old-name")
+        let older = await reserve(store, row.id, after: [row])
+        let newer = await reserve(store, row.id, after: [row])
+
+        // The older's confirm is a no-op: the newer still holds the entry.
+        await store.confirm(older)
+        #expect(await store.isReserved(terminalID: row.id))
+
+        // The newer's release restores the entry from before both.
+        await store.release(newer)
+        #expect(await store.lastApplied(terminalID: row.id) == "old-name")
+        #expect(await store.isReserved(terminalID: row.id) == false)
     }
 
     @Test("two spawns reserved before either row exists get different titles")
@@ -315,13 +361,6 @@ struct ClaudeSessionTitleTests {
         await store.forget(terminalID: spawn.terminalID)
         await store.confirm(spawn)
         #expect(await store.lastApplied(terminalID: spawn.terminalID) == nil)
-    }
-
-    @Test("only a wake that minted an incarnation launched a session")
-    func wakeLaunchedSessionReadsTheIncarnation() {
-        #expect(HibernationCoordinator.wakeLaunchedSession(.ok(sessionIncarnationID: UUID())))
-        #expect(!HibernationCoordinator.wakeLaunchedSession(.ok(sessionIncarnationID: nil)))
-        #expect(!HibernationCoordinator.wakeLaunchedSession(.notFound))
     }
 
     @Test("claim returns a title only when it differs from the last one given")

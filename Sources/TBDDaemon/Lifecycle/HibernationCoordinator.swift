@@ -225,8 +225,9 @@ public actor HibernationCoordinator {
     private let configDirManager: ClaudeProfileConfigDirManager
     /// The title each Claude session was last given — shared with the
     /// lifecycle and router, so a wake's `--name` is what the next prompt's
-    /// title is compared against. See `ClaudeSessionTitle`.
-    private let sessionTitles: ClaudeSessionTitleStore
+    /// title is compared against. See `ClaudeSessionTitle`. Not private: the
+    /// holder wake in `HibernationCoordinator+Holder` settles its reservation.
+    let sessionTitles: ClaudeSessionTitleStore
     /// Default input activity tracker. Wired post-construction by Daemon.swift
     /// to the shared instance from the input router so both use the same tracker.
     var inputActivity: InputActivityTracker
@@ -1903,8 +1904,9 @@ public actor HibernationCoordinator {
             overlayPath: overlayPath,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
-        // Reserved here; confirmed below only when the wake really launched
-        // a session, and released on every other outcome.
+        // Reserved here; confirmed only once the wake has launched a session
+        // under it — even when a later step fails, since that session carries
+        // the name — and released on every other outcome.
         let spawnTitle = await ClaudeSessionTitle.forSpawn(
             db: db, store: sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
@@ -1953,7 +1955,7 @@ public actor HibernationCoordinator {
         // WHAT to resume and that is transport-independent. Below is the tmux
         // mechanic.
         if terminal.transport == .holder {
-            let result = await wakeHolderSection(
+            return await wakeHolderSection(
                 terminal: terminal,
                 worktree: worktree,
                 sessionID: sessionID,
@@ -1965,17 +1967,8 @@ public actor HibernationCoordinator {
                 // spawn holds both the env and the token it would have to undo.
                 attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
-                rows: rows)
-            // Only a wake that minted a new incarnation launched anything. One
-            // that adopted a holder already running started nothing, so that
-            // session still carries whatever name it had, and the store keeps
-            // the entry it had — the next prompt then delivers the wanted title.
-            if Self.wakeLaunchedSession(result) {
-                await sessionTitles.confirm(spawnTitle)
-            } else {
-                await sessionTitles.release(spawnTitle)
-            }
-            return result
+                rows: rows,
+                spawnTitle: spawnTitle)
         }
 
         // The window/pane the rest of wake must reference: the original ones
@@ -2023,6 +2016,11 @@ public actor HibernationCoordinator {
         case .failed(let result):
             await sessionTitles.release(spawnTitle)
             return result
+        case .launchedUnrecorded(let result):
+            // The replacement is running under the reserved name; only the
+            // row's un-park failed. The session carries the name, so confirm.
+            await sessionTitles.confirm(spawnTitle)
+            return result
         case .respawned(
             let newPaneID,
             let newWindowID,
@@ -2056,14 +2054,6 @@ public actor HibernationCoordinator {
         return .ok(sessionIncarnationID: liveIncarnationID)
     }
 
-    /// Whether a wake launched a new agent process. Only `.ok` carrying the
-    /// incarnation the wake minted does: `.ok` without one is a holder wake
-    /// that adopted a session already running and started nothing.
-    static func wakeLaunchedSession(_ result: WakeResult) -> Bool {
-        if case .ok(let incarnationID) = result { return incarnationID != nil }
-        return false
-    }
-
     /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of
     /// `wake()` should reference, or the `WakeResult` to return verbatim.
     private enum WakeTmuxOutcome {
@@ -2074,6 +2064,10 @@ public actor HibernationCoordinator {
             incarnationID: UUID
         )
         case failed(WakeResult)
+        /// The replacement agent launched, but clearing the parked marker
+        /// failed afterwards. Returned to the caller verbatim like `.failed`,
+        /// but the session is running under this wake's `--name`.
+        case launchedUnrecorded(WakeResult)
     }
 
     /// The decide-then-mutate tmux section of `wake()` — ownership check,
@@ -2152,7 +2146,7 @@ public actor HibernationCoordinator {
                     // detects parked+live-agent and clears this marker without
                     // erasing a SessionStart that arrived during launch.
                     logger.warning("wake: launched the replacement agent for terminal \(terminal.id, privacy: .public), but failed to clear its parked marker: \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(
+                    return .launchedUnrecorded(.respawnFailed(
                         reason: "replacement agent launched, but clearing the parked marker failed: \(error.localizedDescription)"))
                 }
                 return .respawned(
@@ -2272,7 +2266,7 @@ public actor HibernationCoordinator {
                     // Keep the live replacement parked for startup
                     // reconciliation; identity and process token stay intact.
                     logger.warning("wake: launched a replacement agent in \(window.windowID, privacy: .public), but failed to clear the parked marker for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(
+                    return .launchedUnrecorded(.respawnFailed(
                         reason: "replacement agent launched in \(window.windowID), but clearing the parked marker failed: \(error.localizedDescription)"))
                 }
                 logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")

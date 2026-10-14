@@ -2720,7 +2720,10 @@ extension RPCRouter {
 
         // The session name is the swapped tab's: the new tab on a fork, the
         // same row on an in-place swap. Reserved here, confirmed only once
-        // the swap's spawn has succeeded and released otherwise, below.
+        // the swap's spawn has succeeded and released otherwise, below. The
+        // holder arm's wake settles it itself, since only the wake knows
+        // whether a session launched under it; a confirm or release after
+        // that is a no-op.
         let swapSpawnTitle = await ClaudeSessionTitle.forSpawn(
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
@@ -2754,6 +2757,7 @@ extension RPCRouter {
         // has to be carried out separately, or the record would call a failed
         // respawn `dispatched`.
         var respawnFailure: String?
+        let isHolderInPlace = mode == .inPlace && oldTerminal.transport == .holder
         do {
             switch mode {
             case .fork:
@@ -2786,7 +2790,8 @@ extension RPCRouter {
                     cols: resolvedCols,
                     rows: resolvedRows,
                     resumeProjectsRoot: resumeProjectsRoot,
-                    composeSpawn: composeSpawn)
+                    composeSpawn: composeSpawn,
+                    spawnTitle: swapSpawnTitle)
                 response = outcome.response
                 respawnFailure = outcome.failure
 
@@ -2835,7 +2840,11 @@ extension RPCRouter {
             // The only unsuccessful response either swap branch returns is
             // "Terminal vanished after swap" — the row it respawned is gone.
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
-            if response.success {
+            // The holder arm answers success after a wake that adopted a live
+            // holder and launched nothing, so its success says nothing about
+            // the title: its wake has settled the reservation already, and
+            // this release only covers an exit before the wake was reached.
+            if response.success, !isHolderInPlace {
                 await lifecycle.sessionTitles.confirm(swapSpawnTitle)
             } else {
                 await lifecycle.sessionTitles.release(swapSpawnTitle)
@@ -3079,7 +3088,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
+        spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // THE CLAIM, ahead of the park and released after the wake.
         //
@@ -3118,7 +3128,8 @@ extension RPCRouter {
                 cols: cols,
                 rows: rows,
                 resumeProjectsRoot: resumeProjectsRoot,
-                composeSpawn: composeSpawn)
+                composeSpawn: composeSpawn,
+                spawnTitle: spawnTitle)
             await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
             return outcome
         } catch {
@@ -3142,7 +3153,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
+        spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // 1. PARK, through the coordinator's own holder park under the
         //    `.profileSwap` policy: the ladder and its rollback unchanged, the
@@ -3254,7 +3266,8 @@ extension RPCRouter {
             env: env,
             attachment: attachment.withEnvironment(sensitiveEnv),
             cols: cols,
-            rows: rows)
+            rows: rows,
+            spawnTitle: spawnTitle)
 
         guard let updated = try await db.terminals.get(id: target.id) else {
             return (RPCResponse(error: "Terminal vanished after swap"), nil)

@@ -13,10 +13,10 @@ import TBDShared
 ///   user has renamed its tab (`tab.setLabel`), otherwise ` · <n>` with `n`
 ///   its 1-based position among the worktree's counted Claude terminals.
 ///   Profile login terminals are not counted; parked ones are.
-/// - **Uniqueness:** a title another live terminal in the worktree was last
-///   given, or one a spawn in flight has reserved, is skipped by bumping the
-///   number, so two sessions never share a peer address while one of them
-///   has not yet re-prompted.
+/// - **Uniqueness:** a title the store holds for any other terminal in the
+///   worktree — given to it, or reserved by a spawn of it in flight — is
+///   skipped by bumping the number, so two sessions never share a peer
+///   address while one of them has not yet re-prompted.
 ///
 /// See `docs/specs/2026-10-14-session-title-sync-design.md`.
 enum ClaudeSessionTitle {
@@ -60,19 +60,19 @@ enum ClaudeSessionTitle {
     ///     terminal's tab shares the terminal's id, so a terminal that roots a
     ///     tab finds its name here. A terminal split into another tab's layout
     ///     roots no tab of its own and is numbered.
-    ///   - appliedTitles: the title each terminal was last given. Entries for
-    ///     the target and for terminals with no row in `terminals` are
-    ///     ignored, so a stale entry can never block a title.
-    ///   - reservedTitles: the titles reserved by spawns still in flight.
-    ///     Their rows are not written yet, so these block a title whether or
-    ///     not `terminals` has a row for them; only the target's is ignored.
+    ///   - heldTitles: every title the store holds in the worktree, keyed by
+    ///     terminal id — the title each terminal was last given and the ones
+    ///     reserved by spawns still in flight. All but the target's own block
+    ///     a title, whether or not `terminals` has a row for them: a spawn's
+    ///     row is written only after it launches, and a snapshot of the rows
+    ///     taken before a concurrent spawn confirmed would miss that spawn.
+    ///     Entries leave with their rows (`ClaudeSessionTitleStore.forget`).
     static func wanted(
         displayName: String,
         terminalID: UUID,
         terminals: [Terminal],
         tabLabels: [UUID: String] = [:],
-        appliedTitles: [UUID: String] = [:],
-        reservedTitles: [UUID: String] = [:]
+        heldTitles: [UUID: String] = [:]
     ) -> String? {
         guard let base = ClaudeSpawnCommandBuilder.sanitizedSessionName(displayName) else {
             return nil
@@ -83,10 +83,7 @@ enum ClaudeSessionTitle {
             .filter { $0.id == terminalID || isCountedClaudeTerminal($0) }
             .sorted { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
         let position = claude.firstIndex(where: { $0.id == terminalID }) ?? claude.count
-        let liveIDs = Set(terminals.map(\.id))
-        let taken = Set(appliedTitles.compactMap { entry in
-            entry.key != terminalID && liveIDs.contains(entry.key) ? entry.value : nil
-        }).union(reservedTitles.compactMap { entry in
+        let taken = Set(heldTitles.compactMap { entry in
             entry.key != terminalID ? entry.value : nil
         })
 
@@ -235,12 +232,15 @@ struct ClaudeSpawnTitle: Sendable, Equatable {
 /// it displaced — when nothing launched. Computing a title and reserving it
 /// happen in one actor call, so two spawns can never both take the same one.
 ///
+/// Every entry in a worktree, confirmed or reserved, blocks its title for
+/// the worktree's other terminals, so entries must leave with their rows:
+/// every path that deletes terminal rows calls `forget`. Rows removed by a
+/// cascade from a deleted worktree leave entries behind that nothing reads,
+/// since a deleted worktree gets no further spawns or prompts.
+///
 /// In memory only: after a daemon restart every live session gets its wanted
 /// title once, on its next prompt. Persisting it would cost a column and a
-/// migration for a rare, cosmetic case. Entries leave with their rows, on the
-/// paths that delete terminal rows; a confirmed entry those paths miss is
-/// harmless, because `ClaudeSessionTitle.wanted` only reads confirmed
-/// entries whose row still exists.
+/// migration for a rare, cosmetic case.
 public actor ClaudeSessionTitleStore {
     private struct Entry: Sendable {
         let worktreeID: UUID
@@ -295,20 +295,20 @@ public actor ClaudeSessionTitleStore {
         terminals: [Terminal],
         tabLabels: [UUID: String]
     ) -> ClaudeSpawnTitle {
-        let taken = takenTitles(worktreeID: worktreeID)
         let title = ClaudeSessionTitle.wanted(
             displayName: displayName,
             terminalID: terminalID,
             terminals: terminals,
             tabLabels: tabLabels,
-            appliedTitles: taken.applied,
-            reservedTitles: taken.reserved)
+            heldTitles: titles(worktreeID: worktreeID))
         let token = UUID()
-        // What a release restores is the last confirmed entry, even when
-        // another reservation of the same terminal sits on top of it.
+        // A newer reservation supersedes an older one of the same terminal:
+        // it takes over the entry the older displaced, so the older's
+        // confirm or release becomes a no-op and this one's release restores
+        // the entry from before both.
         var confirmed = entries[terminalID]
-        if let pending = confirmed?.reservation {
-            confirmed = displaced[pending]
+        if let older = confirmed?.reservation {
+            confirmed = displaced.removeValue(forKey: older)
         }
         if let confirmed {
             displaced[token] = confirmed
@@ -356,42 +356,27 @@ public actor ClaudeSessionTitleStore {
         tabLabels: [UUID: String]
     ) -> String? {
         guard entries[terminal.id]?.reservation == nil else { return nil }
-        let taken = takenTitles(worktreeID: terminal.worktreeID)
         guard let title = ClaudeSessionTitle.wanted(
             displayName: displayName,
             terminalID: terminal.id,
             terminals: terminals,
             tabLabels: tabLabels,
-            appliedTitles: taken.applied,
-            reservedTitles: taken.reserved)
+            heldTitles: titles(worktreeID: terminal.worktreeID))
         else { return nil }
         return claim(terminalID: terminal.id, worktreeID: terminal.worktreeID, title: title)
     }
 
+    /// Drop `terminalID`'s entry, with whatever a reservation of it holds.
+    /// Called on every path that deletes the terminal's row.
     func forget(terminalID: UUID) {
+        if let token = entries[terminalID]?.reservation {
+            displaced[token] = nil
+        }
         entries[terminalID] = nil
     }
 
     func forget(worktreeID: UUID) {
         entries = entries.filter { $0.value.worktreeID != worktreeID }
         displaced = displaced.filter { $0.value.worktreeID != worktreeID }
-    }
-
-    /// The worktree's confirmed titles and its reserved ones, apart: the
-    /// first count only while their row exists, the second always.
-    private func takenTitles(
-        worktreeID: UUID
-    ) -> (applied: [UUID: String], reserved: [UUID: String]) {
-        var applied: [UUID: String] = [:]
-        var reserved: [UUID: String] = [:]
-        for (id, entry) in entries where entry.worktreeID == worktreeID {
-            guard let title = entry.title else { continue }
-            if entry.reservation == nil {
-                applied[id] = title
-            } else {
-                reserved[id] = title
-            }
-        }
-        return (applied, reserved)
     }
 }

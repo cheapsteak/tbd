@@ -1,6 +1,7 @@
 import Clocks
 import Testing
 import Foundation
+import GRDB
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -1301,6 +1302,42 @@ struct HibernationCoordinatorTests {
             actuationLog: makeTestActuationLog())
         #expect((await coord.wake(terminalID: terminalID)).isOk)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+    }
+
+    /// A wake whose replacement agent launched but whose row could not be
+    /// un-parked still launched a session under its `--name`, so the title
+    /// store must hold that name as given — releasing it would put back an
+    /// entry the running session no longer carries.
+    @Test func wakeThatLaunchedButCouldNotUnparkConfirmsItsTitle() async throws {
+        let (db, worktreeID, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER reject_unpark BEFORE UPDATE ON terminal
+                WHEN OLD.hibernatedAt IS NOT NULL AND NEW.hibernatedAt IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'unpark rejected');
+                END;
+                """)
+        }
+        let titles = ClaudeSessionTitleStore()
+        await titles.record(terminalID: terminalID, worktreeID: worktreeID, title: "before-wake")
+        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
+                               dryRunPaneSendTarget: { _, _ in .absent })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: titles,
+            actuationLog: makeTestActuationLog())
+
+        let result = await coord.wake(terminalID: terminalID)
+        guard case .respawnFailed(let reason) = result, reason.contains("launched") else {
+            Issue.record("expected the launched-but-still-parked failure, got \(result)")
+            return
+        }
+        // The worktree's display name, the only Claude terminal's title.
+        #expect(await titles.lastApplied(terminalID: terminalID) == "wt",
+                "a wake that launched under its --name did not keep that name")
+        #expect(await titles.isReserved(terminalID: terminalID) == false)
     }
 
     @Test func wakeUnknownTerminalNotFound() async throws {
