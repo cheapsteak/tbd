@@ -373,9 +373,11 @@ A server reports its URLs by writing a running file into the shared directory
 (contract: [`docs/dev-servers.md`](dev-servers.md)). `OrphanGC` is its named reconciler, under
 `gcEnabled` alone, with no soak flag. The leg only reads and deletes files; it never signals a
 process. A file is deleted (`REAP dev-server-file`) only when its process is gone, by pid and
-start time. Three things keep a file:
+start time. Four things keep a file:
 
 - **Live** (`KEEP live`) – the process exists, is not a zombie, and its start time matches.
+- **Unknown** (`KEEP unknown`) – the process probe failed: the kernel read errored or returned
+  no start time. A failed read is not a dead process, so the file is kept whatever its age.
 - **Inside the grace** (`KEEP grace`) – the file's modification date is younger than
   `gcGraceSeconds`, or cannot be read.
 - **Malformed or newer version** – a file TBD cannot decode has no defined liveness, and another
