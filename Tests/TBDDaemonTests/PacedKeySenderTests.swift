@@ -94,14 +94,21 @@ struct PacedKeySenderTests {
 
     /// The pause is real virtual time, not a yield: a send that has not been
     /// advanced past its pause has typed only the keys before it.
+    ///
+    /// On `EventDrivenTestClock` for the same reason as `pacedInOrder` (#1069):
+    /// `TestClock.waitForSuspension()` polls `checkSuspension()`, whose
+    /// megaYield starved under the saturated fast pass and reported "no task
+    /// was suspended" for a sleep that had armed (#1070). Arming is signalled
+    /// from the sleep's own registration instead, and "Escape" is recorded
+    /// before that sleep is reached, so the snapshot below is exact.
     @Test("an un-advanced pause holds the sequence at the key it reached")
     func pauseHoldsTheSequence() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
 
         async let sent: Void = sender.send(["Escape", "Enter"]) { recorder.record($0) }
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(recorder.keys == ["Escape"])
 
         await clock.advance(by: PacedKeySender.interKeyPause)
