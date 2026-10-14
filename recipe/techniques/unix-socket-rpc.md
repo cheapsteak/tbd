@@ -10,7 +10,13 @@ The daemon, app, and CLI need to communicate. The protocol must be fast (for rea
 
 ## The technique
 
-Dual transport: Unix domain socket at `~/.tbd/sock` (primary, user-scoped permissions) and HTTP on localhost (port stored in `~/.tbd/port`, for debugging with curl). Both use the same JSON-RPC style protocol with newline-delimited messages.
+Dual transport: Unix domain socket at `~/tbd/sock` (primary, user-scoped permissions) and HTTP on localhost (port stored in `~/tbd/port`, for debugging with curl). HTTP requests must carry an `X-TBD-Token` header with the contents of `~/tbd/http-token`; requests with an `Origin` header or a `Host` other than the loopback address and port are refused. For example:
+
+```
+curl -s -H "X-TBD-Token: $(cat ~/tbd/http-token)" -d '{"method":"daemon.status","params":"{}"}' "http://127.0.0.1:$(cat ~/tbd/port)/rpc"
+```
+
+Both use the same JSON-RPC style protocol with newline-delimited messages.
 
 The `state.subscribe` method returns a persistent streaming connection that pushes state deltas as they occur — the app uses this for reactive UI updates.
 

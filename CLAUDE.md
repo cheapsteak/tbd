@@ -128,7 +128,7 @@ The database stores worktree display names, custom config, and notification hist
 ### Tests must not touch ~/tbd
 `TBDConstants.configDir` and `socketPath` honor two env vars so tests, CI, and concurrent `swift test` runs across worktrees never collide with the live daemon or the developer's real config:
 
-- `TBD_HOME` redirects the base config directory (`~/tbd` by default). Every derived path (`socketPath`, `databasePath`, `pidFilePath`, `portFilePath`, `reposDir`) follows.
+- `TBD_HOME` redirects the base config directory (`~/tbd` by default). Every derived path (`socketPath`, `databasePath`, `pidFilePath`, `portFilePath`, `httpTokenFilePath`, `reposDir`) follows.
 - `TBD_SOCKET_PATH` overrides only the socket — an escape hatch for darwin's ~104-char `sun_path` limit when `TBD_HOME` is a deep tmp path.
 
 Integration-style tests that exercise production code paths which internally read `TBD_HOME` — and thus cannot accept an explicit env dict — may use `setenv("TBD_HOME", "/some/tmp/dir", 1)` (and optionally `TBD_SOCKET_PATH`); for all other cases prefer the injection-seam approach, and see the next paragraph for where `setenv` is permitted. Tests that mutate `UserDefaults` should construct `AppState(userDefaults: UserDefaults(suiteName:))` and tear the suite down with `removePersistentDomain(forName:)` — `UserDefaults.standard` on this unbundled executable is the developer's real `TBDApp.plist`.
