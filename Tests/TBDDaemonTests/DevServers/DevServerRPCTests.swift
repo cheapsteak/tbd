@@ -101,6 +101,7 @@ struct DevServerRPCTests {
         router.devServerEnvironment = ["TBD_HOME": home]
         router.devServerStopper = DevServerStopper(
             killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
+                                         // swiftlint:disable:next no_polling_test_clock - legacy, #1171
                                          pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
             commandRunner: runner)
         router.onDevServersChanged = { changes.bump() }

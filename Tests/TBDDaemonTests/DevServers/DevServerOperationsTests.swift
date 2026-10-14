@@ -27,6 +27,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: inspector, commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
+                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
                                              pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: URL(fileURLWithPath: path + "/files")),
@@ -60,6 +61,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: inspector, commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
+                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
                                              pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: URL(fileURLWithPath: path + "/files")),
@@ -94,6 +96,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: FakeDevServerTabInspector(), commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
+                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
                                              pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: filesDir),
