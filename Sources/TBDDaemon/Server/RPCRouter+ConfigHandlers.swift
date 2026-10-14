@@ -268,7 +268,7 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the hang-stack reclaimer gate — the default-off soak switch for
+    /// Persist the hang-stack reclaimer gate — the switch for
     /// bounding `~/Library/Logs/TBD/hang-stacks/` by age and by count, read on
     /// top of the GC master switch.
     ///
