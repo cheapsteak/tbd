@@ -96,6 +96,7 @@ struct NavigationHistoryPersistenceTests {
 
             let second = AppState(userDefaults: defaults)
             second.restoreSavedSelection(validWorktreeIDs: [p, q, r])
+            #expect(second.selectedWorktreeIDs == [q])
             #expect(second.navigationEntries == [.worktrees([p]), .worktrees([q]), .worktrees([r])])
             #expect(second.navigationIndex == 1)
         }
@@ -116,8 +117,36 @@ struct NavigationHistoryPersistenceTests {
 
             let second = AppState(userDefaults: defaults)
             second.restoreSavedSelection(validWorktreeIDs: [p, q, r, s])
+            #expect(second.selectedWorktreeIDs == [s])
             #expect(second.navigationEntries == [.worktrees([p]), .worktrees([q]), .worktrees([s])])
             #expect(second.navigationIndex == 2)
+        }
+    }
+
+    /// Pins the on-disk format: a literal in the synthesized Codable shape
+    /// must keep decoding, so renaming an entry case or a field (which
+    /// silently empties every saved history) goes red here.
+    @Test func savedFormatFixtureDecodes() {
+        withSuite { defaults in
+            let raw = """
+            {"entries":[\
+            {"worktrees":{"_0":["11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222"]}},\
+            {"repo":{"_0":"33333333-3333-3333-3333-333333333333"}},\
+            {"remoteSession":{"_0":{"provider":"acme","sessionID":"s-1"}}}\
+            ],"index":2}
+            """
+            defaults.set(Data(raw.utf8), forKey: AppState.navigationHistoryKey)
+
+            let state = AppState(userDefaults: defaults)
+            let a = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+            let b = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+            let r = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+            #expect(state.navigationEntries == [
+                .worktrees([a, b]),
+                .repo(r),
+                .remoteSession(RemoteSessionSelection(provider: "acme", sessionID: "s-1")),
+            ])
+            #expect(state.navigationIndex == 2)
         }
     }
 
@@ -207,6 +236,27 @@ struct NavigationHistoryPersistenceTests {
             #expect(state.navigateBackPastArchived(c))
             #expect(reloaded().index == 1)
             #expect(reloaded().entries.count == 3)
+        }
+    }
+
+    @Test func arrowsEnableAfterReposLoad() async {
+        await withSuiteAsync { defaults in
+            let r1 = UUID(), r2 = UUID()
+            let first = AppState(userDefaults: defaults)
+            first.recordNavigation(.repo(r1))
+            first.recordNavigation(.repo(r2))
+
+            let second = AppState(userDefaults: defaults)
+            #expect(second.navigationIndex == 1)
+            #expect(!second.canGoBack) // lists empty at launch
+
+            let repos = [
+                Repo(id: r1, path: "/tmp/r1", displayName: "r1", defaultBranch: "main"),
+                Repo(id: r2, path: "/tmp/r2", displayName: "r2", defaultBranch: "main"),
+            ]
+            second.reposFetcher = { repos }
+            await second.refreshRepos()
+            #expect(second.canGoBack)
         }
     }
 
