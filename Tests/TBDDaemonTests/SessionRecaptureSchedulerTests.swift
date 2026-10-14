@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -10,8 +9,7 @@ import Testing
 struct SessionRecaptureSchedulerTests {
     @Test func persistsDetectedSessionIDAfterFiveSeconds() async throws {
         let fixture = try await makeFixture()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let detectedSessionID = UUID().uuidString
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
@@ -30,8 +28,7 @@ struct SessionRecaptureSchedulerTests {
             expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         await recapture.value
         let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(updated.claudeSessionID == detectedSessionID)
@@ -39,8 +36,7 @@ struct SessionRecaptureSchedulerTests {
 
     @Test func keepsSourceSessionIDWhenDetectionReturnsNil() async throws {
         let fixture = try await makeFixture()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
@@ -55,8 +51,7 @@ struct SessionRecaptureSchedulerTests {
             expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         await recapture.value
         let unchanged = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(unchanged.claudeSessionID == fixture.sourceSessionID)
@@ -64,8 +59,7 @@ struct SessionRecaptureSchedulerTests {
 
     @Test func ignoresCaptureFromAProcessReplacedBeforePersistence() async throws {
         let fixture = try await makeFixture()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let capture = BlockingSessionCapture(result: "stale-captured-session")
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
@@ -79,8 +73,7 @@ struct SessionRecaptureSchedulerTests {
             server: "tbd-recapture",
             expectedIncarnationID: fixture.terminal.sessionIncarnationID)
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         guard await waitUntil({ capture.isBlocked }) else {
             capture.release()
             Issue.record("recapture did not reach the detector")
@@ -104,8 +97,7 @@ struct SessionRecaptureSchedulerTests {
 
     @Test func ignoresCaptureWhileHibernationReplacementIsPending() async throws {
         let fixture = try await makeFixture()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let capture = BlockingSessionCapture(result: "stale-captured-session")
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
@@ -119,8 +111,7 @@ struct SessionRecaptureSchedulerTests {
             server: "tbd-recapture",
             expectedIncarnationID: fixture.terminal.sessionIncarnationID)
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         guard await waitUntil({ capture.isBlocked }) else {
             capture.release()
             await recapture.value
@@ -148,8 +139,7 @@ struct SessionRecaptureSchedulerTests {
     /// still lands.
     @Test func holderChildTargetReachesTheDetectorAndPersists() async throws {
         let fixture = try await makeFixture()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let detectedSessionID = UUID().uuidString
         let seen = ObservedTargets()
         let scheduler = SessionRecaptureScheduler(
@@ -168,8 +158,7 @@ struct SessionRecaptureSchedulerTests {
             expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         await recapture.value
         #expect(seen.all == [.holderChild(pid: 4242)])
         let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))

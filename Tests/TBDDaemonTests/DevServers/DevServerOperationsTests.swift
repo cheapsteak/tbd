@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -27,8 +26,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: inspector, commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
-                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                             pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
+                                             pollInterval: .seconds(5), postKillWait: .zero, clock: EventDrivenTestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: URL(fileURLWithPath: path + "/files")),
             probe: DevServerProcessProbe(info: { _ in nil }), environment: [:])
@@ -61,8 +59,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: inspector, commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
-                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                             pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
+                                             pollInterval: .seconds(5), postKillWait: .zero, clock: EventDrivenTestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: URL(fileURLWithPath: path + "/files")),
             probe: DevServerProcessProbe(info: { _ in nil }), environment: [:])
@@ -96,8 +93,7 @@ struct DevServerOperationsTests {
             db: db, tabInspector: FakeDevServerTabInspector(), commandRunner: runner,
             stopper: DevServerStopper(
                 killer: DevServerGroupKiller(signalling: signalling, grace: .seconds(5),
-                                             // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-                                             pollInterval: .seconds(5), postKillWait: .zero, clock: TestClock()),
+                                             pollInterval: .seconds(5), postKillWait: .zero, clock: EventDrivenTestClock()),
                 commandRunner: runner),
             runningFiles: DevServerRunningFileStore(directory: filesDir),
             probe: DevServerProcessProbe(info: { $0 == 500 ? DevServerProcessInfo(startTime: start, isZombie: false) : nil }),

@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -34,7 +33,7 @@ private final class CountingObservationSource: DeliveryObservationSource, @unche
 }
 
 /// Tier 2 — an in-memory database, a dry-run tmux, a real (temp-directory)
-/// actuation log and a `TestClock`. Proves the two branches of
+/// actuation log and an `EventDrivenTestClock`. Proves the two branches of
 /// `delivery_verification_enabled` at the wiring seam, and — with the verifier
 /// really wired to a router — that an ordinary send costs no transcript read
 /// and that a verified one joins its observation to its own request row.
@@ -202,8 +201,7 @@ struct DeliveryVerificationWiringTests {
         let fixture = try await makeFixture()
         try await fixture.db.config.setDeliveryVerification(enabled: true)
         let source = CountingObservationSource()
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         fixture.router.deliveryVerifier = DeliveryVerifier(
             log: fixture.log, source: source,
             redeliver: { _, _, _, _ in .dispatched }, clock: clock)
@@ -232,8 +230,7 @@ struct DeliveryVerificationWiringTests {
             transcriptPath: transcriptPath)
         try await fixture.db.terminals.setActivityState(
             id: fixture.terminal.id, activityState: .working, source: .derived)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let verifier = DeliveryVerifier(
             log: fixture.log,
             source: DatabaseDeliveryObservationSource(db: fixture.db),
@@ -257,8 +254,7 @@ struct DeliveryVerificationWiringTests {
         jsonl.append(0x0A)
         try jsonl.write(to: URL(fileURLWithPath: transcriptPath))
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(60))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(60))
         await awaitDeliveryCycle(verifier, observed: {
             "\(observations(at: fixture.logPath).count) observation row(s)"
         })

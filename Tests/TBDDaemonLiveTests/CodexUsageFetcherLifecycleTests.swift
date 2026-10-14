@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import Testing
@@ -13,14 +12,13 @@ import TestSupport
 /// target serially on an otherwise-idle machine.
 @Suite("Codex usage fetcher lifecycle", .serialized, .timeLimit(.minutes(1)))
 struct CodexUsageFetcherLifecycleTests {
-    /// Far beyond the suite limit, so only the TestClock can fire the timeout.
+    /// Far beyond the suite limit, so only the `EventDrivenTestClock` can fire the timeout.
     fileprivate static let unreachableTimeout: Duration = .seconds(600)
 
     @Test func virtualTimeoutReturnsTimedOutAndKillsChild() async throws {
         let fixture = try ProcessFixture()
         defer { fixture.cleanup() }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let fetch = Task {
             await fixture.fetcher(clock: clock).fetch()
         }
@@ -28,8 +26,7 @@ struct CodexUsageFetcherLifecycleTests {
         let pid = try await fixture.waitForPID()
         defer { fixture.killIfStillAlive(pid) }
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         let result = await fetch.value
 
         #expect(result.unavailableReason == "Usage timed out")
@@ -40,8 +37,7 @@ struct CodexUsageFetcherLifecycleTests {
         let fixture = try ProcessFixture()
         defer { fixture.cleanup() }
         let fetch = Task {
-            // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-            await fixture.fetcher(clock: TestClock()).fetch()
+            await fixture.fetcher(clock: EventDrivenTestClock()).fetch()
         }
         defer { fetch.cancel() }
         let pid = try await fixture.waitForPID()

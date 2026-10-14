@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -8,7 +7,7 @@ import TBDShared
 /// Tier 1 — `PendingPromptStore`'s open prompts: pairing a `PermissionRequest`
 /// register with its `PreToolUse` note, and every way a prompt resolves
 /// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`, "Daemon:
-/// `PendingPromptStore`"). Each store takes a `TestClock` so neither the 5 s
+/// `PendingPromptStore`"). Each store takes an `EventDrivenTestClock` so neither the 5 s
 /// late-note window nor the 5 s delivery-ack timeout can fire on wall time;
 /// the tests that cross them advance the clock explicitly.
 @Suite(.clockDriven)
@@ -23,8 +22,7 @@ struct PendingPromptResolutionTests {
     // MARK: Helpers
 
     private func makeStore(
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        clock: TestClock<Duration> = TestClock(),
+        clock: EventDrivenTestClock = EventDrivenTestClock(),
         dates: TestDateSource = TestDateSource()
     ) -> PendingPromptStore {
         PendingPromptStore(now: dates.provider, clock: clock)
@@ -183,16 +181,14 @@ struct PendingPromptResolutionTests {
         #expect(await store.isLateNoteWindowOpen(promptID: id) == false)
     }
 
-    @Test func lateNoteAfterFiveSecondsDoesNotAttach() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+    @Test func lateNoteAfterFiveSecondsDoesNotAttach() async throws {
+        let clock = EventDrivenTestClock()
         let store = makeStore(clock: clock)
         let terminal = UUID()
         let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
         #expect(await store.isLateNoteWindowOpen(promptID: id))
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         let closed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await store.isLateNoteWindowOpen(promptID: id) == false
         }
@@ -420,9 +416,8 @@ struct PendingPromptResolutionTests {
         #expect(await waiter.value == .resolvedElsewhere)
     }
 
-    @Test func ackTimeoutAnswersDeliveryUnconfirmed() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+    @Test func ackTimeoutAnswersDeliveryUnconfirmed() async throws {
+        let clock = EventDrivenTestClock()
         let store = makeStore(clock: clock)
         let terminal = UUID()
         // Paired, so no late-note timer shares the clock with the ack timer.
@@ -436,8 +431,7 @@ struct PendingPromptResolutionTests {
                                answer: .permission(decision: .allow, message: nil))
         }
         _ = await waiter.value
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         let result = await answering.value
 
         #expect(result.outcome == .deliveryUnconfirmed, "no ack within 5 s may still mean the hook had it")
