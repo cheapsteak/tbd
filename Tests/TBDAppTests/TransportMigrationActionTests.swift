@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("TransportMigrationAction")
@@ -386,20 +387,31 @@ struct CountingImmediateClock: Clock {
     }
 }
 
-/// The reply-races-the-deltas path, on a `TestClock` and through the
-/// production delta entry point (`handleDelta`).
+/// The reply-races-the-deltas path, on an `EventDrivenTestClock` and through
+/// the production delta entry point (`handleDelta`).
+///
+/// The adoption wait is a poll loop on `transportMoveClock`, so its progress is
+/// observed through the clock's ledger rather than by reading state right after
+/// an advance: `advance` only resumes the sleeper, and the loop's post-sleep
+/// check runs on the main actor some turns later. A re-arm is the proof that
+/// the loop ran that check, saw the veil still up, and went back to waiting.
 @MainActor
 @Suite("TransportMigrationRace", .clockDriven, .serialized)
 struct TransportMigrationRaceTests {
-    private func withAppState(_ body: (AppState) async -> Void) async {
+    /// Reaching the adoption wait's sleep takes main-actor turns (the migrate
+    /// task, then the loop after each tick), so every arming wait gets the
+    /// saturated-pass budget rather than the 45 s default.
+    private static let mainActorHop = TestDeadlines.saturatedPass
+
+    private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
         let name = "tbd-transport-race-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
-        await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        defer { defaults.removePersistentDomain(forName: name) }
+        try await body(AppState(userDefaults: defaults))
     }
 
     private func setUp(
-        _ state: AppState, clock: TestClock<Duration>
+        _ state: AppState, clock: EventDrivenTestClock
     ) -> Terminal {
         let row = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
@@ -419,17 +431,25 @@ struct TransportMigrationRaceTests {
             attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
     }
 
-    @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async {
-        await withAppState { state in
-            let clock = TestClock<Duration>()
+    @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async throws {
+        try await withAppState { state in
+            let clock = EventDrivenTestClock()
             let row = setUp(state, clock: clock)
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
-            // The migrator parks the row before the reply.
-            await clock.waitForSuspension()
+            // The reply has landed and the veil is waiting on adoption. A reply
+            // that ended the veil would never reach this sleep.
+            try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
+            // The migrator parked the row; that delta arrives after the reply.
             state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
                 terminalID: row.id, worktreeID: row.worktreeID, hibernated: true, keepWarm: false)))
             var identities = [identity(state, row)]
-            await clock.advanceWhenSuspended(by: .milliseconds(300))
+            // Three ticks of the wait with no adoption, then the fourth re-arm:
+            // the loop has read the veil after every tick and kept waiting.
+            for _ in 0..<3 {
+                try await clock.requireAdvanceWhenArmed(
+                    by: AppState.transportMovePollInterval, timeout: Self.mainActorHop)
+            }
+            try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
             #expect(state.switchingAccountTerminals[row.id] == .transportMove,
                     "the veil cleared on the reply, before the deltas")
             #expect((state.terminalAttachEpochs[row.id] ?? 0) == 0)
@@ -442,7 +462,10 @@ struct TransportMigrationRaceTests {
             moved.tmuxPaneID = ""
             moved.transport = .holder
             state.handleDelta(.terminalReplaced(moved))
-            await clock.advanceWhenSuspended(by: .milliseconds(100))
+            // The loop is parked on its re-armed tick; one tick lets it see the
+            // adoption and end, which the join then observes.
+            try await clock.requireAdvanceWhenArmed(
+                by: AppState.transportMovePollInterval, timeout: Self.mainActorHop)
             await task.value
 
             #expect(state.switchingAccountTerminals[row.id] == nil)
@@ -454,22 +477,29 @@ struct TransportMigrationRaceTests {
         }
     }
 
-    @Test func noDeltaMeansTheBoundClearsTheVeil() async {
-        await withAppState { state in
-            let clock = TestClock<Duration>()
+    @Test func noDeltaMeansTheBoundClearsTheVeil() async throws {
+        try await withAppState { state in
+            let clock = EventDrivenTestClock()
             let row = setUp(state, clock: clock)
             let task = Task { @MainActor in await state.migrateTerminalToHolder(terminalID: row.id) }
-            await clock.waitForSuspension()
+            try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
             #expect(state.switchingAccountTerminals[row.id] == .transportMove)
-            // The wait re-arms every 100 ms, so step it until the bound (5 s of
-            // virtual time) clears the veil; a single large advance can outrun
-            // the re-arm.
+            // The wait re-arms every poll interval, so step it one armed tick at
+            // a time until the bound clears the veil.
+            let start = clock.now
             let id = row.id
-            await clock.advanceUntil("the bound clears the veil", by: .milliseconds(100)) {
+            let cleared = try await clock.advanceUntil(
+                "the bound clears the veil", by: AppState.transportMovePollInterval,
+                timeout: Self.mainActorHop, maxSteps: 100
+            ) {
                 await MainActor.run { state.switchingAccountTerminals[id] == nil }
             }
             await task.value
+            #expect(cleared)
             #expect(state.switchingAccountTerminals[row.id] == nil)
+            // The bound, not some earlier exit, is what ended the wait.
+            #expect(start.duration(to: clock.now) == AppState.transportMoveAdoptionBound,
+                    "the veil cleared after \(start.duration(to: clock.now)) of virtual time")
         }
     }
 }
