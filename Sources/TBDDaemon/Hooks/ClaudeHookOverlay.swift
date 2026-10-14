@@ -134,8 +134,13 @@ public enum ClaudeHookOverlay {
     /// the command prints `hookSpecificOutput.sessionTitle` and Claude Code
     /// renames the session; otherwise it prints nothing. stderr is discarded
     /// and stdout is not, because stdout is the title.
+    ///
+    /// A `tbd` older than the flag rejects it with a usage error, so the plain
+    /// command runs as a fallback: an out-of-date CLI loses the title but
+    /// keeps the working indicator. A rejected flag prints its usage to
+    /// stderr, never stdout, so the fallback cannot add a second output.
     static let workingCommand =
-        #"tbd terminal-activity working --session-title 2>/dev/null || true"#
+        #"tbd terminal-activity working --session-title 2>/dev/null || tbd terminal-activity working 2>/dev/null || true"#
 
     /// Sets the terminal activity state to waiting_for_user.
     static let waitingForUserCommand =

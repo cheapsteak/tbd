@@ -778,11 +778,15 @@ extension TBDHomeSerialized {
 
     /// The `UserPromptSubmit` entry asks for the session's title, and keeps
     /// stdout — the hook output that carries it — while still never failing.
+    /// A `tbd` too old to know `--session-title` rejects the flag, so the
+    /// plain command follows it and the working indicator survives.
     @Test func userPromptSubmitAsksForTheSessionTitle() throws {
         let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
         let entry = try #require(rendered.first { $0.hasPrefix("UserPromptSubmit|") })
-        #expect(entry.contains("tbd terminal-activity working --session-title"))
-        #expect(entry.hasSuffix("2>/dev/null || true"))
+        #expect(entry == "UserPromptSubmit|<none>|"
+            + "tbd terminal-activity working --session-title 2>/dev/null"
+            + " || tbd terminal-activity working 2>/dev/null"
+            + " || true")
         #expect(!entry.contains(">/dev/null 2>&1"))
     }
 
