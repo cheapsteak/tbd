@@ -1,0 +1,84 @@
+# Session title sync
+
+## Problem
+
+A Claude Code session has a display name. It shows in the Remote Control list on claude.ai and in the Claude app, in the `/resume` picker, in the terminal title, and in the peer registry that `ListAgents` / `SendMessage` read. TBD sets that name at spawn with `--name <worktree display name>` (`ClaudeSpawnCommandBuilder`).
+
+The name is fixed at spawn. A worktree usually starts with its generated folder name (`20261014-zippy-hamster`) as its display name and is renamed later, often by the agent itself in its first turn. The running session keeps the generated name until it is respawned or resumed. So Remote Control lists sessions under names nobody chose and nobody can read.
+
+Two further gaps:
+
+- Every Claude terminal in a worktree gets the same `--name`, so two Claude tabs in one worktree look the same in Remote Control and share one peer address.
+- Nothing reacts to `worktree.rename` except the `.worktreeRenamed` state delta to the app.
+
+## Goal
+
+A Claude session's name follows its worktree's display name, including after a rename, without TBD ever typing into the session.
+
+Out of scope: Codex sessions, TBD remote (cloud) sessions, and renaming a session that receives no further prompts.
+
+## What Claude Code offers
+
+- **No out-of-band rename.** Claude Code 2.1.299 has no CLI, IPC or file mechanism to rename a running session from outside it.
+- **Hook output can set the title.** `UserPromptSubmit` and `SessionStart` hooks may return `hookSpecificOutput.sessionTitle`. It has the same effect as `/rename`.
+- **A hook title overrides `--name`, Remote Control included.** Field test on 2.1.299: a session launched with `--name rc-test-ORIGINAL --remote-control` and a `UserPromptSubmit` hook returning `sessionTitle: "rc-test-RENAMED-by-hook"` took the new title on its first prompt. That covered the TUI title bar, the peer registry entry (`sessions/<pid>.json`: `"name": "rc-test-RENAMED-by-hook"`, `"nameSource": "hook"`, the old name under `formerNames`) and the Remote Control session list on claude.ai. Claude Code's documented Remote Control naming order ranks `--name` above `/rename`, but in practice a later hook title wins.
+
+## Design
+
+### Delivery: the existing `UserPromptSubmit` hook
+
+TBD's hook overlay (`ClaudeHookOverlay`) already runs `tbd terminal-activity working` on every `UserPromptSubmit`, which sends one `terminal.activityEvent` RPC to the daemon. The title rides that existing round trip:
+
+- The Claude overlay's `UserPromptSubmit` command gains a flag, `tbd terminal-activity working --session-title`. Codex hooks share `terminal-activity` and do not pass the flag, so they never receive a title.
+- With the flag, the RPC request asks for a title. The response carries an optional `sessionTitle`.
+- When the response has a title, the CLI prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"<title>"}}` to stdout. Otherwise it prints nothing, exactly as today.
+- Every failure path (daemon down, RPC error, no `TBD_TERMINAL_ID`) prints nothing and exits 0, as the command does today. A failed title lookup must never block or fail the user's prompt.
+
+There is no new process, no new RPC and no input sent to the session.
+
+Placement: the hook and the CLI are user-land, but the title has to be computed where terminal rows, labels and display names live, which is the daemon. The daemon exposes the fact (the wanted title), and the hook acts on it.
+
+### The wanted title
+
+One function computes a Claude terminal's wanted title. Both the spawn path (`--name`) and the hook path use it, so a spawn name and a later hook title never disagree.
+
+- **Base:** the worktree's display name, sanitized by `ClaudeSpawnCommandBuilder.sanitizedSessionName`.
+- **Suffix:** the first live Claude terminal in the worktree, by creation order, gets none. Each later one gets ` · <label>` when it has a user-supplied label (`TerminalLabel.userSupplied`), otherwise ` · <n>`, where `n` is its 1-based position among the worktree's live Claude terminals by creation order.
+- A number can shift when an earlier Claude terminal closes. The shifted title is then sent on that terminal's next prompt.
+
+The suffix also gives each Claude tab in a worktree its own peer address, which today they share.
+
+### When a title is sent: only on change
+
+The daemon keeps, per terminal, the last title it gave that session (`lastAppliedTitle`), in memory.
+
+- At spawn, `lastAppliedTitle` is set to the `--name` value.
+- On a `UserPromptSubmit` that asks for a title, the daemon computes the wanted title. If it equals `lastAppliedTitle`, the response carries no title. If it differs, the response carries it and `lastAppliedTitle` is updated.
+- A user's own `/rename` therefore survives until the wanted title next changes, through a worktree rename or a suffix shift. TBD does not fight a manual rename.
+- The entry is dropped when the terminal is removed.
+
+Not persisted: after a daemon restart `lastAppliedTitle` is empty, so each live session gets its wanted title once, on its next prompt. That undoes a manual `/rename` at most once per daemon restart. Persisting it would need a `terminal` column and a migration for a rare, cosmetic case.
+
+### Timing
+
+The new title lands on the session's next prompt after the change, not at the moment of the rename. TBD's `Stop` hook (`tbd hooks stop-rename-check`) prompts the agent to rename a still-default worktree at the end of its first turn, so in the usual flow the title catches up on the second prompt.
+
+### No feature flag
+
+This adds no autonomous action, sends no input, kills nothing and moves no UI. It changes what the session's own title says, the same thing `--name` already sets at spawn. Per the flag rule in `CLAUDE.md`, it ships ungated.
+
+## Tests
+
+- **Wanted title:** first Claude terminal gets the bare display name; a labelled later terminal gets ` · <label>`; unlabelled later terminals get ` · 2`, ` · 3`; closing the first terminal renumbers the rest; non-Claude terminals are ignored when counting; sanitization applies.
+- **Spawn uses it:** the second Claude terminal in a worktree spawns with the suffixed `--name`.
+- **Change rule:** the first prompt after spawn returns no title; a prompt after `worktree.rename` returns the new title once and the following prompt returns none; with no `lastAppliedTitle` (daemon restart) the first prompt returns the title.
+- **Request gate:** an activity event without the title request returns no title, even after a rename, so Codex hooks are unaffected.
+- **CLI:** with a title in the response it prints valid hook JSON naming `UserPromptSubmit`; with none, or on any failure, it prints nothing and exits 0.
+- **Overlay:** the generated overlay's `UserPromptSubmit` command includes `--session-title`.
+
+## Rejected alternatives
+
+- **Type `/rename <name>` into idle sessions on rename.** Immediate, but it sends input to sessions, which risks mixing with what the user is typing and would need a default-off flag. The hook gets the same result one prompt later with none of that risk.
+- **Append a `custom-title` entry to the transcript JSONL.** Undocumented, and nothing shows that a running session or Remote Control rereads it.
+- **Reset the title on every prompt.** Simpler, but it would undo a user's `/rename` within one prompt.
+- **`SessionStart` hook title.** Spawn and resume already pass the current name through `--name`, and `SessionStart` also fires on `/clear` and `/compact`, where a title change is not wanted.
