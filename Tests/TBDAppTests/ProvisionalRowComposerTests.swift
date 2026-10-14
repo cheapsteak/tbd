@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
@@ -383,7 +382,7 @@ struct ProvisionalRowPresentationTests {
 }
 
 /// A `Date` a test can move, for the `now` seam `TableTranscriptPaneView.publish`
-/// takes. `TestClock` moves virtual *durations*; this moves the wall clock the
+/// takes. The test clock moves virtual *durations*; this moves the wall clock the
 /// retire comparison is made against, and the two have to be moved together —
 /// the alarm decides *when* to re-publish, the composer decides what the
 /// re-publish shows.
@@ -1013,8 +1012,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
         await source.refresh(sessionID: "s1", path: transcriptPath)
         let state = await Self.makeState(streaming: true, suite: suite)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let timer = ProvisionalRetireTimer(clock: EventDrivenTestClock())
         let t0 = Self.t0
 
         let midStream = await TableTranscriptPaneView.publish(
@@ -1062,8 +1060,7 @@ struct ProvisionalRowPublishTests {
         #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
         await source.refresh(sessionID: "s1", path: transcriptPath)
         let state = await Self.makeState(streaming: true, suite: suite)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let timer = ProvisionalRetireTimer(clock: EventDrivenTestClock())
         let t0 = Self.t0
 
         let published = await TableTranscriptPaneView.publish(
@@ -1082,8 +1079,7 @@ struct ProvisionalRowPublishTests {
         defer { Self.removeSuite(suite) }
         let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
         let state = await Self.makeState(streaming: false, suite: suite)
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let timer = ProvisionalRetireTimer(clock: EventDrivenTestClock())
         let t0 = Self.t0
 
         let published = await TableTranscriptPaneView.publish(
@@ -1103,7 +1099,9 @@ struct ProvisionalRetireTimerTests {
     private static let t0 = Date(timeIntervalSince1970: 1_700_000_000)
     /// The instant every alarm below is nominally due. It is the alarm's
     /// identity, never a clock the timer reads — the sleeping is all done on
-    /// the injected `TestClock`, which is why these two never have to agree.
+    /// the injected `EventDrivenTestClock`, which is why these two never have
+    /// to agree. Its `advance` does not run the alarm it wakes, so positive
+    /// checks poll and every negative check is preceded by `settle()`.
     private static let due = t0.addingTimeInterval(60)
 
     private actor FireLog {
@@ -1112,19 +1110,19 @@ struct ProvisionalRetireTimerTests {
     }
 
     @Test("the alarm fires once, after the delay and not before")
-    func alarmFiresOnceAfterTheDelay() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func alarmFiresOnceAfterTheDelay() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(59))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(59))
+        await settle()
         #expect(await log.count == 0, "59 s is inside the window")
 
+        // Plain `advance`: the sleeper armed above is still registered.
         await clock.advance(by: .seconds(2))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count == 1 }
         #expect(fired == .satisfied, "the alarm must fire once past the deadline")
@@ -1132,21 +1130,20 @@ struct ProvisionalRetireTimerTests {
 
         // Nothing re-arms it, so no second fire can arrive.
         await clock.advance(by: .seconds(600))
+        await settle()
         #expect(await log.count == 1)
     }
 
     /// The idempotence that keeps a 100 ms poll from pushing the deadline
     /// forever: a re-arm for the id already armed must leave the alarm alone.
     @Test("re-arming the same message does not push the deadline out")
-    func reArmingTheSameMessageIsANoOp() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func reArmingTheSameMessageIsANoOp() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(59))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(59))
         // A poll one second before the deadline re-arms with the *same* due
         // instant and the remaining 1 s. The due instant is the identity, so
         // this is a no-op; if the shrinking delay replaced the alarm instead,
@@ -1158,6 +1155,7 @@ struct ProvisionalRetireTimerTests {
         await clock.advance(by: .seconds(2))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count >= 1 }
         #expect(fired == .satisfied)
+        await settle()
         #expect(await log.count == 1, "one alarm, not two")
     }
 
@@ -1169,59 +1167,63 @@ struct ProvisionalRetireTimerTests {
     /// a no-op, the first alarm fires at 60 s, and a row whose stream is still
     /// producing is withdrawn underneath it.
     @Test("re-arming the same message at a later deadline replaces the alarm")
-    func reArmingAtALaterDeadlineReplacesTheAlarm() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func reArmingAtALaterDeadlineReplacesTheAlarm() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(
             sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
         ) { await log.record() }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(30))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(30))
         await timer.arm(
             sessionID: "s1", messageID: "msg_a",
             deadline: Self.due.addingTimeInterval(60), after: .seconds(60)
         ) { await log.record() }
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(31))
-        for _ in 0..<50 { await Task.yield() }
+        // The replacement cancelled the original sleep, so the strict wait is
+        // for the replacement's own sleep: advancing before it registers would
+        // measure it from the later `now`. `settle()` then gives a stale fire
+        // its turn before the negative read.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(31))
+        await settle()
         #expect(await log.count == 0, "the original deadline no longer belongs to anything")
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
 
         await clock.advance(by: .seconds(30))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count == 1 }
         #expect(fired == .satisfied, "the replacement fires on the later deadline")
+        await settle()
         #expect(await log.count == 1, "one alarm, not two")
     }
 
     @Test("arming a different message replaces the alarm")
-    func armingADifferentMessageReplacesTheAlarm() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func armingADifferentMessageReplacesTheAlarm() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
         let second = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await first.record() }
+        // The first alarm's sleep is registered before it is replaced, so a
+        // replacement that failed to cancel it leaves a sleeper the advance
+        // below fires — rather than one that registers late and never does.
+        try await clock.requireSleeperArmed()
         await timer.arm(sessionID: "s1", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) { await second.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_b")
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(61))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await second.count == 1 }
         #expect(fired == .satisfied)
+        await settle()
         #expect(await first.count == 0, "the superseded message's alarm was cancelled")
     }
 
     /// The keying itself, at the level below the publish test: one session's
     /// disarm must leave every other session's alarm exactly where it is.
     @Test("an alarm is scoped to its session and survives another session's disarm")
-    func alarmsAreScopedToTheirSession() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func alarmsAreScopedToTheirSession() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
         let second = FireLog()
@@ -1233,15 +1235,18 @@ struct ProvisionalRetireTimerTests {
             await second.record()
         }
         #expect(await timer.armedSessionCount == 2, "two sessions, two alarms")
+        // Both sleeps registered before the disarm, so a disarm that failed to
+        // cancel s2 leaves a sleeper the advance below fires.
+        try await clock.requireSleepersArmed(count: 2)
 
         await timer.disarm(sessionID: "s2")
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
         #expect(await timer.armedMessage(sessionID: "s2") == nil)
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(61))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await first.count == 1 }
         #expect(fired == .satisfied, "s1's alarm was untouched by s2's disarm")
+        await settle()
         #expect(await second.count == 0, "and s2's really was cancelled")
     }
 
@@ -1252,9 +1257,8 @@ struct ProvisionalRetireTimerTests {
     /// alarm cancelled here would never be re-armed and its row would stay on
     /// screen for good.
     @Test("a teardown disarm leaves another session's alarm to fire exactly once")
-    func teardownDisarmLeavesOtherSessionsArmed() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func teardownDisarmLeavesOtherSessionsArmed() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let leaving = FireLog()
         let staying = FireLog()
@@ -1265,26 +1269,29 @@ struct ProvisionalRetireTimerTests {
         await timer.arm(sessionID: "s2", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) {
             await staying.record()
         }
+        // Both sleeps registered before the disarm, so a disarm that failed to
+        // cancel s1 leaves a sleeper the advance below fires.
+        try await clock.requireSleepersArmed(count: 2)
 
         // What `appSideLoop` now does when its pane goes away.
         await timer.disarm(sessionID: "s1")
         #expect(await timer.armedSessionCount == 1, "only the leaving pane's session was disarmed")
         #expect(await timer.armedMessage(sessionID: "s2") == "msg_b")
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(61))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await staying.count == 1 }
         #expect(fired == .satisfied, "s2's backstop survived the other pane's teardown")
+        await settle()
         #expect(await leaving.count == 0, "and the torn-down session's own alarm was cancelled")
 
         await clock.advance(by: .seconds(600))
+        await settle()
         #expect(await staying.count == 1, "exactly once — nothing re-arms a fired backstop")
     }
 
     @Test("disarmAll cancels every session's alarm")
-    func disarmAllCancelsEverything() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func disarmAllCancelsEverything() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let first = FireLog()
         let second = FireLog()
@@ -1295,31 +1302,34 @@ struct ProvisionalRetireTimerTests {
         await timer.arm(sessionID: "s2", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) {
             await second.record()
         }
+        // Both sleeps registered first, so a `disarmAll` that cancelled nothing
+        // leaves two sleepers the advance below fires — rather than sleeps that
+        // register after it and never come due.
+        try await clock.requireSleepersArmed(count: 2)
         await timer.disarmAll()
         #expect(await timer.armedSessionCount == 0)
 
         await clock.advance(by: .seconds(600))
-        for _ in 0..<50 { await Task.yield() }
+        // Give a cancelled alarm every chance to run before asserting it did not.
+        await settle()
         #expect(await first.count == 0)
         #expect(await second.count == 0)
     }
 
     @Test("disarming cancels a pending alarm")
-    func disarmingCancelsThePendingAlarm() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock()
+    func disarmingCancelsThePendingAlarm() async throws {
+        let clock = EventDrivenTestClock()
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
         await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .seconds(1))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(1))
         await timer.disarm(sessionID: "s1")
         #expect(await timer.armedMessage(sessionID: "s1") == nil)
 
         await clock.advance(by: .seconds(600))
-        // Give a cancelled task every chance to run before asserting it did not.
-        for _ in 0..<50 { await Task.yield() }
+        // Give a cancelled alarm every chance to run before asserting it did not.
+        await settle()
         #expect(await log.count == 0)
     }
 
@@ -1351,7 +1361,7 @@ struct ProvisionalRetireTimerTests {
 
         let woke = await pollUntilTrue(timeout: .seconds(10)) { await clock.wakeCount == 1 }
         #expect(woke == .satisfied, "the alarm really did wake, or this proves nothing")
-        for _ in 0..<50 { await Task.yield() }
+        await settle()
         #expect(await log.count == 0, "a forgotten session must not be published for")
         #expect(await timer.armedSessionCount == 0)
     }
@@ -1382,7 +1392,7 @@ struct ProvisionalRetireTimerTests {
 
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await current.count == 1 }
         #expect(fired == .satisfied, "the arming that is current fires")
-        for _ in 0..<50 { await Task.yield() }
+        await settle()
         #expect(await stale.count == 0,
                 "and the forgotten one does not, though its message and deadline match")
         #expect(await current.count == 1, "once, not twice")
@@ -1392,10 +1402,10 @@ struct ProvisionalRetireTimerTests {
 /// A clock whose sleeps end only when the test releases them, and which ignores
 /// cancellation entirely.
 ///
-/// `TestClock` cannot express the ordering the two cases above need. They must
-/// hold an alarm mid-sleep while the test reaches into the actor, and then have
-/// that sleep return *normally*: a cancelled sleep would let the alarm bail out
-/// for a reason that has nothing to do with the check under test, and it is
+/// `EventDrivenTestClock` cannot express the ordering the two cases above
+/// need. They must hold an alarm mid-sleep while the test reaches into the
+/// actor, and then have that sleep return *normally*: a cancelled sleep would
+/// let the alarm bail out for a reason that has nothing to do with the check under test, and it is
 /// precisely because cancellation is advisory that the check exists.
 private final class GatedClock: Clock, @unchecked Sendable {
     typealias Instant = ContinuousClock.Instant

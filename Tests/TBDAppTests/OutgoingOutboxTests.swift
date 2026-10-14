@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import SwiftTerm
 import Testing
@@ -13,7 +12,8 @@ import TestSupport
 ///
 /// `.clockDriven` is at suite level because two tests below `await` a
 /// continuation a broken implementation would never resume, and one drives the
-/// backpressure timer on a `TestClock`; each needs its own hang bound.
+/// backpressure timer on an `EventDrivenTestClock`; each needs its own hang
+/// bound.
 ///
 // Two properties here are not testable and should not be faked:
 //
@@ -75,8 +75,7 @@ struct OutgoingOutboxTests {
     }
 
     private func makeQueue(
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        capacity: Int, clock: TestClock<Duration> = TestClock(),
+        capacity: Int, clock: EventDrivenTestClock = EventDrivenTestClock(),
         notifier: NotifierSpy? = nil, backpressure: BackpressureSpy? = nil
     ) -> (OutgoingInputQueue, FakeTransport, NotifierSpy) {
         let transport = FakeTransport(capacity: capacity)
@@ -364,21 +363,31 @@ struct OutgoingOutboxTests {
     // MARK: - The backpressure edge
 
     @Test("the indicator appears only after the threshold, and clears on drain")
-    func backpressureAppearsAfterTheThresholdAndClears() async {
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        let clock = TestClock<Duration>()
+    func backpressureAppearsAfterTheThresholdAndClears() async throws {
+        let clock = EventDrivenTestClock()
         let backpressure = BackpressureSpy()
         let (queue, transport, _) = makeQueue(
             capacity: 1_022, clock: clock, backpressure: backpressure)
 
         queue.enqueueUserBytes(Data(repeating: 0x61, count: 4_096))
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .milliseconds(900))
+        // The backpressure timer is a main-actor task, so its sleep arms only
+        // after a main-actor turn: hence the saturated-pass guard. `advance`
+        // does not run the task it wakes, so `settle()` hands the main actor
+        // back before the negative read — an early publish would otherwise not
+        // have landed yet and the read would pass vacuously.
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(900), timeout: TestDeadlines.saturatedPass)
+        await settle()
         #expect(backpressure.published.isEmpty,
                 "a stall shorter than the threshold is not worth a banner")
 
-        // swiftlint:disable:next no_polling_test_clock - legacy, #1171
-        await clock.advanceWhenSuspended(by: .milliseconds(200))
+        // The 1 s sleeper armed above is still registered, so the strict wait
+        // returns at once. The publish lands after `advance` returns, so it is
+        // waited for rather than read.
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(200), timeout: TestDeadlines.saturatedPass)
+        let publishedOnce = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { !backpressure.published.isEmpty }
+        }
+        #expect(publishedOnce == .satisfied, "the threshold tick never published the indicator")
         #expect(backpressure.published == [4_096 - 1_022])
 
         transport.drain(1_000_000)
