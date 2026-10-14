@@ -211,7 +211,7 @@ struct NavigationHistoryPersistenceTests {
             state.worktrees = [repoID: [a, b, c].map { makeWorktree(id: $0, repoID: repoID) }]
 
             /// A relaunch must see exactly the live history, entries and index.
-            func expectSaved(sourceLocation: SourceLocation = #_sourceLocation) {
+            @MainActor func expectSaved(sourceLocation: SourceLocation = #_sourceLocation) {
                 let fresh = AppState(userDefaults: defaults)
                 #expect(fresh.navigationEntries == state.navigationEntries, sourceLocation: sourceLocation)
                 #expect(fresh.navigationIndex == state.navigationIndex, sourceLocation: sourceLocation)
