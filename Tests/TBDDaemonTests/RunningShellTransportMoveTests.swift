@@ -161,6 +161,7 @@ struct RunningShellTransportMoveTests {
             configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
             paneProcessInspector: FakeInspector(
                 claudePID: nil, foregroundPID: paneForegroundPID),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "running-shell-move"))
         // The registry is wired in every arm but the one that asserts its
         // absence: its `environment` is what the launch's own shell invocation

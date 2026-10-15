@@ -223,6 +223,11 @@ public actor HibernationCoordinator {
     /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
     /// point it at a temp dir instead of falling back to the real `~/.claude`.
     private let configDirManager: ClaudeProfileConfigDirManager
+    /// The title each Claude session was last given — shared with the
+    /// lifecycle and router, so a wake's `--name` is what the next prompt's
+    /// title is compared against. See `ClaudeSessionTitle`. Not private: the
+    /// holder wake in `HibernationCoordinator+Holder` settles its reservation.
+    let sessionTitles: ClaudeSessionTitleStore
     /// Default input activity tracker. Wired post-construction by Daemon.swift
     /// to the shared instance from the input router so both use the same tracker.
     var inputActivity: InputActivityTracker
@@ -424,6 +429,7 @@ public actor HibernationCoordinator {
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        sessionTitles: ClaudeSessionTitleStore,
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -440,6 +446,7 @@ public actor HibernationCoordinator {
         self.clock = clock
         self.signaller = signaller
         self.paneProcessInspector = paneProcessInspector
+        self.sessionTitles = sessionTitles
         self.actuationLog = actuationLog
     }
 
@@ -1897,6 +1904,13 @@ public actor HibernationCoordinator {
             overlayPath: overlayPath,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
+        // Reserved here; confirmed only once the wake has launched a session
+        // under it — even when a later step fails, since that session carries
+        // the name — and released on every other outcome.
+        let spawnTitle = await ClaudeSessionTitle.forSpawn(
+            db: db, store: sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: terminal.id)
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -1922,7 +1936,7 @@ public actor HibernationCoordinator {
             settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: worktree.displayName
+            sessionName: spawnTitle.name
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.
@@ -1953,7 +1967,8 @@ public actor HibernationCoordinator {
                 // spawn holds both the env and the token it would have to undo.
                 attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
-                rows: rows)
+                rows: rows,
+                spawnTitle: spawnTitle)
         }
 
         // The window/pane the rest of wake must reference: the original ones
@@ -1994,10 +2009,17 @@ public actor HibernationCoordinator {
                 )
             }
         } catch {
+            await sessionTitles.release(spawnTitle)
             return .notFound
         }
         switch outcome {
         case .failed(let result):
+            await sessionTitles.release(spawnTitle)
+            return result
+        case .launchedUnrecorded(let result):
+            // The replacement is running under the reserved name; only the
+            // row's un-park failed. The session carries the name, so confirm.
+            await sessionTitles.confirm(spawnTitle)
             return result
         case .respawned(
             let newPaneID,
@@ -2011,6 +2033,7 @@ public actor HibernationCoordinator {
             liveIncarnationID = incarnationID
         }
         idleSince[terminal.id] = nil
+        await sessionTitles.confirm(spawnTitle)
         // Carry the LIVE window/pane ids on the un-park broadcast so the app
         // updates its cached row before (together with) the hibernated flip —
         // otherwise the terminal view rebuilds keyed on the dead window and
@@ -2041,6 +2064,10 @@ public actor HibernationCoordinator {
             incarnationID: UUID
         )
         case failed(WakeResult)
+        /// The replacement agent launched, but clearing the parked marker
+        /// failed afterwards. Returned to the caller verbatim like `.failed`,
+        /// but the session is running under this wake's `--name`.
+        case launchedUnrecorded(WakeResult)
     }
 
     /// The decide-then-mutate tmux section of `wake()` — ownership check,
@@ -2119,7 +2146,7 @@ public actor HibernationCoordinator {
                     // detects parked+live-agent and clears this marker without
                     // erasing a SessionStart that arrived during launch.
                     logger.warning("wake: launched the replacement agent for terminal \(terminal.id, privacy: .public), but failed to clear its parked marker: \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(
+                    return .launchedUnrecorded(.respawnFailed(
                         reason: "replacement agent launched, but clearing the parked marker failed: \(error.localizedDescription)"))
                 }
                 return .respawned(
@@ -2239,7 +2266,7 @@ public actor HibernationCoordinator {
                     // Keep the live replacement parked for startup
                     // reconciliation; identity and process token stay intact.
                     logger.warning("wake: launched a replacement agent in \(window.windowID, privacy: .public), but failed to clear the parked marker for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(
+                    return .launchedUnrecorded(.respawnFailed(
                         reason: "replacement agent launched in \(window.windowID), but clearing the parked marker failed: \(error.localizedDescription)"))
                 }
                 logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")

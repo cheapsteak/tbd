@@ -723,6 +723,7 @@ extension WorktreeLifecycle {
         }
         do {
             try await db.terminals.delete(id: terminalID)
+            await sessionTitles.forget(terminalID: terminalID)
             try await db.tabs.delete(tabID: terminalID)
             var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
             if order.contains(terminalID) {

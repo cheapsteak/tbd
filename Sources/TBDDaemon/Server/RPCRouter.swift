@@ -562,6 +562,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
+            sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog
         )
         self.usageFetcher = usageFetcher

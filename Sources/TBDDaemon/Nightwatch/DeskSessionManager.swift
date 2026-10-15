@@ -1270,6 +1270,7 @@ public actor DeskSessionManager: DeskSessionManaging {
 
             // Delete terminal rows
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+            await lifecycle.sessionTitles.forget(worktreeID: wt.id)
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
 
             // Archive the worktree (preserve the folder on disk)

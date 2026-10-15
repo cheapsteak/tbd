@@ -1081,7 +1081,8 @@ extension HibernationCoordinator {
     /// A refused claim retires the route here rather than in the section,
     /// because the section is never entered: the caller minted a route for a
     /// spawn that is not going to happen, and leaving it behind would make the
-    /// row's route ambiguous for as long as it stayed parked.
+    /// row's route ambiguous for as long as it stayed parked. It releases
+    /// `spawnTitle` for the same reason.
     func wakeHolderAfterInPlaceChange(
         terminal: Terminal,
         worktree: LocalWorktree,
@@ -1091,12 +1092,14 @@ extension HibernationCoordinator {
         env: [String: String],
         attachment: ModelProxyRouteAttachment.Outcome,
         cols: Int?,
-        rows: Int?
+        rows: Int?,
+        spawnTitle: ClaudeSpawnTitle? = nil
     ) async -> WakeResult {
         guard !hibernatesInFlight.contains(terminal.id),
               !wakesInFlight.contains(terminal.id) else {
             await ModelProxyRouteAttachment.retire(
                 attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            await sessionTitles.release(spawnTitle)
             return .inFlight
         }
         wakesInFlight.insert(terminal.id)
@@ -1111,7 +1114,8 @@ extension HibernationCoordinator {
             env: env,
             attachment: attachment,
             cols: cols,
-            rows: rows)
+            rows: rows,
+            spawnTitle: spawnTitle)
     }
 
     /// The mutate half of a holder wake: spawn a fresh holder running the
@@ -1134,6 +1138,13 @@ extension HibernationCoordinator {
     /// reaper's holder leg sweeps by the pids a row carries. Healing the row
     /// instead means the retry that used to widen the damage is now what
     /// repairs it, and `reconcileOnStartup` stops being the only cure.
+    ///
+    /// `spawnTitle`, the session title reserved for `spawnCommand`'s
+    /// `--name`, is settled here because only this method knows whether a
+    /// session launched under it: confirmed once the replacement is running
+    /// and recorded — even if un-parking the row then fails, since the
+    /// session carries the name — and released on every refusal and on an
+    /// adopting wake, which starts nothing.
     func wakeHolderSection(
         terminal: Terminal,
         worktree: LocalWorktree,
@@ -1149,7 +1160,8 @@ extension HibernationCoordinator {
         // routed session it could no longer un-route.
         attachment: ModelProxyRouteAttachment.Outcome,
         cols: Int?,
-        rows: Int?
+        rows: Int?,
+        spawnTitle: ClaudeSpawnTitle? = nil
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
@@ -1160,6 +1172,7 @@ extension HibernationCoordinator {
         func refuse(_ reason: String) async -> WakeResult {
             await ModelProxyRouteAttachment.retire(
                 attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            await sessionTitles.release(spawnTitle)
             return .respawnFailed(reason: reason)
         }
 
@@ -1184,6 +1197,9 @@ extension HibernationCoordinator {
             // token, so the one that is dropped is provably the unused one.
             await ModelProxyRouteAttachment.retire(
                 attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            // Nor did a session launch under this wake's `--name`: the healed
+            // one keeps whatever name it had, and the store the entry it had.
+            await sessionTitles.release(spawnTitle)
             return adopted
         }
 
@@ -1274,6 +1290,8 @@ extension HibernationCoordinator {
             return await refuse(
                 "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
         }
+        // The replacement is running and recorded under the reserved name.
+        await sessionTitles.confirm(spawnTitle)
         // Beside the pids, and before the park marker is cleared: both describe
         // the process this call just started, and nothing snapshots the row
         // between here and `clearHibernated`. A separate statement rather than a

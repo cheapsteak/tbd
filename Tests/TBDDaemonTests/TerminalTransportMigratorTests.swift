@@ -222,6 +222,7 @@ struct TerminalTransportMigratorTests {
             configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
             paneProcessInspector: FakeInspector(
                 claudePID: nil, foregroundPID: paneForegroundPID),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "transport-migration"))
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),

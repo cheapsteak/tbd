@@ -28,12 +28,15 @@ import TBDShared
 ///
 /// `sessionName`, when non-nil and not blank, adds ` --name <escaped>` to both
 /// claude branches (never to `cmd` / `shellFallback`, which are not claude).
-/// Callers pass the worktree's display name so the session announces itself
-/// under the name the user sees in the app — that is the address peers use for
-/// Claude Code's cross-session `ListAgents` / `SendMessage`. Without it a
-/// session names itself after its working-directory folder slug, which never
-/// matches an app-side rename. The name is fixed at spawn, so a later rename
-/// applies at the next respawn or resume. Display names are unvalidated free
+/// Callers pass `ClaudeSessionTitle`'s wanted title — the worktree's display
+/// name, suffixed for every Claude tab after the first — so the session
+/// announces itself under the name the user sees in the app; that is the
+/// address peers use for Claude Code's cross-session `ListAgents` /
+/// `SendMessage`. Without it a session names itself after its
+/// working-directory folder slug, which never matches an app-side rename.
+/// `--name` only sets the name at spawn; a later rename reaches the running
+/// session through the `UserPromptSubmit` hook's `sessionTitle` on its next
+/// prompt (see `ClaudeHookOverlay.workingCommand`). Display names are unvalidated free
 /// text, so the name is sanitized here rather than at the rename handler (see
 /// `sanitizedSessionName`) — renaming must keep meaning what the user typed.
 ///

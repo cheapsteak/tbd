@@ -4882,18 +4882,37 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     /// Absent for the existing agent-hook bridge. Optional so older clients'
     /// payloads continue to decode unchanged.
     public let origin: TerminalActivityEventOrigin?
+    /// Set by the Claude `UserPromptSubmit` hook (`--session-title`): asks the
+    /// daemon for the session's title when it has changed since the session
+    /// was last given one. Absent from Codex hooks and older overlays, which
+    /// therefore never receive a title.
+    public let wantsSessionTitle: Bool?
     public init(
         terminalID: UUID,
         activityState: TerminalActivityState,
         sessionID: String? = nil,
         sessionIncarnationID: UUID? = nil,
-        origin: TerminalActivityEventOrigin? = nil
+        origin: TerminalActivityEventOrigin? = nil,
+        wantsSessionTitle: Bool? = nil
     ) {
         self.terminalID = terminalID
         self.activityState = activityState
         self.sessionID = sessionID
         self.sessionIncarnationID = sessionIncarnationID
         self.origin = origin
+        self.wantsSessionTitle = wantsSessionTitle
+    }
+}
+
+/// Result of `terminal.activityEvent` when the request set
+/// `wantsSessionTitle`. Every other request gets an empty success.
+public struct TerminalActivityEventResult: Codable, Sendable, Equatable {
+    /// The title the session should take, via the hook's
+    /// `hookSpecificOutput.sessionTitle`. Nil when the session already carries
+    /// the title TBD wants for it.
+    public let sessionTitle: String?
+    public init(sessionTitle: String?) {
+        self.sessionTitle = sessionTitle
     }
 }
 

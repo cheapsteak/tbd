@@ -125,6 +125,10 @@ private struct PreparedContinueInClaude: Sendable {
     let profileID: UUID?
     let freshClaudeSessionID: String
     let claudeCommand: String
+    /// The `--name` in `claudeCommand`, reserved in the title store by
+    /// preparation; the handler confirms it once the replacement is finalized
+    /// and releases it on every other outcome.
+    let claudeSpawnTitle: ClaudeSpawnTitle
     /// The staged continuation packet `claudeCommand` reads at launch; removed
     /// by `handleTerminalContinueInClaude` when the transaction ends.
     let packetFilePath: String
@@ -157,14 +161,20 @@ extension RPCRouter {
         // the Claude shell is being replaced by the Codex rollback.
         defer { ContinuationPacketFile.remove(path: prepared.packetFilePath) }
 
-        let actuationID = try await beginActuation(
-            .terminalContinueInClaude,
-            actor: actor,
-            target: .local(
-                worktree: prepared.source.worktreeID,
-                terminal: prepared.source.id),
-            agent: TerminalKind.claude.rawValue,
-            profile: prepared.profileID?.uuidString)
+        let actuationID: String
+        do {
+            actuationID = try await beginActuation(
+                .terminalContinueInClaude,
+                actor: actor,
+                target: .local(
+                    worktree: prepared.source.worktreeID,
+                    terminal: prepared.source.id),
+                agent: TerminalKind.claude.rawValue,
+                profile: prepared.profileID?.uuidString)
+        } catch {
+            await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
+            throw error
+        }
 
         let response: RPCResponse
         do {
@@ -182,9 +192,14 @@ extension RPCRouter {
             response = RPCResponse(error: "Continue in Claude failed: \(error.localizedDescription)")
         }
 
+        // A success means the replacement was finalized and Claude is
+        // running under the reserved name; anything else left no Claude
+        // session that kept it.
         if response.success {
+            await lifecycle.sessionTitles.confirm(prepared.claudeSpawnTitle)
             await finishActuation(actuationID, .dispatched)
         } else {
+            await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
             await finishActuation(
                 actuationID, .transportFailed,
                 error: response.error ?? "Continue in Claude failed")
@@ -338,6 +353,12 @@ extension RPCRouter {
             throw ContinueInClaudeError(
                 "Could not stage the continuation packet: \(error.localizedDescription)")
         }
+        // The source row is still a Codex tab here; the title helper counts
+        // it as the Claude session it is about to become.
+        let claudeSpawnTitle = await ClaudeSessionTitle.forSpawn(
+            db: db, store: lifecycle.sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: source.id)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -363,7 +384,7 @@ extension RPCRouter {
                 promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
-            sessionName: worktree.displayName)
+            sessionName: claudeSpawnTitle.name)
         let claudeSensitiveEnv = EnvOverrideResolver.merge(
             global: config?.envOverrides,
             repo: repo?.envOverrides,
@@ -394,6 +415,7 @@ extension RPCRouter {
             profileID: resolvedProfile?.profileID,
             freshClaudeSessionID: freshClaudeSessionID,
             claudeCommand: claudeSpawn.command,
+            claudeSpawnTitle: claudeSpawnTitle,
             packetFilePath: packetFilePath,
             claudeEnv: claudeEnv,
             claudeSensitiveEnv: claudeSensitiveEnv,
