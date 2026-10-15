@@ -106,24 +106,6 @@ struct PeerMessagingSetting: Sendable, Equatable {
     }
 }
 
-/// Answers "is peer messaging on for this repository?" for the daemon.
-///
-/// **The repository's registered main checkout is the one whose `tbd.toml`
-/// counts** — the path on the repo row — and no linked worktree's copy. What is
-/// read is whatever that checkout's working tree holds right now: if the main
-/// checkout is itself on a feature branch or carries an uncommitted edit, that
-/// is what counts. The guarantee is narrower than "only the default branch
-/// decides", and it is this:
-///
-/// - **A linked worktree cannot change the answer.** A branch checked out in a
-///   TBD worktree can edit its own `tbd.toml` freely without switching
-///   cross-machine messaging on or off for the repository's other sessions.
-/// - **One answer per repository.** The switch scopes whole repositories in
-///   both directions (outward announcement and inward shadow peers), so it
-///   needs one value per repository, not one per worktree that could disagree.
-/// - **Remote lanes have no local checkout of their own.** A remote session's
-///   worktree row carries a synthetic `remote://` path with no files behind it,
-///   so the repository's own directory is the only local `tbd.toml` there is.
 /// Remembers the problems last logged for each `tbd.toml`, so a malformed file
 /// is logged when its problems change — and once when they clear — rather than
 /// on every poll, scope tick and resolver call that reads it. Shared across
@@ -162,6 +144,24 @@ final class PeerMessagingProblemLog: Sendable {
     }
 }
 
+/// Answers "is peer messaging on for this repository?" for the daemon.
+///
+/// **The repository's registered main checkout is the one whose `tbd.toml`
+/// counts** — the path on the repo row — and no linked worktree's copy. What is
+/// read is whatever that checkout's working tree holds right now: if the main
+/// checkout is itself on a feature branch or carries an uncommitted edit, that
+/// is what counts. The guarantee is narrower than "only the default branch
+/// decides", and it is this:
+///
+/// - **A linked worktree cannot change the answer.** A branch checked out in a
+///   TBD worktree can edit its own `tbd.toml` freely without switching
+///   cross-machine messaging on or off for the repository's other sessions.
+/// - **One answer per repository.** The switch scopes whole repositories in
+///   both directions (outward announcement and inward shadow peers), so it
+///   needs one value per repository, not one per worktree that could disagree.
+/// - **Remote lanes have no local checkout of their own.** A remote session's
+///   worktree row carries a synthetic `remote://` path with no files behind it,
+///   so the repository's own directory is the only local `tbd.toml` there is.
 struct RepoPeerMessagingSwitches: Sendable {
     /// Looks a repository row up. Throws when the database read fails, which
     /// callers treat as "unknown" rather than "off" — see `ProviderRepoScope`.
