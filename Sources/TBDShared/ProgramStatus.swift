@@ -410,14 +410,23 @@ public enum ProgramStatusRollup {
     }
 
     /// The displayed state of a terminal, or nil when it is not
-    /// OSC-authoritative (no main entry). The first matching rule wins:
+    /// OSC-authoritative: no main entry, or a main entry whose state this
+    /// build does not recognize. An unrecognized state says nothing TBD can
+    /// display, so the hook rail speaks rather than an opaque `.unknown`.
+    /// The first matching rule wins:
     ///
     /// 1. main is needs-auth, awaiting input or error → main's state;
     /// 2. a task entry is blocked → awaiting input, labelled with that task;
     /// 3. main or any task entry is working → working;
-    /// 4. otherwise main's state (done, idle, unknown).
+    /// 4. otherwise main's state (done, idle).
     public static func resolve(_ snapshot: ProgramStatusSnapshot) -> ProgramStatusResolution? {
         guard let main = snapshot.main else { return nil }
+        switch main.state {
+        case .unrecognized, .clear:
+            return nil
+        case .working, .blocked, .done, .idle, .error:
+            break
+        }
 
         var workingTaskCount = 0
         for task in snapshot.tasks where task.entry.state == .working {

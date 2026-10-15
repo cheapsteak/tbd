@@ -87,6 +87,15 @@ struct ProgramStatusRollupTests {
 
     // MARK: - resolve
 
+    /// A main state this build does not recognize is not authoritative, so
+    /// the hook rail speaks — even with a working task under it.
+    @Test func unrecognizedMainResolvesToNil() {
+        #expect(ProgramStatusRollup.resolve(snapshot(main: entry(.unrecognized("paused")))) == nil)
+        let withTask = snapshot(
+            main: entry(.unrecognized("paused")), tasks: [task("a", entry(.working))])
+        #expect(ProgramStatusRollup.resolve(withTask) == nil)
+    }
+
     @Test func noMainResolvesToNil() {
         let snap = snapshot(main: nil, tasks: [task("a", entry(.working))])
         #expect(ProgramStatusRollup.resolve(snap) == nil)

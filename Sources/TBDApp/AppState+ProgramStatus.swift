@@ -84,10 +84,14 @@ extension AppState {
     }
 
     /// Seed the mirror from `terminal.programStatusList`. Best-effort: a
-    /// failure leaves the mirror to the deltas.
+    /// failure leaves the mirror to the deltas. Applies nothing when the flag
+    /// is off once the list returns: a capabilities refresh that turned it off
+    /// while the list was in flight has already emptied the mirror, and
+    /// nothing would clear what this re-seeded.
     func hydrateProgramStatus() async {
         do {
             let snapshots = try await programStatusListFetcher()
+            guard programStatusFlagOn else { return }
             for snapshot in snapshots {
                 applyProgramStatusSnapshot(snapshot)
             }

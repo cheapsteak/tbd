@@ -2390,6 +2390,16 @@ actor HolderRegistry {
         guard case .adopted(let current) = slots[terminalID], current === reader else { return }
 
         statuses[terminalID] = status
+        // A SIGKILLed Claude sends no `state=clear`, so the session's end is
+        // the only signal its Program Status entries are over (spec
+        // "Liveness"). Dropped here, where the child's exit is confirmed,
+        // rather than after the release: a concurrent release that empties
+        // the slot below must not leave the exited session's entries standing.
+        if let programStatus {
+            await programStatus.drop(terminalID: terminalID, reason: .childExited)
+            // Re-read after the drop's suspension, as below.
+            guard case .adopted(let afterDrop) = slots[terminalID], afterDrop === reader else { return }
+        }
         if let sessionEndedObserver {
             await sessionEndedObserver(terminalID, status, reader)
             // Re-read after the observer's suspension: a concurrent release
@@ -2399,12 +2409,6 @@ actor HolderRegistry {
             guard case .adopted(let after) = slots[terminalID], after === reader else { return }
         }
         await release(terminalID: terminalID)
-        // A SIGKILLed Claude sends no `state=clear`, so the session's end is
-        // the only signal its Program Status entries are over (spec
-        // "Liveness").
-        if let programStatus {
-            await programStatus.drop(terminalID: terminalID, reason: .childExited)
-        }
         Self.logger.info(
             """
             released the reader for session \(terminalID.uuidString, privacy: .public): its \

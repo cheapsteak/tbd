@@ -531,7 +531,7 @@ public actor HibernationCoordinator {
         // Carry the row's persisted snapshot/reason: on a parked row this
         // re-broadcast has hibernated == true, and the app's in-place apply
         // would otherwise wipe both from its cached row.
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: terminal, hibernated: terminal.isHibernated, keepWarm: keepWarm,
             suspendedSnapshot: terminal.isHibernated ? terminal.suspendedSnapshot : nil,
             hibernateReason: terminal.isHibernated ? terminal.hibernateReason : nil,
@@ -1409,7 +1409,7 @@ public actor HibernationCoordinator {
         pendingKillSince[terminal.id] = nil
         // The app materializes its parked view on this flip, so carry the
         // snapshot and reason rather than waiting for a later row refresh.
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: currentTerminal, hibernated: true, keepWarm: currentTerminal.keepWarm,
             suspendedSnapshot: capturedSnapshot, hibernateReason: reason)
         logger.info("hibernated terminal \(terminal.id, privacy: .public) (session \(sessionID, privacy: .public))")
@@ -2047,7 +2047,7 @@ public actor HibernationCoordinator {
         // updates its cached row before (together with) the hibernated flip —
         // otherwise the terminal view rebuilds keyed on the dead window and
         // its failed attach re-parks the row (wake flap).
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
             tmuxWindowID: liveWindowID, tmuxPaneID: livePaneID
         )
@@ -2620,9 +2620,9 @@ public actor HibernationCoordinator {
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
         suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
         isParkOrWake: Bool = true
-    ) {
+    ) async {
         if isParkOrWake {
-            dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
+            await dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
         }
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: terminal.id,
@@ -2645,19 +2645,22 @@ public actor HibernationCoordinator {
     /// drops only entries whose incarnation differs from the row's current
     /// one: by the time a wake broadcasts, the replacement session is live and
     /// what it has already reported is its current state.
-    /// `broadcastHibernation` is synchronous, so the drop runs as a task.
+    ///
+    /// Awaited, not launched as a task: a park's drop sets the store's
+    /// watermark at the instant it runs, so a drop that ran after a later wake
+    /// would refuse the woken session's first reports. Every park reaches here
+    /// with `hibernatesInFlight` still claimed, and wake refuses a row with a
+    /// park in flight, so awaiting the drop orders it before any wake.
     ///
     /// A keep-warm toggle (`setKeepWarm`) re-broadcasts the row's current
     /// state without parking or waking it, so it passes `isParkOrWake: false`
     /// and drops nothing.
-    private func dropProgramStatus(terminalID: UUID, hibernated: Bool) {
+    private func dropProgramStatus(terminalID: UUID, hibernated: Bool) async {
         guard let programStatus else { return }
-        Task {
-            if hibernated {
-                await programStatus.drop(terminalID: terminalID, reason: .parked)
-            } else {
-                await programStatus.dropIfIncarnationChanged(terminalID: terminalID, reason: .woke)
-            }
+        if hibernated {
+            await programStatus.drop(terminalID: terminalID, reason: .parked)
+        } else {
+            await programStatus.dropIfIncarnationChanged(terminalID: terminalID, reason: .woke)
         }
     }
 }

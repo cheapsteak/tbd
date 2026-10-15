@@ -25,6 +25,37 @@ enum ProgramStatusRowPresentation {
         return ProgramStatusRollup.resolve(snapshot)
     }
 
+    /// The suffix badge an OSC-authoritative state selects, or nil for a
+    /// state that selects none (idle, unknown, and the TBD-owned states,
+    /// which never come out of a resolution).
+    static func suffixIndicator(for value: SessionStateValue) -> SuffixRowIndicator? {
+        switch value {
+        case .working: return .working
+        case .awaitingInput: return .attention
+        case .needsAuth: return .needsAuth
+        case .error: return .turnFailed
+        case .done: return .finished
+        case .idle, .rateLimited, .parked, .gone, .unknown: return nil
+        }
+    }
+
+    /// The help text for the badge `selected`: the OSC tooltip when it
+    /// describes that badge — some OSC-authoritative terminal resolves to the
+    /// state that selects it — and otherwise the badge's generic help. An
+    /// unread error notification, say, wins the badge over an OSC `working`,
+    /// and a tooltip about working would mislabel it.
+    static func badgeHelp(
+        selected: SuffixRowIndicator,
+        oscTooltip: String?,
+        resolvedValues: [SessionStateValue],
+        genericHelp: String
+    ) -> String {
+        guard let oscTooltip,
+              resolvedValues.contains(where: { suffixIndicator(for: $0) == selected })
+        else { return genericHelp }
+        return oscTooltip
+    }
+
     /// The label a terminal goes by in the tooltip.
     static func tooltipLabel(for terminal: TBDShared.Terminal) -> String {
         if let label = terminal.label, !label.isEmpty { return label }

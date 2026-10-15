@@ -122,6 +122,16 @@ struct ProgramStatusResolverTests {
         #expect(state.source == .hookEvent("Stop"))
     }
 
+    @Test func unrecognizedMainStateFallsBackToTheHookRail() {
+        let incarnation = UUID()
+        let row = terminal(incarnation: incarnation, hookState: .idle)
+        let snap = snapshot(
+            for: row, incarnation: incarnation, main: entry(.unrecognized("paused"), at: 10))
+        let state = resolver().resolve(SessionStateFacts(terminal: row, programStatus: snap))
+        #expect(state.value == .idle)
+        #expect(state.source == .hookEvent("Stop"))
+    }
+
     @Test func noSnapshotLeavesTheHookRailUntouched() {
         let row = terminal(incarnation: nil, hookState: .idle)
         let state = resolver().resolve(SessionStateFacts(terminal: row))

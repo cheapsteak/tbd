@@ -216,6 +216,10 @@ The main entry maps as follows:
 - `done` → `.done`
 - `idle` → `.idle`
 - `clear` → the terminal stops being OSC-authoritative
+- a state this build does not recognize → the terminal is not
+  OSC-authoritative while that entry stands, and the hook rail speaks: an
+  unrecognized state says nothing TBD can display, and the hook-derived state
+  is a better reading than an opaque unknown
 
 ### Precedence
 

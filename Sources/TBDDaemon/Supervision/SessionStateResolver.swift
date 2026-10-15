@@ -107,8 +107,9 @@ struct SessionStateFacts: Sendable, Equatable {
 ///    against hooks would flicker, because the two arrive over different
 ///    channels with no reliable order between them. Below `.gone`, `.parked`
 ///    and `.rateLimited` because those are states TBD owns. A snapshot for
-///    another incarnation, or one with no main entry (after a main `clear`),
-///    is ignored and the hook rail speaks again. Design:
+///    another incarnation, one with no main entry (after a main `clear`), or
+///    one whose main state this build does not recognize is ignored and the
+///    hook rail speaks again. Design:
 ///    docs/specs/2026-10-10-program-status-protocol-design.md.
 /// 4. **`.awaitingInput` vs `.working`/`.idle`** — decided by **observed-at**,
 ///    not by a fixed rank, and a recorded prompt the transcript has grown past

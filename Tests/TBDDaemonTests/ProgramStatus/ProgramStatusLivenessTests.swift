@@ -9,13 +9,13 @@ import TestSupport
 /// Program Status entries. `broadcastHibernation` is the funnel every park and
 /// wake path goes through, so it is driven directly here; the store's own
 /// drop semantics are pinned in `ProgramStatusStoreTests`.
+///
+/// The drop is awaited inside `broadcastHibernation`, so every assertion here
+/// reads the store immediately after the call returns: a park drop that ran
+/// later, in a task of its own, could set its watermark after a wake and
+/// refuse the woken session's first reports.
 @Suite struct ProgramStatusLivenessTests {
     private let t0 = Date(timeIntervalSince1970: 3_000_000)
-
-    private struct DropNotObserved: Error, CustomStringConvertible {
-        let what: String
-        var description: String { "Program Status entries were not dropped after \(what)" }
-    }
 
     private func holderClaude() -> Terminal {
         Terminal(
@@ -57,15 +57,6 @@ import TestSupport
         try #require(outcome == .accepted)
     }
 
-    private func awaitDropped(_ store: ProgramStatusStore, _ terminal: Terminal, after what: String) async {
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await store.snapshot(for: terminal.id) == nil
-        }
-        if outcome == .timedOut {
-            Issue.record(DropNotObserved(what: what))
-        }
-    }
-
     @Test func parkBroadcastDropsEntries() async throws {
         let terminal = holderClaude()
         let programStatus = store(for: terminal, now: t0.addingTimeInterval(10))
@@ -73,7 +64,7 @@ import TestSupport
         let coord = try coordinator(programStatus: programStatus)
 
         await coord.broadcastHibernation(terminal: terminal, hibernated: true, keepWarm: false)
-        await awaitDropped(programStatus, terminal, after: "a park broadcast")
+        #expect(await programStatus.snapshot(for: terminal.id) == nil)
     }
 
     /// A wake drops what an earlier incarnation left behind.
@@ -90,13 +81,11 @@ import TestSupport
         await coord.broadcastHibernation(
             terminal: terminal, hibernated: false, keepWarm: false,
             tmuxWindowID: "", tmuxPaneID: "")
-        await awaitDropped(programStatus, terminal, after: "a wake broadcast")
+        #expect(await programStatus.snapshot(for: terminal.id) == nil)
     }
 
     /// A wake leaves the live session's current state alone: its entries are
-    /// the row's current incarnation's. One-sided: a regressed drop would run
-    /// in a task and could land after this read; the store's own test pins
-    /// the rule deterministically.
+    /// the row's current incarnation's.
     @Test func wakeBroadcastKeepsTheCurrentIncarnationsEntries() async throws {
         let terminal = holderClaude()
         let programStatus = store(for: terminal, now: t0.addingTimeInterval(10))
@@ -111,8 +100,7 @@ import TestSupport
 
     /// A keep-warm toggle re-broadcasts without parking or waking, and must
     /// leave a live session's status alone — on a live row the wake branch
-    /// would otherwise drop it. One-sided: a regressed drop would run in a
-    /// task and could land after this read.
+    /// would otherwise drop it.
     @Test func keepWarmRebroadcastKeepsEntries() async throws {
         let terminal = holderClaude()
         let programStatus = store(for: terminal, now: t0.addingTimeInterval(10))

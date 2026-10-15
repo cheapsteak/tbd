@@ -183,6 +183,48 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.tooltipLabel(
             for: Self.terminal(label: "Reviewer", incarnation: nil)) == "Reviewer")
     }
+
+    // MARK: - Badge help
+
+    @Test func badgeHelpUsesTheOSCTooltipWhenItDescribesTheSelectedBadge() {
+        let help = ProgramStatusRowPresentation.badgeHelp(
+            selected: .working, oscTooltip: "Claude: working",
+            resolvedValues: [.working], genericHelp: "Agent is working")
+        #expect(help == "Claude: working")
+    }
+
+    /// An unread error notification wins the badge while OSC says working:
+    /// the badge keeps its own help rather than a tooltip about working.
+    @Test func badgeHelpKeepsTheGenericHelpWhenAnotherSignalSelectedTheBadge() {
+        let help = ProgramStatusRowPresentation.badgeHelp(
+            selected: .error, oscTooltip: "Claude: working",
+            resolvedValues: [.working], genericHelp: "Error")
+        #expect(help == "Error")
+    }
+
+    @Test func badgeHelpKeepsTheGenericHelpWithoutAnOSCTooltip() {
+        let help = ProgramStatusRowPresentation.badgeHelp(
+            selected: .working, oscTooltip: nil,
+            resolvedValues: [], genericHelp: "Agent is working")
+        #expect(help == "Agent is working")
+    }
+
+    @Test func badgeHelpMatchesAnyOSCTerminalNotOnlyTheFirst() {
+        let help = ProgramStatusRowPresentation.badgeHelp(
+            selected: .finished, oscTooltip: "both",
+            resolvedValues: [.idle, .done], genericHelp: "Finished")
+        #expect(help == "both")
+    }
+
+    @Test func suffixIndicatorMapsEachOSCState() {
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .working) == .working)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .awaitingInput(reason: nil)) == .attention)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .needsAuth) == .needsAuth)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .error) == .turnFailed)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == .finished)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .idle) == nil)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .unknown(why: "x")) == nil)
+    }
 }
 
 /// The app's mirror of the daemon's program-status snapshots.
@@ -256,6 +298,7 @@ struct ProgramStatusMirrorTests {
         defer { cleanup() }
         let a = UUID()
         let b = UUID()
+        state.daemonCapabilities = capabilities(programStatus: true)
         let listed = [snapshot(a, revision: 1, state: .done), snapshot(b, revision: 7, state: .working)]
         state.programStatusListFetcher = { @MainActor in listed }
         await state.hydrateProgramStatus()
@@ -266,12 +309,41 @@ struct ProgramStatusMirrorTests {
     @Test func hydrateDoesNotOverwriteANewerDelta() async {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
+        state.daemonCapabilities = capabilities(programStatus: true)
         let id = UUID()
         state.applyProgramStatusSnapshot(snapshot(id, revision: 9, state: .done))
         let stale = [snapshot(id, revision: 8, state: .working)]
         state.programStatusListFetcher = { @MainActor in stale }
         await state.hydrateProgramStatus()
         #expect(state.programStatusSnapshots[id]?.main?.state == .done)
+    }
+
+    /// The flag goes off while the list is in flight: the capabilities
+    /// refresh has already emptied the mirror, so the list must not refill it.
+    @Test func hydrateAppliesNothingWhenTheFlagWentOffDuringTheFetch() async {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        state.daemonCapabilities = capabilities(programStatus: true)
+        let id = UUID()
+        let listed = [snapshot(id, revision: 1, state: .working)]
+        let off = capabilities(programStatus: false)
+        state.programStatusListFetcher = { @MainActor [weak state] in
+            state?.daemonCapabilities = off
+            return listed
+        }
+        await state.hydrateProgramStatus()
+        #expect(state.programStatusSnapshots.isEmpty)
+    }
+
+    @Test func hydrateAppliesNothingWithTheFlagOff() async {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        state.daemonCapabilities = capabilities(programStatus: false)
+        let id = UUID()
+        let listed = [snapshot(id, revision: 1, state: .working)]
+        state.programStatusListFetcher = { @MainActor in listed }
+        await state.hydrateProgramStatus()
+        #expect(state.programStatusSnapshots.isEmpty)
     }
 
     @Test func turningTheFlagOffDropsSnapshots() async {

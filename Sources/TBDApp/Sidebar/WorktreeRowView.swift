@@ -600,6 +600,7 @@ struct WorktreeRowView: View {
     @ViewBuilder
     private func suffixIcon() -> some View {
         let tooltip: String? = programStatusTooltip
+        let resolvedValues: [SessionStateValue] = programStatusResolutions.values.map(\.value)
         let taskCount: Int = backgroundTaskCount
         switch RowStatusIndicator.suffix(
             notification: notification,
@@ -624,14 +625,18 @@ struct WorktreeRowView: View {
                 }
                 .padding(.leading, -3)
                 .offset(y: 2)
-                .help(tooltip ?? Self.suffixHelp(.working))
+                .help(ProgramStatusRowPresentation.badgeHelp(
+                    selected: .working, oscTooltip: tooltip,
+                    resolvedValues: resolvedValues, genericHelp: Self.suffixHelp(.working)))
         case let indicator?:
             if let symbol = indicator.systemImage {
                 Image(systemName: symbol)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(indicator.color)
                     .frame(width: 12, height: 12)
-                    .help(tooltip ?? Self.suffixHelp(indicator))
+                    .help(ProgramStatusRowPresentation.badgeHelp(
+                        selected: indicator, oscTooltip: tooltip,
+                        resolvedValues: resolvedValues, genericHelp: Self.suffixHelp(indicator)))
             }
         case nil:
             EmptyView()
