@@ -565,6 +565,23 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                     because: "its repository has peer messaging switched off")
                 return
             }
+            if case .sited(let site) = resolution, site.repoID != existing.repoID {
+                // **The session now sites to a different repository.** A
+                // shadow's repository scopes every message it exchanges, and
+                // keeping the one it was published under would keep it
+                // reaching the old project's sessions. Withdraw it and publish
+                // this same line afresh, so the new shadow carries the
+                // repository it sites to now.
+                guard stillCurrent(),
+                      currentShadow(handle: peer.handle, pid: helperPID) != nil
+                else { return }
+                await withdrawShadow(
+                    handle: peer.handle,
+                    because: "its session now resolves to a different repository")
+                guard stillCurrent(), shadows[peer.handle] == nil else { return }
+                await applyPeer(peer)
+                return
+            }
             let name = composedName(for: resolution) ?? existing.name
             do {
                 try await existing.helper.send(.peer(PeerBridgePeer(
@@ -769,7 +786,10 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// repository on again republishes it. `.unsited` — TBD no longer has a
     /// row for the session, or the row has no repository — withdraws it
     /// outright: there is nothing left to hold it against, and the far side's
-    /// next line for it sites it afresh if a row comes back.
+    /// next line for it sites it afresh if a row comes back. A `.sited` answer
+    /// naming a different repository than the shadow was published under
+    /// withdraws it too, and holds its line back like `.switchedOff`, so the
+    /// second loop below republishes it under the repository it sites to now.
     public func recheckPeerMessagingSwitches() async {
         let generation = linkGeneration
         for handle in shadows.keys.sorted() {
@@ -778,11 +798,20 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             else { continue }
             let pid = shadow.helper.pid
             let resolution = await siteResolver.resolution(forProviderSessionID: sessionID)
-            if case .sited = resolution { continue }
+            if case .sited(let site) = resolution, site.repoID == shadow.repoID { continue }
             guard generation == linkGeneration,
                   let current = currentShadow(handle: handle, pid: pid)
             else { continue }
-            if resolution == .switchedOff {
+            if case .sited = resolution {
+                // Sited, but to another repository: the shadow's scope is
+                // stale. Held back before the withdrawal suspends, for the
+                // same reason as the switched-off case below.
+                switchedOff[handle] = PeerBridgePeer(
+                    handle: handle, name: current.name, status: current.status,
+                    peerProtocol: current.peerProtocol, sessionID: sessionID)
+                await withdrawShadow(
+                    handle: handle, because: "its session now resolves to a different repository")
+            } else if resolution == .switchedOff {
                 // Recorded BEFORE the withdrawal suspends, for the reason the
                 // same step in `applyPeer` gives: a `peer-gone` arriving during
                 // it must win, or a later switch-on would resurrect a retired
@@ -1112,8 +1141,9 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// it. The handle is stable; the permission class is refreshed from each
     /// call, so the stamp follows what the roster last vouched for.
     ///
-    /// Both defaults fail closed: with no `repoID` the session can exchange
-    /// no message with any shadow, and with no `permissionClass` it gets the
+    /// Both arguments are required so no caller omits one by accident, and nil
+    /// fails closed either way: with no `repoID` the session can exchange no
+    /// message with any shadow, and with no `permissionClass` it gets the
     /// stamp that never confers delivery, never a guessed `bypass`.
     ///
     /// A socket is announced under one repository only — a session's worktree
@@ -1123,8 +1153,8 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     @discardableResult
     public func handle(
         forLocalPeerAt socketPath: String, name: String,
-        repoID: UUID? = nil,
-        permissionClass: ShadowPeerPermissionClass? = nil
+        repoID: UUID?,
+        permissionClass: ShadowPeerPermissionClass?
     ) -> String {
         let address = "uds:\(socketPath)"
         let handle = localHandlesByAddress[address] ?? mintHandle()

@@ -278,6 +278,19 @@ private final class MutableDisplayName: @unchecked Sendable {
     }
 }
 
+/// The repository a fixture's site resolver answers with, changeable between
+/// calls so a test can move a remote session to another repository.
+private final class MutableRepoID: @unchecked Sendable {
+    private let stored: OSAllocatedUnfairLock<UUID?>
+
+    init(_ initial: UUID?) { stored = OSAllocatedUnfairLock(initialState: initial) }
+
+    var value: UUID? {
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
+    }
+}
+
 private actor FakeLocalDelivery: LocalPeerDelivering {
     private(set) var delivered: [(payload: Data, path: String)] = []
     private var failure: (any Error)?
@@ -722,7 +735,7 @@ struct ShadowPeerManagerTests {
         await harness.manager.handle(.peer(Self.remotePeer()))
         _ = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
 
         #expect(await harness.delivery.deliveryCount == 0)
         #expect(await harness.manager.dropCounts.summary == "unknownHandle=1")
@@ -806,6 +819,64 @@ struct ShadowPeerManagerTests {
         await harness.manager.handle(.message(PeerBridgeMessage(
             id: "m-1", to: localHandle, from: "remote-1", content: "hi")))
 
+        #expect(await harness.delivery.deliveryCount == 0)
+        #expect(await harness.manager.dropCounts.summary == "crossRepository=1")
+    }
+
+    /// A published shadow whose session, on a later `peer` line, sites to a
+    /// different repository: the harness for the two re-siting tests below.
+    /// The local session stays in the original repository, so a stale shadow
+    /// repository would still deliver into it and a fresh one drops.
+    private static func makeResitingHarness() async throws
+        -> (Harness, MutableRepoID, FakeShadowPeerHelper, String) {
+        let repo = MutableRepoID(shadowPeerTestRepoID)
+        let harness = makeHarness(site: { _ in
+            ShadowPeerSite(
+                worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree",
+                repoID: repo.value)
+        })
+        await harness.manager.handle(.hello(origin: "acme-box", peerProtocol: 1))
+        await harness.manager.handle(.peer(remotePeer()))
+        let localHandle = await harness.manager.handle(
+            forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
+        let first = try #require(await harness.spawner.helper(for: "remote-1"))
+        repo.value = otherRepoID
+        return (harness, repo, first, localHandle)
+    }
+
+    /// **A new `peer` line that sites to another repository withdraws the
+    /// shadow and publishes it afresh**, rather than keeping the repository it
+    /// was first published under. The old shadow's repository would otherwise
+    /// go on scoping its messages to the project it left.
+    @Test func aPeerLineSitingToAnotherRepositoryRepublishesTheShadow() async throws {
+        let (harness, _, first, localHandle) = try await Self.makeResitingHarness()
+
+        await harness.manager.handle(.peer(Self.remotePeer(status: "working")))
+
+        #expect(first.terminations == 1, "the stale shadow is withdrawn")
+        #expect(await harness.spawner.spawnCount == 2, "and published afresh")
+        await harness.manager.handle(.message(PeerBridgeMessage(
+            id: "m-1", to: localHandle, from: "remote-1", content: "hi")))
+        #expect(await harness.delivery.deliveryCount == 0)
+        #expect(await harness.manager.dropCounts.summary == "crossRepository=1")
+    }
+
+    /// The same move caught by the scope tick, with no new line from the far
+    /// side: the recheck withdraws the shadow and republishes it under the
+    /// repository it sites to now.
+    @Test func aRecheckSitingToAnotherRepositoryRepublishesTheShadow() async throws {
+        let (harness, _, first, localHandle) = try await Self.makeResitingHarness()
+
+        await harness.manager.recheckPeerMessagingSwitches()
+
+        #expect(first.terminations == 1, "the stale shadow is withdrawn")
+        #expect(await harness.spawner.spawnCount == 2, "and published afresh")
+        let snapshot = await harness.manager.snapshot()
+        #expect(snapshot.shadows.map(\.handle) == ["remote-1"])
+        #expect(snapshot.switchedOffHandles.isEmpty)
+        await harness.manager.handle(.message(PeerBridgeMessage(
+            id: "m-1", to: localHandle, from: "remote-1", content: "hi")))
         #expect(await harness.delivery.deliveryCount == 0)
         #expect(await harness.manager.dropCounts.summary == "crossRepository=1")
     }
@@ -1249,7 +1320,7 @@ struct ShadowPeerManagerTests {
         await harness.manager.handle(.peer(Self.remotePeer(handle: "remote-2")))
         _ = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
         let first = try #require(await harness.spawner.helper(for: "remote-1"))
         let second = try #require(await harness.spawner.helper(for: "remote-2"))
 
@@ -1522,7 +1593,7 @@ struct ShadowPeerManagerTests {
         let harness = Self.makeHarness()
         let mine = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
 
         await harness.manager.handle(.peerInventory(handles: ["leaked-from-last-time"]))
 
@@ -1539,10 +1610,10 @@ struct ShadowPeerManagerTests {
 
         let first = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
         let second = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
 
         #expect(first == second)
         #expect(await harness.manager.snapshot().localHandles == [first])
@@ -1554,7 +1625,7 @@ struct ShadowPeerManagerTests {
         let harness = Self.makeHarness()
         let handle = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7",
-            repoID: shadowPeerTestRepoID)
+            repoID: shadowPeerTestRepoID, permissionClass: .bypass)
 
         let withdrawn = await harness.manager.withdrawLocalPeer(
             at: "/tmp/tbd-test-shadow-socks/4242.sock")
