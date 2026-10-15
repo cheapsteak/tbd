@@ -80,7 +80,9 @@ struct PeerBridgeCompositionTests {
         let on: Set<UUID> = [fixture.repo.id]
         #expect(await scope.resolve() == on)
         #expect(await resolver.resolution(forProviderSessionID: "sess-1") == .sited(
-            ShadowPeerSite(worktreeDisplayName: "api-lane", path: fixture.checkout.path)))
+            ShadowPeerSite(
+                worktreeDisplayName: "api-lane", path: fixture.checkout.path,
+                repoID: fixture.repo.id)))
 
         // An explicit false, read fresh with no restart.
         try fixture.setSwitch("[remote_sessions]\npeer_messaging = false\n")

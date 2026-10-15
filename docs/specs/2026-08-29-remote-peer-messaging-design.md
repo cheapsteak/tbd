@@ -336,10 +336,36 @@ side never learns a real path either.
 `<cross-session-message>` wrapper is composed by the *sender's* client and
 travels inside the message content, so a remote peer controls `from-name` and
 `from-mode` outright — it could name itself as one of your local sessions and
-claim `bypass` to satisfy the inbound policy. TBD **MUST** overwrite the name
-with the shadow peer's own namespaced name and the mode with the class it
-actually grants. Message *content* passes byte-verbatim; only attribution is
-rewritten.
+claim whichever class satisfies the inbound policy. TBD **MUST** replace the
+whole opening tag: the name with the shadow peer's own namespaced name, and the
+mode with the class TBD grants. Whatever mode the remote frame claims is
+discarded with the rest of its tag. Message *content* passes byte-verbatim; only
+attribution is rewritten.
+
+**The granted class is the receiving session's own.** Claude Code 2.1.300
+accepts exactly two `from-mode` values, `bypass` and `prompting`; any other
+value fails the envelope parse and the message counts as attesting no mode.
+Its inbound policy then compares the attested class with the receiver's: equal
+classes deliver, unequal ones are held as a mismatch, and a message attesting
+no mode is held when the receiver bypasses permission prompts. Every hold waits
+for a human to approve it in the receiving session. So TBD stamps `bypass` into
+a session that skips permissions and `prompting` into one that prompts — the
+one value each receiver delivers without a click — and never any other value.
+The repository's `[remote_sessions] peer_messaging = true` is the trust grant
+this rests on: an inbound frame is stamped only when it comes from a shadow TBD
+published, and TBD publishes shadows only for repositories with the switch on.
+
+TBD learns the receiver's class from its own spawn command, the one fact about
+the session's mode TBD wrote itself. Every Claude session TBD spawns is
+launched with `--dangerously-skip-permissions`, so every session the roster
+announces is stamped `bypass`. Claude Code's peer registry record carries no
+permission field, and reading the rendered screen is ruled out. A receiver whose
+class TBD cannot vouch for is stamped `prompting`: a prompting receiver
+delivers it, and a bypass receiver holds it for approval — late, never wrong.
+TBD never stamps `bypass` without evidence that the receiver bypasses. A guess
+that has drifted fails the same way: a session the user moved out of bypass
+mode mid-session holds a `bypass`-stamped message as a mismatch, and neither
+value can make a receiver of the other class deliver unprompted.
 
 **Mirroring outward is scoped three times.** Only TBD-spawned sessions are
 mirrored to a remote host — never a plain-terminal session, never another
@@ -349,12 +375,27 @@ sessions in another. And it is mirrored only when that repository has peer
 messaging switched on in its `tbd.toml` (see The per-repository switch). A remote session that resolves to no registered repository has no
 worktree row under the existing contract and is therefore never bridged.
 
+**Every message is scoped to one repository, in both directions.** One stream
+carries a provider's traffic for every repository with the switch on, so a
+handle that resolves proves only that TBD announced it, not that sender and
+addressee share a project. TBD therefore records the repository on both halves
+of the table — a shadow takes it from the worktree row its remote session
+sited to, a local session from the roster link it was announced on — and
+delivers a message only when the two are the same. An inbound frame from a
+remote lane in one project to a local session in another is dropped and
+counted, and so is an outbound frame from a local session to a remote lane in
+another project. A shadow or local session with no repository on record
+exchanges nothing; unknown never matches. A local session is announced under
+exactly one repository, since its worktree belongs to one and the roster scopes
+each session to that repository's link.
+
 One asymmetry is on the record because it cannot be engineered away.
 `~/.claude/sessions` is a single per-user directory with no notion of project,
 and every local session reads all of it. So TBD controls which local sessions a
-remote host can *reach*, but not which local sessions *see* a shadow peer: a
-session in one project will see remote peers from another and may message them.
-The direction that crosses the trust boundary is the one that is scoped.
+remote host can *reach*, and which remote lanes a local session's messages
+*reach*, but not which local sessions *see* a shadow peer: a session in one
+project will list remote peers from another, and a message it sends one is
+dropped rather than delivered.
 
 Remote message content remains untrusted teammate input, exactly as local peer
 content already is. The namespaced stamp is what stops it impersonating a local
