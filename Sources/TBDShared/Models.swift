@@ -1611,24 +1611,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
-    /// The single opt-in for remote peer messaging
-    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
-    /// rollout"): publishing a shadow peer for each remote session and carrying
-    /// frames over the provider's `messages` stream. It ships OFF because the
-    /// bridge acts without a user gesture — helper processes, sockets and
-    /// records appear in `~/.claude/sessions` and `/tmp/cc-socks`, directories
-    /// shared with every Claude Code session on the machine.
-    ///
-    /// There is deliberately no per-worktree companion: a second gate under a
-    /// global one is the kind nobody tunes and everybody has to debug around.
-    ///
-    /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `remote_peer_messaging_enabled ?? Config.remotePeerMessagingDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var remotePeerMessagingEnabled: Bool
     /// Whether new sessions spawn onto the per-session pty-holder transport
     /// instead of tmux. It is ON: the holder owns a pty and a child process
     /// that outlive the daemon, and the named reconcilers that reclaim one
@@ -1639,7 +1621,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// creation and keeps it for life, so flipping this never migrates a running
     /// session and both transports coexist while any pre-flip session is alive.
     ///
-    /// **Resolved, not stored**, like `remotePeerMessagingEnabled`: the backing
+    /// **Resolved, not stored**, like `gcHangStacksEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `pty_holder_enabled ?? Config.ptyHolderDefault`. NULL means "never chose"
@@ -1813,12 +1795,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcHangStacksEnabledDefault = false
-    /// The shipped default for `remotePeerMessagingEnabled`, and the single
-    /// place it lives. The peer bridge ships off; graduation — after a soak in
-    /// which no ghost record outlives its daemon — is a change to this
-    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
-    /// left alone.
-    public static let remotePeerMessagingDefault = false
     /// The shipped default for `ptyHolderEnabled`, and the single place it
     /// lives. The holder transport is graduated: new sessions spawn onto a
     /// holder unless somebody has chosen otherwise. Because the column carries
@@ -1910,7 +1886,6 @@ public struct Config: Codable, Sendable, Equatable {
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault,
-                remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
@@ -1955,7 +1930,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
         self.gcHangStacksEnabled = gcHangStacksEnabled
-        self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
@@ -2049,11 +2023,6 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcHangStacksEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcHangStacksEnabled) ?? Config.gcHangStacksEnabledDefault
-        // Same tri-state once more: absent means the sender knew nothing about
-        // the flag, which is the NULL column's situation — follow the shipped
-        // default rather than hardcoding `false`.
-        remotePeerMessagingEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .remotePeerMessagingEnabled) ?? Config.remotePeerMessagingDefault
         // And once more: absent means the sender knew nothing about the flag,
         // which is the NULL column's situation — follow the shipped default
         // rather than hardcoding `false`.

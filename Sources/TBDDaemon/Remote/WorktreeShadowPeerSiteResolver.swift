@@ -33,8 +33,14 @@ import TBDShared
 /// manager counts such a handle as unmirrored and surfaces it, which is the
 /// path that already exists there.
 ///
+/// **A repository whose `tbd.toml` does not switch peer messaging on gets no
+/// shadow**, and says so as `.switchedOff` rather than as an unsited nil. The
+/// difference matters to the manager: an unsited answer can be a failed read
+/// and never withdraws a shadow already published, while `.switchedOff` is the
+/// repository's own definite choice and withdraws one.
+///
 /// Design: `docs/specs/2026-08-29-remote-peer-messaging-design.md`
-/// § "Addressing and naming".
+/// §§ "Addressing and naming", "The per-repository switch".
 public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
     /// One resolver per provider: `providerSessionID` is unique only within a
     /// provider, and a resolver that searched across providers could site a
@@ -46,11 +52,16 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
     /// no real checkout, and so the check is visibly part of the contract
     /// rather than an incidental `FileManager` call.
     private let directoryExists: @Sendable (String) -> Bool
+    /// Whether the repository has peer messaging switched on. Required rather
+    /// than defaulted, so no caller can build a resolver that forgets the
+    /// switch.
+    private let peerMessagingOn: @Sendable (Repo) -> Bool
 
     public init(
         provider: String,
         worktrees: WorktreeStore,
         repos: RepoStore,
+        peerMessagingOn: @escaping @Sendable (Repo) -> Bool,
         directoryExists: @escaping @Sendable (String) -> Bool = { path in
             var isDirectory: ObjCBool = false
             let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
@@ -61,16 +72,26 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
         self.worktrees = worktrees
         self.repos = repos
         self.directoryExists = directoryExists
+        self.peerMessagingOn = peerMessagingOn
     }
 
     public func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
+        guard case .sited(let site) = await resolution(forProviderSessionID: sessionID)
+        else { return nil }
+        return site
+    }
+
+    public func resolution(
+        forProviderSessionID sessionID: String
+    ) async -> ShadowPeerSiteResolution {
         guard let worktree = try? await worktrees.findRemote(
             provider: provider, sessionID: sessionID)
-        else { return nil }
+        else { return .unsited }
         guard let repoID = worktree.repoID,
               let repo = try? await repos.get(id: repoID),
               directoryExists(repo.path)
-        else { return nil }
-        return ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path)
+        else { return .unsited }
+        guard peerMessagingOn(repo) else { return .switchedOff }
+        return .sited(ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path))
     }
 }

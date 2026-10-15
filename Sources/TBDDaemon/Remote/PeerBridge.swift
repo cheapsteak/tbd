@@ -291,9 +291,10 @@ actor PeerBridge: PeerBridging {
             return inventory
         }
 
-        // The shared roster ticks only while a bridge needs it: with the flag
-        // off nothing is constructed here, so nothing scans the registry
-        // directory every two seconds for a feature nobody turned on.
+        // The shared roster ticks only while a bridge needs it: with every
+        // repository's switch off nothing is constructed here, so nothing scans
+        // the registry directory every two seconds for a feature nobody turned
+        // on.
         await roster.retain()
         await link.start()
         await reconcileRepoScope()
@@ -349,7 +350,8 @@ actor PeerBridge: PeerBridging {
     }
 
     /// Add a roster link for every repository this provider now hosts sessions
-    /// in, and drop the ones it no longer does.
+    /// in with peer messaging switched on, and drop the ones it no longer does
+    /// or that switched it off.
     ///
     /// Adding announces this link the whole roster for that repository from
     /// scratch, which is the design's resync rule rather than a convenience.
@@ -394,6 +396,11 @@ actor PeerBridge: PeerBridging {
             registrationsByRepo[repoID] = nil
             await roster.removeLink(id: registrationID, because: .stillOpen)
         }
+
+        // The inward half of the same per-repository switch, on the same tick:
+        // withdraw every shadow whose repository has turned peer messaging
+        // off, and publish any held back while it was off that is now on.
+        await manager.recheckPeerMessagingSwitches()
     }
 
     /// A link-state transition, delivered in stream order by the observer
@@ -447,6 +454,7 @@ actor PeerBridge: PeerBridging {
             remoteOrigin: snapshot.origin,
             shadowCount: snapshot.shadows.count,
             unmirroredHandles: snapshot.unmirroredHandles,
+            switchedOffHandles: snapshot.switchedOffHandles,
             inventorySurplus: snapshot.inventorySurplus,
             inventoryMissing: snapshot.inventoryMissing,
             drops: drops)
@@ -535,10 +543,11 @@ public enum PeerLinkOrigin {
 /// question. The scoping that differs per link is a property of the link's
 /// registration, not of the scan.
 ///
-/// **Reference counted, so the tick is part of the flag's blast radius.** With
-/// `remote_peer_messaging_enabled` off, no bridge is constructed, nothing
-/// retains this, and the directory is never scanned — rather than a two-second
-/// timer running forever on every install for a feature nobody turned on. The
+/// **Reference counted, so the tick is part of the switch's blast radius.**
+/// While no repository has peer messaging switched on, no bridge is
+/// constructed, nothing retains this, and the directory is never scanned —
+/// rather than a two-second timer running forever on every install for a
+/// feature nobody turned on. The
 /// count goes back to zero when the last bridge stops, which is also what
 /// happens on daemon shutdown.
 actor PeerRosterRunner {
@@ -576,7 +585,8 @@ actor PeerRosterRunner {
     }
 
     /// Test seam: whether the tick is armed. The point of the refcount is that
-    /// it is *not* armed with the flag off, and an assertion needs to see that.
+    /// it is *not* armed while no bridge exists, and an assertion needs to see
+    /// that.
     func isTicking() -> Bool { task != nil }
 }
 
@@ -590,21 +600,23 @@ actor PeerRosterRunner {
 /// registry directory — none of which are its subject — and so a test can gate
 /// and construct without a database or a child process.
 struct PeerBridgeWiring: Sendable {
-    /// `remote_peer_messaging_enabled`, resolved at the moment a provider's
-    /// streams are armed.
+    /// Whether to open this provider's `messages` stream: true when at least
+    /// one repository the provider runs sessions in has peer messaging
+    /// switched on in its `tbd.toml`.
     ///
-    /// Read live rather than captured at boot, and the difference is
-    /// deliberate: the flag is the feature's only opt-in, and the gate is
-    /// consulted exactly where the events gate beside it is, so both branches
-    /// are reachable from a test without booting a daemon.
-    let isEnabled: @Sendable () async -> Bool
+    /// Asked live rather than captured at boot, and the difference is
+    /// deliberate: the per-repository switch is the feature's only opt-in, so
+    /// the manager asks where a provider's streams are armed and again on each
+    /// poll tick while no bridge exists. Both branches are reachable from a
+    /// test without booting a daemon.
+    let isEnabled: @Sendable (RemoteProviderConfig) async -> Bool
     /// Build one provider's bridge, given its config and the contract major
     /// already negotiated for it. Returns nil when the bridge cannot be built,
     /// which is treated exactly as a refused gate.
     let make: @Sendable (RemoteProviderConfig, Int) async -> (any PeerBridging)?
 
     init(
-        isEnabled: @escaping @Sendable () async -> Bool,
+        isEnabled: @escaping @Sendable (RemoteProviderConfig) async -> Bool,
         make: @escaping @Sendable (RemoteProviderConfig, Int) async -> (any PeerBridging)?
     ) {
         self.isEnabled = isEnabled

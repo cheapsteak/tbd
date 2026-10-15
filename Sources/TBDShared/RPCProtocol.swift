@@ -463,13 +463,6 @@ public enum RPCMethod {
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
-    /// The remote peer-messaging gate (`remote_peer_messaging_enabled`) — the
-    /// feature's only opt-in, and the write half of what `peer.status` reports.
-    /// Reading needs no method of its own: `config.get` already carries the
-    /// resolved value, and `peer.status` carries it beside the link states it
-    /// explains.
-    public static let configSetRemotePeerMessagingEnabled =
-        "config.setRemotePeerMessagingEnabled"
     /// The pty-holder transport gate (`pty_holder_enabled`) — the feature's only
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
@@ -2283,17 +2276,6 @@ public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setRemotePeerMessagingEnabled` — the remote peer
-/// messaging gate (default OFF during soak), which is the single opt-in for
-/// shadow peers and for a provider's `messages` stream. Writing either value is
-/// the explicit gesture that lifts the column out of its NULL "never chose"
-/// state, so an operator who turns the feature off stays off when the shipped
-/// default graduates.
-public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setPtyHolderEnabled` — the pty-holder transport gate
 /// (default OFF during soak), which decides whether a *new* session is spawned
 /// onto a holder rather than into a tmux window. Writing either value is the
@@ -2370,16 +2352,17 @@ public struct GCSweepResult: Codable, Sendable, Equatable {
 /// **The last pair is the answer to the stale-shim problem.** An old shim never
 /// declares the `messages` capability, so TBD never invokes it and the feature
 /// silently does nothing — the failure this contract's users have been bitten
-/// by. `messagingEnabled` plus each provider's `declaresMessages` makes that
-/// visible instead of silent
+/// by. `repos` plus each provider's `declaresMessages` makes that visible
+/// instead of silent
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, § "Conformance").
 ///
 /// Every field is a fact TBD holds, never an inference: nothing here is derived
 /// from a record's contents or from a path.
 public struct PeerBridgeStatus: Codable, Sendable, Equatable {
-    /// Resolved `remote_peer_messaging_enabled` — the config value, or the
-    /// shipped default when nobody has chosen.
-    public let messagingEnabled: Bool
+    /// Every registered repository's peer-messaging switch, as its committed
+    /// `tbd.toml` states it, with any problem the file has. Nil from a daemon
+    /// that predates the per-repository switch.
+    public let repos: [PeerMessagingRepoStatus]?
     /// True when the daemon has a remote-provider manager at all. False means
     /// `remote_backends_enabled` was off at boot, so no provider is described
     /// and `providers` is empty for that reason rather than for want of one.
@@ -2396,17 +2379,45 @@ public struct PeerBridgeStatus: Codable, Sendable, Equatable {
     public let lastSweep: PeerShadowSweep?
 
     public init(
-        messagingEnabled: Bool,
+        repos: [PeerMessagingRepoStatus]? = nil,
         remoteBackendsLive: Bool,
         providers: [PeerProviderBridgeStatus],
         shadows: [PeerShadowArtifactRow],
         lastSweep: PeerShadowSweep?
     ) {
-        self.messagingEnabled = messagingEnabled
+        self.repos = repos
         self.remoteBackendsLive = remoteBackendsLive
         self.providers = providers
         self.shadows = shadows
         self.lastSweep = lastSweep
+    }
+}
+
+/// One repository's peer-messaging switch, read from the `tbd.toml` in its
+/// registered main checkout.
+///
+/// `[remote_sessions] peer_messaging = true` turns it on; anything else is off.
+/// A value TBD could not understand is off too, and is named in `problems` so
+/// the listing can say why a repository someone meant to switch on is not.
+public struct PeerMessagingRepoStatus: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let repoName: String
+    /// The `tbd.toml` the switch was read from.
+    public let tomlPath: String
+    public let enabled: Bool
+    /// Why the file gave no clear answer; empty when it did, including when the
+    /// file, table or key is simply absent.
+    public let problems: [String]
+
+    public init(
+        repoID: UUID, repoName: String, tomlPath: String, enabled: Bool,
+        problems: [String] = []
+    ) {
+        self.repoID = repoID
+        self.repoName = repoName
+        self.tomlPath = tomlPath
+        self.enabled = enabled
+        self.problems = problems
     }
 }
 
@@ -2417,11 +2428,14 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
     /// **False is the stale-shim signal**, and it is reported rather than
     /// inferred from an empty listing.
     public let declaresMessages: Bool
-    /// Whether a bridge is constructed for it right now. False with
-    /// `declaresMessages == true` and the flag on means the gate refused for
-    /// another reason — most plausibly a flag flipped after the last time poll
-    /// loops were armed, which a daemon restart resolves.
+    /// Whether a bridge is constructed for it right now.
     public let bridged: Bool
+    /// For a provider that declares `messages` and has no bridge: whether at
+    /// least one repository it runs sessions in has peer messaging switched on
+    /// right now. True means the stream opens at the provider's next poll tick;
+    /// false means no repository asks for one. Nil when bridged, when the
+    /// provider declares no `messages`, or from an older daemon.
+    public let wantsStream: Bool?
     /// `"up"` / `"down"`, or nil when nothing is bridged.
     public let linkState: String?
     /// The origin label the far side declared in its `hello`, or nil before one
@@ -2433,6 +2447,10 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
     /// never mirrored — a `peer` line carrying no session id, or one naming a
     /// session TBD adopted no worktree row for.
     public let unmirroredHandles: [String]
+    /// Handles the far side announced for sessions in a repository whose
+    /// `tbd.toml` does not switch peer messaging on, so TBD publishes no shadow
+    /// for them. Nil from an older daemon.
+    public let switchedOffHandles: [String]?
     /// The divergence between the provider's own `peer-inventory` and what TBD
     /// asked it to publish. TBD cannot sweep the far host, so this is the
     /// mitigation: a provider that leaks is visible as a difference.
@@ -2446,10 +2464,12 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
         provider: String,
         declaresMessages: Bool,
         bridged: Bool,
+        wantsStream: Bool? = nil,
         linkState: String? = nil,
         remoteOrigin: String? = nil,
         shadowCount: Int = 0,
         unmirroredHandles: [String] = [],
+        switchedOffHandles: [String]? = nil,
         inventorySurplus: [String] = [],
         inventoryMissing: [String] = [],
         drops: [String: Int] = [:]
@@ -2457,10 +2477,12 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
         self.provider = provider
         self.declaresMessages = declaresMessages
         self.bridged = bridged
+        self.wantsStream = wantsStream
         self.linkState = linkState
         self.remoteOrigin = remoteOrigin
         self.shadowCount = shadowCount
         self.unmirroredHandles = unmirroredHandles
+        self.switchedOffHandles = switchedOffHandles
         self.inventorySurplus = inventorySurplus
         self.inventoryMissing = inventoryMissing
         self.drops = drops

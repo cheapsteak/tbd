@@ -1389,3 +1389,140 @@ struct ShadowPeerManagerTests {
         #expect(await harness.manager.dropCounts.summary == "deliveryFailed=1")
     }
 }
+
+// MARK: - The per-repository switch, inward
+
+/// A site resolver whose repository switch a test can flip between two calls,
+/// standing in for an edit to the repository's `tbd.toml`.
+private final class SwitchableSiteResolver: ShadowPeerSiteResolving, @unchecked Sendable {
+    private let on: OSAllocatedUnfairLock<Bool>
+    private let site = ShadowPeerSite(
+        worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")
+
+    init(on: Bool) { self.on = OSAllocatedUnfairLock(initialState: on) }
+
+    func set(on value: Bool) { on.withLock { $0 = value } }
+
+    func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
+        on.withLock { $0 } ? site : nil
+    }
+
+    func resolution(forProviderSessionID sessionID: String) async -> ShadowPeerSiteResolution {
+        on.withLock { $0 } ? .sited(site) : .switchedOff
+    }
+}
+
+/// The inward half of the per-repository peer-messaging switch: a remote
+/// session whose repository has `[remote_sessions] peer_messaging` off gets no
+/// shadow, and a change to the switch reaches shadows already published on the
+/// next recheck (`docs/specs/2026-08-29-remote-peer-messaging-design.md`,
+/// "The per-repository switch").
+///
+/// Tier 1: no process, socket or registry record — the same fakes as above.
+@Suite("ShadowPeerManager per-repository switch")
+struct ShadowPeerManagerSwitchTests {
+
+    private static func makeManager(
+        resolver: SwitchableSiteResolver
+    ) -> (ShadowPeerManager, FakeShadowPeerSpawner) {
+        let spawner = FakeShadowPeerSpawner()
+        let manager = ShadowPeerManager(
+            provider: "cloud",
+            link: FakePeerLink(),
+            siteResolver: resolver,
+            spawner: spawner,
+            delivery: FakeLocalDelivery(),
+            socketDirectory: URL(fileURLWithPath: "/tmp/tbd-test-shadow-socks", isDirectory: true),
+            sessionsDirectory: URL(
+                fileURLWithPath: "/tmp/tbd-test-shadow-sessions", isDirectory: true),
+            mintSessionID: { "session-1" },
+            artifactRecorder: FakeArtifactRecorder())
+        return (manager, spawner)
+    }
+
+    private static let peer = PeerBridgePeer(
+        handle: "remote-1", name: "fix-ci", status: "idle",
+        peerProtocol: PeerBridgeFrameCodec.peerProtocol, sessionID: "remote-session-1")
+
+    @Test func aPeerInASwitchedOffRepositoryGetsNoShadow() async {
+        let resolver = SwitchableSiteResolver(on: false)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+
+        await manager.handle(.peer(Self.peer))
+
+        #expect(await spawner.spawnCount == 0, "switched off: nothing may be spawned")
+        let snapshot = await manager.snapshot()
+        #expect(snapshot.shadows.isEmpty)
+        #expect(snapshot.switchedOffHandles == ["remote-1"])
+        #expect(snapshot.unmirroredHandles.isEmpty,
+                "held back by the repository's choice, not unsitable")
+    }
+
+    @Test func aPeerInASwitchedOnRepositoryGetsAShadow() async {
+        let resolver = SwitchableSiteResolver(on: true)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+
+        await manager.handle(.peer(Self.peer))
+
+        #expect(await spawner.spawnCount == 1)
+        let snapshot = await manager.snapshot()
+        #expect(snapshot.shadows.map(\.handle) == ["remote-1"])
+        #expect(snapshot.switchedOffHandles.isEmpty)
+    }
+
+    /// Switching the repository off withdraws a published shadow on the next
+    /// recheck, with no new line from the far side and no restart; switching it
+    /// back on publishes it again from the line held back.
+    @Test func recheckFollowsTheSwitchInBothDirections() async throws {
+        let resolver = SwitchableSiteResolver(on: true)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+        let first = try #require(await spawner.helper(for: "remote-1"))
+
+        resolver.set(on: false)
+        await manager.recheckPeerMessagingSwitches()
+
+        #expect(first.terminations == 1, "the published shadow is withdrawn")
+        var snapshot = await manager.snapshot()
+        #expect(snapshot.shadows.isEmpty)
+        #expect(snapshot.switchedOffHandles == ["remote-1"])
+
+        resolver.set(on: true)
+        await manager.recheckPeerMessagingSwitches()
+
+        #expect(await spawner.spawnCount == 2, "republished from the held-back line")
+        snapshot = await manager.snapshot()
+        #expect(snapshot.shadows.map(\.handle) == ["remote-1"])
+        #expect(snapshot.switchedOffHandles.isEmpty)
+    }
+
+    /// A `peer` line for a published shadow, arriving after the switch went
+    /// off, withdraws it at once rather than updating it.
+    @Test func anUpdateLineAfterTheSwitchWentOffWithdrawsTheShadow() async throws {
+        let resolver = SwitchableSiteResolver(on: true)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+        let helper = try #require(await spawner.helper(for: "remote-1"))
+
+        resolver.set(on: false)
+        await manager.handle(.peer(Self.peer))
+
+        #expect(helper.terminations == 1)
+        #expect(await manager.snapshot().switchedOffHandles == ["remote-1"])
+    }
+
+    /// `peer-gone` forgets a held-back peer, so a later switch-on cannot
+    /// resurrect a session the far side retired.
+    @Test func peerGoneForgetsAHeldBackPeer() async {
+        let resolver = SwitchableSiteResolver(on: false)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+
+        await manager.handle(.peerGone(handle: "remote-1"))
+        resolver.set(on: true)
+        await manager.recheckPeerMessagingSwitches()
+
+        #expect(await spawner.spawnCount == 0)
+        #expect(await manager.snapshot().switchedOffHandles.isEmpty)
+    }
+}

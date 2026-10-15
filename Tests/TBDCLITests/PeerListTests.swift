@@ -111,8 +111,16 @@ struct PeerListTests {
             live: live)
     }
 
+    private static let onRepo = PeerMessagingRepoStatus(
+        repoID: UUID(), repoName: "acme", tomlPath: "/opt/peertest/acme/tbd.toml",
+        enabled: true)
+
+    private static let offRepo = PeerMessagingRepoStatus(
+        repoID: UUID(), repoName: "acme-tools", tomlPath: "/opt/peertest/acme-tools/tbd.toml",
+        enabled: false)
+
     private static func bridge(
-        messagingEnabled: Bool = true,
+        repos: [PeerMessagingRepoStatus]? = [onRepo],
         providers: [PeerProviderBridgeStatus] = [
             PeerProviderBridgeStatus(
                 provider: "acme-cloud", declaresMessages: true, bridged: true,
@@ -122,7 +130,7 @@ struct PeerListTests {
         lastSweep: PeerShadowSweep? = nil
     ) -> PeerBridgeStatus {
         PeerBridgeStatus(
-            messagingEnabled: messagingEnabled,
+            repos: repos,
             remoteBackendsLive: true,
             providers: providers,
             shadows: shadows,
@@ -423,13 +431,12 @@ struct PeerListTests {
 
     /// The stale-shim answer. An old shim never declares `messages`, so TBD
     /// never invokes it — and the whole feature then does nothing, silently.
-    /// With the flag on, that silence is a line somebody reads.
+    /// With a repository switched on, that silence is a line somebody reads.
     @Test func aProviderThatDoesNotDeclareMessagesIsNamed() {
         let result = Self.compose(
             scan: PeerRegistryScan(),
             fleet: PeerListFleet(
                 reachable: true,
-                remotePeerMessagingEnabled: true,
                 bridge: Self.bridge(providers: [
                     PeerProviderBridgeStatus(
                         provider: "old-shim", declaresMessages: false, bridged: false)
@@ -448,7 +455,6 @@ struct PeerListTests {
             scan: PeerRegistryScan(),
             fleet: PeerListFleet(
                 reachable: true,
-                remotePeerMessagingEnabled: true,
                 bridge: Self.bridge()))
 
         #expect(!result.warnings.contains { $0.contains("`messages`") })
@@ -527,23 +533,91 @@ struct PeerListTests {
         })
     }
 
-    @Test func theMessagingGateBeingOffExplainsAnEmptyShadowList() {
+    /// No repository switched on explains an empty shadow list, and the
+    /// warning names the exact setting that would change it.
+    @Test func noSwitchedOnRepositoryExplainsAnEmptyShadowList() {
         let result = Self.compose(
             scan: PeerRegistryScan(),
-            fleet: PeerListFleet(reachable: true, remotePeerMessagingEnabled: false))
+            fleet: PeerListFleet(reachable: true, bridge: Self.bridge(repos: [Self.offRepo])))
 
-        #expect(result.remotePeerMessagingEnabled == false)
-        #expect(result.warnings.contains { $0.contains("remote peer messaging is off") })
+        #expect(result.peerMessagingRepos == [Self.offRepo])
+        #expect(result.warnings.contains {
+            $0.contains("no repository has peer messaging switched on")
+                && $0.contains("peer_messaging = true")
+        })
     }
 
-    /// Nil is not "off". A config the command could not read must not be
-    /// rendered as a deliberate choice nobody made.
-    @Test func anUnreadableConfigDoesNotClaimTheGateIsOff() {
+    /// The other branch: one repository on draws no such warning, and the
+    /// listing prints each repository's state.
+    @Test func aSwitchedOnRepositoryIsListedAsOn() {
         let result = Self.compose(
-            scan: PeerRegistryScan(), fleet: PeerListFleet(reachable: true))
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(
+                reachable: true, bridge: Self.bridge(repos: [Self.onRepo, Self.offRepo])))
 
-        #expect(result.remotePeerMessagingEnabled == nil)
-        #expect(!result.warnings.contains { $0.contains("remote peer messaging is off") })
+        #expect(!result.warnings.contains { $0.contains("no repository has peer messaging") })
+        let text = renderPeerListing(result)
+        #expect(text.contains("Peer messaging by repository"))
+        #expect(text.contains("  on   acme  /opt/peertest/acme/tbd.toml"))
+        #expect(text.contains("  off  acme-tools  /opt/peertest/acme-tools/tbd.toml"))
+    }
+
+    /// A `tbd.toml` TBD could not understand is named with its path and the
+    /// problem, so a repository someone meant to switch on says why it is not.
+    @Test func aTOMLProblemIsNamedWithItsPath() {
+        let broken = PeerMessagingRepoStatus(
+            repoID: UUID(), repoName: "acme", tomlPath: "/opt/peertest/acme/tbd.toml",
+            enabled: false,
+            problems: ["[remote_sessions] `peer_messaging` must be true or false"])
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(reachable: true, bridge: Self.bridge(repos: [broken])))
+
+        #expect(result.warnings.contains {
+            $0.contains("/opt/peertest/acme/tbd.toml") && $0.contains("must be true or false")
+        })
+    }
+
+    /// A provider that declares `messages`, runs sessions in a switched-on
+    /// repository and has no bridge yet is told when its stream opens: at the
+    /// next poll, with no restart.
+    @Test func aProviderAboutToOpenItsStreamIsNamed() {
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(reachable: true, bridge: Self.bridge(providers: [
+                PeerProviderBridgeStatus(
+                    provider: "acme-cloud", declaresMessages: true, bridged: false,
+                    wantsStream: true)
+            ])))
+
+        #expect(result.warnings.contains {
+            $0.contains("acme-cloud") && $0.contains(peerMessagingStreamOpeningNote)
+        })
+    }
+
+    /// And the gated branch's other side: a provider whose repositories are all
+    /// off has nothing pending, so nothing claims a stream is about to open.
+    @Test func aProviderWithOnlySwitchedOffRepositoriesIsNotNamedAsPending() {
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(reachable: true, bridge: Self.bridge(providers: [
+                PeerProviderBridgeStatus(
+                    provider: "acme-cloud", declaresMessages: true, bridged: false,
+                    wantsStream: false)
+            ])))
+
+        #expect(!result.warnings.contains { $0.contains(peerMessagingStreamOpeningNote) })
+    }
+
+    /// Nil is not "off". A daemon that did not report the switches must not be
+    /// rendered as one where every repository chose off.
+    @Test func anUnreportedSwitchSetDoesNotClaimEveryRepositoryIsOff() {
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(reachable: true, bridge: Self.bridge(repos: nil)))
+
+        #expect(result.peerMessagingRepos == nil)
+        #expect(!result.warnings.contains { $0.contains("no repository has peer messaging") })
     }
 
     // MARK: - Orphans
@@ -718,7 +792,7 @@ struct PeerListTests {
             scan: scan,
             fleet: PeerListFleet(
                 reachable: true, worktrees: [worktree], terminals: [terminal],
-                remotePeerMessagingEnabled: false))
+                bridge: Self.bridge(repos: [Self.offRepo])))
 
         // Encoded exactly the way the command encodes it.
         let json = try #require(jsonString(result))
@@ -728,7 +802,7 @@ struct PeerListTests {
         #expect(json.contains("\"pid\" : 4100"))
         #expect(json.contains("\"peerProtocol\" : 1"))
         #expect(json.contains("\"version\" : \"2.1.251\""))
-        #expect(json.contains("remote peer messaging is off"))
+        #expect(json.contains("no repository has peer messaging switched on"))
         // The absent ref is absent from the machine surface too, so nothing
         // reads an always-null field as "this peer has no ref".
         #expect(!json.contains("\"ref\""))

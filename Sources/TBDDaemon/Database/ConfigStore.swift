@@ -106,15 +106,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.gcHangStacksEnabledDefault`, never through `?? false`.
     var gc_hang_stacks_enabled: Bool?
-    /// The remote peer messaging gate (design 2026-08-29, "Flag and
-    /// rollout"). **Genuinely tri-state**, same shape as
-    /// `gc_orphan_processes_enabled`: the
-    /// `20260830003851_config_remote_peer_messaging` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.remotePeerMessagingDefault`, never through `?? false`.
-    var remote_peer_messaging_enabled: Bool?
+    // `remote_peer_messaging_enabled` stays in the table (migration
+    // `20260830003851_config_remote_peer_messaging`) but is read by nothing:
+    // peer messaging is switched per repository in its `tbd.toml` instead.
     /// The pty-holder transport gate. **Genuinely tri-state**, same shape as
-    /// `remote_peer_messaging_enabled`: the
+    /// `gc_hang_stacks_enabled`: the
     /// `20260831055718_config_pty_holder` migration carries no SQL default, so
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.ptyHolderDefault`, never through `?? false`.
@@ -235,9 +231,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcHangStacksDefault: same shape once more, for
     ///   `gc_hang_stacks_enabled` — the hang-stack reclaimer's soak gate,
     ///   which also governs the app-side write-time cap.
-    /// - Parameter remotePeerMessagingDefault: same shape once more, for
-    ///   `remote_peer_messaging_enabled` — the remote peer messaging bridge's
-    ///   soak gate.
     /// - Parameter ptyHolderDefault: same shape once more, for
     ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
     /// - Parameter remoteDeleteDefault: and the last of them, for
@@ -275,7 +268,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
         gcHangStacksDefault: Bool = Config.gcHangStacksEnabledDefault,
-        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
@@ -349,9 +341,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the hang-stack reclaimer's gate —
             // NOT `?? false`.
             gcHangStacksEnabled: gc_hang_stacks_enabled ?? gcHangStacksDefault,
-            // And once more, for the remote peer messaging bridge's gate —
-            // NOT `?? false`.
-            remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             // And once more, for the pty-holder transport's gate — NOT `?? false`.
             ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
             // And truly the last of them, for the remote-delete gate —
@@ -815,19 +804,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_hang_stacks_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the remote peer messaging gate (default OFF, soaking) — the
-    /// single opt-in for shadow peers and the provider `messages` stream. The
-    /// column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    public func setRemotePeerMessagingEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET remote_peer_messaging_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

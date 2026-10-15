@@ -36,13 +36,58 @@ struct ShadowPeerSiteResolverTests {
     private static func resolver(
         _ fixture: Fixture,
         provider: String = "acme-cloud",
-        directoriesThatExist: Set<String> = [repoPath]
+        directoriesThatExist: Set<String> = [repoPath],
+        peerMessagingOn: Bool = true
     ) -> WorktreeShadowPeerSiteResolver {
         WorktreeShadowPeerSiteResolver(
             provider: provider,
             worktrees: fixture.db.worktrees,
             repos: fixture.db.repos,
+            peerMessagingOn: { _ in peerMessagingOn },
             directoryExists: { directoriesThatExist.contains($0) })
+    }
+
+    // MARK: - The per-repository switch
+
+    /// A session in a repository whose `tbd.toml` does not switch peer
+    /// messaging on gets no shadow, and the answer says so as `.switchedOff` —
+    /// the one outcome that withdraws a shadow already published.
+    @Test func aSessionInASwitchedOffRepositoryResolvesSwitchedOff() async throws {
+        let fixture = try await Self.makeFixture()
+        _ = try await fixture.db.worktrees.createRemote(
+            repoID: fixture.repo.id, name: "api-lane", displayName: "api-lane",
+            branch: "tbd/api-lane", provider: "acme-cloud", sessionID: "sess-42")
+
+        let resolver = Self.resolver(fixture, peerMessagingOn: false)
+
+        #expect(await resolver.resolution(forProviderSessionID: "sess-42") == .switchedOff)
+        #expect(await resolver.site(forProviderSessionID: "sess-42") == nil)
+    }
+
+    /// The other branch of the same gate: switched on, the same row sites.
+    @Test func aSessionInASwitchedOnRepositoryResolvesSited() async throws {
+        let fixture = try await Self.makeFixture()
+        _ = try await fixture.db.worktrees.createRemote(
+            repoID: fixture.repo.id, name: "api-lane", displayName: "api-lane",
+            branch: "tbd/api-lane", provider: "acme-cloud", sessionID: "sess-42")
+
+        let resolution = await Self.resolver(fixture, peerMessagingOn: true)
+            .resolution(forProviderSessionID: "sess-42")
+
+        #expect(resolution == .sited(ShadowPeerSite(
+            worktreeDisplayName: "api-lane", path: Self.repoPath)))
+    }
+
+    /// The switch is never consulted for a session TBD cannot site at all, so
+    /// "no row" is still unsited, not switched off — only a definite answer
+    /// about a real repository may withdraw a shadow.
+    @Test func anUnadoptedSessionIsUnsitedWhateverTheSwitch() async throws {
+        let fixture = try await Self.makeFixture()
+
+        let resolution = await Self.resolver(fixture, peerMessagingOn: false)
+            .resolution(forProviderSessionID: "sess-nobody")
+
+        #expect(resolution == .unsited)
     }
 
     /// The join key is the provider's session id, and the answer is the row's

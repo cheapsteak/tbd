@@ -12,22 +12,6 @@ import TBDShared
 // Design: docs/specs/2026-08-29-remote-peer-messaging-design.md
 // § "Reclamation and detection" → "`tbd peer list`".
 
-/// When a change to `remote_peer_messaging_enabled` actually takes hold.
-///
-/// One sentence in one place, because two commands say it: `tbd peer list`
-/// names it when a provider that declares `messages` has no bridge, and
-/// `tbd peer messaging` names it right after writing the flag. Two phrasings of
-/// the same fact drift apart, and the one that drifts is the one a user reads
-/// while wondering why nothing happened.
-///
-/// It is written for either direction on purpose. The gate is consulted where a
-/// provider's poll loops are armed, so turning it on builds no bridge for a
-/// provider already running, and turning it off leaves a running bridge up.
-let peerMessagingRestartCaveat = """
-    The gate is read when a provider's streams are armed, so a change made since \
-    then takes effect at the next daemon restart.
-    """
-
 /// nil for nil, and nil for empty. An empty string in somebody else's record is
 /// an absent value wearing a present one, and every read below wants the same
 /// answer for both.
@@ -177,10 +161,6 @@ struct PeerListFleet: Equatable, Sendable {
     var reachable: Bool
     var worktrees: [Worktree]
     var terminals: [Terminal]
-    /// The resolved value of the `remote_peer_messaging_enabled` config gate,
-    /// or nil when the config could not be read. Nil is not "off" — the whole
-    /// point of that tri-state column is that nobody has to guess.
-    var remotePeerMessagingEnabled: Bool?
     /// The daemon's answer to `peer.status`: the durable shadow-peer ledger,
     /// each provider's link state, and whether each provider declared the
     /// `messages` capability. Nil when the daemon did not answer that call —
@@ -196,14 +176,12 @@ struct PeerListFleet: Equatable, Sendable {
         reachable: Bool,
         worktrees: [Worktree] = [],
         terminals: [Terminal] = [],
-        remotePeerMessagingEnabled: Bool? = nil,
         bridge: PeerBridgeStatus? = nil,
         unreachableReason: String? = nil
     ) {
         self.reachable = reachable
         self.worktrees = worktrees
         self.terminals = terminals
-        self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.bridge = bridge
         self.unreachableReason = unreachableReason
     }
@@ -379,9 +357,11 @@ struct PeerListResult: Encodable, Equatable, Sendable {
     /// output modes: a diagnostic that quietly narrows its own scope is the
     /// failure this command exists to prevent.
     let warnings: [String]
-    /// The resolved `remote_peer_messaging_enabled` gate, or nil when the
-    /// config could not be read.
-    let remotePeerMessagingEnabled: Bool?
+    /// Every registered repository's peer-messaging switch, read from the
+    /// `tbd.toml` in its main checkout, with any problem the file has. Nil
+    /// when the daemon did not say — it did not answer `peer.status`, or
+    /// predates the per-repository switch.
+    let peerMessagingRepos: [PeerMessagingRepoStatus]?
     /// What the last `ShadowPeerReconciler` pass found, or nil when the daemon
     /// has not swept in this lifetime (or did not answer). Reported because
     /// every unbounded leak in this repo's history went unnoticed for want of
@@ -475,7 +455,7 @@ func composePeerListing(
         peers: peers,
         orphans: orphans,
         warnings: peerListingWarnings(scan: scan, fleet: fleet),
-        remotePeerMessagingEnabled: fleet.remotePeerMessagingEnabled,
+        peerMessagingRepos: fleet.bridge?.repos,
         lastSweep: fleet.bridge?.lastSweep)
 }
 
@@ -701,43 +681,8 @@ private func peerListingWarnings(
             that answer a live shadow lists as an ordinary external peer.
             """)
     }
-    if fleet.remotePeerMessagingEnabled == false {
-        warnings.append("""
-            remote peer messaging is off (config remote_peer_messaging_enabled), so TBD \
-            publishes no shadow peers — a fleet with remote sessions still lists none here.
-            """)
-    }
-    // The stale-shim answer. An old shim never declares `messages`, so TBD
-    // never invokes it and the feature simply does nothing — which is the
-    // failure this contract's users have been bitten by before, and the reason
-    // the silence is answered here rather than accepted.
-    if let bridge = fleet.bridge, bridge.messagingEnabled {
-        let silent = bridge.providers
-            .filter { !$0.declaresMessages }
-            .map(\.provider)
-            .sorted()
-        if !silent.isEmpty {
-            warnings.append("""
-                remote peer messaging is on, but \(silent.joined(separator: ", ")) \
-                \(silent.count == 1 ? "does" : "do") not declare the `messages` \
-                capability, so TBD opens no stream to \
-                \(silent.count == 1 ? "it" : "them") and mirrors none of \
-                \(silent.count == 1 ? "its" : "their") sessions. That shim predates \
-                remote peer messaging; update it.
-                """)
-        }
-        let gated = bridge.providers
-            .filter { $0.declaresMessages && !$0.bridged }
-            .map(\.provider)
-            .sorted()
-        if !gated.isEmpty {
-            warnings.append("""
-                \(gated.joined(separator: ", ")) \
-                \(gated.count == 1 ? "declares" : "declare") the `messages` capability \
-                and \(gated.count == 1 ? "has" : "have") no bridge running. \
-                \(peerMessagingRestartCaveat)
-                """)
-        }
+    if let bridge = fleet.bridge {
+        warnings.append(contentsOf: peerMessagingSwitchWarnings(bridge))
         for provider in bridge.providers where !provider.unmirroredHandles.isEmpty {
             warnings.append("""
                 \(provider.provider) announced \(provider.unmirroredHandles.count) peer(s) \
@@ -758,6 +703,78 @@ private func peerListingWarnings(
     }
     return warnings
 }
+
+/// What the per-repository switches mean for this listing: none on, files TBD
+/// could not understand, providers that cannot carry the feature, and
+/// providers about to open their stream.
+func peerMessagingSwitchWarnings(_ bridge: PeerBridgeStatus) -> [String] {
+    var warnings: [String] = []
+    let repos = bridge.repos ?? []
+    for repo in repos {
+        for problem in repo.problems {
+            warnings.append("\(abbreviatedPeerPath(repo.tomlPath)): \(problem)")
+        }
+    }
+    let anyOn = repos.contains(where: \.enabled)
+    if bridge.repos != nil, !anyOn {
+        warnings.append("""
+            no repository has peer messaging switched on \
+            (`[remote_sessions] peer_messaging = true` in its tbd.toml), so TBD \
+            publishes no shadow peers and announces no local session to a provider — \
+            a fleet with remote sessions still lists none here.
+            """)
+    }
+    // The stale-shim answer. An old shim never declares `messages`, so TBD
+    // never invokes it and the feature simply does nothing — which is the
+    // failure this contract's users have been bitten by before, and the reason
+    // the silence is answered here rather than accepted.
+    if anyOn {
+        let silent = bridge.providers
+            .filter { !$0.declaresMessages }
+            .map(\.provider)
+            .sorted()
+        if !silent.isEmpty {
+            warnings.append("""
+                peer messaging is on for at least one repository, but \
+                \(silent.joined(separator: ", ")) \
+                \(silent.count == 1 ? "does" : "do") not declare the `messages` \
+                capability, so TBD opens no stream to \
+                \(silent.count == 1 ? "it" : "them") and mirrors none of \
+                \(silent.count == 1 ? "its" : "their") sessions. That shim predates \
+                remote peer messaging; update it.
+                """)
+        }
+    }
+    let pending = bridge.providers
+        .filter { $0.declaresMessages && !$0.bridged && $0.wantsStream == true }
+        .map(\.provider)
+        .sorted()
+    if !pending.isEmpty {
+        warnings.append("""
+            \(pending.joined(separator: ", ")) \
+            \(pending.count == 1 ? "runs" : "run") sessions in a repository with peer \
+            messaging on and \(pending.count == 1 ? "has" : "have") no stream open yet. \
+            \(peerMessagingStreamOpeningNote)
+            """)
+    }
+    for provider in bridge.providers {
+        let held = provider.switchedOffHandles ?? []
+        guard !held.isEmpty else { continue }
+        warnings.append("""
+            \(provider.provider) announced \(held.count) peer(s) in repositories with \
+            peer messaging off, so TBD did not mirror them.
+            """)
+    }
+    return warnings
+}
+
+/// When a provider's `messages` stream opens after a repository switches peer
+/// messaging on. One sentence in one place, so the listing and the help text
+/// cannot drift apart.
+let peerMessagingStreamOpeningNote = """
+    TBD opens a provider's stream at its next poll, within about a minute; \
+    no daemon restart is needed.
+    """
 
 // MARK: - Rendering
 
@@ -792,6 +809,17 @@ func renderPeerListing(_ result: PeerListResult) -> String {
         for orphan in result.orphans {
             lines.append(
                 "  \(orphan.kind.label)  \(abbreviatedPeerPath(orphan.path)) — \(orphan.detail)")
+        }
+    }
+
+    if let repos = result.peerMessagingRepos, !repos.isEmpty {
+        lines.append("")
+        lines.append("Peer messaging by repository ([remote_sessions] peer_messaging in tbd.toml):")
+        for repo in repos {
+            let state = repo.enabled ? "on " : "off"
+            let flag = repo.problems.isEmpty ? "" : " (problem: see warnings)"
+            lines.append(
+                "  \(state)  \(repo.repoName)  \(abbreviatedPeerPath(repo.tomlPath))\(flag)")
         }
     }
 
