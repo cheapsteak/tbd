@@ -576,6 +576,19 @@ enum ManualParkAffordance {
 
 // MARK: - TabBarItem
 
+/// Pure policy for the tab context menu's "Copy Session ID": the Claude
+/// session UUID to copy, or nil to hide the item (no terminal, a shell or
+/// Codex tab, or a Claude tab whose session ID is not known yet).
+enum CopyClaudeSessionIDMenu {
+    static let title = "Copy Session ID"
+
+    static func sessionID(for terminal: Terminal?) -> String? {
+        guard let terminal, terminal.isClaudeResumable,
+              let id = terminal.claudeSessionID, !id.isEmpty else { return nil }
+        return id
+    }
+}
+
 enum ContinueInCodexMenu {
     static func isVisible(for terminal: Terminal?) -> Bool {
         terminal?.isClaudeResumable == true
@@ -1015,6 +1028,13 @@ private struct TabBarItem: View {
                 DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
                 forType: .string
             )
+        }
+
+        if let sessionID = CopyClaudeSessionIDMenu.sessionID(for: terminal) {
+            Button(CopyClaudeSessionIDMenu.title) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(sessionID, forType: .string)
+            }
         }
 
         Divider()
