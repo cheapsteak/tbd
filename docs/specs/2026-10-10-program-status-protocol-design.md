@@ -34,7 +34,8 @@ the sequence is never wrapped in tmux/screen DCS passthrough.
 when Claude Code believes the terminal is kitty). Keys:
 
 - **`state`** – `working`, `blocked`, `done`, `idle`, `error`, or `clear`.
-- **`app`** – always `claude-code`.
+- **`app`** – `claude-code` on every state report; absent on both forms of
+  `clear`.
 - **`id`** – present on per-task entries (background tasks and subagents),
   absent on the session's main entry. Sanitized by the sender to
   `[A-Za-z0-9_.+-]`, at most 32 characters.
@@ -171,7 +172,8 @@ it with a debug log:
 - the terminal is a live holder session whose recorded agent is Claude;
 - the report's incarnation matches the terminal's current incarnation, so a
   late report from a previous process cannot overwrite its successor;
-- `app=claude-code`.
+- `app=claude-code`, except on a `clear`, which Claude Code writes without
+  `app`; a `clear` naming another app is still refused.
 
 A program running inside a genuine Claude session — a `cat` of a file that
 contains the sequence — can still forge a report. That residual risk is

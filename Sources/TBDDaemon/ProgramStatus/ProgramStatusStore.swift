@@ -156,8 +156,15 @@ public actor ProgramStatusStore {
             report = parsed
         }
 
-        // 3. App.
-        guard report.app == ProgramStatusProtocol.expectedApp else {
+        // 3. App. Claude Code stamps `app=claude-code` on every state report
+        // but writes both clears without it — the bare `state=clear` and
+        // `state=clear:id=X` (read from the v2.1.301 bundle) — so a clear with
+        // no `app` is accepted; one naming another app is still refused.
+        // Refusing app-less clears left a finished task entry standing, and
+        // with it a session stuck reading as working.
+        let appAccepted = report.app == ProgramStatusProtocol.expectedApp
+            || (report.app == nil && report.state == .clear)
+        guard appAccepted else {
             return reject(terminalID, "app is not \(ProgramStatusProtocol.expectedApp)")
         }
 

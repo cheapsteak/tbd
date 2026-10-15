@@ -160,6 +160,9 @@ import TestSupport
         h.add(terminal)
         #expect(isRejected(await h.store.ingest(inbound(terminal, "state=working:app=other"))))
         #expect(isRejected(await h.store.ingest(inbound(terminal, "state=working"))))
+        // A clear may omit `app`, but one naming another app is still refused.
+        #expect(isRejected(await h.store.ingest(inbound(terminal, "state=clear:app=other"))))
+        #expect(isRejected(await h.store.ingest(inbound(terminal, "state=clear:app=other:id=a"))))
         #expect(h.publishedSnapshots.isEmpty)
     }
 
@@ -257,7 +260,8 @@ import TestSupport
         #expect(afterReplace.tasks.map(\.id) == ["a", "b"])
         #expect(afterReplace.tasks.first?.entry.state == .blocked)
 
-        _ = await h.store.ingest(inbound(terminal, "state=clear:app=claude-code:id=a", at: 5))
+        // Claude Code writes a task clear without `app` (v2.1.301).
+        #expect(await h.store.ingest(inbound(terminal, "state=clear:id=a", at: 5)) == .accepted)
         let afterClear = try #require(await h.store.snapshot(for: terminal.id))
         #expect(afterClear.tasks.map(\.id) == ["b"])
         #expect(afterClear.main?.state == .working)
@@ -298,7 +302,8 @@ import TestSupport
         h.add(terminal)
         _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1))
         _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code:id=a", at: 2))
-        #expect(await h.store.ingest(inbound(terminal, "state=clear:app=claude-code", at: 3)) == .accepted)
+        // Claude Code writes the bare clear without `app` (v2.1.301).
+        #expect(await h.store.ingest(inbound(terminal, "state=clear", at: 3)) == .accepted)
         #expect(await h.store.snapshot(for: terminal.id) == nil)
         #expect(await h.store.allSnapshots().isEmpty)
         let last = try #require(h.publishedSnapshots.last)
