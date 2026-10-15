@@ -87,13 +87,38 @@ struct ProgramStatusRollupTests {
 
     // MARK: - resolve
 
-    /// A main state this build does not recognize is not authoritative, so
-    /// the hook rail speaks — even with a working task under it.
-    @Test func unrecognizedMainResolvesToNil() {
+    /// A main state this build does not recognize decides nothing, so with no
+    /// task entry that decides either, the hook rail speaks.
+    @Test func unrecognizedMainWithoutDecidingTasksResolvesToNil() {
         #expect(ProgramStatusRollup.resolve(snapshot(main: entry(.unrecognized("paused")))) == nil)
-        let withTask = snapshot(
-            main: entry(.unrecognized("paused")), tasks: [task("a", entry(.working))])
-        #expect(ProgramStatusRollup.resolve(withTask) == nil)
+        let withIdleTask = snapshot(
+            main: entry(.unrecognized("paused")), tasks: [task("a", entry(.done))])
+        #expect(ProgramStatusRollup.resolve(withIdleTask) == nil)
+    }
+
+    @Test func unrecognizedMainStillHonoursABlockedTask() throws {
+        let snap = snapshot(
+            main: entry(.unrecognized("paused"), at: 1),
+            tasks: [task("a", entry(.working, at: 2)),
+                    task("b", entry(.blocked, kind: .permission, title: "Subagent B", at: 3))])
+        let resolution = try #require(ProgramStatusRollup.resolve(snap))
+        guard case .awaitingInput(let reason?) = resolution.value else {
+            Issue.record("expected awaitingInput, got \(resolution.value)")
+            return
+        }
+        #expect(reason.programStatusBlock == ProgramStatusBlock(kind: .permission, taskID: "b"))
+        #expect(resolution.observedAt == at(3))
+        #expect(resolution.workingTaskCount == 1)
+    }
+
+    @Test func unrecognizedMainWithWorkingTaskIsWorking() throws {
+        let snap = snapshot(
+            main: entry(.unrecognized("paused"), at: 9),
+            tasks: [task("a", entry(.working, at: 2))])
+        let resolution = try #require(ProgramStatusRollup.resolve(snap))
+        #expect(resolution.value == .working)
+        #expect(resolution.workingTaskCount == 1)
+        #expect(resolution.observedAt == at(2))
     }
 
     @Test func noMainResolvesToNil() {

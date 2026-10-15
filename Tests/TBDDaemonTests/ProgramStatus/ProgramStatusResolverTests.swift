@@ -132,6 +132,20 @@ struct ProgramStatusResolverTests {
         #expect(state.source == .hookEvent("Stop"))
     }
 
+    @Test func unrecognizedMainStillHonoursABlockedTask() {
+        let incarnation = UUID()
+        let row = terminal(incarnation: incarnation, hookState: .idle)
+        let snap = snapshot(
+            for: row, incarnation: incarnation, main: entry(.unrecognized("paused"), at: 10),
+            tasks: [ProgramStatusTaskEntry(id: "a", entry: entry(.blocked, at: 11))])
+        let state = resolver().resolve(SessionStateFacts(terminal: row, programStatus: snap))
+        guard case .awaitingInput = state.value else {
+            Issue.record("expected awaitingInput, got \(state.value)")
+            return
+        }
+        #expect(state.source == .programStatus)
+    }
+
     @Test func noSnapshotLeavesTheHookRailUntouched() {
         let row = terminal(incarnation: nil, hookState: .idle)
         let state = resolver().resolve(SessionStateFacts(terminal: row))

@@ -410,22 +410,27 @@ public enum ProgramStatusRollup {
     }
 
     /// The displayed state of a terminal, or nil when it is not
-    /// OSC-authoritative: no main entry, or a main entry whose state this
-    /// build does not recognize. An unrecognized state says nothing TBD can
-    /// display, so the hook rail speaks rather than an opaque `.unknown`.
-    /// The first matching rule wins:
+    /// OSC-authoritative. The first matching rule wins:
     ///
     /// 1. main is needs-auth, awaiting input or error → main's state;
     /// 2. a task entry is blocked → awaiting input, labelled with that task;
     /// 3. main or any task entry is working → working;
     /// 4. otherwise main's state (done, idle).
+    ///
+    /// With no main entry the result is nil: task entries alone do not make
+    /// a terminal authoritative. A main entry whose state this build does not
+    /// recognize says nothing TBD can display, so it takes part in no rule;
+    /// its task entries still decide through rules 2 and 3, and when none
+    /// does the result is nil and the hook rail speaks rather than an opaque
+    /// `.unknown`.
     public static func resolve(_ snapshot: ProgramStatusSnapshot) -> ProgramStatusResolution? {
         guard let main = snapshot.main else { return nil }
+        let mainRecognized: Bool
         switch main.state {
         case .unrecognized, .clear:
-            return nil
+            mainRecognized = false
         case .working, .blocked, .done, .idle, .error:
-            break
+            mainRecognized = true
         }
 
         var workingTaskCount = 0
@@ -433,16 +438,17 @@ public enum ProgramStatusRollup {
             workingTaskCount += 1
         }
 
-        let mainResolved = mainValue(main)
-
         // Rule 1.
-        switch mainResolved {
-        case .needsAuth, .awaitingInput, .error:
-            return ProgramStatusResolution(
-                value: mainResolved, workingTaskCount: workingTaskCount,
-                observedAt: main.observedAt)
-        default:
-            break
+        if mainRecognized {
+            let mainResolved = mainValue(main)
+            switch mainResolved {
+            case .needsAuth, .awaitingInput, .error:
+                return ProgramStatusResolution(
+                    value: mainResolved, workingTaskCount: workingTaskCount,
+                    observedAt: main.observedAt)
+            default:
+                break
+            }
         }
 
         // Rule 2.
@@ -472,8 +478,9 @@ public enum ProgramStatusRollup {
         }
 
         // Rule 4.
+        guard mainRecognized else { return nil }
         return ProgramStatusResolution(
-            value: mainResolved, workingTaskCount: workingTaskCount,
+            value: mainValue(main), workingTaskCount: workingTaskCount,
             observedAt: main.observedAt)
     }
 }

@@ -345,9 +345,10 @@ struct SessionStateResolver: Sendable {
                 observedAt: transcriptRateLimit.observedAt)
         }
 
-        // 3½. Program status (OSC 7501). From the first accepted main entry for
-        //     this incarnation, Claude Code's own report is the session's state;
-        //     the hook rail below is not consulted. Gone, parked and
+        // 3½. Program status (OSC 7501). While this incarnation's main entry
+        //     carries a recognized state, or stands over task entries that
+        //     decide the state, Claude Code's own report is the session's
+        //     state; the hook rail below is not consulted. Gone, parked and
         //     rate-limited still outrank it — they are states TBD owns.
         if let snapshot = facts.programStatus,
            snapshot.incarnationID == terminal.sessionIncarnationID,

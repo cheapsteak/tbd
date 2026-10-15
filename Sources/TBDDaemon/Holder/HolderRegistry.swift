@@ -2397,17 +2397,15 @@ actor HolderRegistry {
         // the slot below must not leave the exited session's entries standing.
         if let programStatus {
             await programStatus.drop(terminalID: terminalID, reason: .childExited)
-            // Re-read after the drop's suspension, as below.
-            guard case .adopted(let afterDrop) = slots[terminalID], afterDrop === reader else { return }
         }
         if let sessionEndedObserver {
             await sessionEndedObserver(terminalID, status, reader)
-            // Re-read after the observer's suspension: a concurrent release
-            // may have emptied the slot, or a re-adoption filled it with a
-            // reader this reclaim knows nothing about. Either way this
-            // reader is no longer the one to release here.
-            guard case .adopted(let after) = slots[terminalID], after === reader else { return }
         }
+        // Re-read after the drop's and the observer's suspensions: a
+        // concurrent release may have emptied the slot, or a re-adoption
+        // filled it with a reader this reclaim knows nothing about. Either way
+        // this reader is no longer the one to release here.
+        guard case .adopted(let after) = slots[terminalID], after === reader else { return }
         await release(terminalID: terminalID)
         Self.logger.info(
             """

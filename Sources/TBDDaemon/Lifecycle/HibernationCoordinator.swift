@@ -2614,14 +2614,16 @@ public actor HibernationCoordinator {
     ///
     /// `isParkOrWake` is false only for a re-broadcast that changes neither
     /// (`setKeepWarm`); every other caller parks or wakes the row, which drops
-    /// its Program Status entries (`dropProgramStatus`).
+    /// a holder row's Program Status entries (`dropProgramStatus`).
     func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
         suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
         isParkOrWake: Bool = true
     ) async {
-        if isParkOrWake {
+        // Only holder sessions carry Program Status entries; a tmux park or
+        // wake has nothing to drop and does not hop to the store.
+        if isParkOrWake, terminal.transport == .holder {
             await dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
         }
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(

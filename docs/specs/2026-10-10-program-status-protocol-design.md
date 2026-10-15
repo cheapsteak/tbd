@@ -218,15 +218,19 @@ The main entry maps as follows:
 - `done` → `.done`
 - `idle` → `.idle`
 - `clear` → the terminal stops being OSC-authoritative
-- a state this build does not recognize → the terminal is not
-  OSC-authoritative while that entry stands, and the hook rail speaks: an
-  unrecognized state says nothing TBD can display, and the hook-derived state
-  is a better reading than an opaque unknown
+- a state this build does not recognize → the main entry takes part in no
+  roll-up rule: an unrecognized state says nothing TBD can display. Its task
+  entries still decide the state through rules 2 and 3 below; when none does,
+  the terminal is not OSC-authoritative and the hook rail speaks, because the
+  hook-derived state is a better reading than an opaque unknown
 
 ### Precedence
 
-From the first accepted main-entry report for an incarnation, that terminal
-is **OSC-authoritative**: its resolved state comes from the store. Hooks keep
+A terminal is **OSC-authoritative** while the store holds a main entry for
+its current incarnation that either carries a state this build recognizes or
+stands over task entries that decide the state (a blocked or working task).
+Its resolved state then comes from the store; task entries with no main entry
+above them do not make a terminal authoritative. Hooks keep
 writing `activityState` exactly as they do now; resolution simply does not
 consult it while the terminal is OSC-authoritative. Authority ends with a
 main-entry `clear`, an incarnation change, or a liveness drop.
