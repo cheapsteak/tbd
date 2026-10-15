@@ -96,11 +96,18 @@ public actor SupervisionHeartbeat {
     /// justifies it. Idempotent in both directions: calling it twice with the
     /// same value republishes and leaves the timer as it was.
     ///
-    /// The edge write happens **first and unconditionally**, including when the
-    /// brake is engaging. That write is what makes gating the timer safe: it
-    /// leaves behind a file that says `engaged`, which the watchdog reads as
-    /// "nothing is effectively on" and therefore never alarms about, no matter
-    /// how long it then sits untouched.
+    /// The edge write happens **unconditionally**, including when the brake is
+    /// engaging. That write is what makes gating the timer safe: it leaves
+    /// behind a file that says `engaged`, which the watchdog reads as "nothing
+    /// is effectively on" and therefore never alarms about, no matter how long
+    /// it then sits untouched.
+    /// So the engaging edge **unwinds the loop first** and only then writes. A
+    /// loop tick can be in flight at the edge, holding a snapshot composed
+    /// before the brake moved; the snapshot is an `await`, so that tick could
+    /// otherwise land *after* the edge write and leave a file saying `released`
+    /// with no timer left to refresh it — the stale claim of coverage the
+    /// watchdog exists to alarm on. Awaiting the unwind before writing puts
+    /// every loop write behind the edge's.
     /// Two overlapping edges must not leave the timer disagreeing with the
     /// brake. The edge write is an `await`, so an actor releases itself across
     /// it and a second edge can run entirely inside the first's suspension —
@@ -131,6 +138,12 @@ public actor SupervisionHeartbeat {
         guard sequence >= lastBrakeSequence else { return }
         lastBrakeSequence = sequence
         brakeReleased = released
+        if !released {
+            // Unwind the loop before the edge write, so a tick already in
+            // flight — holding a snapshot composed before this edge — lands
+            // before the write rather than after it.
+            await cancelTimer()
+        }
         await tick()
         if brakeReleased {
             startTimer()

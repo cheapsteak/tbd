@@ -40,6 +40,11 @@ public struct TBDSpawnedSession: Sendable, Equatable {
     /// `SessionStart` hook, when one was captured. Joined against the record's
     /// `sessionId`, and the stronger of the two joins when present.
     public let claudeSessionID: String?
+    /// The permission class TBD launched the session in, or nil when TBD
+    /// cannot vouch for one. A remote peer's message into this session is
+    /// stamped with it (`ShadowPeerAttribution.grantedClass(forReceiver:)`),
+    /// and nil stamps the class that never confers delivery on its own.
+    public let permissionClass: ShadowPeerPermissionClass?
 
     public init(
         worktreeID: UUID,
@@ -48,7 +53,8 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         displayName: String,
         worktreePath: String,
         tmuxPaneID: String,
-        claudeSessionID: String?
+        claudeSessionID: String?,
+        permissionClass: ShadowPeerPermissionClass? = nil
     ) {
         self.worktreeID = worktreeID
         self.repoID = repoID
@@ -57,6 +63,7 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         self.worktreePath = worktreePath
         self.tmuxPaneID = tmuxPaneID
         self.claudeSessionID = claudeSessionID
+        self.permissionClass = permissionClass
     }
 }
 
@@ -109,7 +116,8 @@ public struct DatabaseLocalSessionDirectory: LocalSessionDirectory {
                     displayName: worktree.displayName,
                     worktreePath: worktree.localPath,
                     tmuxPaneID: terminal.tmuxPaneID,
-                    claudeSessionID: terminal.claudeSessionID)
+                    claudeSessionID: terminal.claudeSessionID,
+                    permissionClass: Self.spawnedPermissionClass)
             }
         } catch {
             logger.error(
@@ -117,6 +125,26 @@ public struct DatabaseLocalSessionDirectory: LocalSessionDirectory {
             return []
         }
     }
+
+    /// The permission class every session this directory returns runs as.
+    ///
+    /// **TBD's own spawn command is the source, because it is the one fact
+    /// about the session's mode that TBD wrote itself.** Every `.claude`
+    /// terminal TBD spawns — fresh, resumed, revived, woken, or continued from
+    /// Codex — is launched through `ClaudeSpawnCommandBuilder`'s Claude
+    /// branches, which carry `--dangerously-skip-permissions`
+    /// unconditionally. The other machine interfaces do not carry the mode:
+    /// Claude Code's peer registry record has no permission field (none of
+    /// the 360 records on a development machine carried one), and TBD does
+    /// not capture a mode from hooks. Reading the rendered screen is out by
+    /// rule.
+    ///
+    /// The class can drift after launch — a user can leave bypass mode
+    /// mid-session, managed settings can disable it, or a plain `claude` can
+    /// be run by hand in the pane — and then the receiver prompts while TBD
+    /// stamps `bypass`. That fails closed: the receiver holds the message as
+    /// `mode-mismatch` for a human to approve.
+    static let spawnedPermissionClass = ClaudeSpawnCommandBuilder.spawnedPermissionClass
 }
 
 // MARK: - Reading Claude Code's registry
@@ -224,6 +252,11 @@ public struct RosterEntry: Sendable, Equatable {
     public let peerProtocol: Int
     /// The repository this session's worktree belongs to — the scoping key.
     public let repoID: UUID
+    /// The session's permission class, carried from `TBDSpawnedSession` to
+    /// the handle registry so an inbound frame can be stamped with it. Never
+    /// on the `peer` line: it describes the local receiver, not anything the
+    /// far side needs.
+    public let permissionClass: ShadowPeerPermissionClass?
     public let worktreeID: UUID
     public let terminalID: UUID
     /// The pid the record is filed under.
@@ -259,12 +292,20 @@ public struct RosterEntry: Sendable, Equatable {
 /// shape it already has (`registerLocalPeer(socketPath:name:)` /
 /// `withdrawLocalPeer(socketPath:)`).
 ///
-/// **`handle(forLocalPeerAt:name:)` must be idempotent on the socket path.** A
-/// `peer` line is a complete statement re-sent whenever anything about a
-/// session changes, and a handle that churned on a status change would strand
-/// every peer that had already been told about it.
+/// **`handle(forLocalPeerAt:name:repoID:permissionClass:)` must be idempotent
+/// on the socket path.** A `peer` line is a complete statement re-sent whenever
+/// anything about a session changes, and a handle that churned on a status
+/// change would strand every peer that had already been told about it.
 public protocol LocalPeerHandleRegistry: Sendable {
-    func handle(forLocalPeerAt socketPath: String, name: String) async -> String
+    /// Mint (or return) the handle for one local session. `repoID` is the
+    /// repository its worktree belongs to: a message crosses between it and a
+    /// shadow only when both are in the same one. `permissionClass` is the
+    /// class an inbound frame for that session is stamped with — nil when TBD
+    /// cannot vouch for one.
+    func handle(
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
+        permissionClass: ShadowPeerPermissionClass?
+    ) async -> String
     /// Forget one local session, returning the handle it held (nil when it was
     /// never registered).
     func withdrawLocalPeer(at socketPath: String) async -> String?
@@ -285,7 +326,10 @@ public actor MemoizingLocalPeerHandleRegistry: LocalPeerHandleRegistry {
         self.mint = mint
     }
 
-    public func handle(forLocalPeerAt socketPath: String, name: String) async -> String {
+    public func handle(
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
+        permissionClass: ShadowPeerPermissionClass?
+    ) async -> String {
         if let existing = handlesBySocket[socketPath] { return existing }
         let handle = mint()
         handlesBySocket[socketPath] = handle
@@ -721,7 +765,8 @@ public actor RosterWatcher {
             var socketsByHandle: [String: String] = [:]
             for entry in scoped.sorted(by: { $0.name < $1.name }) {
                 let handle = await registration.handles.handle(
-                    forLocalPeerAt: entry.socketPath, name: entry.name)
+                    forLocalPeerAt: entry.socketPath, name: entry.name,
+                    repoID: entry.repoID, permissionClass: entry.permissionClass)
                 lines[handle] = entry.peerLine(handle: handle)
                 socketsByHandle[handle] = entry.socketPath
             }
@@ -897,6 +942,7 @@ public actor RosterWatcher {
             status: record.status ?? LocalPeerRegistryRecord.unknownStatus,
             peerProtocol: peerProtocol,
             repoID: session.repoID,
+            permissionClass: session.permissionClass,
             worktreeID: session.worktreeID,
             terminalID: session.terminalID,
             pid: pid,

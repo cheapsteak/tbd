@@ -114,6 +114,79 @@ struct SupervisionHeartbeatTests {
         }
     }
 
+    /// A snapshot source whose **second** call composes its answer and then
+    /// parks before returning it — a loop tick that read the facts before a
+    /// brake edge and has not yet written them. Every other call answers with
+    /// whatever is current.
+    ///
+    /// The second call rather than the first because the first belongs to the
+    /// releasing edge that arms the loop; the second is the loop's own first
+    /// tick. Lock-guarded rather than an actor for the same reason as
+    /// `ParkingSnapshots`.
+    private final class InFlightSnapshots: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: SupervisionStatusFile
+        private var callCount = 0
+        private var sawSecondCall = false
+        private var secondCallWaiters: [CheckedContinuation<Void, Never>] = []
+        private var isReleased = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(_ value: SupervisionStatusFile) { self.value = value }
+
+        func set(_ value: SupervisionStatusFile) { lock.withLock { self.value = value } }
+
+        var provider: @Sendable () async throws -> SupervisionStatusFile {
+            { [self] in
+                let (composed, shouldPark) = lock.withLock { () -> (SupervisionStatusFile, Bool) in
+                    callCount += 1
+                    guard callCount == 2 else { return (value, false) }
+                    sawSecondCall = true
+                    return (value, true)
+                }
+                guard shouldPark else { return composed }
+
+                let arrivals = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                    defer { secondCallWaiters = [] }
+                    return secondCallWaiters
+                }
+                for waiter in arrivals { waiter.resume() }
+
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    let alreadyReleased = lock.withLock { () -> Bool in
+                        guard !isReleased else { return true }
+                        releaseWaiters.append(continuation)
+                        return false
+                    }
+                    if alreadyReleased { continuation.resume() }
+                }
+                // The value composed before the park, not the current one: the
+                // whole point is a tick publishing facts the edge has overtaken.
+                return composed
+            }
+        }
+
+        func waitForSecondCall() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyArrived = lock.withLock { () -> Bool in
+                    guard !sawSecondCall else { return true }
+                    secondCallWaiters.append(continuation)
+                    return false
+                }
+                if alreadyArrived { continuation.resume() }
+            }
+        }
+
+        func release() {
+            let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                isReleased = true
+                defer { releaseWaiters = [] }
+                return releaseWaiters
+            }
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
     private static func path() throws -> String {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-heartbeat-\(UUID().uuidString)", isDirectory: true)
@@ -262,6 +335,43 @@ struct SupervisionHeartbeatTests {
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
         await settle()
         #expect(snapshots.calls == afterEngaging, "and the timer is disarmed behind it")
+    }
+
+    @Test("An engaging edge lands after a loop tick already in flight, never under it")
+    func engagingEdgeLandsAfterAnInFlightTick() async throws {
+        let path = try Self.path()
+        let snapshots = InFlightSnapshots(Self.statusFile(brake: .released))
+        let clock = EventDrivenTestClock()
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: clock)
+        // Lifted on the way out whatever happens, so a failed assertion cannot
+        // leave the loop parked for the rest of the run. Idempotent.
+        defer { snapshots.release() }
+
+        await heartbeat.applyBrake(released: true, sequence: 1)
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
+        // The loop's tick has composed `released` and is parked before writing
+        // it — the window in which the operator pulls the brake.
+        await snapshots.waitForSecondCall()
+
+        snapshots.set(Self.statusFile(brake: .engaged))
+        let engaging = Task { await heartbeat.applyBrake(released: false, sequence: 2) }
+        // Gives an edge that writes before unwinding the loop the turn to do
+        // so, so the parked tick's write lands on top of it. One-sided: under
+        // load that turn may not arrive in time and a regressed ordering can
+        // pass, but a correct one cannot fail here — it is waiting on the
+        // parked tick, not racing it.
+        await settle()
+        snapshots.release()
+        await engaging.value
+
+        #expect(try read(path)?.brake == .engaged, """
+            the engaging edge must be the last write — a pre-edge tick landing \
+            after it leaves a file claiming a released brake with no timer to \
+            refresh it, which goes stale and trips the watchdog
+            """)
+        #expect(await heartbeat.isTimerArmed == false)
     }
 
     @Test("Overlapping brake edges leave the timer matching the edge that landed last")

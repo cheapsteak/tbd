@@ -25,6 +25,11 @@ mkdir -p "$TEST_TMP/bash-pin"
 ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
 PATH="$TEST_TMP/bash-pin:$PATH"
 export PATH
+# The shipped poll interval is a second, which is right next to a compiler and
+# wrong inside a harness that runs a dozen builds: every case would pay it once
+# waiting for the watcher's last pass. The parsing of the knob (including its
+# default) has its own case; these run fast.
+export TBD_RESTART_BUILD_POLL_SECONDS=0.05
 
 FAIL=0
 pass() { echo "ok   - $1"; }
@@ -59,6 +64,258 @@ EOF
     echo "$d"
 }
 
+# Build a throwaway "worktree" whose scripts/swift-safe stub BLOCKS until the
+# test releases it, so anything asserted while it blocks is provably asserted
+# mid-build. It writes, in order: $1 lines of compiler noise, one `swift-safe:`
+# progress line, then nothing until $d/release exists, then a final noise line
+# and the wrapper's own exit-status line, before exiting with $2. Echoes $d.
+mkblockingworktree() {
+    local noise_lines="${1:-1}" status="${2:-0}"
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-block.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+for i in \$(seq 1 $noise_lines); do echo "compiler output line \$i"; done
+echo "swift-safe: still waiting for the shared build slot after 60s of 1800s (held by pid 1)" >&2
+while [ ! -e "$d/release" ]; do sleep 0.05; done
+echo "compiler output line after release"
+echo "swift-safe: exit status $status" >&2
+exit $status
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# Build a throwaway "worktree" whose scripts/swift-safe stub never finishes and
+# records two pids: its own, and a grandchild's. The stub stands in for the
+# wrapper, the grandchild for the compiler below it — and the grandchild is the
+# half that matters, because a teardown that signals only the direct child
+# leaves it running and holding the machine-global build slot. Echoes $d.
+#
+# The grandchild self-reaps in 45s, so a case that fails before its teardown
+# bounds the leak rather than leaving a process nothing can reclaim.
+mkunendingworktree() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-unending.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+echo "swift-safe: still waiting for the shared build slot after 60s of 1800s (held by pid 1)" >&2
+sleep 45 &
+echo "\$!" > "$d/grandchild.pid"
+echo "\$\$" > "$d/child.pid"
+wait
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# Build a throwaway "worktree" whose scripts/swift-safe stub writes ONE
+# `swift-safe:` line across THREE writes, $1 seconds apart, with no newline
+# until the last. Echoes $d.
+#
+# The gap is ten poll intervals at the harness's 0.05s, so the watcher drains
+# between every pair of writes: the split is what the case needs to happen, not
+# something it hopes for.
+#
+# Three pieces and not two, because the number discriminates. A carry that
+# REPLACES the held fragment instead of appending to it survives a two-way split
+# — there is nothing to overwrite yet — and on a three-way one drops the first
+# piece, which is the one carrying the prefix.
+mksplitlineworktree() {
+    local gap="${1:-0.5}"
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-split.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+for piece in 'swift-safe: still ' 'waiting for the ' 'shared build slot after 60s of 1800s'; do
+    printf '%s' "\$piece" >&2
+    sleep $gap
+done
+printf '\n' >&2
+echo "swift-safe: exit status 0" >&2
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# Build a throwaway "worktree" whose scripts/swift-safe stub writes nothing but
+# newline-LESS fragments, one every tenth of a second, $1 of them. Echoes $d.
+# Every byte it writes is output, and none of it completes a line.
+mkfragmentworktree() {
+    local fragments="${1:-30}"
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-frag.XXXXXX")"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/swift-safe" <<EOF
+#!/usr/bin/env bash
+i=0
+while [ \$i -lt $fragments ]; do
+    printf 'x' >&2
+    sleep 0.1
+    i=\$((i + 1))
+done
+printf '\n' >&2
+echo "swift-safe: exit status 0" >&2
+EOF
+    chmod +x "$d/scripts/swift-safe"
+    echo "$d"
+}
+
+# A directory holding a python3 shim that restores SIGINT's DEFAULT disposition
+# and then execs its arguments.
+#
+# Needed because a backgrounded command is the one thing that cannot be sent a
+# meaningful SIGINT: bash sets SIGINT to SIG_IGN for its own asynchronous jobs,
+# SIG_IGN survives exec, and `trap` in a shell that inherited it is a no-op. A
+# harness has to put the runner in the background to signal it at all, so
+# without the shim the SIGINT case would assert against a disposition no
+# terminal ever produces. The shim gives the runner exactly the disposition
+# restart.sh has when a human runs it from a terminal — which is the case under
+# test. Echoes $d.
+mksigintshim() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-shim.XXXXXX")"
+    cat > "$d/shim.py" <<'EOF'
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+EOF
+    echo "$d"
+}
+
+# A directory holding a `ps` that never answers, to be put ahead of the real
+# one on PATH. This is the hazard the process probe has to survive: the
+# watcher must reach `wait` on the build for the build's status to be
+# collected at all, so a `ps` that wedges rather than failing would strand a
+# build that may already have succeeded.
+#
+# It sleeps rather than blocking forever, and `exec`s so the sleep IS the
+# process the probe kills: a fixture that outlived a failing case would be
+# exactly the unreclaimed process this repo keeps finding. Twenty seconds is
+# long enough that no bounded probe can outlast it and short enough that a
+# leaked one reaps itself.
+mkhangingps() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-hangps.XXXXXX")"
+    cat > "$d/ps" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 20
+EOF
+    chmod +x "$d/ps"
+    echo "$d"
+}
+
+# Run "$@" in the background and say whether it finished within $1 tenths of a
+# second. Echoes "finished" or "hung". A hung command is killed, so a case
+# that fails against an unbounded probe fails rather than wedging the harness.
+await_completion() {
+    local limit="$1"; shift
+    local pid waited=0
+    "$@" >/dev/null 2>&1 &
+    pid=$!
+    while [ "$waited" -lt "$limit" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null
+            echo finished
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    echo hung
+}
+
+# Wait up to $2 tenths of a second for background job $1 to finish, leaving
+# "finished"/"hung" in AWAITED_RESULT and, when it finished, the job's status
+# in AWAITED_STATUS — the half that matters here, since a watcher that
+# returned but lost the build's status is no better than one that hung.
+#
+# Results come back through globals rather than stdout because `wait` only
+# knows the jobs of the shell that started them: run inside a command
+# substitution this could neither collect the status nor report it.
+AWAITED_RESULT=""
+AWAITED_STATUS=""
+await_exit() {
+    local pid="$1" limit="$2" waited=0
+    AWAITED_RESULT=hung
+    AWAITED_STATUS=""
+    while [ "$waited" -lt "$limit" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            AWAITED_STATUS=0
+            wait "$pid" 2>/dev/null || AWAITED_STATUS=$?
+            AWAITED_RESULT=finished
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+# Wait up to ~10s for $2 to appear in file $1. Echoes "found" or "missing".
+await_text() {
+    local file="$1" needle="$2" waited=0
+    while [ "$waited" -lt 200 ]; do
+        if [ -e "$file" ] && grep -qF -- "$needle" "$file" 2>/dev/null; then
+            echo found; return 0
+        fi
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo missing
+}
+
+# `sleep` reached through a SYMLINK named e.g. `swift-frontend`, so a fixture
+# process really carries that name in the process table. Echoes the pid of the
+# wrapper the fixture runs UNDER, which is what a walk is rooted at.
+#
+# A symlink and not a copy: darwin SIGKILLs a copied system binary on exec —
+# the copy is no longer a platform binary and fails its signature check — so a
+# `cp` fixture dies before the walk can see it, and the test then fails for a
+# reason that has nothing to do with the walk. Nor a shell script: `ps comm`
+# names the interpreter, not the script.
+#
+# The fixture self-reaps in 20s, so even a teardown that loses the pid bounds
+# the leak — a process nothing can reclaim is this repo's most common one.
+fake_process() {
+    local dir="$1" name="$2"
+    ln -s "$(command -v sleep)" "$dir/$name"
+    # `; true` keeps bash from exec'ing the command into its own pid, so the
+    # fixture really is a DESCENDANT of the pid the walk is rooted at. Its
+    # output goes to /dev/null because this function is called inside a
+    # command substitution: a background job left holding that pipe keeps it
+    # open, and `$(fake_process …)` then blocks for the fixture's whole life.
+    bash -c "\"$dir/$name\" 20; true" >/dev/null 2>&1 &
+    echo $!
+}
+
+# Wait up to ~5s for a process named $2 to appear below pid $1. `fake_process`
+# returns as soon as bash is forked, which is before it has exec'd anything.
+await_process() {
+    local root="$1" name="$2" waited=0
+    while [ "$waited" -lt 100 ]; do
+        if build_descendant_processes "$root" | grep -q -- "$name"; then
+            echo found; return 0
+        fi
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo missing
+}
+
+# Tear a fixture tree down by pid — never by name. Patterns on this machine
+# match every sibling worktree's processes.
+kill_tree() {
+    local root="$1" pid
+    for pid in $(build_descendant_processes "$root" | awk '{print $1}'); do
+        kill "$pid" 2>/dev/null
+    done
+    kill "$root" 2>/dev/null
+    wait "$root" 2>/dev/null
+}
+
 # Run run_governed_build under RESTART.SH's shell options, not this harness's.
 # This file sets `pipefail`; restart.sh sets only `set -e`, and without
 # pipefail a pipeline reports its LAST command's status — the entire bug. A
@@ -66,15 +323,22 @@ EOF
 # and pass even against the piped implementation, which is worthless. So the
 # call goes through a subshell configured exactly like restart.sh, and the
 # subshell's own exit status is the answer.
+#
+# The body is a named constant because one case cannot use the wrapper: the
+# SIGINT case has to launch the same shell through a shim (see `mksigintshim`),
+# and a second copy of the script would be a second thing to keep in step.
+# Arguments: $0 = the directory holding the lib, $1 = the repo, $2.. = passed on.
+RESTART_SHELL_BODY='
+    set -e
+    # shellcheck source=/dev/null
+    source "$0/restart-build-lib.sh"
+    repo="$1"; shift
+    run_governed_build "$repo" "$@"
+'
+
 run_under_restart_shell() {
     local repo="$1"; shift
-    bash -c '
-        set -e
-        # shellcheck source=/dev/null
-        source "$0/restart-build-lib.sh"
-        repo="$1"; shift
-        run_governed_build "$repo" "$@"
-    ' "$HERE" "$repo" "$@"
+    bash -c "$RESTART_SHELL_BODY" "$HERE" "$repo" "$@"
 }
 
 # --- the ship/no-ship decision ------------------------------------------------
@@ -357,6 +621,500 @@ SWEOF
     rm -rf "$d"
 }
 
+# --- reporting a build that has not finished ----------------------------------
+#
+# THE REGRESSION: `Building...` and then nothing, for as long as it took. The
+# wait announcement and 60s heartbeat scripts/swift-safe writes exist so that a
+# queued build is not silent for its whole 30-minute timeout — and they landed
+# in a temp file that was read only after the build ended, which is precisely
+# when they have stopped being worth anything. A developer watching a build
+# blocked behind an 11-day-stale lock saw the same blank terminal as one
+# watching a healthy compile.
+
+test_swift_safe_progress_reaches_the_terminal_while_the_build_runs() {
+    local d; d="$(mkblockingworktree 200)"
+    local out="$d/stdout.txt" err="$d/stderr.txt"
+    run_under_restart_shell "$d" > "$out" 2> "$err" &
+    local runner=$!
+
+    local seen; seen="$(await_text "$err" "still waiting for the shared build slot")"
+    assert_eq "the wait line arrives before the build ends" "found" "$seen"
+    # Proof that it arrived MID-BUILD and not at the end: the stub cannot
+    # return until $d/release exists, and nothing has created it yet.
+    assert_fail "the build had not been released yet" test -e "$d/release"
+    assert_eq "nothing has been trimmed yet — the build has not ended" "" "$(cat "$out")"
+    # Compiler output is what floods an agent's context; only the wrapper's
+    # own prefixed lines are separable, and only they may be streamed.
+    assert_missing "compiler output is not streamed live" "$(cat "$err")" "compiler output line 1"
+
+    : > "$d/release"
+    local status=0; wait "$runner" || status=$?
+    assert_eq "the released build still returns 0" "0" "$status"
+    assert_contains "the trim still runs at the end" "$(cat "$out")" "compiler output line after release"
+    rm -rf "$d"
+}
+
+test_a_silent_build_is_described_while_it_runs() {
+    local d; d="$(mkblockingworktree 1)"
+    local out="$d/stdout.txt" err="$d/stderr.txt"
+    (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" > "$out" 2> "$err"
+    ) &
+    local runner=$!
+
+    local seen; seen="$(await_text "$err" "no build output for")"
+    assert_eq "silence is reported while the build is still blocked" "found" "$seen"
+    assert_fail "the build had not been released yet" test -e "$d/release"
+    assert_contains "the report applies the compiler discriminator" \
+        "$(cat "$err")" "NO swift-frontend process is running"
+
+    : > "$d/release"
+    local status=0; wait "$runner" || status=$?
+    assert_eq "a build that was merely slow still returns its own status" "0" "$status"
+    rm -rf "$d"
+}
+
+# `date +%s` truncates, so two readings a hair apart can straddle a second
+# boundary and differ by a whole second. Arming the silence deadline at exactly
+# `now + silence` therefore let a report fire after as little as no time at
+# all: a build that ran for 80ms was announced as silent for "1s". It reddened
+# this suite about one run in eight — the shape of flake that gets a guard
+# disabled rather than fixed.
+#
+# The case is deterministic because it STARTS at the adverse phase instead of
+# waiting to land on it by luck.
+test_a_fast_build_at_a_second_boundary_is_never_called_silent() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        pass "second-boundary case needs python3 to align — not run here"
+        return 0
+    fi
+    local d; d="$(mkfakeworktree 0)"
+    # Land a few tens of milliseconds before the next whole second, which is
+    # the window where a truncated clock turns a one-second bound into none.
+    python3 -c 'import time; time.sleep((1.0 - time.time() % 1.0) * 0.96)'
+    local err
+    err="$( (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" 2>&1 >/dev/null
+    ) )"
+    assert_missing "a fast build started at a second boundary is not called silent" \
+        "$err" "no build output for"
+    rm -rf "$d"
+}
+
+test_a_finishing_build_is_never_called_silent() {
+    local d; d="$(mkfakeworktree 0)"
+    local err
+    err="$( (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" 2>&1 >/dev/null
+    ) )"
+    assert_missing "a build that produced output is not reported silent" "$err" "no build output for"
+    rm -rf "$d"
+}
+
+# The liveness discriminator this repo already uses by hand: swift-build and
+# swift-driver sit at 0% CPU by design while they wait on their jobs, so only
+# swift-frontend leaves prove a compiler is running. The real incident had a
+# SwiftPM manifest binary wedged before it executed an instruction — a process
+# tree with no compiler in it at all, holding the machine-global slot.
+
+test_the_process_walk_finds_a_process_below_the_root() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-walk.XXXXXX")"
+    local root; root="$(fake_process "$d" swift-frontend)"
+    local found=missing waited=0
+    while [ "$waited" -lt 100 ]; do
+        if build_descendant_processes "$root" | grep -q "swift-frontend"; then
+            found=found; break
+        fi
+        sleep 0.05; waited=$((waited + 1))
+    done
+    assert_eq "the walk sees a descendant of the build" "found" "$found"
+    assert_eq "the root itself is not listed" "" \
+        "$(build_descendant_processes "$root" | awk -v r="$root" '$1 == r')"
+    kill_tree "$root"
+    rm -rf "$d"
+}
+
+test_silence_with_a_live_compiler_says_the_build_is_working() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-busy.XXXXXX")"
+    local root; root="$(fake_process "$d" swift-frontend)"
+    await_process "$root" swift-frontend >/dev/null
+    local msg; msg="$(describe_silent_build "$root" 420)"
+    assert_contains "silence with a compiler names the silence" "$msg" "no build output for 420s"
+    assert_contains "silence with a compiler is reassuring" "$msg" "the compiler is working"
+    assert_missing "no alarm is raised while a compiler runs" "$msg" "NO swift-frontend"
+    kill_tree "$root"
+    rm -rf "$d"
+}
+
+test_silence_with_no_compiler_names_what_is_actually_running() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/restart-build-stall.XXXXXX")"
+    local root; root="$(fake_process "$d" tbd-manifest)"
+    await_process "$root" tbd-manifest >/dev/null
+    local msg; msg="$(describe_silent_build "$root" 660)"
+    assert_contains "the stall names the silence" "$msg" "no build output for 660s"
+    assert_contains "the stall says no compiler is running" "$msg" "NO swift-frontend process is running"
+    assert_contains "the stall names the live process" "$msg" "tbd-manifest"
+    assert_contains "the stall explains why an idle process proves nothing" "$msg" "idle at 0% CPU by design"
+    assert_contains "the stall distinguishes holding from queueing" "$msg" "HOLDS the slot"
+    assert_contains "the stall points at the lock to inspect" "$msg" "swift-build.lock"
+    kill_tree "$root"
+    rm -rf "$d"
+}
+
+test_silence_with_no_live_processes_says_so() {
+    local dead; dead="$(bash -c 'echo $$')"
+    # A pid that has exited: the walk finds nothing below it.
+    local msg; msg="$(describe_silent_build "$dead" 900)"
+    assert_contains "an empty process tree is reported as empty" "$msg" "no live child processes"
+}
+
+# --- the probe must not become the hang ---------------------------------------
+#
+# This is a watchdog, and the one failure it may never have is its own. The
+# walk runs from inside `follow_build_progress`, which must RETURN before
+# `run_governed_build` reaches the `wait` that collects the build's exit
+# status — so a `ps` that wedges instead of failing strands a build whose own
+# status may already be a clean zero. The bound is what these cases pin.
+
+test_a_hanging_process_probe_is_abandoned_rather_than_waited_on() {
+    local fake; fake="$(mkhangingps)"
+    local finished
+    finished="$(
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        # Three seconds is comfortably past the one-second bound and
+        # comfortably short of the twenty-second fixture.
+        await_completion 30 build_descendant_processes 1
+    )"
+    assert_eq "a hanging ps is abandoned, not waited on" "finished" "$finished"
+    rm -rf "$fake"
+}
+
+test_an_abandoned_probe_is_distinguishable_from_an_empty_process_tree() {
+    local fake; fake="$(mkhangingps)"
+    local status=0
+    (
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        build_descendant_processes 1 >/dev/null 2>&1
+    ) || status=$?
+    # Empty output alone cannot carry the difference: "nothing is running" and
+    # "I could not look" are opposite conclusions that both print nothing.
+    assert_fail "an abandoned probe reports failure, not an empty tree" test "$status" -eq 0
+    rm -rf "$fake"
+}
+
+test_a_hanging_probe_degrades_to_saying_it_could_not_look() {
+    local fake; fake="$(mkhangingps)"
+    local msg
+    msg="$(
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        describe_silent_build 1 480
+    )"
+    assert_contains "the silence itself is still named" "$msg" "no build output for 480s"
+    assert_contains "an unreadable process table says so" "$msg" "could not be enumerated within 1s"
+    assert_contains "the degraded report names its own limits" "$msg" "Could not enumerate descendants"
+    # The honesty assertion. Falling through to the no-compiler branch would
+    # tell a human that nothing is compiling when the truth is that nobody
+    # looked — and that reads as licence to kill a working build.
+    assert_missing "it never claims no compiler is running" "$msg" "NO swift-frontend process is running"
+    assert_missing "it never claims an empty process tree" "$msg" "no live child processes"
+    rm -rf "$fake"
+}
+
+# The assertion the whole finding is about: the watcher returns, and the
+# build's REAL status still reaches restart.sh. 75 rather than 0, so a status
+# that was invented rather than collected is visible as such.
+test_a_hanging_ps_cannot_strand_the_builds_exit_status() {
+    local d; d="$(mkblockingworktree 1 75)"
+    local fake; fake="$(mkhangingps)"
+    local out="$d/stdout.txt" err="$d/stderr.txt"
+    (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=1
+        export PATH="$fake:$PATH"
+        run_under_restart_shell "$d" > "$out" 2> "$err"
+    ) &
+    local runner=$!
+
+    local seen; seen="$(await_text "$err" "no build output for")"
+    assert_eq "silence is still reported when ps hangs" "found" "$seen"
+    assert_fail "the build had not been released yet" test -e "$d/release"
+
+    : > "$d/release"
+    await_exit "$runner" 50 || true
+    assert_eq "the watcher returns rather than waiting on the probe" "finished" "$AWAITED_RESULT"
+    assert_eq "the build's own status is still collected" "75" "$AWAITED_STATUS"
+    # Not left running: a case that failed above must not leak the build. The
+    # stub exits on its own, so this is a collection, not a kill.
+    [ "$AWAITED_RESULT" = finished ] || wait "$runner" 2>/dev/null
+    rm -rf "$d" "$fake"
+}
+
+# --- a line that arrives in two writes --------------------------------------
+#
+# `read` consumes a newline-less tail and returns failure, handing the bytes
+# back through its variable. Dropping them there loses the half of the line
+# that carries the `swift-safe:` prefix, so the second write arrives as a bare
+# remainder that matches nothing — and the fragment counts as no output at all,
+# which lets the silence watchdog call a build stalled mid-write.
+#
+# The carry must ACCUMULATE across passes rather than replace what it holds, so
+# the fixture splits the line three ways: a replacing carry is indistinguishable
+# from a correct one on a two-way split.
+
+test_a_progress_line_split_across_several_writes_is_still_streamed() {
+    local d; d="$(mksplitlineworktree 0.5)"
+    local err; err="$(run_under_restart_shell "$d" 2>&1 >/dev/null)"
+    assert_contains "all three pieces are rejoined before the filter sees them" "$err" \
+        "swift-safe: still waiting for the shared build slot after 60s of 1800s"
+    local count
+    count="$(printf '%s\n' "$err" | grep -c "still waiting for the shared" || true)"
+    assert_eq "streamed once, not again by the end-of-build flush" "1" "$count"
+    rm -rf "$d"
+}
+
+test_a_build_writing_partial_lines_is_not_called_silent() {
+    local d; d="$(mkfragmentworktree 30)"
+    local err
+    err="$( (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=1
+        run_under_restart_shell "$d" 2>&1 >/dev/null
+    ) )"
+    # Three seconds of fragments against a one-second bound: a watcher that
+    # ignores them reports silence, and one that counts them never can.
+    assert_missing "bytes without a newline are still output" "$err" "no build output for"
+    rm -rf "$d"
+}
+
+# --- an interrupted build must not keep the shared slot ------------------------
+#
+# THE REGRESSION: watching a build means the build runs as an asynchronous job,
+# and bash gives such a job an IGNORED SIGINT whenever job control is off —
+# which it is in every script. SIG_IGN survives both fork and exec, so
+# scripts/swift-safe, SwiftPM and every compiler below them inherit it. Ctrl-C
+# then ends restart.sh and nothing else: the compiler runs on, holding the
+# machine-global build lock. That is the same stuck-lock state this file exists
+# to diagnose, produced by the diagnostic. So the interrupt is caught and the
+# tree signalled, and these cases pin that the GRANDchild dies too — a teardown
+# that reached only the direct child would leave the compiler behind.
+
+# "dead" once pid $1 is gone, or "alive" after ~5s.
+await_death() {
+    local pid="$1" waited=0
+    while [ "$waited" -lt 100 ]; do
+        kill -0 "$pid" 2>/dev/null || { echo dead; return 0; }
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo alive
+}
+
+# "found" once file $1 is non-empty, or "missing" after ~10s.
+await_file() {
+    local file="$1" waited=0
+    while [ "$waited" -lt 200 ]; do
+        [ -s "$file" ] && { echo found; return 0; }
+        sleep 0.05
+        waited=$((waited + 1))
+    done
+    echo missing
+}
+
+# Assert that interrupting the runner with signal $1 takes the whole build tree
+# with it. $2 names the case in the assertion text. The runner is started by the
+# caller, which leaves its pid in RUNNER_PID and the fixture in RUNNER_FIXTURE.
+assert_interrupt_tears_down_the_tree() {
+    local signal="$1" label="$2"
+    local d="$RUNNER_FIXTURE" runner="$RUNNER_PID"
+    assert_eq "$label: the stub build reached its grandchild" \
+        "found" "$(await_file "$d/grandchild.pid")"
+    local child grand
+    child="$(cat "$d/child.pid")"
+    grand="$(cat "$d/grandchild.pid")"
+
+    kill -"$signal" "$runner" 2>/dev/null
+    await_exit "$runner" 150 || true
+    assert_eq "$label: the runner returns rather than hanging" "finished" "$AWAITED_RESULT"
+    assert_eq "$label: it reports 130, so restart.sh ships nothing" "130" "$AWAITED_STATUS"
+    # The two halves of the finding. The wrapper is the direct child; the
+    # grandchild is what a kill of the direct child alone would orphan, and it
+    # is the process that would go on holding the machine-global build slot.
+    assert_eq "$label: the wrapper is gone" "dead" "$(await_death "$child")"
+    assert_eq "$label: the compiler below it is gone too" "dead" "$(await_death "$grand")"
+    assert_contains "$label: the interruption is explained" \
+        "$(cat "$d/stderr.txt")" "stopping the build"
+    # ...and explained ONLY in English. bash reports a job it reaped after a
+    # signal as "line NNN: 12345 Terminated: 15", naming this library and the
+    # whole build subshell — which reads like a script error at the one moment a
+    # human is looking for one, directly under a line that already said what
+    # happened.
+    assert_missing "$label: no job-control noise is left on stderr" \
+        "$(cat "$d/stderr.txt")" "Terminated:"
+    assert_missing "$label: and the library is not named as if it had failed" \
+        "$(cat "$d/stderr.txt")" "restart-build-lib.sh: line"
+    # Teardown by recorded pid, never by pattern: a case that failed above must
+    # not leave the fixture running.
+    kill -9 "$grand" "$child" 2>/dev/null
+    [ "$AWAITED_RESULT" = finished ] || { kill -9 "$runner" 2>/dev/null; wait "$runner" 2>/dev/null; }
+}
+
+RUNNER_PID=""
+RUNNER_FIXTURE=""
+
+# `bash -c "$RESTART_SHELL_BODY"` and not `run_under_restart_shell`, because
+# backgrounding a FUNCTION makes `$!` the subshell bash forks for the function
+# — a shell with no handler of its own, whose death just orphans the runner
+# inside it. The signal has to reach the shell that armed the trap.
+test_a_build_interrupted_by_sigterm_is_torn_down_not_orphaned() {
+    local d; d="$(mkunendingworktree)"
+    bash -c "$RESTART_SHELL_BODY" "$HERE" "$d" > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree TERM "SIGTERM"
+    rm -rf "$d"
+}
+
+# Ctrl-C itself, with the signal disposition a terminal really produces. See
+# `mksigintshim` for why the shim is unavoidable in a harness.
+test_a_build_interrupted_by_ctrl_c_is_torn_down_not_orphaned() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        pass "the Ctrl-C case needs python3 to restore the signal's default — not run here"
+        return 0
+    fi
+    local d shim
+    d="$(mkunendingworktree)"
+    shim="$(mksigintshim)"
+    python3 "$shim/shim.py" "$BASH" -c "$RESTART_SHELL_BODY" "$HERE" "$d" \
+        > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree INT "Ctrl-C"
+    rm -rf "$d" "$shim"
+}
+
+# THE FINDING THE PROCESS GROUP ANSWERS, and the one the ORDER answers. A
+# teardown that can only signal what `ps` enumerated fails on exactly the
+# machine this PR targets: the one where `ps` is slow enough to hit its own
+# bound. Killing the root alone is no substitute — its children re-parent to
+# launchd and go on holding the machine-global slot. So the teardown signals the
+# build's process group, which `run_governed_build` arranges by launching under
+# job control.
+#
+# This case takes `ps` away AND gives the probe a bound far longer than the case
+# is willing to wait, so it pins both halves at once: that no process table is
+# needed, and that none is consulted BEFORE the signal. A walk placed first
+# would mean a human's Ctrl-C did nothing for twenty seconds here — and the
+# traps are disarmed by then, so an impatient second Ctrl-C would end
+# restart.sh and leave the build alive in a process group that is no longer the
+# terminal's.
+test_an_interrupt_tears_the_tree_down_promptly_when_ps_cannot_answer() {
+    local d fake
+    d="$(mkunendingworktree)"
+    fake="$(mkhangingps)"
+    PATH="$fake:$PATH" TBD_RESTART_PROCESS_PROBE_SECONDS=20 \
+        bash -c "$RESTART_SHELL_BODY" "$HERE" "$d" > "$d/stdout.txt" 2> "$d/stderr.txt" &
+    RUNNER_PID=$!
+    RUNNER_FIXTURE="$d"
+    assert_interrupt_tears_down_the_tree TERM "hanging ps"
+    rm -rf "$d" "$fake"
+}
+
+# The three signals are borrowed for the length of the build, not taken: a
+# caller with its own cleanup handler must still have it afterwards.
+test_the_callers_own_signal_handlers_are_borrowed_and_returned() {
+    local body; body="$(cat "$HERE/restart-build-lib.sh")"
+    # shellcheck disable=SC2016 # literal, unexpanded strings searched in the lib
+    assert_contains "the caller's handlers are saved before arming" "$body" 'saved_traps="$(trap -p INT TERM HUP)"'
+    # shellcheck disable=SC2016
+    assert_contains "the build is trapped out of INT, TERM and HUP" "$body" 'INT TERM HUP'
+    # shellcheck disable=SC2016
+    assert_contains "and the saved handlers are put back" "$body" 'eval "$saved_traps"'
+
+    local d; d="$(mkfakeworktree 0)"
+    local out
+    out="$(bash -c '
+        set -e
+        source "$0/restart-build-lib.sh"
+        trap "echo caller-int" INT
+        trap "echo caller-term" TERM
+        run_governed_build "$1" >/dev/null 2>&1
+        echo "status=$?"
+        trap -p INT; trap -p TERM; trap -p HUP
+    ' "$HERE" "$d")"
+    assert_contains "an uninterrupted build still returns its own zero" "$out" "status=0"
+    assert_contains "the INT handler the caller installed is back" "$out" "echo caller-int"
+    assert_contains "the TERM handler the caller installed is back" "$out" "echo caller-term"
+    assert_missing "nothing of the build's own handler is left behind" "$out" "interrupt_governed_build"
+    rm -rf "$d"
+}
+
+test_the_lock_path_follows_the_wrappers_own_resolution() {
+    assert_eq "an explicit lock path wins" "/tmp/example.lock" \
+        "$( TBD_SWIFT_LOCK_PATH=/tmp/example.lock swift_build_lock_path )"
+    assert_eq "TBD_HOME is honored" "/tmp/fake-home/runtime/swift-build.lock" \
+        "$( unset TBD_SWIFT_LOCK_PATH; TBD_HOME=/tmp/fake-home swift_build_lock_path )"
+}
+
+test_bad_diagnostic_knobs_fall_back_to_their_defaults() {
+    assert_eq "a non-numeric poll falls back" "$DEFAULT_BUILD_POLL_SECONDS" \
+        "$( TBD_RESTART_BUILD_POLL_SECONDS=soon build_poll_seconds )"
+    assert_eq "a zero poll falls back rather than spinning" "$DEFAULT_BUILD_POLL_SECONDS" \
+        "$( TBD_RESTART_BUILD_POLL_SECONDS=0 build_poll_seconds )"
+    assert_eq "a fractional poll is accepted" "0.25" \
+        "$( TBD_RESTART_BUILD_POLL_SECONDS=0.25 build_poll_seconds )"
+    assert_eq "a non-numeric silence bound falls back" "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=never build_silence_seconds )"
+    assert_eq "a fractional silence bound falls back — it is integer arithmetic" \
+        "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=1.5 build_silence_seconds )"
+    assert_eq "an explicit silence bound is honored" "42" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=42 build_silence_seconds )"
+}
+
+# A knob whose value is digits can still be arithmetic bash refuses: a leading
+# zero makes it OCTAL, so `08` is an invalid literal and `$(( now + 08 ))` fails
+# — which under restart.sh's `set -e` takes down the watcher, and with it the
+# build it was watching. The whole contract of this function is that a typo in a
+# diagnostic knob cannot fail a build, so what it emits has to be safe to put in
+# a `$(( ))` and not merely to look like a number.
+test_a_leading_zero_knob_does_not_abort_the_watcher() {
+    assert_eq "a leading zero is read as base 10, not octal" "8" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=08 build_silence_seconds )"
+    assert_eq "and so is the other invalid octal digit" "9" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=09 build_silence_seconds )"
+    assert_eq "a leading zero on a valid octal digit is still decimal" "7" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=07 build_silence_seconds )"
+    # Positivity is checked after normalization, so a padded zero falls back
+    # like the zero it is rather than becoming a bound of 0.
+    assert_eq "a padded zero falls back rather than spinning" "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=00 build_silence_seconds )"
+    assert_eq "a value too large for bash arithmetic falls back" "$DEFAULT_BUILD_SILENCE_SECONDS" \
+        "$( TBD_RESTART_BUILD_SILENCE_SECONDS=999999999999999999999 build_silence_seconds )"
+    # The same normalization protects the probe bound, which is multiplied.
+    assert_eq "the probe bound is normalized too" "8" \
+        "$( TBD_RESTART_PROCESS_PROBE_SECONDS=08 process_probe_seconds )"
+}
+
+# The assertion the finding is really about: the arithmetic the watcher does
+# with the knob must survive it. A build is run end to end with the adverse
+# value set, under restart.sh's own `set -e`, and must still return its status.
+test_a_leading_zero_knob_still_lets_a_build_report_its_status() {
+    local d; d="$(mkfakeworktree 75)"
+    local status=0
+    (
+        export TBD_RESTART_BUILD_SILENCE_SECONDS=08
+        export TBD_RESTART_PROCESS_PROBE_SECONDS=09
+        run_under_restart_shell "$d" >/dev/null 2>&1
+    ) || status=$?
+    assert_eq "the build's own status survives an octal-looking knob" "75" "$status"
+    rm -rf "$d"
+}
+
 # --- restart.sh wiring --------------------------------------------------------
 #
 # Static checks: the guard is worth nothing if restart.sh stops calling it, and
@@ -384,6 +1142,20 @@ test_restart_sh_routes_the_build_through_the_guard() {
 # file this grep has to read; pointed at restart.sh it can never match and the
 # assertion passes unconditionally. Both files are scanned so the mistake cannot
 # be reintroduced at the call's old home either.
+# The status must come from the build job itself. Watching a build while it
+# runs means the build cannot be in the foreground, and `wait` is then the
+# only thing that reports THAT job's status and no other command's. Feeding
+# the build into the watcher through a pipe would put the status back at the
+# mercy of the last command in the pipe, which is the bug this file exists to
+# prevent; the case above forbids the pipe, this one pins what replaced it.
+test_the_build_status_comes_from_waiting_on_the_build_job() {
+    local body; body="$(cat "$HERE/restart-build-lib.sh")"
+    # shellcheck disable=SC2016 # literal, unexpanded strings searched in the lib
+    assert_contains "the build runs in the background" "$body" '> "$build_log" 2>&1 &'
+    # shellcheck disable=SC2016
+    assert_contains "its status comes from waiting on it" "$body" 'wait "$builder" || status=$?'
+}
+
 test_the_build_invocation_never_pipes_the_status_away() {
     local f piped
     for f in restart-build-lib.sh restart.sh; do

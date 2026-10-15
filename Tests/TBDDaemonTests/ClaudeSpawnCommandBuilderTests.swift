@@ -8,6 +8,25 @@ struct ClaudeSpawnCommandBuilderTests {
 
     private let fakeOauth = "sk-ant-oat01-fake"
 
+    // MARK: - The permission class the spawn vouches for
+
+    /// The peer roster stamps remote messages into a TBD-spawned session with
+    /// `spawnedPermissionClass`, so the class must be the one the flag both
+    /// Claude branches carry actually starts a session in.
+    @Test func bothClaudeBranchesCarryTheFlagTheVouchedClassNames() {
+        let resumed = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123", freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+        let fresh = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "sid-1", appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+
+        #expect(ClaudeSpawnCommandBuilder.skipPermissionsFlag == "--dangerously-skip-permissions")
+        #expect(resumed.command.contains(" --dangerously-skip-permissions"))
+        #expect(fresh.command.contains(" --dangerously-skip-permissions"))
+        #expect(ClaudeSpawnCommandBuilder.spawnedPermissionClass == .bypass)
+    }
+
     // MARK: - Fallback / non-token branches
 
     @Test("resume id only")

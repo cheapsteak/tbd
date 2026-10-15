@@ -189,7 +189,8 @@ private struct StubSiteResolver: ShadowPeerSiteResolving {
     let path: String
 
     func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
-        ShadowPeerSite(worktreeDisplayName: "api-lane", path: path)
+        // No repository: these tests exercise wiring, never a delivery.
+        ShadowPeerSite(worktreeDisplayName: "api-lane", path: path, repoID: nil)
     }
 }
 

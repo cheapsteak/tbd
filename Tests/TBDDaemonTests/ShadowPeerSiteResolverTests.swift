@@ -74,8 +74,10 @@ struct ShadowPeerSiteResolverTests {
         let resolution = await Self.resolver(fixture, peerMessagingOn: true)
             .resolution(forProviderSessionID: "sess-42")
 
+        // The repository rides on the site: it is what scopes every message
+        // the shadow sends or receives to that repository's local sessions.
         #expect(resolution == .sited(ShadowPeerSite(
-            worktreeDisplayName: "api-lane", path: Self.repoPath)))
+            worktreeDisplayName: "api-lane", path: Self.repoPath, repoID: fixture.repo.id)))
     }
 
     /// The switch is never consulted for a session TBD cannot site at all, so

@@ -111,6 +111,7 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
         guard let repo, directoryExists(repo.path), peerMessagingOn(repo) else {
             return .switchedOff
         }
-        return .sited(ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path))
+        return .sited(ShadowPeerSite(
+            worktreeDisplayName: worktree.displayName, path: repo.path, repoID: repoID))
     }
 }
