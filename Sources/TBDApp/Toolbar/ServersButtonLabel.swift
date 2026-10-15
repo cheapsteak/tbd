@@ -12,12 +12,15 @@ struct ServersButtonLabel: View {
     private var runningCount: Int { list.servers.filter { $0.state == .running }.count }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(nsImage: Self.bakedIcon(running: runningCount > 0, colorScheme: colorScheme))
-                .renderingMode(.original)
+        // A `Label` so the toolbar `Menu`'s `.labelStyle(.titleAndIcon)`
+        // applies: macOS 27 otherwise draws the item icon-only.
+        Label {
             Text(verbatim: Self.title(runningCount: runningCount))
                 .font(.caption)
                 .fontWeight(.medium)
+        } icon: {
+            Image(nsImage: Self.bakedIcon(running: runningCount > 0, colorScheme: colorScheme))
+                .renderingMode(.original)
         }
         .accessibilityLabel(runningCount > 0 ? "Dev servers, \(runningCount) running" : "Dev servers")
     }

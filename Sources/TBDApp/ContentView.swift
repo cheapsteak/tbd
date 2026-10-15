@@ -155,6 +155,9 @@ struct ContentView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    // macOS 27 draws toolbar menus icon-only by default; this
+                    // text-only Picker then rendered as an empty capsule.
+                    .labelStyle(.titleAndIcon)
                     .help("Filter sidebar by repository")
                 }
 
@@ -255,6 +258,7 @@ struct ContentView: View {
                                     // Keep "#123" neutral like the original plain Button (the
                                     // split button otherwise accent-tints it); the icon keeps
                                     // its baked status color via renderingMode(.original).
+                                    .labelStyle(.titleAndIcon)
                                     .tint(.primary)
                                     .help(helpText)
                                     .id(splitButtonID)
@@ -272,6 +276,7 @@ struct ContentView: View {
                                     } label: {
                                         PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
                                     }
+                                    .labelStyle(.titleAndIcon)
                                     .tint(.primary)
                                     .help(helpText)
                                     .id(splitButtonID)
@@ -310,6 +315,7 @@ struct ContentView: View {
                                 } primaryAction: {
                                     appState.openDevServerURL(primaryURL)
                                 }
+                                .labelStyle(.titleAndIcon)
                                 .tint(.primary)
                                 .help("Open \(primaryURL) · more options")
                                 .id(serversID)
@@ -323,6 +329,7 @@ struct ContentView: View {
                                 } label: {
                                     ServersButtonLabel(list: serverList)
                                 }
+                                .labelStyle(.titleAndIcon)
                                 .tint(.primary)
                                 .help("Dev servers")
                                 .id(serversID)
@@ -1293,16 +1300,15 @@ struct PRButtonLabel: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
-            if let prStatus,
-               let presentation = PRStatusPresentation.make(for: prStatus),
-               let nsImage = coloredIcon(presentation, colorScheme: colorScheme) {
-                Image(nsImage: nsImage)
-                    .renderingMode(.original)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: bakedWidth, height: Self.iconSide)
-            }
+        // A `Label`, not an `HStack`: the toolbar item renders it under the
+        // `.labelStyle(.titleAndIcon)` its `Menu` carries, which macOS 27
+        // needs to draw the title at all (see `Sources/TBDApp/CLAUDE.md`).
+        // The image is NOT `.resizable()`: AppKit flattens the label to its
+        // NSImage and ignores a SwiftUI `.frame`, so a resizable image is
+        // stretched to fill the toolbar's icon slot — on macOS 27 that
+        // squashed the 27×12 badge bitmap out of proportion. The baked
+        // NSImage already carries its exact point size (`bakedWidth` × 12).
+        Label {
             // macOS 26 flattens a toolbar split-button (Menu) label to exactly
             // ONE image + ONE plain text string: a separate trailing Image is
             // dropped, and an inline Text(Image(...)) attachment is stripped
@@ -1314,6 +1320,13 @@ struct PRButtonLabel: View {
             Text(verbatim: PRBindingPresentation.buttonLabel(bindings) ?? "")
                 .font(.caption)
                 .fontWeight(.medium)
+        } icon: {
+            if let prStatus,
+               let presentation = PRStatusPresentation.make(for: prStatus),
+               let nsImage = coloredIcon(presentation, colorScheme: colorScheme) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.original)
+            }
         }
         .accessibilityLabel(accessibilityLabel)
     }
