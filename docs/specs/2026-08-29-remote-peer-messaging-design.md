@@ -375,12 +375,27 @@ sessions in another. And it is mirrored only when that repository has peer
 messaging switched on in its `tbd.toml` (see The per-repository switch). A remote session that resolves to no registered repository has no
 worktree row under the existing contract and is therefore never bridged.
 
+**Every message is scoped to one repository, in both directions.** One stream
+carries a provider's traffic for every repository with the switch on, so a
+handle that resolves proves only that TBD announced it, not that sender and
+addressee share a project. TBD therefore records the repository on both halves
+of the table — a shadow takes it from the worktree row its remote session
+sited to, a local session from the roster link it was announced on — and
+delivers a message only when the two are the same. An inbound frame from a
+remote lane in one project to a local session in another is dropped and
+counted, and so is an outbound frame from a local session to a remote lane in
+another project. A shadow or local session with no repository on record
+exchanges nothing; unknown never matches. A local session is announced under
+exactly one repository, since its worktree belongs to one and the roster scopes
+each session to that repository's link.
+
 One asymmetry is on the record because it cannot be engineered away.
 `~/.claude/sessions` is a single per-user directory with no notion of project,
 and every local session reads all of it. So TBD controls which local sessions a
-remote host can *reach*, but not which local sessions *see* a shadow peer: a
-session in one project will see remote peers from another and may message them.
-The direction that crosses the trust boundary is the one that is scoped.
+remote host can *reach*, and which remote lanes a local session's messages
+*reach*, but not which local sessions *see* a shadow peer: a session in one
+project will list remote peers from another, and a message it sends one is
+dropped rather than delivered.
 
 Remote message content remains untrusted teammate input, exactly as local peer
 content already is. The namespaced stamp is what stops it impersonating a local

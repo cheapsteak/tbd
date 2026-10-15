@@ -292,16 +292,18 @@ public struct RosterEntry: Sendable, Equatable {
 /// shape it already has (`registerLocalPeer(socketPath:name:)` /
 /// `withdrawLocalPeer(socketPath:)`).
 ///
-/// **`handle(forLocalPeerAt:name:permissionClass:)` must be idempotent on the
-/// socket path.** A `peer` line is a complete statement re-sent whenever
+/// **`handle(forLocalPeerAt:name:repoID:permissionClass:)` must be idempotent
+/// on the socket path.** A `peer` line is a complete statement re-sent whenever
 /// anything about a session changes, and a handle that churned on a status
 /// change would strand every peer that had already been told about it.
 public protocol LocalPeerHandleRegistry: Sendable {
-    /// Mint (or return) the handle for one local session. `permissionClass`
-    /// is the class an inbound frame for that session is stamped with — nil
-    /// when TBD cannot vouch for one.
+    /// Mint (or return) the handle for one local session. `repoID` is the
+    /// repository its worktree belongs to: a message crosses between it and a
+    /// shadow only when both are in the same one. `permissionClass` is the
+    /// class an inbound frame for that session is stamped with — nil when TBD
+    /// cannot vouch for one.
     func handle(
-        forLocalPeerAt socketPath: String, name: String,
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
         permissionClass: ShadowPeerPermissionClass?
     ) async -> String
     /// Forget one local session, returning the handle it held (nil when it was
@@ -325,7 +327,7 @@ public actor MemoizingLocalPeerHandleRegistry: LocalPeerHandleRegistry {
     }
 
     public func handle(
-        forLocalPeerAt socketPath: String, name: String,
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
         permissionClass: ShadowPeerPermissionClass?
     ) async -> String {
         if let existing = handlesBySocket[socketPath] { return existing }
@@ -764,7 +766,7 @@ public actor RosterWatcher {
             for entry in scoped.sorted(by: { $0.name < $1.name }) {
                 let handle = await registration.handles.handle(
                     forLocalPeerAt: entry.socketPath, name: entry.name,
-                    permissionClass: entry.permissionClass)
+                    repoID: entry.repoID, permissionClass: entry.permissionClass)
                 lines[handle] = entry.peerLine(handle: handle)
                 socketsByHandle[handle] = entry.socketPath
             }

@@ -73,16 +73,18 @@ private func spawnedSession(
         permissionClass: permissionClass)
 }
 
-/// A handle registry that records the permission class each registration
-/// carried, so a test can see what the roster vouched for.
+/// A handle registry that records the repository and permission class each
+/// registration carried, so a test can see what the roster vouched for.
 private actor ClassRecordingHandleRegistry: LocalPeerHandleRegistry {
     private(set) var classesBySocket: [String: ShadowPeerPermissionClass?] = [:]
+    private(set) var reposBySocket: [String: UUID?] = [:]
 
     func handle(
-        forLocalPeerAt socketPath: String, name: String,
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
         permissionClass: ShadowPeerPermissionClass?
     ) async -> String {
         classesBySocket[socketPath] = permissionClass
+        reposBySocket[socketPath] = repoID
         return "h-\(socketPath)"
     }
 
@@ -219,9 +221,11 @@ private func watcher(
 
 @Suite("Roster watcher — announcements")
 struct RosterWatcherAnnouncementTests {
-    /// The session's permission class reaches the handle registry — the table
-    /// an inbound frame is stamped from — for a vouched session and an
-    /// unvouched one alike, and never on the `peer` line.
+    /// The session's permission class and repository reach the handle
+    /// registry — the table an inbound frame is stamped and scoped from — for
+    /// a vouched session and an unvouched one alike. Neither goes on the
+    /// `peer` line: it is pinned whole, so a field added to carry either would
+    /// break the equality.
     @Test(arguments: [ShadowPeerPermissionClass?.some(.bypass), .some(.prompting), .none])
     func theSessionsPermissionClassReachesTheHandleRegistry(
         permissionClass: ShadowPeerPermissionClass?
@@ -240,6 +244,12 @@ struct RosterWatcherAnnouncementTests {
             let recorded = await handles.classesBySocket
             #expect(recorded.count == 1)
             #expect(recorded.values.first == .some(permissionClass))
+            #expect(await handles.reposBySocket.values.first == .some(repoA))
+
+            let socket = try #require(recorded.keys.first)
+            #expect(peers(await sink.drain()) == [PeerBridgePeer(
+                handle: "h-\(socket)", name: "laptop:useful-swallow 5A1B2C3D",
+                status: "busy", peerProtocol: 1)])
         }
     }
 
@@ -762,7 +772,7 @@ private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
     }
 
     func handle(
-        forLocalPeerAt socketPath: String, name: String,
+        forLocalPeerAt socketPath: String, name: String, repoID: UUID?,
         permissionClass: ShadowPeerPermissionClass?
     ) async -> String {
         if let existing = handlesBySocket[socketPath] { return existing }

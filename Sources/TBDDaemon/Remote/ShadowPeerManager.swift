@@ -21,6 +21,17 @@ public enum ShadowPeerDropReason: String, Sendable, CaseIterable, Codable {
     /// admitted. A handle outside the table resolves to nothing — never to a
     /// name match, a nearest match, or a broadcast.
     case unknownHandle
+    /// The frame's sender and addressee are not in the same repository, or
+    /// one of them is in none.
+    ///
+    /// **The per-repository scope, enforced per frame.** One manager serves a
+    /// provider's whole stream, and every repository with peer messaging
+    /// switched on announces its local sessions into the same handle table —
+    /// so both handles resolving is not enough. A remote lane in one project
+    /// must not reach local sessions in another, and a local session must not
+    /// reach a remote lane in another project, whatever the far side
+    /// addresses. Either side with no repository on record fails closed.
+    case crossRepository
     /// An outbound frame's content still carried a path into the local
     /// peer-socket directory, so it was dropped instead of sent.
     ///
@@ -110,13 +121,22 @@ public struct ShadowPeerDropCounts: Sendable, Equatable {
 /// disambiguates local peers is unavailable to it — and the path is a `cwd` that must exist
 /// on **this** machine, because a remote path resolves to nothing here and a
 /// surface filtering on the directory existing would drop the row.
+///
+/// `repoID` is the repository the remote session's worktree row belongs to.
+/// A message between a shadow and a local session is delivered only when both
+/// sit in the same repository, so a site with no repository on record yields
+/// a shadow that can neither send nor receive. Required at every construction
+/// rather than defaulted, so no caller forgets it into a shadow that drops
+/// everything.
 public struct ShadowPeerSite: Sendable, Equatable {
     public let worktreeDisplayName: String
     public let path: String
+    public let repoID: UUID?
 
-    public init(worktreeDisplayName: String, path: String) {
+    public init(worktreeDisplayName: String, path: String, repoID: UUID?) {
         self.worktreeDisplayName = worktreeDisplayName
         self.path = path
+        self.repoID = repoID
     }
 }
 
@@ -323,6 +343,10 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         /// a handle names one session for the life of one connection and that
         /// session never becomes a different one.
         let remoteSessionID: String?
+        /// The repository the remote session was sited in, from its worktree
+        /// row. `let` for the same reason as `remoteSessionID`: a session never
+        /// moves to another repository. Nil fails every message closed.
+        let repoID: UUID?
         let helper: any ShadowPeerHelperHandle
         var reader: Task<Void, Never>?
     }
@@ -333,6 +357,9 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         let handle: String
         let socketPath: String
         let name: String
+        /// The repository the session's worktree belongs to, from the roster
+        /// link it was announced on. Nil fails every message closed.
+        let repoID: UUID?
         /// The class an inbound frame for this session is stamped with, as the
         /// roster vouched for it — nil when it could not.
         let permissionClass: ShadowPeerPermissionClass?
@@ -684,7 +711,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         shadows[peer.handle] = Shadow(
             handle: peer.handle, name: name, status: peer.status,
             peerProtocol: peer.peerProtocol, remoteSessionID: peer.sessionID,
-            helper: helper, reader: reader)
+            repoID: site.repoID, helper: helper, reader: reader)
         unmirrored.remove(peer.handle)
         switchedOff.removeValue(forKey: peer.handle)
         shadowPeerLogger.info("""
@@ -811,6 +838,16 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                 dropped message \(message.id, privacy: .public) on \
                 \(self.provider, privacy: .public): its sender is not a shadow TBD published, so \
                 it cannot be attributed
+                """)
+            return
+        }
+        guard Self.sameRepository(shadow.repoID, local.repoID) else {
+            drops.record(.crossRepository)
+            shadowPeerLogger.error("""
+                dropped message \(message.id, privacy: .public) from \
+                \(shadow.name, privacy: .public) to \(local.name, privacy: .public): the \
+                sender and the addressee are not in the same repository, and a remote lane may \
+                reach only local sessions in its own
                 """)
             return
         }
@@ -958,6 +995,15 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                 """)
             return
         }
+        guard Self.sameRepository(shadow.repoID, localPeers[senderHandle]?.repoID) else {
+            drops.record(.crossRepository)
+            shadowPeerLogger.error("""
+                dropped message \(message.id, privacy: .public) to \
+                \(shadow.name, privacy: .public): its sender is a local session in a different \
+                repository, and a local session may reach only remote lanes in its own
+                """)
+            return
+        }
 
         // **The last check before the content leaves the machine, and the one
         // that trusts nothing outside this actor.** `from` is rewritten to a
@@ -1003,6 +1049,14 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                 \(error.localizedDescription, privacy: .public)
                 """)
         }
+    }
+
+    /// Whether a shadow and a local session may exchange a message: both are
+    /// in a repository, and it is the same one. Unknown on either side is a
+    /// no, because the per-repository scope is a trust boundary.
+    private static func sameRepository(_ shadowRepo: UUID?, _ localRepo: UUID?) -> Bool {
+        guard let shadowRepo, let localRepo else { return false }
+        return shadowRepo == localRepo
     }
 
     /// Every way a send can fail keeps its own count.
@@ -1058,12 +1112,18 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// it. The handle is stable; the permission class is refreshed from each
     /// call, so the stamp follows what the roster last vouched for.
     ///
-    /// `permissionClass` defaults to nil — unvouched — so a caller that does
-    /// not know the class gets the stamp that never confers delivery, never a
-    /// guessed `bypass`.
+    /// Both defaults fail closed: with no `repoID` the session can exchange
+    /// no message with any shadow, and with no `permissionClass` it gets the
+    /// stamp that never confers delivery, never a guessed `bypass`.
+    ///
+    /// A socket is announced under one repository only — a session's worktree
+    /// belongs to exactly one, and the roster scopes each entry to the link of
+    /// that repository — so refreshing `repoID` here never moves a session
+    /// between repositories.
     @discardableResult
     public func handle(
         forLocalPeerAt socketPath: String, name: String,
+        repoID: UUID? = nil,
         permissionClass: ShadowPeerPermissionClass? = nil
     ) -> String {
         let address = "uds:\(socketPath)"
@@ -1071,7 +1131,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         localHandlesByAddress[address] = handle
         localPeers[handle] = LocalPeer(
             handle: handle, socketPath: socketPath, name: name,
-            permissionClass: permissionClass)
+            repoID: repoID, permissionClass: permissionClass)
         return handle
     }
 
