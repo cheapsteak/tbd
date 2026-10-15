@@ -781,7 +781,7 @@ extension HibernationCoordinator {
         }
         idleSince[terminal.id] = nil
         pendingKillSince[terminal.id] = nil
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: currentTerminal, hibernated: true, keepWarm: currentTerminal.keepWarm,
             suspendedSnapshot: capturedSnapshot, hibernateReason: reason)
         logger.info("hibernated holder-backed terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public) (session \(sessionID, privacy: .public))")
@@ -1329,7 +1329,7 @@ extension HibernationCoordinator {
         // Empty tmux coordinates, because that is what a holder row carries and
         // what the app's cached row must keep: a non-empty pair here would send
         // the terminal view looking for a window that does not exist.
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: currentTerminal, hibernated: false, keepWarm: currentTerminal.keepWarm,
             tmuxWindowID: "", tmuxPaneID: "")
         // No `SessionRecaptureScheduler`: a holder wake knows the id it resumed
@@ -1435,7 +1435,7 @@ extension HibernationCoordinator {
         // The same empty tmux coordinates the spawn path broadcasts, for the
         // same reason: a holder row carries none, and a non-empty pair would
         // send the terminal view looking for a window that does not exist.
-        broadcastHibernation(
+        await broadcastHibernation(
             terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
             tmuxWindowID: "", tmuxPaneID: "")
         logger.info("wake: adopted the holder already running for \(terminal.id, privacy: .public) instead of spawning a second one — \(evidence, privacy: .public); the row was parked over it")

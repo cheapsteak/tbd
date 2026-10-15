@@ -228,6 +228,13 @@ public enum RPCMethod {
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let terminalAskUserQuestionSatisfied = "terminal.askUserQuestionSatisfied"
+    /// The app forwards a raw Program Status Protocol (OSC 7501) report it
+    /// read off a holder pty while attached. Always answers ok: a report the
+    /// daemon rejects is debug-logged and the app must not retry.
+    public static let terminalProgramStatusReport = "terminal.programStatusReport"
+    /// Every terminal's current program-status snapshot (main entry and task
+    /// entries). Empty while `program_status_enabled` is off.
+    public static let terminalProgramStatusList = "terminal.programStatusList"
     /// Answering prompts from the transcript
     /// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`).
     /// `prompt.note` – a `PreToolUse`/`PostToolUse` hook records a tool call.
@@ -353,6 +360,12 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
+    /// The Program Status Protocol gate (`program_status_enabled`): whether
+    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
+    /// accepts its status reports. Applies to Claude processes started after
+    /// the change. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
     /// The transcript prompt-answer gate (`transcript_prompt_answer_enabled`).
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
@@ -3941,6 +3954,14 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProgramStatusEnabled` — the gate for the Program
+/// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
+/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
+public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setTranscriptPromptAnswerEnabled` — the gate for
 /// answering Claude's question and permission dialogs from the transcript
 /// (default OFF during soak). Design:
@@ -4359,6 +4380,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `modelProxyEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
+    /// Whether the Program Status Protocol is on (`program_status_enabled`).
+    /// Default OFF while it soaks. Resolved through
+    /// `Config.programStatusEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
     /// Whether answering prompts from the transcript is on
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
@@ -4516,6 +4544,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
+        // New field for the Program Status Protocol gate. A daemon that does
+        // not send it does not speak the protocol, so fall through to the
+        // shipped default.
+        programStatusEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
@@ -5119,6 +5152,34 @@ public struct TerminalAskUserQuestionSatisfiedParams: Codable, Sendable {
     public init(terminalID: UUID, toolUseIDs: [String]) {
         self.terminalID = terminalID
         self.toolUseIDs = toolUseIDs
+    }
+}
+
+/// Params for `terminal.programStatusReport`: one OSC 7501 report the app read
+/// off a holder pty while attached, forwarded raw so the daemon's parser is
+/// the only one on the path that decides anything.
+/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
+public struct TerminalProgramStatusReportParams: Codable, Sendable {
+    public let terminalID: UUID
+    /// The terminal incarnation the app was attached to when it read the
+    /// report. The daemon rejects a report whose incarnation is not the row's.
+    public let incarnationID: UUID?
+    /// The raw OSC data after "7501;", as UTF-8 (the protocol is ASCII).
+    public let payload: String
+    public let observedAt: Date
+    public init(terminalID: UUID, incarnationID: UUID?, payload: String, observedAt: Date) {
+        self.terminalID = terminalID
+        self.incarnationID = incarnationID
+        self.payload = payload
+        self.observedAt = observedAt
+    }
+}
+
+/// Result of `terminal.programStatusList`.
+public struct TerminalProgramStatusListResult: Codable, Sendable {
+    public let snapshots: [ProgramStatusSnapshot]
+    public init(snapshots: [ProgramStatusSnapshot]) {
+        self.snapshots = snapshots
     }
 }
 

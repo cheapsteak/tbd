@@ -357,6 +357,7 @@ extension StateDelta {
         case .remoteSessionAttention: return "remoteSessionAttention"
         case .remoteSessionReconnectRequested: return "remoteSessionReconnectRequested"
         case .terminalLimitHit: return "terminalLimitHit"
+        case .terminalProgramStatusChanged: return "terminalProgramStatusChanged"
         case .terminalPendingPromptsChanged: return "terminalPendingPromptsChanged"
         case .devServersChanged: return "devServersChanged"
         }

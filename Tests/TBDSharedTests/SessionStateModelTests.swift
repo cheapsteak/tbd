@@ -28,6 +28,12 @@ import Testing
         .rateLimited(until: Date(timeIntervalSince1970: 1_770_003_600)),
         .parked(reason: "manual"),
         .gone,
+        .done,
+        .error,
+        .needsAuth,
+        .awaitingInput(reason: AwaitingInputReason(
+            message: "Bash wants to run",
+            programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: "a1"))),
         .unknown(why: "transcript unreadable")
     ])
     func everyStateRoundTrips(state: SessionStateValue) throws {
@@ -50,6 +56,25 @@ import Testing
         #expect(why == "unrecognized state tag 'compacting'")
         // And the raw tag survives into anything rendered from it.
         #expect(decoded.label.contains("compacting"))
+    }
+
+    @Test func needsAuthTagDecodes() throws {
+        let json = #"{"state":"needs_auth"}"#
+        let decoded = try JSONDecoder().decode(SessionStateValue.self, from: Data(json.utf8))
+        #expect(decoded == .needsAuth)
+        #expect(decoded.label == "needs sign-in")
+    }
+
+    @Test func programStatusStatesEncodeTheirTags() throws {
+        let pairs: [(SessionStateValue, String)] = [
+            (.done, "done"), (.error, "error"), (.needsAuth, "needs_auth"),
+        ]
+        for (value, tag) in pairs {
+            let data = try JSONEncoder().encode(value)
+            let object = try #require(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(object["state"] as? String == tag)
+        }
     }
 
     @Test func onlyUnknownIsUnconfident() {
@@ -244,6 +269,40 @@ import Testing
         #expect(reason.message == "m")
     }
 
+    /// Every program-status block is a prompt a human must answer, whatever
+    /// `notificationType` says — and the class is re-derived the same way on
+    /// decode.
+    @Test func aProgramStatusBlockClassifiesAsPromptOnScreen() throws {
+        let reason = AwaitingInputReason(
+            message: "",
+            programStatusBlock: ProgramStatusBlock(kind: nil, taskID: nil))
+        #expect(reason.notificationType == nil)
+        #expect(reason.classification == .promptOnScreen)
+
+        let round = try roundTrip(reason)
+        #expect(round == reason)
+        #expect(round.classification == .promptOnScreen)
+        #expect(round.programStatusBlock == ProgramStatusBlock(kind: nil, taskID: nil))
+    }
+
+    @Test func aProgramStatusBlockSurvivesARoundTrip() throws {
+        let reason = AwaitingInputReason(
+            message: "Which file?",
+            programStatusBlock: ProgramStatusBlock(kind: .question, taskID: "t-2"))
+        let round = try roundTrip(reason)
+        #expect(round.programStatusBlock?.kind == .question)
+        #expect(round.programStatusBlock?.taskID == "t-2")
+        #expect(round.classification == .promptOnScreen)
+    }
+
+    @Test func aReasonWithoutAProgramStatusBlockDecodesAsAbsent() throws {
+        let legacy = #"{"message":"m","notificationType":"idle_prompt"}"#
+        let reason = try JSONDecoder().decode(
+            AwaitingInputReason.self, from: Data(legacy.utf8))
+        #expect(reason.programStatusBlock == nil)
+        #expect(reason.classification == AwaitingInputClass(notificationType: "idle_prompt"))
+    }
+
     @Test func fingerprintsDifferOnPathMtimeOrSize() {
         let stamp = Date(timeIntervalSince1970: 1_700_000_000)
         let base = TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10)
@@ -264,12 +323,24 @@ import Testing
         .processLiveness,
         .forge,
         .gitSweep,
+        .programStatus,
         .derived,
         .unavailable,
         .unrecognized("screen-scrape")
     ])
     func everySourceRoundTrips(source: FactSource) throws {
         #expect(try roundTrip(source) == source)
+    }
+
+    @Test func programStatusSourceUsesItsKind() throws {
+        let data = try JSONEncoder().encode(FactSource.programStatus)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["kind"] as? String == "program-status")
+        #expect(object.count == 1)
+        let json = #"{"kind":"program-status"}"#
+        let decoded = try JSONDecoder().decode(FactSource.self, from: Data(json.utf8))
+        #expect(decoded == .programStatus)
     }
 
     @Test func unrecognizedSourceKindDecodesWithoutThrowing() throws {

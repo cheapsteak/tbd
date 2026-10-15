@@ -54,7 +54,12 @@ struct SessionStateFactGatherer {
         self.capturePath = capturePath
     }
 
-    func facts(for terminal: Terminal) -> SessionStateFacts {
+    /// - Parameter programStatus: the terminal's OSC 7501 snapshot, read by
+    ///   the caller from `ProgramStatusStore` (an actor, so it cannot be read
+    ///   from this synchronous pass). nil when the flag is off.
+    func facts(
+        for terminal: Terminal, programStatus: ProgramStatusSnapshot? = nil
+    ) -> SessionStateFacts {
         // One tail read serves both transcript-derived facts: the rate-limit
         // classification and the append stamp the resolver's staleness rule
         // compares against. Reading twice would double the cost of the pass and
@@ -69,7 +74,8 @@ struct SessionStateFactGatherer {
             // Deliberately nil: nothing on this path establishes pane or
             // process liveness, and this path does not go and find out. See
             // `SessionStateResolver`'s note on `.gone`.
-            liveness: nil)
+            liveness: nil,
+            programStatus: programStatus)
     }
 
     func contextLoad(for terminal: Terminal) -> ContextLoad {
@@ -179,7 +185,14 @@ extension RPCRouter {
         reports.reserveCapacity(terminals.count)
 
         for terminal in terminals {
-            let state = resolver.resolve(gatherer.facts(for: terminal))
+            let programStatusSnapshot: ProgramStatusSnapshot?
+            if programStatus.gate.isEnabled {
+                programStatusSnapshot = await programStatus.snapshot(for: terminal.id)
+            } else {
+                programStatusSnapshot = nil
+            }
+            let state = resolver.resolve(
+                gatherer.facts(for: terminal, programStatus: programStatusSnapshot))
             let contextLoad = gatherer.contextLoad(for: terminal)
 
             if !repoIDByWorktree.keys.contains(terminal.worktreeID) {

@@ -1798,6 +1798,21 @@ final class AppState {
     /// state, so it stays out of Observation: a view that renders
     /// `pendingQuestions` must not also re-render on this.
     @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
+    /// The daemon's Program Status Protocol (OSC 7501) snapshot per terminal,
+    /// keyed by terminal id. Mirrored, never derived: seeded from
+    /// `terminal.programStatusList` and kept current by
+    /// `.terminalProgramStatusChanged`. Memory only — `title` and `msg` can
+    /// carry content from the user's work. Empty while the flag is off.
+    var programStatusSnapshots: [UUID: ProgramStatusSnapshot] = [:]
+    /// Last `ProgramStatusSnapshot.revision` applied per terminal, so a late
+    /// snapshot cannot overwrite a newer one. Bookkeeping, not UI state, so it
+    /// stays out of Observation — same reasoning as `pendingQuestionRevisions`.
+    @ObservationIgnored var programStatusRevisions: [UUID: UInt64] = [:]
+    /// How `hydrateProgramStatus()` lists the daemon's snapshots — injectable
+    /// for the same reason as `daemonCapabilitiesFetcher`, so tests can seed
+    /// the mirror without a daemon.
+    @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
+        { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
     /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
     /// prompts) by terminal, mirrored from the daemon's store over
     /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
@@ -2054,6 +2069,20 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
+    /// How `setProgramStatusEnabled` persists the Program Status Protocol gate
+    /// — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var programStatusFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setProgramStatus(enabled: enabled) }
+    /// Carries OSC 7501 reports an attached panel read off a holder pty to the
+    /// daemon, one at a time and in order — see `forwardProgramStatusReport`.
+    /// Replaceable for the same reason as `controlModeSetter`, so a test can
+    /// record what would have been sent without a daemon.
+    @ObservationIgnored lazy var programStatusForwarder: ProgramStatusForwarder =
+        ProgramStatusForwarder(send: { [daemonClient] params in
+            try? await daemonClient.terminalProgramStatusReport(
+                terminalID: params.terminalID, incarnationID: params.incarnationID,
+                payload: params.payload, observedAt: params.observedAt)
+        })
     /// How `setTranscriptPromptAnswerEnabled` persists the transcript
     /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
@@ -2372,7 +2401,10 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
+            let wasProgramStatusEnabled = daemonCapabilities?.programStatusEnabled
+                ?? Config.programStatusEnabledDefault
             daemonCapabilities = capabilities
+            programStatusCapabilitiesChanged(wasEnabled: wasProgramStatusEnabled)
         }
     }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -2931,6 +2963,12 @@ final class AppState {
     func startSubscription() {
         subscriptionTask?.cancel()
         resetDeltaOrdering()
+        // Same reason for program status: the daemon's `ProgramStatusStore` is
+        // memory-only and counts revisions from zero after a restart. Re-seed
+        // from the list; deltas from the new subscription keep it current.
+        programStatusSnapshots.removeAll()
+        programStatusRevisions.removeAll()
+        Task { [weak self] in await self?.hydrateProgramStatus() }
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2996,6 +3034,8 @@ final class AppState {
             // An older daemon still sends this; a current one sends
             // `.terminalPendingPromptsChanged` instead.
             applyPendingQuestionsDelta(d)
+        case .terminalProgramStatusChanged(let snapshot):
+            applyProgramStatusSnapshot(snapshot)
         case .terminalPendingPromptsChanged(let d):
             applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):

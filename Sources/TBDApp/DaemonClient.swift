@@ -1215,6 +1215,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the Program Status Protocol gate (default OFF, soaking). Applies
+    /// to Claude sessions started after the change.
+    func setProgramStatus(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetProgramStatusEnabled,
+            params: ConfigSetProgramStatusEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the transcript prompt-answer gate (default OFF, soaking). New
     /// sessions pick up the hooks.
     func setTranscriptPromptAnswer(enabled: Bool) async throws {
@@ -2405,6 +2414,31 @@ actor DaemonClient {
             params: TerminalAskUserQuestionSatisfiedParams(
                 terminalID: terminalID, toolUseIDs: toolUseIDs)
         )
+    }
+
+    /// Forward one raw Program Status Protocol (OSC 7501) report the attached
+    /// terminal view read off a holder pty. `payload` is the OSC data after
+    /// `7501;`. The daemon parses and validates it; a rejection still answers
+    /// ok, so there is nothing to retry.
+    func terminalProgramStatusReport(
+        terminalID: UUID, incarnationID: UUID?, payload: String, observedAt: Date
+    ) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalProgramStatusReport,
+            params: TerminalProgramStatusReportParams(
+                terminalID: terminalID, incarnationID: incarnationID,
+                payload: payload, observedAt: observedAt)
+        )
+    }
+
+    /// Every terminal's current program-status snapshot. Empty while
+    /// `program_status_enabled` is off.
+    func terminalProgramStatusList() async throws -> [ProgramStatusSnapshot] {
+        let result = try await callNoParamsAsync(
+            method: RPCMethod.terminalProgramStatusList,
+            resultType: TerminalProgramStatusListResult.self
+        )
+        return result.snapshots
     }
 
     /// What slash commands, skills and subagents this terminal's session knows.

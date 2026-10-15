@@ -47,6 +47,9 @@ struct SupervisionReadoutBuilder: Sendable {
     /// and attributed. A nested agent's sidechain writes are not the parent
     /// session moving, so growth alone may not take a raised hand down.
     let transcriptDeltaInspector: TranscriptDeltaInspector
+    /// Program Status Protocol (OSC 7501) snapshots, consulted by the resolver
+    /// while the flag is on. nil → the resolver sees none.
+    let programStatus: ProgramStatusStore?
     let now: @Sendable () -> Date
 
     init(
@@ -58,6 +61,7 @@ struct SupervisionReadoutBuilder: Sendable {
         transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
         transcriptDeltaInspector: @escaping TranscriptDeltaInspector
             = TranscriptDeltaInspection.live,
+        programStatus: ProgramStatusStore? = nil,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.db = db
@@ -67,6 +71,7 @@ struct SupervisionReadoutBuilder: Sendable {
         self.actuationRecord = actuationRecord
         self.transcriptFingerprinter = transcriptFingerprinter
         self.transcriptDeltaInspector = transcriptDeltaInspector
+        self.programStatus = programStatus
         self.now = now
     }
 
@@ -120,7 +125,12 @@ struct SupervisionReadoutBuilder: Sendable {
                 continue
             }
 
-            let state = resolver.resolve(gatherer.facts(for: terminal))
+            var programStatusSnapshot: ProgramStatusSnapshot? = nil
+            if let programStatus, programStatus.gate.isEnabled {
+                programStatusSnapshot = await programStatus.snapshot(for: terminal.id)
+            }
+            let state = resolver.resolve(
+                gatherer.facts(for: terminal, programStatus: programStatusSnapshot))
             let commitsUnchangedSince = await branchTips.unchangedSince(
                 repoID: agent.repo, worktreeID: agent.worktree)
             let counters = await sessionCounters.sample(

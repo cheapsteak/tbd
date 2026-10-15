@@ -397,6 +397,11 @@ actor HolderRegistry {
 
     private let busyRetryBudget: Duration
     private let adoptAllBudget: Duration
+    /// Where every reader this registry builds sends its Program Status
+    /// Protocol (OSC 7501) reports, and whose gate decides whether it answers
+    /// the probe. nil (tests that do not exercise the protocol) leaves OSC 7501
+    /// unhandled in the daemon's emulators.
+    private let programStatus: ProgramStatusStore?
     private let clock: any Clock<Duration>
 
     /// Set by `adoptAll`'s budget timer, read by its loop between holders.
@@ -470,8 +475,10 @@ actor HolderRegistry {
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
         adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
+        programStatus: ProgramStatusStore? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
+        self.programStatus = programStatus
         self.owner = owner
         self.environment = environment
         self.listTerminals = listTerminals
@@ -738,7 +745,8 @@ actor HolderRegistry {
                 // in this emulator — and so does every cell it ever paints,
                 // which is what makes this emulator's screen the child's own.
                 observedChildFromStart: true,
-                onEndOfOutput: endOfOutputNotifier(for: terminalID))
+                onEndOfOutput: endOfOutputNotifier(for: terminalID),
+                programStatus: programStatusTap(for: terminalID))
         } catch {
             // The holder is up and supervising a job that no row will ever
             // name, so leaving it would orphan both. Best-effort, and the
@@ -1192,6 +1200,7 @@ actor HolderRegistry {
         let budget = busyRetryBudget
         let clock = self.clock
         let notifyEndOfOutput = endOfOutputNotifier(for: terminalID)
+        let statusTap = self.programStatusTap(for: terminalID)
         let task = Task<Adoption, Swift.Error> {
             try await Self.attach(
                 terminalID: terminalID,
@@ -1213,6 +1222,7 @@ actor HolderRegistry {
                 // no more than the daemon gave it.
                 observedChildFromStart: false,
                 onEndOfOutput: notifyEndOfOutput,
+                programStatus: statusTap,
                 seedingScreenWith: preamble)
         }
         attachRoundTripsStarted += 1
@@ -1524,6 +1534,7 @@ actor HolderRegistry {
         clock: any Clock<Duration>,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
+        programStatus: HolderProgramStatusTap? = nil,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         var waited: Duration = .zero
@@ -1536,6 +1547,7 @@ actor HolderRegistry {
                     receiveTimeout: receiveTimeout,
                     observedChildFromStart: observedChildFromStart,
                     onEndOfOutput: onEndOfOutput,
+                    programStatus: programStatus,
                     seedingScreenWith: preamble)
             } catch HolderClient.Error.rejected(let version) {
                 guard waited < busyRetryBudget else {
@@ -1560,6 +1572,7 @@ actor HolderRegistry {
         receiveTimeout: Duration,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
+        programStatus: HolderProgramStatusTap? = nil,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         try await take(
@@ -1568,6 +1581,7 @@ actor HolderRegistry {
             expecting: owner,
             observedChildFromStart: observedChildFromStart,
             onEndOfOutput: onEndOfOutput,
+            programStatus: programStatus,
             seedingScreenWith: preamble)
     }
 
@@ -1597,6 +1611,7 @@ actor HolderRegistry {
         expecting owner: HolderOwnerToken,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
+        programStatus: HolderProgramStatusTap? = nil,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         let description: HolderChildDescription
@@ -1645,6 +1660,7 @@ actor HolderRegistry {
             columns: grid.columns,
             rows: grid.rows,
             onEndOfOutput: onEndOfOutput,
+            programStatus: programStatus,
             observedChildFromStart: observedChildFromStart)
         // BEFORE the drain starts, and that ordering is the whole of the
         // handback's fidelity: the preamble's reset prelude erases the display
@@ -2284,6 +2300,27 @@ actor HolderRegistry {
         }
     }
 
+    /// The Program Status Protocol (OSC 7501) tap for one session's reader, or
+    /// nil when this registry has no store.
+    ///
+    /// `deliver` runs on the drain thread inside a parse, under the emulator's
+    /// lock, so it only enqueues: `ProgramStatusStore.enqueue` yields to the
+    /// store's inbox and returns, and the store's `run()` loop validates and
+    /// applies in order. `.currentRow` because this reader reads the current
+    /// holder process, so the row's current incarnation is the report's.
+    /// `observedAt` is stamped here, on the parse thread, so the store's
+    /// staleness check sees parse order.
+    private func programStatusTap(for terminalID: UUID) -> HolderProgramStatusTap? {
+        guard let store = programStatus else { return nil }
+        return HolderProgramStatusTap(gate: store.gate, deliver: { payload in
+            store.enqueue(ProgramStatusStore.Inbound(
+                terminalID: terminalID,
+                incarnation: .currentRow,
+                payload: payload,
+                observedAt: store.now()))
+        })
+    }
+
     /// **The reclaimer for a reader whose session is over.**
     ///
     /// A reader is not free. It owns a dedicated thread with a 1 MB stack, a
@@ -2353,14 +2390,22 @@ actor HolderRegistry {
         guard case .adopted(let current) = slots[terminalID], current === reader else { return }
 
         statuses[terminalID] = status
+        // A SIGKILLed Claude sends no `state=clear`, so the session's end is
+        // the only signal its Program Status entries are over (spec
+        // "Liveness"). Dropped here, where the child's exit is confirmed,
+        // rather than after the release: a concurrent release that empties
+        // the slot below must not leave the exited session's entries standing.
+        if let programStatus {
+            await programStatus.drop(terminalID: terminalID, reason: .childExited)
+        }
         if let sessionEndedObserver {
             await sessionEndedObserver(terminalID, status, reader)
-            // Re-read after the observer's suspension: a concurrent release
-            // may have emptied the slot, or a re-adoption filled it with a
-            // reader this reclaim knows nothing about. Either way this
-            // reader is no longer the one to release here.
-            guard case .adopted(let after) = slots[terminalID], after === reader else { return }
         }
+        // Re-read after the drop's and the observer's suspensions: a
+        // concurrent release may have emptied the slot, or a re-adoption
+        // filled it with a reader this reclaim knows nothing about. Either way
+        // this reader is no longer the one to release here.
+        guard case .adopted(let after) = slots[terminalID], after === reader else { return }
         await release(terminalID: terminalID)
         Self.logger.info(
             """

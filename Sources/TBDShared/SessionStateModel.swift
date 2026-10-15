@@ -66,6 +66,9 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     case forge
     /// The daemon's git sweep.
     case gitSweep
+    /// Claude Code's own OSC 7501 report, read off the pty by whichever TBD
+    /// reader owned it.
+    case programStatus
     /// Composed by TBD from other facts.
     ///
     /// Not a laundering channel: a `.derived` fact must be a function of facts
@@ -98,6 +101,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case .processLiveness: return "process-liveness"
         case .forge: return "forge"
         case .gitSweep: return "git-sweep"
+        case .programStatus: return "program-status"
         case .derived: return "derived"
         case .unavailable: return "unavailable"
         case .unrecognized(let raw): return raw
@@ -139,6 +143,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case "process-liveness": self = .processLiveness
         case "forge": self = .forge
         case "git-sweep": self = .gitSweep
+        case "program-status": self = .programStatus
         case "derived": self = .derived
         case "unavailable": self = .unavailable
         default: self = .unrecognized(kind)
@@ -350,20 +355,34 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// project's own program — should not have to reimplement the grouping to
     /// read the record.
     public let classification: AwaitingInputClass
+    /// The block Claude Code announced over OSC 7501, when the wait was
+    /// reported that way rather than by the `Notification` hook. Absent on
+    /// hook-delivered reasons and on rows written before this existed.
+    ///
+    /// Its presence decides `classification`: every program-status block — a
+    /// permission prompt, a question, or an open dialog — is a prompt a human
+    /// must answer, which is what `.promptOnScreen` means.
+    public let programStatusBlock: ProgramStatusBlock?
 
     public init(
         message: String,
         hookEventName: String? = nil,
         raw: String? = nil,
         notificationType: String? = nil,
-        transcriptFingerprint: TranscriptFingerprint? = nil
+        transcriptFingerprint: TranscriptFingerprint? = nil,
+        programStatusBlock: ProgramStatusBlock? = nil
     ) {
         self.message = message
         self.hookEventName = hookEventName
         self.raw = raw
         self.notificationType = notificationType
         self.transcriptFingerprint = transcriptFingerprint
-        self.classification = AwaitingInputClass(notificationType: notificationType)
+        self.programStatusBlock = programStatusBlock
+        if programStatusBlock != nil {
+            self.classification = .promptOnScreen
+        } else {
+            self.classification = AwaitingInputClass(notificationType: notificationType)
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -373,6 +392,7 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
         case notificationType
         case transcriptFingerprint
         case classification
+        case programStatusBlock
     }
 
     /// Decodes through the memberwise init so `classification` is recomputed
@@ -386,8 +406,27 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
             raw: try c.decodeIfPresent(String.self, forKey: .raw),
             notificationType: try c.decodeIfPresent(String.self, forKey: .notificationType),
             transcriptFingerprint: try c.decodeIfPresent(
-                TranscriptFingerprint.self, forKey: .transcriptFingerprint)
+                TranscriptFingerprint.self, forKey: .transcriptFingerprint),
+            programStatusBlock: try c.decodeIfPresent(
+                ProgramStatusBlock.self, forKey: .programStatusBlock)
         )
+    }
+}
+
+/// A block Claude Code announced over OSC 7501 (`state=blocked`), carried on
+/// the `AwaitingInputReason` it produced.
+///
+/// `kind` is Claude Code's own label for the block, carried rather than
+/// interpreted beyond the vocabulary `ProgramStatusBlockKind` names.
+public struct ProgramStatusBlock: Codable, Sendable, Equatable {
+    /// permission / question, or nil for an open dialog.
+    public let kind: ProgramStatusBlockKind?
+    /// The task entry that blocked, or nil for the main entry.
+    public let taskID: String?
+
+    public init(kind: ProgramStatusBlockKind?, taskID: String?) {
+        self.kind = kind
+        self.taskID = taskID
     }
 }
 
@@ -434,6 +473,13 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
     /// The session no longer exists: the pane, the window, or the process is
     /// gone.
     case gone
+    /// The agent reported over OSC 7501 that its work is finished and awaits
+    /// review.
+    case done
+    /// The agent reported over OSC 7501 that its turn ended in an error.
+    case error
+    /// The agent reported over OSC 7501 that it is blocked on signing in.
+    case needsAuth
     /// Nothing could establish the state. `why` says what was tried or what was
     /// missing.
     case unknown(why: String)
@@ -452,6 +498,9 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
         static let rateLimited = "rate_limited"
         static let parked = "parked"
         static let gone = "gone"
+        static let done = "done"
+        static let error = "error"
+        static let needsAuth = "needs_auth"
         static let unknown = "unknown"
     }
 
@@ -467,6 +516,9 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
             return "rate-limited until \(FactTimestamp.string(from: until))"
         case .parked(let reason): return "parked (\(reason))"
         case .gone: return "gone"
+        case .done: return "done"
+        case .error: return "error"
+        case .needsAuth: return "needs sign-in"
         case .unknown(let why): return "unknown (\(why))"
         }
     }
@@ -491,6 +543,9 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
         case Tag.parked:
             self = .parked(reason: try c.decodeIfPresent(String.self, forKey: .reason) ?? "")
         case Tag.gone: self = .gone
+        case Tag.done: self = .done
+        case Tag.error: self = .error
+        case Tag.needsAuth: self = .needsAuth
         case Tag.unknown:
             self = .unknown(why: try c.decodeIfPresent(String.self, forKey: .why) ?? "")
         default:
@@ -518,6 +573,12 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
             try c.encode(reason, forKey: .reason)
         case .gone:
             try c.encode(Tag.gone, forKey: .state)
+        case .done:
+            try c.encode(Tag.done, forKey: .state)
+        case .error:
+            try c.encode(Tag.error, forKey: .state)
+        case .needsAuth:
+            try c.encode(Tag.needsAuth, forKey: .state)
         case .unknown(let why):
             try c.encode(Tag.unknown, forKey: .state)
             try c.encode(why, forKey: .why)
