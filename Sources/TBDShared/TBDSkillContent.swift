@@ -149,8 +149,9 @@ it, and names the terminal by the first eight characters of its id — a prefix
 of the id `tbd terminal list <worktree-id>` prints. `tbd worktree list --json` is where
 the worktree id and the directory slug come from. The name `tbd peer list`
 shows for the terminal you meant is the one to look up in `ListAgents`. When
-remote peer messaging is on, a TBD session announced to another machine is named
-`<machine>:<worktree> <terminal id prefix>`, the same terminal id prefix.
+a repo's `tbd.toml` turns peer messaging on (`[remote_sessions]` with
+`peer_messaging = true`), a TBD session in that repo announced to another machine
+is named `<machine>:<worktree> <terminal id prefix>`, the same terminal id prefix.
 A tmux pane is not an identity: in `ListAgents` a session on the tmux transport also prints
 the legacy coordinate `tmux <server>:<window>.<pane>` (`tbd peer list` shows it
 as `tmux %<pane>`), so when several rows share that name, pick the `ListAgents`

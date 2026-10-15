@@ -33,8 +33,17 @@ import TBDShared
 /// manager counts such a handle as unmirrored and surfaces it, which is the
 /// path that already exists there.
 ///
+/// **A repository whose `tbd.toml` does not switch peer messaging on gets no
+/// shadow**, and says so as `.switchedOff` rather than as an unsited nil — and
+/// so does every case where TBD cannot confirm the switch is on: a failed
+/// read, a repo row that is gone, a checkout that is gone. The difference
+/// matters to the manager: both withdraw a published shadow on its recheck,
+/// but only `.switchedOff` holds the peer back to republish when the switch
+/// turns on again; consent to share that cannot be confirmed is treated as
+/// absent.
+///
 /// Design: `docs/specs/2026-08-29-remote-peer-messaging-design.md`
-/// § "Addressing and naming".
+/// §§ "Addressing and naming", "The per-repository switch".
 public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
     /// One resolver per provider: `providerSessionID` is unique only within a
     /// provider, and a resolver that searched across providers could site a
@@ -46,11 +55,16 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
     /// no real checkout, and so the check is visibly part of the contract
     /// rather than an incidental `FileManager` call.
     private let directoryExists: @Sendable (String) -> Bool
+    /// Whether the repository has peer messaging switched on. Required rather
+    /// than defaulted, so no caller can build a resolver that forgets the
+    /// switch.
+    private let peerMessagingOn: @Sendable (Repo) -> Bool
 
     public init(
         provider: String,
         worktrees: WorktreeStore,
         repos: RepoStore,
+        peerMessagingOn: @escaping @Sendable (Repo) -> Bool,
         directoryExists: @escaping @Sendable (String) -> Bool = { path in
             var isDirectory: ObjCBool = false
             let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
@@ -61,16 +75,42 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
         self.worktrees = worktrees
         self.repos = repos
         self.directoryExists = directoryExists
+        self.peerMessagingOn = peerMessagingOn
     }
 
     public func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
-        guard let worktree = try? await worktrees.findRemote(
-            provider: provider, sessionID: sessionID)
+        guard case .sited(let site) = await resolution(forProviderSessionID: sessionID)
         else { return nil }
-        guard let repoID = worktree.repoID,
-              let repo = try? await repos.get(id: repoID),
-              directoryExists(repo.path)
-        else { return nil }
-        return ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path)
+        return site
+    }
+
+    public func resolution(
+        forProviderSessionID sessionID: String
+    ) async -> ShadowPeerSiteResolution {
+        // The switch fails closed. Once TBD cannot rule out that the session
+        // sits in a switched-off repository — the row read failed, the repo row
+        // is gone, its checkout is gone so its `tbd.toml` cannot be read — the
+        // answer is `.switchedOff`, which holds a new peer back and withdraws a
+        // published one. Only "TBD adopted no row for this session" and "the
+        // row belongs to no repository" are `.unsited`: neither can be a shadow
+        // anyone consented to.
+        let found: Worktree?
+        do {
+            found = try await worktrees.findRemote(provider: provider, sessionID: sessionID)
+        } catch {
+            return .switchedOff
+        }
+        guard let worktree = found else { return .unsited }
+        guard let repoID = worktree.repoID else { return .unsited }
+        let repo: Repo?
+        do {
+            repo = try await repos.get(id: repoID)
+        } catch {
+            return .switchedOff
+        }
+        guard let repo, directoryExists(repo.path), peerMessagingOn(repo) else {
+            return .switchedOff
+        }
+        return .sited(ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path))
     }
 }

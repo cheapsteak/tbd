@@ -52,6 +52,17 @@ status = "scripts/dev/localstack-status"   # optional; exit 0 = running
 
 There are no `port`, `url`, `dependsOn` or `autostart` fields. Ports and URLs belong to the running file.
 
+### Other tables in `tbd.toml`
+
+`tbd.toml` is the repo's committed settings file, and `[servers]` is not its only table. The server parser ignores every other table, and each is read by the part of TBD it belongs to.
+
+- **`[remote_sessions]`** – `peer_messaging = true` lets this repo's local sessions and its remote sessions message each other by name. The value is `true` or `false`; absent means off, and so does any value TBD cannot read, which `tbd peer list` names with the file's path. TBD reads it from the working tree of the repo's registered main checkout — whatever that checkout holds, including an uncommitted edit — and never from a linked worktree, so there is one answer per repo and a branch checked out in a TBD worktree cannot change it. It is honored only in `tbd.toml`, never in the personal `servers.toml`. It takes effect without a restart. What it does: [`docs/remote-provider-contract.md`](remote-provider-contract.md) under `messages`, and [`docs/specs/2026-08-29-remote-peer-messaging-design.md`](specs/2026-08-29-remote-peer-messaging-design.md) under "The per-repository switch".
+
+```toml
+[remote_sessions]
+peer_messaging = true
+```
+
 ### Reading `.claude/launch.json`
 
 Many repos already carry this file for Claude Code's preview. Each entry of `configurations[]` becomes a declared server:

@@ -12,7 +12,7 @@ enum DevServerDeclarationParser {
     typealias Parsed = (servers: [DeclaredDevServer], errors: [DevServerParseError])
 
     static let launchJSONRelativePath = ".claude/launch.json"
-    static let repoTOMLFileName = "tbd.toml"
+    static let repoTOMLFileName = RepoTOML.fileName
 
     static func load(
         worktreePath: String,

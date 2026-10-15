@@ -341,11 +341,12 @@ with the shadow peer's own namespaced name and the mode with the class it
 actually grants. Message *content* passes byte-verbatim; only attribution is
 rewritten.
 
-**Mirroring outward is scoped twice.** Only TBD-spawned sessions are mirrored to
-a remote host — never a plain-terminal session, never another profile's. And a
-session is mirrored only to a host whose remote session resolves to the same
-repository, so a remote lane in one project cannot reach local sessions in
-another. A remote session that resolves to no registered repository has no
+**Mirroring outward is scoped three times.** Only TBD-spawned sessions are
+mirrored to a remote host — never a plain-terminal session, never another
+profile's. A session is mirrored only to a host whose remote session resolves
+to the same repository, so a remote lane in one project cannot reach local
+sessions in another. And it is mirrored only when that repository has peer
+messaging switched on in its `tbd.toml` (see The per-repository switch). A remote session that resolves to no registered repository has no
 worktree row under the existing contract and is therefore never bridged.
 
 One asymmetry is on the record because it cannot be engineered away.
@@ -477,7 +478,7 @@ Required behaviors:
 - **`version` is omitted rather than fabricated.** The contract carries no agent
   version for a remote session, so the honest options were to invent one or
   leave it out. An omission fails loudly and early; an invented version is a
-  quiet wrongness that would survive the whole soak.
+  quiet wrongness that would survive unnoticed in the field.
 
 ## Reclamation and detection
 
@@ -518,9 +519,9 @@ to clean up after itself — host power loss, or something `SIGKILL`ing the help
 out from under it. What survives that is a record and a socket with no whitelist
 row, and nothing can recognise them afterwards: a shadow's record is
 indistinguishable from any other session's by construction, since TBD puts no
-marker inside one, which is the reason the whitelist exists at all. The soak
-criterion — no ghost record outliving its daemon — is the field check that would
-surface it happening.
+marker inside one, which is the reason the whitelist exists at all. The field
+check that would surface it happening is that no ghost record outlives its
+daemon.
 
 **A refused connect is not proof that a socket is unowned, so the pid gates the
 unlink.** Since a saturated listener refuses exactly as an empty path does, the
@@ -582,27 +583,86 @@ to find a row by its terminal id and worktree — every peer TBD can see, with t
 worktree, terminal or remote session behind it. That file's substrings are
 pinned by `TBDSkillContentTests`.
 
-## Flag and rollout
+## The per-repository switch
 
-`remote_peer_messaging_enabled`, a `config` column added by migration with **no
-SQL `DEFAULT`**, so unset stays a third state and graduation is a one-line change
-to `Config.remotePeerMessagingDefault` that reaches everyone who never chose
-while preserving every explicit opt-out. The migration, the GRDB record, and the
-`TBDShared` model land in one commit.
+Peer messaging is switched on per repository, in the repository's committed
+`tbd.toml`:
 
-Default off. The feature acts without a user gesture and writes into a directory
-shared with every session on the machine, which is squarely what the rule
-covers. The flag is the only opt-in: there is no per-worktree toggle, because a
-second gate under a global one is the kind nobody tunes and everybody has to
-debug around.
+```toml
+[remote_sessions]
+peer_messaging = true
+```
 
-**Moving the flag: `tbd peer messaging on|off`**, which writes it over
-`config.setRemotePeerMessagingEnabled`. The gate is read where a provider's
-streams are armed rather than once at boot, so a change made after that takes
-effect at the next daemon restart — the command says so rather than leaving the
-user to wonder why nothing happened.
+The value is `true` or `false`. An absent file, an absent `[remote_sessions]`
+table and an absent key all mean off. There is no machine-wide switch and no
+"use the machine's setting" value: the setting is committed to the repository,
+so it means the same thing on every machine that checks the repository out, and
+a machine-wide value would mean only "this laptop's TBD database", which says
+nothing about what a project has agreed to share.
 
-Graduation after a soak in which no ghost record outlives its daemon.
+**Anything that is not a clear `true` is off, and says why.** A value that is not
+a boolean (the string `"true"` included), a `remote_sessions` that is not a
+table, a file that is not valid TOML and a file that cannot be read are each
+reported as a problem naming the file, and the switch reads as off. Sharing
+sessions across machines must never happen by accident, so a file TBD cannot
+understand fails closed and visibly.
+
+**The repository's registered main checkout is the one whose `tbd.toml`
+counts** — the path on the repo row, never a linked worktree's copy. What is
+read is whatever that checkout's working tree holds: if the main checkout is on
+a feature branch or carries an uncommitted edit, that is the answer. The
+guarantee is therefore not "only the default branch decides". It is that there
+is one answer per repository, and that a branch checked out in a linked
+worktree cannot change it — any worktree can carry an unmerged edit to the
+file, and if its copy counted, one experimental branch could switch on
+cross-machine messaging for every session in the project. The switch scopes
+whole repositories, which is why it needs one answer rather than one per
+worktree. And a remote lane has no local checkout of its own — its row carries
+a synthetic `remote://` path — so the repository's own directory is the only
+local `tbd.toml` there is.
+
+The switch applies in both directions, per repository:
+
+- **Inward.** A provider session gets a shadow peer only if the repository it
+  resolves to has the switch on. A `peer` line for a session in a switched-off
+  repository is held back rather than published, and is counted separately from
+  the unmirrored handles: it sited fine, and the repository declined it.
+- **Outward.** A local session is announced to a provider only for a repository
+  that has the switch on and in which that provider runs a session. This narrows
+  the repository-scope rule under Trust; it never widens it.
+
+**TBD opens a provider's `messages` stream once at least one repository the
+provider runs sessions in has the switch on.** A provider whose sessions sit
+only in switched-off repositories gets no stream, even while another provider's
+repository is on. The decision is made where a provider's streams are armed and
+again after every poll while no stream is open, so a repository switched on
+while the daemon runs — or a provider's first remote lane in a repository
+already switched on — opens the stream within one poll interval, with no
+restart.
+
+**The switch is re-read on every check, never cached.** The bridge's scope tick
+re-reads it for every repository in scope, so turning a repository off retires
+its outward announcements (`peer-gone` for each, as any scope change does) and
+withdraws its shadows on the next tick, and turning it back on announces the
+roster afresh and publishes the held-back shadows. The stream itself stays open
+once opened, with nothing announced on it, until the daemon next restarts. A
+failed database read can keep a repository out but never keeps a switched-off
+one in. The outward scope replays its last known good value narrowed by
+re-reading each repository's `tbd.toml` from the checkout that read recorded,
+so a repository switched off while the database is failing still leaves the
+scope. Inward, a shadow is withdrawn whenever TBD cannot confirm its
+repository's switch is on — the switch is off, or the repository row, its
+checkout or the read itself is missing — and is republished once it can.
+
+**`tbd peer list` reports each repository's state** — on or off, the `tbd.toml`
+it was read from, and any problem with that file — along with any provider that
+runs sessions in a switched-on repository and has no stream open yet.
+
+The switch is off unless a repository opts in, which is what the rule for
+behavior that acts without a user gesture asks for: the bridge writes into a
+directory shared with every session on the machine. Opting in is the gesture,
+made by whoever commits to the repository, so there is no shipped default to
+flip later.
 
 ## Conformance
 
@@ -663,15 +723,23 @@ and never terminates the stream.
 old shim never declares `messages`, so TBD never invokes it — the safety half is
 free from capability gating. But the result is a feature that simply does
 nothing, which is the failure this contract's users have been bitten by before.
-When the flag is on and a provider does not declare the capability, TBD says so
-in `tbd peer list` and in the provider's diagnostics rather than showing nothing.
+When a repository has peer messaging switched on and a provider does not
+declare the capability, TBD says so in `tbd peer list` and in the provider's
+diagnostics rather than showing nothing.
 
 ## Testing
 
-- **Both flag branches.** Off: no helper spawns, no record is published, no
-  stream is opened. On: the full path. Plus the three-state column test — a
-  pre-migration row reads NULL rather than `0`, an explicit `false` survives a
-  change to the default constant, and NULL follows it.
+- **The switch, both branches.** No switched-on repository: no helper spawns,
+  no record is published, no stream is opened. One switched-on repository: the
+  full path, including a stream that opens at the next poll after the switch
+  turns on. The parser: `true`, `false`, an absent file, table and key, a value
+  that is not a boolean, a `remote_sessions` that is not a table, and a syntax
+  error. The stream decision: no repositories, all off, one on, and a provider
+  whose sessions sit only in switched-off repositories while another provider's
+  repository is on. And the filter in both directions: the outward scope leaves
+  a switched-off repository out and follows the switch on the next read, and a
+  shadow is held back, withdrawn and republished as its repository's switch
+  moves.
 - **The sweep, mutation-checked.** Plant a ghost record, a ghost socket, and an
   orphaned helper; assert all three are reclaimed. Then assert a *live* shadow's
   three artifacts survive the same pass — a reaper that eats live state is worse
@@ -728,6 +796,17 @@ in `tbd peer list` and in the provider's diagnostics rather than showing nothing
 - **A bounded in-memory buffer across reconnects.** Would ride out a wifi blip,
   but it is store-and-forward with a smaller number on it, and the number gets
   argued upward.
-- **A per-worktree bridging toggle.** A second gate under the global flag.
+- **A machine-wide switch, alone or as a fallback for repositories that say
+  nothing.** It would answer "has this laptop opted in", which is not the
+  question: what may be shared is a property of a project, decided by the people
+  who commit to it, and a machine-wide value would mean different things on
+  different machines checking out the same repository. A fallback value would
+  also make an absent key mean "whatever this machine says" instead of off.
+- **A per-worktree switch, or reading the worktree's own `tbd.toml`.** It would
+  let a branch in a linked worktree widen sharing for a whole repository, and
+  give one repository several answers at once. The main checkout's copy is the
+  one answer.
+- **Treating a value TBD cannot read as on, or a string `"true"` as true.** The
+  lenient reading is the one that shares sessions nobody agreed to share.
 - **A wake handler in the daemon.** Unnecessary — the wall-clock watchdog already
   covers wake — and unavailable, since the daemon has no AppKit run loop.

@@ -34,8 +34,8 @@ public actor RemoteProviderManager {
     /// Everything the remote peer-messaging bridge needs, or nil where nothing
     /// may ever be bridged — mock mode, and the many fixtures that construct
     /// this actor for mirror/adoption coverage. Nil is a stronger statement
-    /// than "the flag is off": it means no bridge can be built at all, so the
-    /// gate below is never even consulted.
+    /// than "no repository has the switch on": it means no bridge can be built
+    /// at all, so the gate is never even consulted.
     private let peerBridging: PeerBridgeWiring?
     /// Binds the PRs a session names in `meta.prs` after adoption, at both
     /// convergence points (`apply` and `applyUpsert`). Installed after the
@@ -463,34 +463,68 @@ public actor RemoteProviderManager {
             await supervisor.start()
         }
 
-        // The peer-messaging bridge, behind two gates that answer different
-        // questions. The **flag** (`remote_peer_messaging_enabled`, default
-        // off) is the user's consent: a provider that declares the capability
-        // while it is off gets nothing — no helper spawned, no record
-        // published, no stream opened — because nothing is constructed at all.
-        // The **capability** is the provider's own declaration: an old shim
-        // never declares `messages`, and invoking a verb it cannot implement
-        // would spawn a child that fails on every reconnect forever.
-        //
-        // Read here rather than at boot, alongside the events gate it mirrors,
-        // so both live at the one place a provider's streams are armed.
-        if let peerBridging,
-           describes[config.name]?.capabilities.contains(Self.messagesCapability) == true,
-           await peerBridging.isEnabled(),
-           let bridge = await peerBridging.make(config, contractMajor(for: config.name)) {
-            // Installed before `start()` for the reason the events supervisor
-            // documents above: `start()` suspends this actor's executor, and a
-            // bridge nothing holds is one `stopAll()` could never reach.
-            peerBridges[config.name] = bridge
-            await bridge.start()
-        }
+        await armPeerBridgeIfWanted(for: config)
 
         loops[config.name] = Task { [weak self, clock] in
             while !Task.isCancelled {
                 await self?.pollOnce(provider: config)
+                // After the poll, not before: the poll is what adopts a new
+                // remote lane, and that lane can be the first one in a
+                // repository with peer messaging on.
+                await self?.rearmPeerBridgeIfWanted(for: config)
                 try? await clock.sleep(for: .seconds(Self.pollInterval))
             }
         }
+    }
+
+    /// The peer-messaging bridge, behind two gates that answer different
+    /// questions. The **switch** is the repositories' consent: a provider gets a
+    /// bridge only when at least one repository it runs sessions in has
+    /// `[remote_sessions] peer_messaging = true` in its committed `tbd.toml`.
+    /// Until then it gets nothing — no helper spawned, no record published, no
+    /// stream opened — because nothing is constructed at all. The
+    /// **capability** is the provider's own declaration: an old shim never
+    /// declares `messages`, and invoking a verb it cannot implement would spawn
+    /// a child that fails on every reconnect forever.
+    ///
+    /// Callers hold the reconfigure lock, so a bridge installed here is always
+    /// one `stopAll()` can reach.
+    private func armPeerBridgeIfWanted(for config: RemoteProviderConfig) async {
+        guard let peerBridging,
+              peerBridges[config.name] == nil,
+              describes[config.name]?.capabilities.contains(Self.messagesCapability) == true,
+              await peerBridging.isEnabled(config),
+              let bridge = await peerBridging.make(config, contractMajor(for: config.name))
+        else { return }
+        // Installed before `start()` for the reason the events supervisor
+        // documents in `startLoop`: `start()` suspends this actor's executor,
+        // and a bridge nothing holds is one `stopAll()` could never reach.
+        peerBridges[config.name] = bridge
+        await bridge.start()
+    }
+
+    /// The poll loop's second chance at the gate, so a repository that turns
+    /// peer messaging on — or a provider's first remote lane in a repository
+    /// that already has it on — opens the stream within one poll interval
+    /// rather than at the next daemon restart.
+    ///
+    /// Takes the reconfigure lock like every other path that installs into
+    /// `peerBridges`, and re-checks cancellation under it: `stopAll()` cancels
+    /// this loop without awaiting it, so a tick that was waiting on the lock
+    /// while its loop was torn down must arm nothing.
+    ///
+    /// Only ever opens. A bridge whose repositories all turn the switch off
+    /// stays up with an empty scope and no shadows — the scope tick has
+    /// already retired every announcement and withdrawn every shadow — and
+    /// closes at the next restart.
+    private func rearmPeerBridgeIfWanted(for config: RemoteProviderConfig) async {
+        guard peerBridging != nil, peerBridges[config.name] == nil, !Task.isCancelled,
+              describes[config.name]?.capabilities.contains(Self.messagesCapability) == true
+        else { return }
+        await acquireReconfigureLock()
+        defer { releaseReconfigureLock() }
+        guard !shuttingDown, !Task.isCancelled, loops[config.name] != nil else { return }
+        await armPeerBridgeIfWanted(for: config)
     }
 
     func pollOnce(provider: RemoteProviderConfig) async {
@@ -1240,20 +1274,30 @@ public actor RemoteProviderManager {
                 report.providers.append(await bridge.status())
                 report.liveShadowsByPID.merge(await bridge.liveShadows()) { current, _ in current }
             } else {
+                let declares = describes[name]?
+                    .capabilities.contains(Self.messagesCapability) == true
+                // Asked only where the answer explains something: a provider
+                // that declares `messages` and has no bridge either has no
+                // switched-on repository, or has one and is waiting for its
+                // next poll tick to open the stream.
+                var wantsStream: Bool?
+                if declares, let peerBridging, let config = providers[name] {
+                    wantsStream = await peerBridging.isEnabled(config)
+                }
                 report.providers.append(PeerProviderBridgeStatus(
                     provider: name,
-                    declaresMessages: describes[name]?
-                        .capabilities.contains(Self.messagesCapability) == true,
-                    bridged: false))
+                    declaresMessages: declares,
+                    bridged: false,
+                    wantsStream: wantsStream))
             }
         }
         return report
     }
 
     /// Test seam: whether a peer bridge currently exists for `name`. The gate
-    /// in `startLoop` has three branches — flag off, capability absent, both
-    /// satisfied — and this is what makes each of them observable without
-    /// spawning anything.
+    /// in `armPeerBridgeIfWanted` has three branches — no switched-on
+    /// repository, capability absent, both satisfied — and this is what makes
+    /// each of them observable without spawning anything.
     func hasPeerBridge(named name: String) -> Bool {
         peerBridges[name] != nil
     }

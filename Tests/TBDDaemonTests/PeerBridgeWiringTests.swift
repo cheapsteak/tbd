@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
@@ -47,8 +48,14 @@ private final class BridgeFactory: @unchecked Sendable {
     }
 
     func wiring(enabled: Bool) -> PeerBridgeWiring {
+        wiring(switch: StreamSwitch(enabled))
+    }
+
+    /// A wiring whose answer a test can change between two poll ticks, standing
+    /// in for a repository's `tbd.toml` being edited while the daemon runs.
+    func wiring(switch streamSwitch: StreamSwitch) -> PeerBridgeWiring {
         PeerBridgeWiring(
-            isEnabled: { enabled },
+            isEnabled: { _ in streamSwitch.value },
             make: { [state] config, _ in
                 state.withLock { inner -> (any PeerBridging)? in
                     inner.requested.append(config.name)
@@ -57,6 +64,19 @@ private final class BridgeFactory: @unchecked Sendable {
                     return bridge
                 }
             })
+    }
+}
+
+/// Whether any repository the provider runs sessions in has peer messaging on,
+/// movable mid-test.
+private final class StreamSwitch: @unchecked Sendable {
+    private let stored: OSAllocatedUnfairLock<Bool>
+
+    init(_ initial: Bool) { stored = OSAllocatedUnfairLock(initialState: initial) }
+
+    var value: Bool {
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
 }
 
@@ -227,31 +247,35 @@ struct PeerBridgeWiringTests {
     }
 
     private static func makeManager(
-        capabilities: [String], wiring: PeerBridgeWiring?
+        capabilities: [String], wiring: PeerBridgeWiring?,
+        polls: Int = 1,
+        clock: any Clock<Duration> = ContinuousClock()
     ) throws -> (RemoteProviderManager, URL) {
         let registry = FileManager.default.temporaryDirectory
             .appendingPathComponent("providers-\(UUID().uuidString).json")
         try Data(#"[{"name":"fake","exec":"/bin/true"}]"#.utf8).write(to: registry)
+        // One `list` per poll tick the test lets run; the first is in case the
+        // 60s poll's first tick fires before teardown.
         let invoker = FakeProviderInvoker(script: [
             providerOK(describeJSON(capabilities: capabilities)),
-            // In case the 60s poll's first tick fires before teardown.
-            providerOK(#"{"sessions": []}"#),
-        ])
+        ] + Array(repeating: providerOK(#"{"sessions": []}"#), count: polls))
         let manager = RemoteProviderManager(
             db: try TBDDatabase(inMemory: true),
             subscriptions: StateSubscriptionManager(),
             runner: invoker,
             registryURL: registry,
-            peerBridging: wiring)
+            peerBridging: wiring,
+            clock: clock)
         return (manager, registry)
     }
 
-    /// **Flag off is a structural refusal, not a quiet one.** A provider that
-    /// declares the capability while `remote_peer_messaging_enabled` is off
-    /// gets nothing built at all — so no helper is spawned, no record is
-    /// published into the directory every session on this machine reads, and no
-    /// `messages` stream is opened.
-    @Test func theFlagBeingOffBuildsNothingEvenForACapableProvider() async throws {
+    /// **No switched-on repository is a structural refusal, not a quiet one.**
+    /// A provider that declares the capability while no repository it runs
+    /// sessions in has `[remote_sessions] peer_messaging = true` gets nothing
+    /// built at all — so no helper is spawned, no record is published into the
+    /// directory every session on this machine reads, and no `messages` stream
+    /// is opened.
+    @Test func noSwitchedOnRepositoryBuildsNothingEvenForACapableProvider() async throws {
         let factory = BridgeFactory()
         let (manager, registry) = try Self.makeManager(
             capabilities: ["messages"], wiring: factory.wiring(enabled: false))
@@ -260,13 +284,13 @@ struct PeerBridgeWiringTests {
         await manager.start()
 
         #expect(await manager.hasPeerBridge(named: "fake") == false)
-        #expect(factory.requested.isEmpty, "the flag is off; nothing may even be constructed")
+        #expect(factory.requested.isEmpty, "no repository asks; nothing may even be constructed")
         await manager.stopAll()
     }
 
-    /// The other branch of the same conditional: flag on, capability declared,
-    /// the whole path constructs and is started.
-    @Test func theFlagBeingOnBridgesACapableProvider() async throws {
+    /// The other branch of the same conditional: a repository switched on,
+    /// capability declared, the whole path constructs and is started.
+    @Test func aSwitchedOnRepositoryBridgesACapableProvider() async throws {
         let factory = BridgeFactory()
         let (manager, registry) = try Self.makeManager(
             capabilities: ["messages"], wiring: factory.wiring(enabled: true))
@@ -280,7 +304,7 @@ struct PeerBridgeWiringTests {
         await manager.stopAll()
     }
 
-    /// The capability gate, independent of the flag. An old shim declares
+    /// The capability gate, independent of the switch. An old shim declares
     /// nothing, so TBD opens no stream against a verb it cannot implement —
     /// and the diagnostic reports the absence rather than leaving an empty
     /// listing to be misread as "no remote sessions".
@@ -299,6 +323,42 @@ struct PeerBridgeWiringTests {
         let row = try #require(report.providers.first { $0.provider == "fake" })
         #expect(row.declaresMessages == false)
         #expect(row.bridged == false)
+        #expect(row.wantsStream == nil, "nothing to explain for a provider that cannot carry it")
+        await manager.stopAll()
+    }
+
+    /// **A repository switched on after boot opens the stream at the next poll
+    /// tick, with no restart.** The gate is asked again on every tick while no
+    /// bridge exists, after the poll that may have adopted the first lane in a
+    /// switched-on repository.
+    @Test func aRepositorySwitchedOnAfterBootOpensTheStreamAtTheNextPoll() async throws {
+        let factory = BridgeFactory()
+        let streamSwitch = StreamSwitch(false)
+        let clock = EventDrivenTestClock()
+        let (manager, registry) = try Self.makeManager(
+            capabilities: ["messages"], wiring: factory.wiring(switch: streamSwitch),
+            polls: 2, clock: clock)
+        defer { try? FileManager.default.removeItem(at: registry) }
+
+        await manager.start()
+        // The first tick has polled and asked the gate once more, and is now
+        // asleep until the next one.
+        try await clock.requireSleeperArmed()
+        #expect(await manager.hasPeerBridge(named: "fake") == false)
+        var row = try #require(await manager.peerBridgeReport().providers.first)
+        #expect(row.wantsStream == false)
+
+        streamSwitch.value = true
+        row = try #require(await manager.peerBridgeReport().providers.first)
+        #expect(row.wantsStream == true, "the listing can say the stream is about to open")
+
+        try await clock.requireAdvanceWhenArmed(by: .seconds(RemoteProviderManager.pollInterval))
+        // Re-armed means the tick that followed the advance has finished.
+        try await clock.requireSleeperArmed()
+
+        #expect(await manager.hasPeerBridge(named: "fake"))
+        #expect(factory.requested == ["fake"])
+        #expect(await factory.bridge(for: "fake")?.starts == 1)
         await manager.stopAll()
     }
 
@@ -489,7 +549,7 @@ struct PeerBridgeWiringTests {
     }
 
     /// The stream is opened by starting the bridge and closed by stopping it —
-    /// the "no stream opens" half of the flag-off assertion, stated positively
+    /// the "no stream opens" half of the switched-off assertion, stated positively
     /// so the negative one above is not vacuous.
     @Test func startingTheBridgeOpensTheStreamAndStoppingItClosesIt() async throws {
         let harness = try Self.makeBridge(repos: [])
@@ -769,10 +829,110 @@ struct ProviderRepoScopeTests {
             location: location)
     }
 
+    /// Each repository's checkout path is its id's string, so a test's switch
+    /// can name a repository by id.
     private static func resolver(
-        _ reads: StubWorktreeReads, provider: String = "cloud"
+        _ reads: StubWorktreeReads, provider: String = "cloud",
+        checkoutPath: @escaping @Sendable (UUID) async throws -> String? = { $0.uuidString },
+        repoIsOn: @escaping @Sendable (UUID) -> Bool = { _ in true }
     ) -> ProviderRepoScope {
-        ProviderRepoScope(provider: provider, listWorktrees: { try reads.read() })
+        ProviderRepoScope(
+            provider: provider, listWorktrees: { try reads.read() },
+            checkoutPath: checkoutPath,
+            switchIsOn: { path in UUID(uuidString: path).map(repoIsOn) ?? false })
+    }
+
+    // MARK: The per-repository switch, outward
+
+    /// A repository the provider hosts sessions in but whose `tbd.toml` does
+    /// not switch peer messaging on is left out of the scope, so none of its
+    /// local sessions is announced to that provider.
+    @Test func aSwitchedOffRepositoryIsLeftOutOfTheScope() async {
+        let on = UUID()
+        let off = UUID()
+        let reads = StubWorktreeReads(.success([
+            Self.lane(repoID: on, provider: "cloud"),
+            Self.lane(repoID: off, provider: "cloud", name: "brisk-otter"),
+        ]))
+        let scope = Self.resolver(reads, repoIsOn: { $0 == on })
+        let expected: Set<UUID> = [on]
+
+        #expect(await scope.resolve() == expected)
+    }
+
+    /// The switch is re-read on every resolve, so turning it off narrows the
+    /// scope on the very next tick — which is what retires the announcements —
+    /// and turning it back on widens it again, with no restart.
+    @Test func theSwitchIsReadFreshOnEveryResolve() async {
+        let repo = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: repo, provider: "cloud")]))
+        let streamSwitch = StreamSwitch(true)
+        let scope = Self.resolver(reads, repoIsOn: { _ in streamSwitch.value })
+        let full: Set<UUID> = [repo]
+
+        #expect(await scope.resolve() == full)
+        streamSwitch.value = false
+        #expect(await scope.resolve() == Set<UUID>())
+        streamSwitch.value = true
+        #expect(await scope.resolve() == full)
+    }
+
+    /// A repository row that cannot be read is not "switched off": it fails
+    /// the whole read, which replays the last known good scope rather than
+    /// retiring every announcement on one bad tick.
+    @Test func anUnreadableSwitchKeepsTheLastKnownGoodScope() async {
+        let repo = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: repo, provider: "cloud")]))
+        let failing = StreamSwitch(false)
+        let scope = Self.resolver(reads, checkoutPath: { id in
+            if failing.value { throw StubWorktreeReads.ReadFailure() }
+            return id.uuidString
+        })
+        let expected: Set<UUID> = [repo]
+        #expect(await scope.resolve() == expected)
+
+        failing.value = true
+        #expect(await scope.resolve() == expected)
+        #expect(await scope.failedReads == 1)
+    }
+
+    /// **A failed read may keep a repository out, never a switched-off one
+    /// in.** The replay re-reads each repository's switch from the checkout
+    /// the last good read recorded, so a repository switched off while the
+    /// database is failing leaves the scope on that very tick.
+    @Test func aFailedReadStillDropsARepositorySwitchedOffSinceTheLastGoodOne() async {
+        let kept = UUID()
+        let switchedOff = UUID()
+        let reads = StubWorktreeReads(.success([
+            Self.lane(repoID: kept, provider: "cloud"),
+            Self.lane(repoID: switchedOff, provider: "cloud", name: "brisk-otter"),
+        ]))
+        let offNow = StreamSwitch(false)
+        let scope = Self.resolver(reads, repoIsOn: { id in
+            !(id == switchedOff && offNow.value)
+        })
+        let both: Set<UUID> = [kept, switchedOff]
+        #expect(await scope.resolve() == both)
+
+        reads.fail()
+        offNow.value = true
+        let narrowed: Set<UUID> = [kept]
+        #expect(await scope.resolve() == narrowed)
+        #expect(await scope.failedReads == 1)
+    }
+
+    /// The same replay may not widen: a repository off at the last good read
+    /// stays out while the database is failing, even if it is switched on.
+    @Test func aFailedReadNeverAddsARepositoryTheLastGoodReadLeftOut() async {
+        let repo = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: repo, provider: "cloud")]))
+        let on = StreamSwitch(false)
+        let scope = Self.resolver(reads, repoIsOn: { _ in on.value })
+        #expect(await scope.resolve() == Set<UUID>())
+
+        reads.fail()
+        on.value = true
+        #expect(await scope.resolve() == Set<UUID>())
     }
 
     // MARK: A read that works

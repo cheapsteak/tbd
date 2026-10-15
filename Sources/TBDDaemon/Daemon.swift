@@ -54,10 +54,18 @@ struct RuntimeIntegrationRefresher {
     }
 }
 
-/// The repositories one provider hosts sessions in, remembered across a failed
-/// read.
+/// The repositories one provider hosts sessions in **and** that have peer
+/// messaging switched on in their `tbd.toml`, remembered across a failed read.
 ///
-/// The scope is recomputed from the worktree table on every reconcile tick, and
+/// Both halves are the design's outward scoping rule: TBD announces its own
+/// sessions to a provider only for a repository the provider hosts a session
+/// in, and only when that repository has `[remote_sessions] peer_messaging =
+/// true`. A repository with the switch off is left out of the scope exactly as
+/// one with no remote lane is, so turning the switch off retires every
+/// announcement for that repository on the next tick, with no restart.
+///
+/// The scope is recomputed from the worktree table and the switches on every
+/// reconcile tick, and
 /// **scope retirement unannounces**: a repository leaving the scope withdraws
 /// its roster registration and writes `peer-gone` for every local session
 /// announced on it. A resolver that answered a transient database error with
@@ -105,6 +113,20 @@ actor ProviderRepoScope {
     /// test without a database that can be made to fail.
     private let listWorktrees: @Sendable () async throws -> [Worktree]
 
+    /// The repository's registered main checkout, or nil when TBD has no row
+    /// for it. Throws when the row could not be read, which counts as a failed
+    /// read of the whole scope.
+    private let checkoutPath: @Sendable (UUID) async throws -> String?
+
+    /// Whether the `tbd.toml` in a checkout switches peer messaging on. A file
+    /// read, never a database read, so it can still be asked when the database
+    /// cannot.
+    private let switchIsOn: @Sendable (String) -> Bool
+
+    /// Repository → main checkout, from the last read that succeeded. What lets
+    /// a failed read still re-read every replayed repository's switch.
+    private var checkoutPaths: [UUID: String] = [:]
+
     /// The scope the last successful read produced; `nil` until one has
     /// succeeded. The optionality *is* the fix — it is what keeps "no scope
     /// known" distinguishable from "the scope is empty".
@@ -120,21 +142,38 @@ actor ProviderRepoScope {
 
     init(
         provider: String,
-        listWorktrees: @escaping @Sendable () async throws -> [Worktree]
+        listWorktrees: @escaping @Sendable () async throws -> [Worktree],
+        checkoutPath: @escaping @Sendable (UUID) async throws -> String?,
+        switchIsOn: @escaping @Sendable (String) -> Bool
     ) {
         self.provider = provider
         self.listWorktrees = listWorktrees
+        self.checkoutPath = checkoutPath
+        self.switchIsOn = switchIsOn
     }
 
-    /// The repositories this provider currently hosts sessions in, the last
-    /// known good set if this read failed, or `nil` if no read has ever
-    /// succeeded.
+    /// The repositories this provider currently hosts sessions in that have
+    /// peer messaging on; if this read failed, the last known good set
+    /// narrowed to the repositories whose switch is still on; or `nil` if no
+    /// read has ever succeeded.
+    ///
+    /// **A failed read may keep a repository out, never a switched-off one
+    /// in.** The replay re-reads each repository's `tbd.toml` from the
+    /// checkout the last good read recorded, so a repository switched off
+    /// while the database is failing leaves the scope on the very next tick.
+    /// The asymmetry is deliberate: the switch is consent to share, and stale
+    /// consent is not consent.
     func resolve() async -> Set<UUID>? {
         do {
             let rows = try await listWorktrees()
-            let scope = Set(rows.compactMap { row in
-                row.providerBinding?.provider == provider ? row.repoID : nil
-            })
+            var scope: Set<UUID> = []
+            var paths: [UUID: String] = [:]
+            for repoID in PeerMessagingStreamGate.repos(hostedBy: provider, in: rows) {
+                guard let path = try await checkoutPath(repoID) else { continue }
+                paths[repoID] = path
+                if switchIsOn(path) { scope.insert(repoID) }
+            }
+            checkoutPaths = paths
             if consecutiveFailures > 0 {
                 peerScopeLogger.notice("""
                     repo scope for provider \(self.provider, privacy: .public) is fresh again \
@@ -165,7 +204,9 @@ actor ProviderRepoScope {
                     \(String(describing: error), privacy: .public)
                     """)
             }
-            return lastKnownGood
+            return lastKnownGood.map { known in
+                known.filter { repoID in checkoutPaths[repoID].map(switchIsOn) ?? false }
+            }
         }
     }
 }
@@ -638,20 +679,24 @@ public final class Daemon: Sendable {
     /// Everything a peer-messaging bridge needs, assembled at the one place the
     /// daemon knows all of it.
     ///
-    /// The gate itself is NOT here. `remote_peer_messaging_enabled` is read
-    /// through `isEnabled`, at the moment a provider's streams are armed, next
-    /// to the `events` capability gate it mirrors — so a provider that declares
-    /// `messages` while the flag is off gets nothing built at all: no helper
-    /// spawned, no record published, no stream opened. What this function
-    /// decides is only *how* to build one when both gates pass.
+    /// The gate is per repository, not per machine. `isEnabled` answers for one
+    /// provider: open its `messages` stream when at least one repository it
+    /// runs sessions in has `[remote_sessions] peer_messaging = true` in its
+    /// committed `tbd.toml` (see `RepoPeerMessagingSwitches` for which
+    /// checkout's file counts). It is asked where a provider's streams are
+    /// armed, next to the `events` capability gate it mirrors, and again on
+    /// every poll tick while no bridge exists — so a provider that declares
+    /// `messages` gets nothing built until a repository asks for it, and gets
+    /// its stream within a poll interval once one does, with no restart.
     ///
     /// The scope closure is the design's outward scoping rule, expressed once:
     /// TBD's own sessions are announced to a provider only for the
-    /// repositories that provider actually hosts sessions in, so a remote lane
-    /// in one project can never reach local sessions in another. It resolves
-    /// through a `ProviderRepoScope`, so a database read that fails replays the
-    /// last known scope instead of reporting an empty one — see that type for
-    /// why the difference is load-bearing.
+    /// repositories that provider actually hosts sessions in and that have the
+    /// switch on, so a remote lane in one project can never reach local
+    /// sessions in another. It resolves through a `ProviderRepoScope`, so a
+    /// database read that fails replays the last known scope instead of
+    /// reporting an empty one — see that type for why the difference is
+    /// load-bearing. The site resolver applies the same switch inward.
     static func makePeerBridging(
         database: TBDDatabase,
         roster: PeerRosterRunner,
@@ -659,30 +704,37 @@ public final class Daemon: Sendable {
         sessionsDirectory: URL,
         origin: String = PeerLinkOrigin.local()
     ) -> PeerBridgeWiring {
-        PeerBridgeWiring(
-            isEnabled: {
-                let config = try? await database.config.get()
-                return config?.remotePeerMessagingEnabled
-                    ?? Config.remotePeerMessagingDefault
+        let switches = makePeerMessagingSwitches(database: database)
+        return PeerBridgeWiring(
+            isEnabled: { config in
+                do {
+                    let rows = try await database.worktrees.list(excludeArchived: true)
+                    return try await PeerMessagingStreamGate.shouldOpenStream(
+                        provider: config.name, worktrees: rows,
+                        repoIsOn: { try await switches.isOn(repoID: $0) })
+                } catch {
+                    // Fails closed: an unreadable database opens nothing, and
+                    // the next poll tick asks again.
+                    daemonLogger.error("""
+                        could not decide whether to open \(config.name, privacy: .public)'s \
+                        messages stream: \(String(describing: error), privacy: .public)
+                        """)
+                    return false
+                }
             },
             make: { config, contractVersion in
                 // One resolver per bridge, living exactly as long as the
                 // bridge does. Last-known-good is per-provider state and the
                 // provider is fixed the moment the bridge is built, so this is
                 // the narrowest scope that can hold it.
-                let scope = ProviderRepoScope(
-                    provider: config.name,
-                    listWorktrees: {
-                        try await database.worktrees.list(excludeArchived: true)
-                    })
+                let scope = makeRepoScope(
+                    provider: config.name, database: database, switches: switches)
                 let bridge = PeerBridge.make(
                     config: config,
                     contractVersion: contractVersion,
                     origin: origin,
-                    siteResolver: WorktreeShadowPeerSiteResolver(
-                        provider: config.name,
-                        worktrees: database.worktrees,
-                        repos: database.repos),
+                    siteResolver: makeShadowSiteResolver(
+                        provider: config.name, database: database, switches: switches),
                     // The real ledger, never `UnrecordedShadowPeerArtifacts`: a
                     // shadow published through that recorder is one nothing can
                     // recognise afterwards, so its helper, socket and record
@@ -703,6 +755,36 @@ public final class Daemon: Sendable {
                     })
                 return bridge
             })
+    }
+
+    /// The per-repository switches, read from each repo row's main checkout.
+    /// One of the three pieces `makePeerBridging` composes, split out so a test
+    /// can drive exactly what production builds.
+    static func makePeerMessagingSwitches(database: TBDDatabase) -> RepoPeerMessagingSwitches {
+        RepoPeerMessagingSwitches(repo: { id in try await database.repos.get(id: id) })
+    }
+
+    /// The outward scope for one provider: its hosted repositories that have
+    /// the switch on.
+    static func makeRepoScope(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> ProviderRepoScope {
+        ProviderRepoScope(
+            provider: provider,
+            listWorktrees: { try await database.worktrees.list(excludeArchived: true) },
+            checkoutPath: { try await database.repos.get(id: $0)?.path },
+            switchIsOn: { switches.setting(checkoutPath: $0).enabled })
+    }
+
+    /// The inward site resolver for one provider, applying the same switch.
+    static func makeShadowSiteResolver(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> WorktreeShadowPeerSiteResolver {
+        WorktreeShadowPeerSiteResolver(
+            provider: provider,
+            worktrees: database.worktrees,
+            repos: database.repos,
+            peerMessagingOn: { switches.setting(for: $0).enabled })
     }
 
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
@@ -1744,7 +1826,7 @@ public final class Daemon: Sendable {
             // Code's own reaper provably will not collect) and then on its own
             // tick.
             //
-            // Not gated on `remotePeerMessagingEnabled`: this is the
+            // Not gated on any repository's peer-messaging switch: this is the
             // reclaimer's ledger rather than the feature, its whitelist is
             // empty on any install that never published a shadow, and gating it
             // would strand every artifact the moment somebody turned the
