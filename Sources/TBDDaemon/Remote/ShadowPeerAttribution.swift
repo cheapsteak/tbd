@@ -4,6 +4,29 @@ import os
 
 private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeer")
 
+// MARK: - Permission class
+
+/// The permission class a `<cross-session-message>` attests in `from-mode`.
+///
+/// **These two values are Claude Code's whole vocabulary, and an enum keeps any
+/// other value unrepresentable.** Claude Code 2.1.300's envelope parser accepts
+/// exactly `bypass` and `prompting` (its binary carries
+/// `var x=["bypass","prompting"]`); any other value — `default` among them —
+/// fails that parse and the message counts as attesting no mode at all. Its
+/// inbound policy then compares the attested class against the receiving
+/// session's own: equal classes deliver, unequal ones are held as
+/// `mode-mismatch`, and a message attesting no mode is held as
+/// `no-mode-asserted` when the receiver bypasses permission prompts (it is
+/// delivered when the receiver prompts). Every hold waits for a human to
+/// approve it in the receiving session.
+public enum ShadowPeerPermissionClass: String, Sendable, Equatable, CaseIterable {
+    /// The receiver runs without permission prompts
+    /// (`--dangerously-skip-permissions`, or `bypassPermissions` mode).
+    case bypass
+    /// The receiver asks before it acts.
+    case prompting
+}
+
 // MARK: - Attribution
 
 /// Composes the `<cross-session-message …>` wrapper TBD stamps on every frame
@@ -14,9 +37,9 @@ private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "sh
 /// wrapper is composed by the *sender's* client and travels inside the message
 /// content, so a remote peer otherwise controls `from-name` and `from-mode`
 /// outright: it could name itself as one of your local sessions and claim
-/// `bypass` to satisfy an inbound policy. So the whole opening tag is replaced,
-/// unconditionally, on every inbound frame — never inspected and patched, never
-/// trusted when it "looks right"
+/// whichever class satisfies an inbound policy. So the whole opening tag is
+/// replaced, unconditionally, on every inbound frame — never inspected and
+/// patched, never trusted when it "looks right"
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "Trust").
 ///
 /// **Everything after the opening tag survives byte for byte.** The design's
@@ -37,17 +60,41 @@ public enum ShadowPeerAttribution {
     /// with no wrapper of its own.
     public static let closeTag = "</cross-session-message>"
 
-    /// The permission class TBD grants a remote peer, written as `from-mode`.
+    /// The class stamped for a receiver whose class TBD cannot vouch for.
     ///
-    /// **`default`, deliberately the least of the classes.** The attribute
-    /// tells the receiving session what the sender was permitted to do, and a
-    /// remote peer is granted nothing beyond being able to speak: TBD confers
-    /// no elevated permission on the far side, so claiming one here would be
-    /// the exact misstatement the stamp exists to prevent. The observed value
-    /// on a real local send is `bypass`, which is what a locally-running
-    /// session in bypass mode reports about *itself* — it is not a value TBD
-    /// may pass on for somebody else.
-    public static let grantedMode = "default"
+    /// **`prompting`, because it is the stamp that never confers delivery a
+    /// receiver would not grant on its own.** A prompting receiver delivers a
+    /// `prompting` message, and would equally deliver one attesting no mode at
+    /// all, so for it the stamp adds nothing. A bypass receiver holds a
+    /// `prompting` message as `mode-mismatch` and waits for a human to approve
+    /// it — late, never wrong. Stamping `bypass` instead would auto-deliver into
+    /// exactly the sessions that run tools without asking, on no evidence that
+    /// the receiver is one, so TBD never stamps `bypass` without that evidence.
+    public static let unvouchedReceiverClass: ShadowPeerPermissionClass = .prompting
+
+    /// The class TBD stamps on a frame bound for a local session: the
+    /// receiving session's own class, or `unvouchedReceiverClass` when TBD
+    /// cannot vouch for it.
+    ///
+    /// **The receiver's class, never the sender's.** Claude Code delivers a
+    /// peer message without a click only when the attested class matches the
+    /// receiver's own (see `ShadowPeerPermissionClass`). A remote sender's
+    /// class is not something TBD can observe, and whatever its frame claims is
+    /// discarded with the rest of its opening tag. What authorizes a remote
+    /// peer to reach this session as a same-class teammate is the repository's
+    /// own `[remote_sessions] peer_messaging = true` in `tbd.toml`: a frame
+    /// reaches this stamp only from a shadow TBD published, and TBD publishes a
+    /// shadow only for a repository with that switch on.
+    ///
+    /// **A wrong guess fails closed.** A class TBD believed but that has since
+    /// drifted — a session the user moved out of bypass mid-session, say — is
+    /// held by the receiver as `mode-mismatch` for a human to approve. Neither
+    /// value can make a receiver of the *other* class deliver unprompted.
+    public static func grantedClass(
+        forReceiver receiver: ShadowPeerPermissionClass?
+    ) -> ShadowPeerPermissionClass {
+        receiver ?? unvouchedReceiverClass
+    }
 
     /// Replace the content's attribution with TBD's own.
     ///
@@ -59,11 +106,12 @@ public enum ShadowPeerAttribution {
     ///     the helper, and the frame goes back out over the link. It is a local
     ///     path and stays local; nothing derived from the wire appears here.
     ///   - senderName: the shadow peer's namespaced name.
-    ///   - mode: the permission class TBD grants, `grantedMode` unless a caller
-    ///     has a reason.
+    ///   - mode: the permission class written as `from-mode` — from
+    ///     `grantedClass(forReceiver:)`, never from the wire. Required rather
+    ///     than defaulted so no caller stamps a class it did not choose.
     public static func stamp(
         content: String, senderAddress: String, senderName: String,
-        mode: String = ShadowPeerAttribution.grantedMode
+        mode: ShadowPeerPermissionClass
     ) -> String {
         let tag = openTag(senderAddress: senderAddress, senderName: senderName, mode: mode)
         guard let end = openTagEnd(in: content) else {
@@ -77,12 +125,11 @@ public enum ShadowPeerAttribution {
     /// The opening tag TBD writes. Separate from `stamp` so a test can assert
     /// the composed tag in one place rather than re-deriving it.
     public static func openTag(
-        senderAddress: String, senderName: String,
-        mode: String = ShadowPeerAttribution.grantedMode
+        senderAddress: String, senderName: String, mode: ShadowPeerPermissionClass
     ) -> String {
         "\(openTagName) from=\"\(escaped(senderAddress))\""
             + " from-name=\"\(escaped(senderName))\""
-            + " from-mode=\"\(escaped(mode))\">"
+            + " from-mode=\"\(mode.rawValue)\">"
     }
 
     /// Escapes a value for an attribute position.

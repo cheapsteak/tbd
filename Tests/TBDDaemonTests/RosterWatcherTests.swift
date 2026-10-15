@@ -59,7 +59,8 @@ private func spawnedSession(
     worktreePath: String = "/tmp/tbd-roster-fixture/useful-swallow",
     pane: String = "%3541",
     claudeSessionID: String? = "4E12DD65-92B8-4D8E-9920-214C6553FC63",
-    terminalID: UUID = fixtureTerminalID
+    terminalID: UUID = fixtureTerminalID,
+    permissionClass: ShadowPeerPermissionClass? = .bypass
 ) -> TBDSpawnedSession {
     TBDSpawnedSession(
         worktreeID: UUID(),
@@ -68,7 +69,24 @@ private func spawnedSession(
         displayName: displayName,
         worktreePath: worktreePath,
         tmuxPaneID: pane,
-        claudeSessionID: claudeSessionID)
+        claudeSessionID: claudeSessionID,
+        permissionClass: permissionClass)
+}
+
+/// A handle registry that records the permission class each registration
+/// carried, so a test can see what the roster vouched for.
+private actor ClassRecordingHandleRegistry: LocalPeerHandleRegistry {
+    private(set) var classesBySocket: [String: ShadowPeerPermissionClass?] = [:]
+
+    func handle(
+        forLocalPeerAt socketPath: String, name: String,
+        permissionClass: ShadowPeerPermissionClass?
+    ) async -> String {
+        classesBySocket[socketPath] = permissionClass
+        return "h-\(socketPath)"
+    }
+
+    func withdrawLocalPeer(at socketPath: String) async -> String? { nil }
 }
 
 /// One registry record, as a dictionary, so a test can leave a key out the way
@@ -201,6 +219,30 @@ private func watcher(
 
 @Suite("Roster watcher — announcements")
 struct RosterWatcherAnnouncementTests {
+    /// The session's permission class reaches the handle registry — the table
+    /// an inbound frame is stamped from — for a vouched session and an
+    /// unvouched one alike, and never on the `peer` line.
+    @Test(arguments: [ShadowPeerPermissionClass?.some(.bypass), .some(.prompting), .none])
+    func theSessionsPermissionClassReachesTheHandleRegistry(
+        permissionClass: ShadowPeerPermissionClass?
+    ) async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let handles = ClassRecordingHandleRegistry()
+            let subject = watcher(
+                directory: directory,
+                sessions: FakeSessionDirectory([
+                    spawnedSession(permissionClass: permissionClass)
+                ]))
+            await subject.addLink(link(handles: handles, sink: sink))
+
+            let recorded = await handles.classesBySocket
+            #expect(recorded.count == 1)
+            #expect(recorded.values.first == .some(permissionClass))
+        }
+    }
+
     /// A session appearing produces a `peer` line, complete rather than
     /// partial, named `<origin>:<display name> <terminal short id>` with the
     /// terminal discriminator always present.
@@ -719,7 +761,10 @@ private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
         self.onMint = onMint
     }
 
-    func handle(forLocalPeerAt socketPath: String, name: String) async -> String {
+    func handle(
+        forLocalPeerAt socketPath: String, name: String,
+        permissionClass: ShadowPeerPermissionClass?
+    ) async -> String {
         if let existing = handlesBySocket[socketPath] { return existing }
         mints += 1
         let handle = "h\(mints)"
@@ -1157,6 +1202,9 @@ struct DatabaseLocalSessionDirectoryTests {
         #expect(session.worktreePath == made.worktree.localPath)
         #expect(session.tmuxPaneID == "%3541")
         #expect(session.claudeSessionID == "4E12DD65-92B8-4D8E-9920-214C6553FC63")
+        // Every Claude terminal TBD spawns is launched with
+        // `--dangerously-skip-permissions`, so the directory vouches `bypass`.
+        #expect(session.permissionClass == .bypass)
     }
 
     /// A session whose hook never fired carries no Claude session id, and is

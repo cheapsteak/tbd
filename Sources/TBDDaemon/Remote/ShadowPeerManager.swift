@@ -333,6 +333,9 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         let handle: String
         let socketPath: String
         let name: String
+        /// The class an inbound frame for this session is stamped with, as the
+        /// roster vouched for it — nil when it could not.
+        let permissionClass: ShadowPeerPermissionClass?
     }
 
     private let provider: String
@@ -350,7 +353,6 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// would leave it matching nothing.
     private let socketDirectoryPath: String
     private let sessionsDirectory: URL
-    private let grantedMode: String
     /// Mints opaque handles for local sessions. A seam so a test can pin them;
     /// the default is random, because a handle must carry no information a
     /// receiver could parse.
@@ -422,7 +424,6 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         delivery: any LocalPeerDelivering = UnixSocketLocalPeerDelivery(),
         socketDirectory: URL = ShadowPeerManager.defaultSocketDirectory,
         sessionsDirectory: URL = ShadowPeerRecordStore().sessionsDirectory,
-        grantedMode: String = ShadowPeerAttribution.grantedMode,
         mintHandle: @escaping @Sendable () -> String = ShadowPeerManager.randomHandle,
         mintAgentMessageID: @escaping @Sendable () -> String = { UUID().uuidString },
         mintSessionID: @escaping @Sendable () -> String = { UUID().uuidString },
@@ -436,7 +437,6 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         self.socketDirectory = socketDirectory
         self.socketDirectoryPath = socketDirectory.path
         self.sessionsDirectory = sessionsDirectory
-        self.grantedMode = grantedMode
         self.mintHandle = mintHandle
         self.mintAgentMessageID = mintAgentMessageID
         self.mintSessionID = mintSessionID
@@ -819,10 +819,18 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         // shadow's own local socket. Writing to it reaches the helper, which
         // sends the answer back out over the link. Nothing derived from the
         // wire appears here.
+        //
+        // The mode is the RECEIVING session's class, as the roster vouched for
+        // it — never one the far side claimed, which `stamp` discards with the
+        // rest of its opening tag. Claude Code 2.1.300 accepts only `bypass`
+        // and `prompting` here and holds a message whose class is not its own
+        // (`ShadowPeerPermissionClass`). `grantedClass` documents why the receiver's
+        // class is the one to attest, what an unknown one gets, and which
+        // switch grants the trust this stamp acts on.
         let address = "uds:\(shadow.helper.socketPath)"
         let stamped = ShadowPeerAttribution.stamp(
             content: message.content, senderAddress: address, senderName: shadow.name,
-            mode: grantedMode)
+            mode: ShadowPeerAttribution.grantedClass(forReceiver: local.permissionClass))
         let frame = ShadowPeerAgentFrame(
             from: address, content: stamped, messageID: mintAgentMessageID())
 
@@ -1047,16 +1055,23 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// Idempotent on the socket path: a `peer` line is a complete statement
     /// re-sent whenever anything about a session changes, and a handle that
     /// churned on a status change would strand every peer already told about
-    /// it.
+    /// it. The handle is stable; the permission class is refreshed from each
+    /// call, so the stamp follows what the roster last vouched for.
+    ///
+    /// `permissionClass` defaults to nil — unvouched — so a caller that does
+    /// not know the class gets the stamp that never confers delivery, never a
+    /// guessed `bypass`.
     @discardableResult
-    public func handle(forLocalPeerAt socketPath: String, name: String) -> String {
+    public func handle(
+        forLocalPeerAt socketPath: String, name: String,
+        permissionClass: ShadowPeerPermissionClass? = nil
+    ) -> String {
         let address = "uds:\(socketPath)"
-        if let existing = localHandlesByAddress[address] {
-            return existing
-        }
-        let handle = mintHandle()
+        let handle = localHandlesByAddress[address] ?? mintHandle()
         localHandlesByAddress[address] = handle
-        localPeers[handle] = LocalPeer(handle: handle, socketPath: socketPath, name: name)
+        localPeers[handle] = LocalPeer(
+            handle: handle, socketPath: socketPath, name: name,
+            permissionClass: permissionClass)
         return handle
     }
 

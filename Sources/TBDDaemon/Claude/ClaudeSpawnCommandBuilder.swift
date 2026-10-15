@@ -64,6 +64,18 @@ import TBDShared
 /// `sensitiveEnv` is **not** populated when the resolved path is `cmd` or
 /// `shellFallback`, since those branches are for non-claude shells.
 enum ClaudeSpawnCommandBuilder {
+    /// The permission flag both Claude branches carry, unconditionally.
+    static let skipPermissionsFlag = "--dangerously-skip-permissions"
+
+    /// The permission class `skipPermissionsFlag` starts a session in.
+    ///
+    /// Read by the peer roster (`DatabaseLocalSessionDirectory`) as the class
+    /// every TBD-spawned Claude session runs as, so a remote peer's message
+    /// into one is stamped `from-mode="bypass"` — the class Claude Code
+    /// requires before a bypass receiver delivers without a click. Kept beside
+    /// the flag so making the flag conditional means revisiting this too.
+    static let spawnedPermissionClass: ShadowPeerPermissionClass = .bypass
+
     struct Result: Equatable {
         let command: String
         /// Env vars containing secrets, routing config, or rc-affecting
@@ -142,11 +154,11 @@ enum ClaudeSpawnCommandBuilder {
         let base: String
         if let resumeID {
             let forkFlag = forkSession ? " --fork-session" : ""
-            var b = "claude --resume \(resumeID)\(forkFlag) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
+            var b = "claude --resume \(resumeID)\(forkFlag) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)"
             b += promptArgument
             base = b
         } else if let sessionID = freshSessionID {
-            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
+            var b = "claude --session-id \(sessionID) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }
